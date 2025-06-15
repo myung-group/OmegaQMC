@@ -1,7 +1,7 @@
-"""MLSW - A simple Hello World library."""
+"""VMC-MLSW"""
 
-from .core import run
+from .core import *
 
 __version__ = "0.1.0"
-__all__ = ["run"]
+# __all__ = ["run"]
 
