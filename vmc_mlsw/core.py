@@ -145,7 +145,8 @@ def vqmc_gradient(mf,
                   nuc_crds,
                   params_vmc,
                   stacked_samples,
-                  enr_samples):
+                  enr_samples,
+                  l_scheme1=True):
 
     log_trial_wavefunction, local_energy, get_psi_mo =\
         get_psi_fun(mf)
@@ -171,8 +172,10 @@ def vqmc_gradient(mf,
 
     # --- Redistribute Gradient Samples ---
     jac_rescale_fn = jax.jacobian(redistribute_samples_ver1, argnums=0)
-
     rescale = jax.vmap(redistribute_samples_ver1)(stacked_samples)
+    if not l_scheme1:
+        jac_rescale_fn = jax.jacobian(redistribute_samples_ver2, argnums=0)
+        rescale = jax.vmap(redistribute_samples_ver2)(stacked_samples)
 
     @jax.jit
     def single_sample_grad_elocal_en(e_pos_):

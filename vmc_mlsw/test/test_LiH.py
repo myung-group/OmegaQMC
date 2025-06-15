@@ -23,9 +23,9 @@ g = mf.nuc_grad_method()
 grad = g.kernel()
 
 nuc_crds = jnp.array(mol.atom_coords(unit='Bohr'))
-print('nuc_crds', nuc_crds)
+print('nuc_crds(Bohr)\n', nuc_crds)
 nuc_crds_A = jnp.array(mol.atom_coords(unit='Ang'))
-print('nuc_crds_A', nuc_crds_A)
+print('nuc_crds(Ang)\n', nuc_crds_A)
 LiH_stacked_samples = vqmc_run(mf,
                                rng_key,
                                nuc_crds,
@@ -49,5 +49,6 @@ LiH_grad_total = vqmc_gradient(mf,
                                nuc_crds,
                                params_vmc_no_jastrow,
                                LiH_stacked_samples,
-                               LiH_enr_samples)
+                               LiH_enr_samples,
+                               l_scheme1=False)
 print('grad_total\n', LiH_grad_total)

@@ -30,7 +30,7 @@ H2O_grad = H2O_mf.nuc_grad_method()
 H2O_grad = H2O_grad.kernel()
 
 H2O_nuc_crds = jnp.array(H2O_mol.atom_coords(unit='Bohr'))
-print('H2O_nuc_crds', H2O_nuc_crds)
+print('H2O_nuc_crds(Bohr)\n', H2O_nuc_crds)
 
 H2O_stacked_samples = vqmc_run(H2O_mf,
                                rng_key,
@@ -55,5 +55,6 @@ grad_total = vqmc_gradient(H2O_mf,
                            H2O_nuc_crds,
                            params_vmc_no_jastrow,
                            H2O_stacked_samples,
-                           H2O_enr_samples)
-print('grad_total', grad_total)
+                           H2O_enr_samples,
+                           l_scheme1=False)
+print('grad_total\n', grad_total)
