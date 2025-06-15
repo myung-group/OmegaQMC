@@ -8,15 +8,93 @@ def run():
     print("Hello World!")
 
 
+def vqmc_run(mf,
+             rng_key,
+             nuc_crds,
+             params_vmc,
+             num_steps=5000,
+             num_equilibration=1000,
+             step_size=0.25):
+
+    log_trial_wavefunction, local_energy, get_psi_mo = \
+          get_psi_fun(mf)
+    nelec = mf.mol.tot_electrons()
+    Z_charges = mf.mol.atom_charges()
+
+    @jax.jit
+    def metropolis_step(rng_key,
+                        elec_crds):
+        n_walkers = elec_crds.shape[0]
+        rng_key, key_prop, key_accept = \
+            jax.random.split(rng_key, 3)
+        proposed_crds = elec_crds + step_size*jax.random.normal(
+            key_prop, elec_crds.shape)
+        log_psi_old_sq = 2*log_trial_wavefunction(
+            elec_crds, nuc_crds, params_vmc)
+        log_psi_new_sq = 2*log_trial_wavefunction(
+            proposed_crds, nuc_crds, params_vmc)
+        acceptance_log_ratio = log_psi_new_sq - log_psi_old_sq
+        accept = jnp.log(jax.random.uniform(key_accept, (n_walkers,))) \
+            < jnp.minimum(0., acceptance_log_ratio)
+        new_crds = jnp.where(accept[:, None], proposed_crds, elec_crds)
+
+        return rng_key, new_crds, accept
+
+    rng_key, rng = jax.random.split(rng_key)
+    idx_cnt = []
+    for ia, iz in enumerate(Z_charges):
+        idx_cnt = idx_cnt + [ia]*iz
+
+    idx_cnt = jnp.array(idx_cnt)
+    centers = nuc_crds[idx_cnt]
+    elec_crds = centers + 0.05*jax.random.normal(rng, (nelec, 3))
+
+    accepts_eq = 0
+
+    for _ in range(num_equilibration):
+        rng_key, elec_crds, accepted = \
+            metropolis_step(rng_key, elec_crds)
+
+        accepts_eq += accepted.sum()
+
+    if num_equilibration > 0:
+        print("Equilibration Acceptance Rate:"
+              f"{accepts_eq / (num_equilibration*nelec):.2f}")
+
+    samples_list = []
+    accepts_main = 0
+    for step in range(num_steps):
+        rng_key, elec_crds, accepted = \
+            metropolis_step(rng_key, elec_crds)
+
+        accepts_main += accepted.sum()
+        if (step+1) % 10 == 0:
+            samples_list.append(elec_crds)
+
+    if num_steps > 0:
+        print("Main Sampling Acceptance Rate:"
+              f"{accepts_main / (num_steps*nelec):.2f}")
+
+    if not samples_list:
+        print("Warning: No samples collected in vqmc_h2.")
+        dummy_forces = jnp.full((nuc_crds.shape[0], 3), jnp.nan)
+        return jnp.nan, jnp.nan, jnp.array([]), dummy_forces, dummy_forces
+
+    stacked_samples = jnp.stack(samples_list)
+
+    return stacked_samples
+
+
 def vqmc_energy(mf,
                 nuc_crds,
                 params_vmc,
                 stacked_samples):
 
-    log_trial_wavefunction, local_energy, get_psi_mo =\
-        get_psi_fun(mf)
+    log_trial_wavefunction, local_energy, get_psi_mo \
+        = get_psi_fun(mf)
 
-    local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke = local_energy
+    local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
+        = local_energy
 
     enr_ee_samples = jax.vmap(local_energy_ee)(stacked_samples)
     enr_nn = local_energy_nn(nuc_crds)
@@ -53,7 +131,8 @@ def vqmc_gradient(mf,
     log_trial_wavefunction, local_energy, get_psi_mo =\
         get_psi_fun(mf)
 
-    local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke = local_energy
+    local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
+        = local_energy
 
     @jax.jit
     def redistribute_samples_ver1(elec_crds):
@@ -86,7 +165,9 @@ def vqmc_gradient(mf,
 
     @jax.jit
     def single_sample_grad_elocal_ke(e_pos_):
-        return jax.grad(local_energy_ke, argnums=(0, 1))(e_pos_, nuc_crds, params_vmc)
+        return jax.grad(
+            local_energy_ke, argnums=(0, 1)
+            )(e_pos_, nuc_crds, params_vmc)
 
     @jax.jit
     def single_sample_grad_logpsi(e_pos_):
