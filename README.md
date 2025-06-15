@@ -8,16 +8,15 @@ Install directly from the repository:
 pip install .
 ```
 Or in development mode:
-```
-bashpip install -e .
+```bash
+pip install -e .
 ```
 
 ## Usage
 ```python
-import mlsw
-mlsw.run()
+import vmc_mlsw
+vmc_mlsw.run()
 ```
 
 ## License
 MIT License
-
