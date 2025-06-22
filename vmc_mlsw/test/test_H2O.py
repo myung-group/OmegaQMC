@@ -1,15 +1,14 @@
 import jax
 import jax.numpy as jnp
 from pyscf import gto, scf
-from vmc_mlsw import vqmc_run, vqmc_energy, vqmc_gradient
-from vmc_mlsw import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
+from vmc_mlsw import (vmc_run, 
+                      vmc_energy, 
+                      vmc_gradient_prep,
+                      vmc_gradient_with_space_warping)
 
 
 rng_key = jax.random.key(777)
 
-# Jastrow hyperparameters (passed to functions but not used if Jastrow is off)
-L_cut = JASTROW_EE_L_CUT
-M_power = JASTROW_EE_M_POWER
 # No optimizable Jastrow parameters:
 params_vmc_no_jastrow = jnp.array([])
 
@@ -32,29 +31,37 @@ H2O_grad = H2O_grad.kernel()
 H2O_nuc_crds = jnp.array(H2O_mol.atom_coords(unit='Bohr'))
 print('H2O_nuc_crds(Bohr)\n', H2O_nuc_crds)
 
-H2O_stacked_samples = vqmc_run(H2O_mf,
-                               rng_key,
-                               H2O_nuc_crds,
-                               params_vmc_no_jastrow,
-                               num_steps=1000000,
-                               num_equilibration=20000,
-                               step_size=0.05
-                               )
-# num_steps: number of steps for each point on the curve
+chkfile = 'H2O_vmc.hdf5'
+# (1) Sample electrons
+vmc_run(H2O_mf,
+        rng_key,
+        H2O_nuc_crds,
+        params_vmc_no_jastrow,
+        num_steps=1000000,
+        num_equilibration=50000,
+        step_size=0.05,
+        chkfile=chkfile
+        )
 
-H2O_enr_samples, H2O_enr_nn = vqmc_energy(H2O_mf,
-                                          H2O_nuc_crds,
-                                          params_vmc_no_jastrow,
-                                          H2O_stacked_samples)
+# (2) Estimate VMC energy
+vmc_energy(H2O_mf,
+           params_vmc_no_jastrow,
+           chkfile)
 
-enr_mean = H2O_enr_samples.mean() + H2O_enr_nn
-enr_std_err = H2O_enr_samples.std()/jnp.sqrt(H2O_enr_samples.shape[0])
-print('enr_mean', enr_mean, enr_std_err)
+# (3) Calculate the gradients acting on electrons and nuclei 
+# based on sampled electrons
+vmc_gradient_prep(H2O_mf,
+                  params_vmc_no_jastrow,
+                  chkfile)
 
-grad_total = vqmc_gradient(H2O_mf,
-                           H2O_nuc_crds,
-                           params_vmc_no_jastrow,
-                           H2O_stacked_samples,
-                           H2O_enr_samples,
-                           l_scheme1=False)
-print('grad_total\n', grad_total)
+
+# (4) Calculate the total VMC gradients
+grd = vmc_gradient_with_space_warping (H2O_mf,
+                                       chkfile,
+                                       scheme='scheme1')
+print ('\nScheme1:grd\n', grd, '\n')
+
+grd = vmc_gradient_with_space_warping (H2O_mf,
+                                       chkfile,
+                                       scheme='scheme2')
+print ('\nScheme2:grd\n', grd, '\n')

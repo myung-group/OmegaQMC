@@ -1,7 +1,10 @@
 import jax
 import jax.numpy as jnp
 from pyscf import gto, scf
-from vmc_mlsw import vqmc_run, vqmc_energy, vqmc_gradient
+from vmc_mlsw import (vmc_run, 
+                      vmc_energy, 
+                      vmc_gradient_prep,
+                      vmc_gradient_with_space_warping)
 # from vmc_mlsw import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
 rng_key = jax.random.key(7)
@@ -26,29 +29,36 @@ nuc_crds = jnp.array(mol.atom_coords(unit='Bohr'))
 print('nuc_crds(Bohr)\n', nuc_crds)
 nuc_crds_A = jnp.array(mol.atom_coords(unit='Ang'))
 print('nuc_crds(Ang)\n', nuc_crds_A)
-LiH_stacked_samples = vqmc_run(mf,
-                               rng_key,
-                               nuc_crds,
-                               params_vmc_no_jastrow,
-                               num_steps=500000,
-                               num_equilibration=20000,
-                               step_size=0.1
-                               )
+chkfile = 'LiH_vmc.hdf5'
+# (1) Sample electrons
+vmc_run(mf,
+         rng_key,
+         nuc_crds,
+         params_vmc_no_jastrow,
+         num_steps=500000,
+         num_equilibration=50000,
+         step_size=0.15,
+         chkfile=chkfile)
+
+# (2) Estimate VMC energy
+vmc_energy(mf,
+            params_vmc_no_jastrow,
+            chkfile)
 
 
-LiH_enr_samples, LiH_enr_nn = vqmc_energy(mf,
-                                          nuc_crds,
-                                          params_vmc_no_jastrow,
-                                          LiH_stacked_samples)
-LiH_enr_mean = LiH_enr_samples.mean() + LiH_enr_nn
-LiH_enr_std_err = LiH_enr_samples.std()/jnp.sqrt(LiH_enr_samples.shape[0])
-print('LiH_enr_mean', LiH_enr_mean, LiH_enr_std_err)
+# (3) Calculate the gradients acting on electrons and nuclei 
+# based on sampled electrons
+vmc_gradient_prep(mf,
+                   params_vmc_no_jastrow,
+                   chkfile)
 
+# (4) Calculate the total VMC gradients
+grd = vmc_gradient_with_space_warping (mf,
+                                       chkfile,
+                                       scheme='scheme1')
+print ('\nScheme1:grd\n', grd, '\n')
 
-LiH_grad_total = vqmc_gradient(mf,
-                               nuc_crds,
-                               params_vmc_no_jastrow,
-                               LiH_stacked_samples,
-                               LiH_enr_samples,
-                               l_scheme1=False)
-print('grad_total\n', LiH_grad_total)
+grd = vmc_gradient_with_space_warping (mf,
+                                       chkfile,
+                                       scheme='scheme2')
+print ('\nScheme2:grd\n', grd, '\n')

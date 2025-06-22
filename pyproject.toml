@@ -6,7 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "vmc-mlsw"
 version = "0.1.0"
 description = "Variational Monte Carlo with machine-learned space warping"
-authors = [{name = "Soohaeng Willow", email = "sy7willow@skku.edu"}]
+authors = [
+    {name = "Soohaeng Yoo Willow", email = "sy7willow@gmail.com"},
+    {name = "Chang Woo Myung", email= "cwmyung@skku.edu"},
+    {name = "David ChangMo Yang", email="dcyang@skku.edu"}
+]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.7"
