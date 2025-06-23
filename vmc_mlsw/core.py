@@ -200,7 +200,7 @@ def vmc_gradient_prep(mf,
     grad_eloc_ee_elc = jax.vmap(single_sample_grad_elocal_ee)(stacked_samples)
     grad_eloc_en_elc, grad_eloc_en_nuc_base = jax.vmap(single_sample_grad_elocal_en)(stacked_samples)
     
-    num_batches = 10000
+    num_batches = 2000
     grad_eloc_ke_elc = jnp.zeros((num_samples, num_electrons, 3))
     grad_eloc_ke_nuc_base = jnp.zeros((num_samples, num_nuc, 3))
     grad_logpsi_elc = jnp.zeros((num_samples, num_electrons, 3))
@@ -271,14 +271,20 @@ def vmc_gradient_with_space_warping(mf,
         mass_center = jnp.einsum('i,ij->j', atomic_masses, nuc_crds)/atomic_masses.sum()
         relative_nuc_pos = nuc_crds - mass_center 
 
-        rescale = jax.vmap (rescale_fn, in_axes=(0,None)) (
-            stacked_samples, nuc_crds
-        )
-        jac_rescale_elec = jax.vmap (jac_rescale_fn, in_axes=(0,None)) (
-            stacked_samples, nuc_crds
-        )
-
+        #
+        num_batches = 2000
+        num_samples = stacked_samples.shape[0]
+        num_elc = stacked_samples.shape[1]
+        num_nuc = nuc_crds.shape[0]
         
+        rescale = jnp.zeros ( (num_samples, num_elc, num_nuc))
+        for ist in range (0, num_samples, num_batches):
+            ied = min (ist+num_batches, num_samples)
+            val = jax.vmap (rescale_fn, in_axes=(0,None)) (
+                stacked_samples[ist:ied], nuc_crds
+            )
+            rescale = rescale.at[ist:ied].set (val)
+
         # --- Nuclear Gradient ---
         grd_nn = jnp.array(f['grad_eloc_nn_nuc'][:])
         # --- Electron Gradient ---
@@ -310,7 +316,15 @@ def vmc_gradient_with_space_warping(mf,
         
         enr_samples = enr_ke_samples+enr_ee_samples+enr_en_samples
         d_enr = enr_samples - enr_samples.mean()
-        novel_correction = 0.5*jnp.einsum('senek->snk', jac_rescale_elec)
+        novel_correction = jnp.zeros ( (num_samples, num_nuc, 3))
+        for ist in range (0, num_samples, num_batches):
+            ied = min (ist+num_batches, num_samples)
+            jac_rescale_elec = jax.vmap (jac_rescale_fn, in_axes=(0,None)) (
+                    stacked_samples[ist:ied], nuc_crds
+            )
+            val = 0.5*jnp.einsum('seneK->snK', jac_rescale_elec)
+            novel_correction = novel_correction.at[ist:ied].set (val)
+        
         grad_logpsi_nuc = grad_logpsi_nuc_base + \
             jnp.einsum('seK,sen->snK', 
                        grad_logpsi_elc, 
