@@ -134,7 +134,7 @@ def vmc_energy(mf,
         stacked_samples, nuc_crds
     )
     num_samples = stacked_samples.shape[0]
-    num_batches = 10000
+    num_batches = 2000
     ener_ke_samples = jnp.zeros((num_samples))
     for ist in range(0, num_samples, num_batches):
         ied = min(ist+num_batches, num_samples)
@@ -248,9 +248,9 @@ def vmc_gradient_with_space_warping(mf,
     @jax.jit
     def redistribute_samples_scheme2(elec_crds, nuc_crds):
         diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
-        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1)+1e-10)
+        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1)+1e-15)
         weight = dist**(-4.0)
-        return weight/(jnp.sum(weight, axis=-1, keepdims=True)+1.e-10)
+        return weight/jnp.sum(weight, axis=-1, keepdims=True)
 
     # --- Redistribute Gradient Samples ---
     if scheme in ['scheme1']:

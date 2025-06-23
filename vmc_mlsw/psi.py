@@ -651,7 +651,7 @@ def get_psi_fun(mf):
         """
         # Calculate electron-nuclear distances
         diffs = elec_crds.reshape(-1, 1, 3)-nuc_crds  # Shape: (n_elec, n_nuc, 3)
-        dists = jnp.sqrt(1.0e-12 + (diffs*diffs).sum(axis=-1))  # Add small constant to avoid division by zero
+        dists = jnp.sqrt(1.0e-15 + (diffs*diffs).sum(axis=-1))  # Add small constant to avoid division by zero
         # Sum up Coulomb interactions
         e = jnp.einsum('i,ij,j->', elec_chgs, 1.0/dists, nuc_chgs)
         return e
