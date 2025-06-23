@@ -626,7 +626,7 @@ def get_psi_fun(mf):
         i, j = jnp.triu_indices(crds.shape[-2], k=1)
         # Calculate pairwise differences and distances
         diffs_ij = (crds.reshape(-1, 1, 3) - crds.reshape(1, -1, 3))[i, j]
-        dists_ij = jnp.sqrt(1.0e-5 + (diffs_ij*diffs_ij).sum(axis=-1))  # Add small constant to avoid division by zero
+        dists_ij = jnp.sqrt((diffs_ij*diffs_ij).sum(axis=-1))  # Add small constant to avoid division by zero
         # Calculate charge products
         chgs_ij = (chgs.reshape(-1, 1) * chgs.reshape(1, -1))[i, j]
 
@@ -651,7 +651,7 @@ def get_psi_fun(mf):
         """
         # Calculate electron-nuclear distances
         diffs = elec_crds.reshape(-1, 1, 3)-nuc_crds  # Shape: (n_elec, n_nuc, 3)
-        dists = jnp.sqrt(1.0e-5 + (diffs*diffs).sum(axis=-1))  # Add small constant to avoid division by zero
+        dists = jnp.sqrt(1.0e-12 + (diffs*diffs).sum(axis=-1))  # Add small constant to avoid division by zero
         # Sum up Coulomb interactions
         e = jnp.einsum('i,ij,j->', elec_chgs, 1.0/dists, nuc_chgs)
         return e
@@ -713,7 +713,7 @@ def get_psi_fun(mf):
             )
         return en_pot_energy
 
-    '''
+    
     def local_energy_ke(elec_crds, nuc_crds, params_vmc):
         """Calculates local kinetic energy"""
         kin_energy = H_psi_over_psi(elec_crds, nuc_crds, params_vmc)
@@ -733,7 +733,7 @@ def get_psi_fun(mf):
         grad_term_sq = jnp.sum(grad_log_psi**2)
 
         return -0.5*(lap_term + grad_term_sq)
-
+    '''
     return log_trial_wavefunction, \
         (local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke), \
         get_psi_mo
