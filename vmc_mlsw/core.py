@@ -171,7 +171,8 @@ def vmc_gradient_prep(mf,
 
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
         = local_energy
-
+    
+    
     stacked_samples = None 
     nuc_crds = None  
     with h5py.File(chkfile, 'r') as f:
@@ -231,7 +232,8 @@ def vmc_gradient_prep(mf,
 
 def vmc_gradient_with_space_warping(mf,
                                    chkfile='vmc_chk.hdf5',
-                                   scheme='scheme1'):
+                                   scheme='scheme1',
+                                   mark=None):
 
     log_trial_wavefunction, local_energy, get_psi_mo =\
         get_psi_fun(mf)
@@ -248,7 +250,8 @@ def vmc_gradient_with_space_warping(mf,
     @jax.jit
     def redistribute_samples_scheme2(elec_crds, nuc_crds):
         diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
-        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1)+1e-15)
+        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+        dist = jnp.where (dist < 1e-12, 1e-12, dist)
         weight = dist**(-4.0)
         return weight/jnp.sum(weight, axis=-1, keepdims=True)
 
@@ -277,6 +280,9 @@ def vmc_gradient_with_space_warping(mf,
         num_elc = stacked_samples.shape[1]
         num_nuc = nuc_crds.shape[0]
         
+        if mark is None:
+            mark = jnp.ones ( (num_samples), dtype=int)
+
         rescale = jnp.zeros ( (num_samples, num_elc, num_nuc))
         for ist in range (0, num_samples, num_batches):
             ied = min (ist+num_batches, num_samples)
@@ -335,24 +341,24 @@ def vmc_gradient_with_space_warping(mf,
                                        grad_logpsi_nuc)
         
         print('grd_nn\n', grd_nn)
-        print('grd_ee\n', grd_ee.mean(axis=0))
-        print('grd_en\n', grd_en.mean(axis=0))
-        print('grd_ke\n', grd_ke.mean(axis=0))
-        print('grd_pulay\n', pulay_terms.mean(axis=0))
+        print('grd_ee\n', grd_ee[mark].mean(axis=0))
+        print('grd_en\n', grd_en[mark].mean(axis=0))
+        print('grd_ke\n', grd_ke[mark].mean(axis=0))
+        print('grd_pulay\n', pulay_terms[mark].mean(axis=0))
         
         total_grad = grd_nn[None,...] + \
             grd_ee + grd_en + grd_ke + pulay_terms
         
-        loss_variance = jnp.mean(jnp.var (total_grad, axis=0))
+        loss_variance = jnp.mean(jnp.var (total_grad[mark], axis=0))
         torques_per_nucleus = jnp.cross (relative_nuc_pos,
-                                        total_grad)
+                                        total_grad[mark])
         total_torque_per_sample = jnp.sum (torques_per_nucleus, axis=1)
         loss_torque = jnp.mean (jnp.sum(total_torque_per_sample**2, axis=-1))
         print ('loss_variance', loss_variance)
         print ('loss_torque', loss_torque)
         print ('loss', loss_variance+loss_torque)
 
-        return total_grad.mean(axis=0)
+        return total_grad[mark].mean(axis=0)
     
     return None
 
