@@ -1,6 +1,9 @@
 """VMC-MLSW"""
 
-from .core import *
+from vmc_mlsw.vmc_gto import get_vmc_func
+#from vmc_mlsw import psi_gto
+#from vmc_mlsw import psi_gto_cusp
+#from vmc_mlsw import vmc_gto
 
 __version__ = "0.1.0"
 # __all__ = ["run"]

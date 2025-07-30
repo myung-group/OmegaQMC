@@ -13,9 +13,8 @@ pip install -e .
 ```
 
 ## Usage
-```python
-import vmc_mlsw
-vmc_mlsw.run()
+```bash
+python test/test_H2.py
 ```
 
 ## License
