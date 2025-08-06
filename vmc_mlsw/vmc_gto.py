@@ -11,6 +11,7 @@ def get_vmc_func (mf,
                   chkfile_mc = 'vmc_mc_chk.hdf5', 
                   chkfile_enr = 'vmc_enr_chk.hdf5',
                   chkfile_grd = 'vmc_grd_chk.hdf5',
+                  chkfile_elc = 'vmc_elc_chk.hdf5',
                   cgto_coeff=None):
     
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
@@ -144,7 +145,7 @@ def get_vmc_func (mf,
         # Save results
         with h5py.File(chkfile_mc, 'w') as f:
             f.create_dataset('stacked_samples', data=stacked_samples)
-            
+            f.create_dataset('nuc_crds', data=nuc_crds)
 
     def vmc_energy():
         """Optimized energy calculation with better batching."""
@@ -191,15 +192,19 @@ def get_vmc_func (mf,
             f.create_dataset('ener_ke_samples', data=ener_ke_samples)
 
 
-    def vmc_gradient_prep(sym_op_list=None):
+    def vmc_gradient_prep():
         """
         Highly optimized gradient preparation using JAX compilation,
         vectorization, and efficient memory management.
         """
         # Load data
-        with h5py.File(chkfile_mc, 'r') as f:
-            stacked_samples = jnp.array(f['stacked_samples'][:])
+        dict_elec_samples = {}
+        with h5py.File(chkfile_elc, 'r') as f:
+            for key, data in f.items():
+                dict_elec_samples[key] = jnp.array(data[:])
         
+        stacked_samples = dict_elec_samples['reflection_E']
+
         num_samples, num_electrons, num_nuc = (
             stacked_samples.shape[0], 
             stacked_samples.shape[1], 
@@ -238,7 +243,9 @@ def get_vmc_func (mf,
 
         # Compute nuclear-nuclear gradient (constant)
         grad_eloc_nn_nuc = jax.grad(local_energy_nn)(nuc_crds)
-    
+        with h5py.File(chkfile_grd, 'w') as f:
+            f.create_dataset('grad_eloc_nn_nuc', data=grad_eloc_nn_nuc)
+
         # Adaptive batch size based on available memory and problem size
         base_batch_size = 500
         memory_factor = max(1, num_electrons * num_nuc // 1000)
@@ -246,37 +253,12 @@ def get_vmc_func (mf,
         # Process samples in batches with progress tracking
         num_batches = (num_samples + batch_size - 1) // batch_size
     
-        if sym_op_list == None:
-            sym_op_list = ['E']
-
-        for i_sample, sym_op in enumerate(sym_op_list):
+        for key, elec_samples in dict_elec_samples.items():
             
-            print(f"Using batch size: {i_sample} {sym_op} {batch_size}")
+            print(f"Using batch size: {key} {batch_size}")
             
-            elec_samples = stacked_samples 
-            h5py_io = 'a'
-            if sym_op == 'E':
-                h5py_io = 'w'
-            elif sym_op == 'Sx': # Reflection via the yz plane
-                elec_samples = stacked_samples.at[:,:,0].multiply(-1)
-            elif sym_op == 'Sy': 
-                elec_samples = stacked_samples.at[:,:,1].multiply(-1)
-            elif sym_op == 'Sz':
-                elec_samples = stacked_samples.at[:,:,2].multiply(-1)
-            elif sym_op == 'Sxy':
-                elec_samples = stacked_samples.at[:,:,0].multiply(-1)
-                elec_samples = elec_samples.at[:,:,1].multiply(-1)
-            elif sym_op == 'Sxz':
-                elec_samples = stacked_samples.at[:,:,0].multiply(-1)
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)
-            elif sym_op == 'Syz':
-                elec_samples = stacked_samples.at[:,:,1].multiply(-1)
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)
-            elif sym_op == 'Sxyz':
-                elec_samples = stacked_samples.at[:,:,0].multiply(-1)
-                elec_samples = elec_samples.at[:,:,1].multiply(-1)
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)
-
+            #elec_samples = stacked_samples 
+            
             # Pre-allocate output arrays
             grad_eloc_ee_elc = jnp.zeros((num_samples, num_electrons, 3))
             grad_eloc_en_elc = jnp.zeros((num_samples, num_electrons, 3))
@@ -290,7 +272,7 @@ def get_vmc_func (mf,
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, num_samples)
         
-                if (batch_idx + 1) % max(1, num_batches // 10) == 0:
+                if (batch_idx + 1) % max(1, num_batches // 5) == 0:
                     print(f"Processing batch {batch_idx + 1}/{num_batches} ({100*(batch_idx+1)/num_batches:.1f}%)")
         
         
@@ -315,15 +297,14 @@ def get_vmc_func (mf,
 
             # Save results efficiently
 
-            with h5py.File(chkfile_grd, h5py_io) as f:
-                f.create_dataset('grad_eloc_nn_nuc_'+sym_op, data=grad_eloc_nn_nuc)
-                f.create_dataset('grad_eloc_ee_elc_'+sym_op, data=grad_eloc_ee_elc)
-                f.create_dataset('grad_eloc_en_elc_'+sym_op, data=grad_eloc_en_elc)
-                f.create_dataset('grad_eloc_en_nuc_base_'+sym_op, data=grad_eloc_en_nuc_base)
-                f.create_dataset('grad_eloc_ke_elc_'+sym_op, data=grad_eloc_ke_elc)
-                f.create_dataset('grad_eloc_ke_nuc_base_'+sym_op, data=grad_eloc_ke_nuc_base)
-                f.create_dataset('grad_logpsi_elc_'+sym_op, data=grad_logpsi_elc)
-                f.create_dataset('grad_logpsi_nuc_base_'+sym_op, data=grad_logpsi_nuc_base)
+            with h5py.File(chkfile_grd, 'a') as f:
+                f.create_dataset('grad_eloc_ee_elc_'+key, data=grad_eloc_ee_elc)
+                f.create_dataset('grad_eloc_en_elc_'+key, data=grad_eloc_en_elc)
+                f.create_dataset('grad_eloc_en_nuc_base_'+key, data=grad_eloc_en_nuc_base)
+                f.create_dataset('grad_eloc_ke_elc_'+key, data=grad_eloc_ke_elc)
+                f.create_dataset('grad_eloc_ke_nuc_base_'+key, data=grad_eloc_ke_nuc_base)
+                f.create_dataset('grad_logpsi_elc_'+key, data=grad_logpsi_elc)
+                f.create_dataset('grad_logpsi_nuc_base_'+key, data=grad_logpsi_nuc_base)
             
         return 
 
@@ -344,18 +325,16 @@ def get_vmc_func (mf,
         return weight/jnp.sum(weight, axis=-1, keepdims=True)
 
 
-    def vmc_gradient_with_space_warping_and_symmetry (scheme='scheme1',
-                                        mark_std=None,
-                                        sym_op_list=None):
-        if sym_op_list == None:
-            sym_op_list = ['E']
+    def vmc_gradient_with_space_warping_and_symmetry (
+                                        scheme='scheme1',
+                                        mark_std=None):
         
         # Load data
-        with h5py.File(chkfile_mc, 'r') as f:
-            stacked_samples = jnp.array(f['stacked_samples'][:])
+        dict_elec_samples = {}
+        with h5py.File(chkfile_elc, 'r') as f:
+            for key, data in f.items():
+                dict_elec_samples[key] = jnp.array(data[:])
         
-        #z_stacked_samples = stacked_samples.at[:,:,2].multiply(-1)
-
         with h5py.File(chkfile_enr, 'r') as f:
             ener_ee_samples = jnp.array(f['ener_ee_samples'][:])
             ener_en_samples = jnp.array(f['ener_en_samples'][:])
@@ -380,6 +359,7 @@ def get_vmc_func (mf,
 
         jac_rescale_fn = jax.jacobian(rescale_fn, argnums=0)
         #
+        stacked_samples = dict_elec_samples['reflection_E']
         num_batches = 2000
         num_samples = stacked_samples.shape[0]
         num_elc = stacked_samples.shape[1]
@@ -395,38 +375,16 @@ def get_vmc_func (mf,
         d_enr = local_energies - local_energies.mean()
         f_h5 = h5py.File(chkfile_grd, 'r')
         # --- Nuclear Gradient ---
-        grd_nn = jnp.array(f_h5['grad_eloc_nn_nuc_E'][:])
+        grd_nn = jnp.array(f_h5['grad_eloc_nn_nuc'][:])
         grd_ee = []
         grd_en = []
         grd_ke = []
         grad_logpsi_nuc = []
 
-        for sym_op in sym_op_list:
-            
-            elec_samples = stacked_samples
-            if sym_op == 'Sx':
-                elec_samples = elec_samples.at[:,:,0].multiply(-1)
-            elif sym_op == 'Sy':
-                elec_samples = elec_samples.at[:,:,1].multiply(-1)
-            elif sym_op == 'Sz':
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)
-            elif sym_op == 'Sxy':
-                elec_samples = elec_samples.at[:,:,0].multiply(-1)
-                elec_samples = elec_samples.at[:,:,1].multiply(-1)
-            elif sym_op == 'Sxz':
-                elec_samples = elec_samples.at[:,:,0].multiply(-1)
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)
-            elif sym_op == 'Syz':
-                elec_samples = elec_samples.at[:,:,1].multiply(-1)
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)  
-            elif sym_op == 'Sxyz':
-                elec_samples = elec_samples.at[:,:,0].multiply(-1)
-                elec_samples = elec_samples.at[:,:,1].multiply(-1)    
-                elec_samples = elec_samples.at[:,:,2].multiply(-1)
+        for key, elec_samples in dict_elec_samples.items():
             
             rescale = jnp.zeros ( (num_samples, num_elc, num_nuc))
             
-
             for ist in range (0, num_samples, num_batches):
                 ied = min (ist+num_batches, num_samples)
                 val = jax.vmap (rescale_fn) (
@@ -435,30 +393,30 @@ def get_vmc_func (mf,
                 rescale = rescale.at[ist:ied].set (val)
 
             # --- Electron Gradient ---
-            grad_eloc_ee_elc = jnp.array(f_h5['grad_eloc_ee_elc_'+sym_op][:])
+            grad_eloc_ee_elc = jnp.array(f_h5['grad_eloc_ee_elc_'+key][:])
             grd_ee.append(jnp.einsum('seK,sen->snK', 
                             grad_eloc_ee_elc, 
                             rescale))
             
             # --- Electron-Nuclear Gradient ---
-            grad_eloc_en_elc = jnp.array(f_h5['grad_eloc_en_elc_'+sym_op][:])
-            grad_eloc_en_nuc_base = jnp.array(f_h5['grad_eloc_en_nuc_base_'+sym_op][:])
+            grad_eloc_en_elc = jnp.array(f_h5['grad_eloc_en_elc_'+key][:])
+            grad_eloc_en_nuc_base = jnp.array(f_h5['grad_eloc_en_nuc_base_'+key][:])
             grd_en.append (grad_eloc_en_nuc_base+
                   jnp.einsum('seK,sen->snK',
                              grad_eloc_en_elc, 
                              rescale))
             
             #    --- Electron-Kinetic Gradient ---
-            grad_eloc_ke_elc = jnp.array(f_h5['grad_eloc_ke_elc_'+sym_op][:])
-            grad_eloc_ke_nuc_base = jnp.array(f_h5['grad_eloc_ke_nuc_base_'+sym_op][:])
+            grad_eloc_ke_elc = jnp.array(f_h5['grad_eloc_ke_elc_'+key][:])
+            grad_eloc_ke_nuc_base = jnp.array(f_h5['grad_eloc_ke_nuc_base_'+key][:])
             grd_ke.append (grad_eloc_ke_nuc_base+
                   jnp.einsum('seK,sen->snK',
                              grad_eloc_ke_elc, 
                              rescale))
             
             # --- Electron-LogPsi Gradient ---
-            grad_logpsi_elc = jnp.array(f_h5['grad_logpsi_elc_'+sym_op][:])
-            grad_logpsi_nuc_base = jnp.array(f_h5['grad_logpsi_nuc_base_'+sym_op][:])
+            grad_logpsi_elc = jnp.array(f_h5['grad_logpsi_elc_'+key][:])
+            grad_logpsi_nuc_base = jnp.array(f_h5['grad_logpsi_nuc_base_'+key][:])
 
             novel_correction = jnp.zeros ( (num_samples, num_nuc, 3))
             for ist in range (0, num_samples, num_batches):
@@ -474,9 +432,6 @@ def get_vmc_func (mf,
                                                 grad_logpsi_elc, rescale) 
                                      + novel_correction)
         
-            
-        
-            
         grd_ee = jnp.stack (grd_ee, axis=0)
         grd_ee = grd_ee.mean(axis=0)
         grd_en = jnp.stack (grd_en, axis=0)
