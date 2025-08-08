@@ -129,8 +129,8 @@ def process_symmetric_water_molecule(chkfile_mc,
     
     O = nuc_crds[0]  # Oxygen position for centering
 
-    dist = jnp.linalg.norm (elc_samples[0]-O, axis=-1)
-    print ('dist_ref', dist)
+    #dist = jnp.linalg.norm (elc_samples[0]-O, axis=-1)
+    #print ('dist_ref', dist)
     # Step 1: Symmetrize the water molecule
     nuc_crds_sym, rot_mat = symmetrize_water_molecule(nuc_crds)
     
@@ -145,8 +145,8 @@ def process_symmetric_water_molecule(chkfile_mc,
     nuc_crds_sym_trans_rot = apply_coordinate_transformation(nuc_crds_sym, O, rot_mat)
     
     #debug
-    dist = jnp.linalg.norm (elc_samples_trans_rot[0], axis=-1)
-    print ('dist_trans_rot', dist)
+    #dist = jnp.linalg.norm (elc_samples_trans_rot[0], axis=-1)
+    #print ('dist_trans_rot', dist)
 
     # Step 3: Compute redistribution weights
     # Using vmap for efficient batch processing
@@ -159,8 +159,8 @@ def process_symmetric_water_molecule(chkfile_mc,
         apply_space_warping, in_axes=(0, None, None, 0)
     )(elc_samples_trans_rot, nuc_crds_trans_rot, nuc_crds_sym_trans_rot, weights)
     
-    dist = jnp.linalg.norm (elc_samples_sym_trans_rot[0], axis=-1)
-    print ('dist_space_warping', dist)
+    #dist = jnp.linalg.norm (elc_samples_sym_trans_rot[0], axis=-1)
+    #print ('dist_space_warping', dist)
 
     # Step 5: Apply reflection operations
     reflection_map = {
@@ -190,8 +190,8 @@ def process_symmetric_water_molecule(chkfile_mc,
                                                         weights_i)
         )(elc_samples_reflected, weights)
         
-        dist = jnp.linalg.norm (elc_samples_unwarped[0], axis=-1)
-        print ('dist_unwarped', reflection_op, dist)
+        #dist = jnp.linalg.norm (elc_samples_unwarped[0], axis=-1)
+        #print ('dist_unwarped', reflection_op, dist)
         # Then apply inverse coordinate transformation
         elc_samples_final = apply_inverse_transformation(elc_samples_unwarped, O, rot_mat)
         

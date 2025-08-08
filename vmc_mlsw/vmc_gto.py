@@ -53,7 +53,7 @@ def get_vmc_func (mf,
             # check the sigularity between electron-electron
             diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
             dists_ee = jnp.sqrt (jnp.sum(diffs_ee*diffs_ee, axis=-1))
-            proposed_crds = jax.lax.select (dists_ee.min() < 0.01, 
+            proposed_crds = jax.lax.select (dists_ee.min() < 0.001, 
                                             elec_crds,
                                             proposed_crds)
         
@@ -61,7 +61,7 @@ def get_vmc_func (mf,
             diffs_en = proposed_crds[:,None,:] - nuc_crds[None, :, :]
             dists_en = jnp.sqrt (jnp.sum(diffs_en*diffs_en, axis=-1))
 
-            proposed_crds = jax.lax.select (dists_en.min() < 0.01, 
+            proposed_crds = jax.lax.select (dists_en.min() < 0.001, 
                                             elec_crds,
                                             proposed_crds)
         
@@ -94,58 +94,93 @@ def get_vmc_func (mf,
         elec_crds = centers + 0.05 * jax.random.normal(rng, (nelec, 3))
 
         # Equilibration phase
-        accepts_eq = 0
-        ratio = 0.0
-        for step in range(num_equilibration):
-            rng_key, elec_crds, accepted = \
-                metropolis_step(rng_key, elec_crds, step_size)
-        
-            accepts_eq += accepted.sum()
-
-            if (step + 1) % 5000 == 0:
-                ratio = accepts_eq / 5000 
-                step_size *= (0.5 + ratio)
-                accepts_eq = 0
-
-        if num_equilibration > 0:
-            print(f"Equilibration Acceptance Rate: {ratio:.2f}")
-            print(f"Step size: {step_size}")
-
-        # Main sampling phase with pre-allocated arrays
-        samples_list = []
-        accepts_main = 0
+        @jax.jit
+        def equilibration_step (state, step_number):
+            rng_key, elec_crds, step_size, accepts, _ = state 
+            rng_key, elec_crds, accepted = metropolis_step (rng_key, elec_crds, step_size)
+            accepts += accepted.sum() 
+            ratio = accepts/5000 
+            new_step_size = jax.lax.select (
+                (step_number+1)%5000 == 0,
+                step_size * (0.5 + ratio),
+                step_size
+            )
+            new_accepts = jax.lax.select (
+                (step_number+1)%5000 == 0,
+                0,
+                accepts
+            )
+            return (rng_key, elec_crds, new_step_size, new_accepts, ratio), None 
     
-        for step in range(num_steps):
-            rng_key, elec_crds, accepted = \
-                metropolis_step(rng_key, elec_crds, step_size)
-            accepts_main += accepted.sum()
-
-            if (step + 1)% 10 == 0:
-                samples_list = samples_list + [elec_crds]
-        
-        
-            if (step + 1) % 50000 == 0:
-                ratio = accepts_main / 50000 
-                step_size *= (0.5 + ratio)
-                accepts_main = 0
-                print (f"MC {step+1}/{num_steps} ({100*(step+1)/num_steps:.1f}%): Ratio {ratio:.2f} Step_size {step_size:.4f}")
+        initial_state = (rng_key, elec_crds, step_size, 0, 0.5)
+        final_state, _ = jax.lax.scan (equilibration_step,
+                                       initial_state,
+                                       jnp.arange (num_equilibration))
+        rng_key, elec_crds, step_size, _, ratio = final_state
         
 
-        if num_steps > 0:
-            print(f"Main Sampling Acceptance Rate: {ratio:.2f}")
-            print(f"Final step size: {step_size}")
+        print(f"Equilibration Acceptance Rate: {ratio:.2f}")
+        print(f"Step size: {step_size:.4f}")
 
-        if not samples_list:
-            print("Warning: No samples collected in vmc_run.")
-            return
+        # Production phase
+        @jax.jit
+        def production_step (state, step_number):
+            rng_key, elec_crds, step_size, accepts, _, samples, sample_idx = state 
+            rng_key, elec_crds, accepted = metropolis_step (rng_key, elec_crds, step_size)
+            accepts += accepted.sum() 
+            ratio = accepts/50000 
+            new_step_size = jax.lax.select (
+                (step_number+1)%50000 == 0,
+                step_size * (0.5 + ratio),
+                step_size
+            )
+            new_accepts = jax.lax.select (
+                (step_number+1)%50000 == 0,
+                0,
+                accepts
+            )
+        
+            is_collection = jnp.equal( jnp.mod (step_number+1, 10), 0)
 
+            def write_samples (args):
+                samples_loc, idx = args 
+                samples_loc = samples_loc.at[idx].set (elec_crds)
+                idx = idx + 1
+                return samples_loc, idx 
+            
+            def no_write (args):
+                return args 
+            
+            samples, sample_idx = jax.lax.cond (is_collection,
+                                                 write_samples,
+                                                 no_write,
+                                                 operand=(samples, sample_idx))
+            
+            return (rng_key, elec_crds, new_step_size, new_accepts, ratio, samples, sample_idx), None 
+        
+        # Main sampling phase with pre-allocated arrays
+        n_collect = num_steps//10
+        samples = jnp.zeros ( (n_collect, elec_crds.shape[0], 3) )
+        sample_idx = 0
+        for istep in range (num_steps//50000):
+            initial_state = (rng_key, elec_crds, step_size, 0, 0.5,
+                             samples, sample_idx)
+            final_state, _ = jax.lax.scan (production_step,
+                                       initial_state,
+                                       jnp.arange (50000))
+            rng_key, elec_crds, step_size, _, ratio, samples, sample_idx = final_state
+            
+            print (f"MC {(istep+1)*50000}/{num_steps} ({100*(istep+1)*50000/num_steps:.2f}%): Ratio {ratio:.2f} Step_size {step_size:.4f}")
+
+        
         # More efficient stacking
-        stacked_samples = jnp.stack(samples_list, axis=0)
+        samples = samples[:sample_idx]
 
         # Save results
         with h5py.File(chkfile_mc, 'w') as f:
-            f.create_dataset('stacked_samples', data=stacked_samples)
+            f.create_dataset('stacked_samples', data=samples)
             f.create_dataset('nuc_crds', data=nuc_crds)
+
 
     def vmc_energy():
         """Optimized energy calculation with better batching."""
@@ -170,7 +205,6 @@ def get_vmc_func (mf,
     
         for i in range(0, num_samples, batch_size):
             end_idx = min(i + batch_size, num_samples)
-            #print ('KE', i, end_idx)
             batch_samples = stacked_samples[i:end_idx]
         
             batch_ke = jax.vmap(local_energy_ke, in_axes=(0, None, None))(
