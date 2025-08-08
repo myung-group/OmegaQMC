@@ -230,7 +230,8 @@ def process_symmetric_diatomic_molecule(chkfile_mc,
     # Step 1: Symmetrize the water molecule
     vector = nuc_crds[1] - center
     rot_mat = rotate_vector_to_z_axis(vector)
-    
+    rot_mat = rot_mat.T 
+
     # Step 2: Transform coordinates to symmetric frame
     elc_samples_trans_rot = apply_coordinate_transformation(elc_samples, center, rot_mat)
     
