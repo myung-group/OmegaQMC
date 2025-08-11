@@ -8,12 +8,16 @@ version = "0.1.0"
 description = "Variational Monte Carlo with machine-learned space warping"
 authors = [
     {name = "Soohaeng Yoo Willow", email = "sy7willow@gmail.com"},
-    {name = "Chang Woo Myung", email= "cwmyung@skku.edu"},
-    {name = "David ChangMo Yang", email="dcyang@skku.edu"}
+    {name = "Chang Woo Myung", email = "cwmyung@skku.edu"},
+    {name = "David ChangMo Yang", email = "dcyang@skku.edu"}
 ]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.7"
+dependencies = [
+    "pyscf>=2.0.0",
+    "jax>=0.6"
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
