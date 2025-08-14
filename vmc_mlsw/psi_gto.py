@@ -133,23 +133,20 @@ def get_psi_fun(mf):
         """
         Two-body Jastrow for like-spin electron pairs.
 
-        Uses a cutoff polynomial form that satisfies the electron-electron
+        Uses a polynomial form that satisfies the electron-electron
         cusp condition for same-spin pairs:
-            u_aa(r) = a * r * max(1 - r/L, 0)^M
-        where a = 1/4 for like-spin, L and M are global constants.
+            u_aa(r) = a * r / (1 + b * r)
+        where a = 1/4 for like-spin and b is a variational constant.
         """
         # Pairwise distances between electrons
-        diffs = elec_crds[:, None, :] - elec_crds[None, :, :]
-        dists = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
-
         # Upper-triangular pairs (i < j)
-        ne = elec_crds.shape[0]
-        iu, ju = jnp.triu_indices(ne, k=1)
-        r_ij = dists[iu, ju]
+        i, j = jnp.triu_indices(elec_crds.shape[0], k=1)
+        diffs = elec_crds[i] - elec_crds[j]
+        r_ij = jnp.sqrt(jnp.sum(diffs*diffs, axis=-1))
 
         # Same-spin mask assuming alternating spin ordering
         # (0:A, 1:B, 2:A, 3:B, ...)
-        same_spin_mask = (iu % 2) == (ju % 2)
+        same_spin_mask = (i % 2) == (j % 2)
         # Avoid boolean indexing inside jitted code
         # (causes NonConcreteBooleanIndexError)
         same_spin_mask_f = same_spin_mask.astype(r_ij.dtype)
@@ -173,21 +170,19 @@ def get_psi_fun(mf):
         """
         Two-body Jastrow for opposite-spin electron pairs.
 
-        Uses the same cutoff polynomial form as J2_aa but with the
-        unlike-spin cusp a = 1/2:
-            u_ab(r) = a * r * max(1 - r/L, 0)^M
+        Uses a polynomial form that satisfies the electron-electron
+        cusp condition for opposite-spin pairs:
+            u_ab(r) = a * r / (1 + b * r)
+        where a = 1/2 for unlike-spin and b is a variational constant.
         """
         # Pairwise distances between electrons
-        diffs = elec_crds[:, None, :] - elec_crds[None, :, :]
-        dists = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
-
         # Upper-triangular pairs (i < j)
-        ne = elec_crds.shape[0]
-        iu, ju = jnp.triu_indices(ne, k=1)
-        r_ij = dists[iu, ju]
+        i, j = jnp.triu_indices(elec_crds.shape[0], k=1)
+        diffs = elec_crds[i] - elec_crds[j]
+        r_ij = jnp.sqrt(jnp.sum(diffs*diffs, axis=-1))
 
         # Opposite-spin mask assuming alternating spin ordering
-        opp_spin_mask = (iu % 2) != (ju % 2)
+        opp_spin_mask = (i % 2) != (j % 2)
         # Avoid boolean indexing; use mask multiplication
         opp_spin_mask_f = opp_spin_mask.astype(r_ij.dtype)
 
@@ -250,22 +245,20 @@ def get_psi_fun(mf):
     def local_energy_ke(elec_crds, nuc_crds, params_vmc):
         """Optimized kinetic energy calculation."""
         def _log_psi_flat(p_flat):
-            return log_trial_wavefunction(p_flat.reshape(-1, 3), nuc_crds, params_vmc)
-        
+            return log_trial_wavefunction(p_flat.reshape(-1, 3),
+                                          nuc_crds, params_vmc)
+
         # Use more efficient gradient calculations
         grad_fn = jax.grad(_log_psi_flat)
         hess_fn = jax.hessian(_log_psi_flat)
-        
+
         p_flat = elec_crds.flatten()
         grad_log_psi = grad_fn(p_flat)
         hess_log_psi = hess_fn(p_flat)
-        # jax.debug.print("!!neneA!: {x}", x=jnp.isnan(p_flat).any())
-        # jax.debug.print("!!neneB!:  {x}", x=jnp.isnan(hess_log_psi).any())
-        # jax.debug.print("!!neneC!:   {x}", x=jnp.isnan(grad_log_psi).any())
-        
+
         lap_term = jnp.trace(hess_log_psi)
         grad_term_sq = jnp.sum(grad_log_psi**2)
-        
+
         return -0.5 * (lap_term + grad_term_sq)
 
     return (log_trial_wavefunction, 
