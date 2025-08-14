@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 #from functools import partial
 from vmc_mlsw.shell import read_shell
+from vmc_mlsw.constants import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER, EE_CUSP_VALUE
 
 
 def get_psi_fun(mf):
@@ -128,9 +129,89 @@ def get_psi_fun(mf):
         return log_det_alpha + log_det_beta
 
     @jax.jit
+    def J2_aa(elec_crds, params_vmc):
+        """
+        Two-body Jastrow for like-spin electron pairs.
+
+        Uses a cutoff polynomial form that satisfies the electron-electron
+        cusp condition for same-spin pairs:
+            u_aa(r) = a * r * max(1 - r/L, 0)^M
+        where a = 1/4 for like-spin, L and M are global constants.
+        """
+        # Pairwise distances between electrons
+        diffs = elec_crds[:, None, :] - elec_crds[None, :, :]
+        dists = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
+
+        # Upper-triangular pairs (i < j)
+        ne = elec_crds.shape[0]
+        iu, ju = jnp.triu_indices(ne, k=1)
+        r_ij = dists[iu, ju]
+
+        # Same-spin mask assuming alternating spin ordering
+        # (0:A, 1:B, 2:A, 3:B, ...)
+        same_spin_mask = (iu % 2) == (ju % 2)
+        # Avoid boolean indexing inside jitted code
+        # (causes NonConcreteBooleanIndexError)
+        same_spin_mask_f = same_spin_mask.astype(r_ij.dtype)
+
+        # Jastrow parameters
+        a_cusp = EE_CUSP_VALUE  # 1/4 for like-spin electrons
+        # L_cut = JASTROW_EE_L_CUT
+        # m_pow = JASTROW_EE_M_POWER
+
+        # Cutoff polynomial (C^M-1 continuous at r = L_cut)
+        # one_minus = 1.0 - r_ij / L_cut
+        # cutoff = jnp.clip(one_minus, a_min=0.0)  # max(1 - r/L, 0)
+        # u_pairs = a_cusp * r_ij * cutoff**m_pow
+        u_pairs = a_cusp * r_ij / (1. + params_vmc[0]*r_ij)
+
+        # Sum only same-spin contributions via masking
+        return jnp.sum(u_pairs * same_spin_mask_f)
+
+    @jax.jit
+    def J2_ab(elec_crds, params_vmc):
+        """
+        Two-body Jastrow for opposite-spin electron pairs.
+
+        Uses the same cutoff polynomial form as J2_aa but with the
+        unlike-spin cusp a = 1/2:
+            u_ab(r) = a * r * max(1 - r/L, 0)^M
+        """
+        # Pairwise distances between electrons
+        diffs = elec_crds[:, None, :] - elec_crds[None, :, :]
+        dists = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
+
+        # Upper-triangular pairs (i < j)
+        ne = elec_crds.shape[0]
+        iu, ju = jnp.triu_indices(ne, k=1)
+        r_ij = dists[iu, ju]
+
+        # Opposite-spin mask assuming alternating spin ordering
+        opp_spin_mask = (iu % 2) != (ju % 2)
+        # Avoid boolean indexing; use mask multiplication
+        opp_spin_mask_f = opp_spin_mask.astype(r_ij.dtype)
+
+        # Jastrow parameters
+        a_cusp = 2.0 * EE_CUSP_VALUE  # 1/2 for unlike-spin electrons
+        # L_cut = JASTROW_EE_L_CUT
+        # m_pow = JASTROW_EE_M_POWER
+
+        # Cutoff polynomial
+        # one_minus = 1.0 - r_ij / L_cut
+        # cutoff = jnp.clip(one_minus, a_min=0.0)
+        # u_pairs = a_cusp * r_ij * cutoff**m_pow
+        u_pairs = a_cusp * r_ij / (1. + params_vmc[0]*r_ij)
+
+        # Sum only opposite-spin contributions via masking
+        return jnp.sum(u_pairs * opp_spin_mask_f)
+
+    @jax.jit
     def log_trial_wavefunction(elec_crds, nuc_crds, params_vmc):
         """Optimized trial wavefunction."""
-        return log_slater_determinant_optimized(elec_crds, nuc_crds)
+        return log_slater_determinant_optimized(elec_crds, nuc_crds) \
+            + J2_aa(elec_crds, params_vmc)
+
+#             + J2_ab(elec_crds, params_vmc)
 
     @jax.jit
     def classical_coulomb_optimized(crds1, chgs1, crds2=None, chgs2=None):
@@ -178,6 +259,9 @@ def get_psi_fun(mf):
         p_flat = elec_crds.flatten()
         grad_log_psi = grad_fn(p_flat)
         hess_log_psi = hess_fn(p_flat)
+        # jax.debug.print("!!neneA!: {x}", x=jnp.isnan(p_flat).any())
+        # jax.debug.print("!!neneB!:  {x}", x=jnp.isnan(hess_log_psi).any())
+        # jax.debug.print("!!neneC!:   {x}", x=jnp.isnan(grad_log_psi).any())
         
         lap_term = jnp.trace(hess_log_psi)
         grad_term_sq = jnp.sum(grad_log_psi**2)
