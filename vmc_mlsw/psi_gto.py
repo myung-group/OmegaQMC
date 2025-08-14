@@ -204,9 +204,7 @@ def get_psi_fun(mf):
     def log_trial_wavefunction(elec_crds, nuc_crds, params_vmc):
         """Optimized trial wavefunction."""
         return log_slater_determinant_optimized(elec_crds, nuc_crds) \
-            + J2_aa(elec_crds, params_vmc)
-
-#             + J2_ab(elec_crds, params_vmc)
+            + J2_aa(elec_crds, params_vmc) + J2_ab(elec_crds, params_vmc)
 
     @jax.jit
     def classical_coulomb_optimized(crds1, chgs1, crds2=None, chgs2=None):
