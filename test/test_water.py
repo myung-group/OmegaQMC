@@ -4,16 +4,20 @@ from functools import partial
 
 from pyscf import gto, scf
 from vmc_mlsw import get_vmc_func 
-from vmc_mlsw.vmc_gto_symm import process_symmetric_water_molecule
+#from vmc_mlsw.vmc_gto_symm import process_symmetric_water_molecule
 
-    
+rng_key = jax.random.key(777)
+# No optimizable Jastrow parameters:
+params_vmc_no_jastrow = jnp.array([])
+
+
 mol = gto.M(
               atom='''
-O       10.39872781       0.20926782       3.37949987
-H       10.22017454      -0.60695484       3.93306444
-H       10.61215295       0.95345020       4.00705751
+O                0.   0.   0.
+H                0.   1.52610182  1.12172672
+H                0.  -1.51745721  1.11537270
 ''',
-              basis='6-31g*',
+              basis='6-31g',
               # basis='cc-pvdz',
               unit='Ang'
           )
@@ -24,55 +28,45 @@ mf_grad = mf.nuc_grad_method()
 grad = mf_grad.kernel()
 
 nuc_crds = mol.atom_coords(unit='Bohr')
-rng_key = jax.random.key(777)
-# No optimizable Jastrow parameters:
-params_vmc_no_jastrow = jnp.array([])
+print('nuc_crds(Bohr)\n', nuc_crds)
 
-chkfile_mc =  'H2O_vmc_631gd_mc.hdf5'
-chkfile_elc = 'H2O_vmc_631gd_elc.hdf5'
-chkfile_enr = 'H2O_vmc_631gd_enr.hdf5'
 chkfile_grd = 'H2O_vmc_631gd_grd.hdf5'
 
 cgto_coeff = {
         1: jnp.array ([1, 1.0431879, -0.02914878, 0.78355617,
-        -2.95081286, 5.43507108, -5.08491324, 1.94265234]),
+                -2.95081286, 5.43507108, -5.08491324, 1.94265234]),
+        3: jnp.array ([ 1, 2.61276719, -0.37992215, 3.75299616, -12.77929016,
+                19.64491315, -13.86228360,  3.69413606]),
         8: jnp.array ([1, 12.45593615, -2.38348643, 30.46159315,
-        -125.8242091, 252.61904634, -239.5024989, 86.70950789])
+                -125.8242091, 252.61904634, -239.5024989, 86.70950789])
     }
-    
-vmc_run, vmc_energy, vmc_gradient_prep, vmc_grad =\
-        get_vmc_func (mf, 
-                      params_vmc_no_jastrow,
-                      chkfile_mc=chkfile_mc,
-                      chkfile_enr=chkfile_enr,
-                      chkfile_grd=chkfile_grd,
-                      chkfile_elc=chkfile_elc,
-                      cgto_coeff=None)
-vmc_run (rng_key, 
-             num_steps=1000000,
-             num_equilibration=50000,
-             step_size=0.05)
-    
-vmc_energy () 
 
 
-process_symmetric_water_molecule(
-        chkfile_mc,
-        chkfile_elc,
-        sigma=0.5,
-        reflection_ops=['x','y', 'xy']
-    )
+l_cusp = True
+if l_cusp:
+    vmc_run, vmc_grad =\
+                get_vmc_func(mf,
+                     params_vmc_no_jastrow,
+                     scheme='scheme1',
+                     chkfile_grd=chkfile_grd,
+                     cgto_coeff=cgto_coeff)
+else:
+    vmc_run, vmc_grad =\
+                get_vmc_func(mf,
+                     params_vmc_no_jastrow,
+                     scheme='scheme1',
+                     chkfile_grd=chkfile_grd,
+                     cgto_coeff=None)
 
-vmc_gradient_prep ()
+l_grad = False
+vmc_run(rng_key,
+        nwalkers=1000, 
+        num_mc_steps=1000, # MC steps per each walker
+        max_mc_iter=500,
+        mc_step_size=0.10, # electrons movement distance
+        tolerance_enr_std=0.01, # 
+        fname_log='vmc_H2O_enr.log',
+        l_grad=l_grad)
 
-grd = vmc_grad (scheme='scheme2',
-          mark_std=3.0)
-
-with jnp.printoptions (precision=5, suppress=True):
-    print('Scheme2:grd_tot\n', grd)
-
-grd = vmc_grad (scheme='scheme1',
-          mark_std=3.0)
-
-with jnp.printoptions (precision=5, suppress=True):
-    print('Scheme1:grd_tot\n', grd)
+if l_grad:
+    grd = vmc_grad ()

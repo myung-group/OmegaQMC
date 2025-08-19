@@ -1,13 +1,13 @@
 import jax
 import jax.numpy as jnp
 #from functools import partial
-from vmc_mlsw.shell import read_shell
+from vmc_mlsw.shell import read_shell, evaluate_cusp_s
 from vmc_mlsw.constants import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER, EE_CUSP_VALUE
 
 
-def get_psi_fun(mf):
+def get_psi_fun(mf, params_vmc, cgto_coeff=None):
     """
-    Creates optimized functions for evaluating the wavefunction
+    Creates functions for evaluating the wavefunction
     and local energy components from a PySCF mean-field calculation.
     """
     # Extract basic molecular information
@@ -26,44 +26,46 @@ def get_psi_fun(mf):
     ncgs = 0
     shell_list = []
 
-    # Process basis functions for each atom
-    for ia, atom in enumerate(mol._atom):
-        symb = atom[0]
-        basis = mol._basis[symb]
+    l_Jastrow = params_vmc.shape[0] != 0
+    l_cgto = True
+    if cgto_coeff == None:
+        cgto_coeff = jnp.array([])
+        l_cgto = False
 
-        for ish, ish_basis in enumerate(basis):
-            shell = read_shell(ish_basis, ia, nsgs, ncgs)
-            shell.is_cusp = 0
-            nsgs = nsgs + shell.nsgs
-            ncgs = ncgs + shell.ncgs
-            shell_list.append(shell)
+    Z_rc = jnp.array([])
+    Z_cgto_coeff = jnp.array([])
+    if l_cgto:
+        Z_rc = jnp.array ([0.1 if Z == 1 else 0.2 for Z in Z_charges])
+        Z_cgto_coeff = jnp.array([cgto_coeff[Z] for Z in Z_charges])
 
-    '''
-    # Pre-compute shell parameters for vectorized operations
-    n_shells = len(shell_list)
-    max_nsgs = max(shell.nsgs for shell in shell_list)
-    max_nprim = max(shell.nprim for shell in shell_list)
-    
-    # Create structured arrays for better memory access
-    shell_am = jnp.array([shell.am for shell in shell_list])
-    shell_iat = jnp.array([shell.iat for shell in shell_list])
-    shell_isgs = jnp.array([shell.isgs for shell in shell_list])
-    shell_nsgs = jnp.array([shell.nsgs for shell in shell_list])
-    shell_is_cusp = jnp.array([shell.is_cusp for shell in shell_list])
-    
-    # Pad arrays for vectorization
-    shell_alphas = jnp.zeros((n_shells, max_nprim))
-    shell_norms = jnp.zeros((n_shells, max_nprim))
-    
-    for i, shell in enumerate(shell_list):
-        shell_alphas = shell_alphas.at[i, :shell.nprim].set(shell.alpha)
-        shell_norms = shell_norms.at[i, :shell.nprim].set(shell.norm)
-    '''
+        # Process basis functions for each atom
+        for ia, atom in enumerate(mol._atom):
+            symb = atom[0]
+            basis = mol._basis[symb]
 
+            for ish, ish_basis in enumerate(basis):
+                shell = read_shell(ish_basis, ia, nsgs, ncgs)
+                shell.is_cusp = 1 if ish == 0 else 0
+                nsgs = nsgs + shell.nsgs
+                ncgs = ncgs + shell.ncgs
+                shell_list.append(shell)
+    else:
+        for ia, atom in enumerate(mol._atom):
+            symb = atom[0]
+            basis = mol._basis[symb]
+
+            for ish, ish_basis in enumerate(basis):
+                shell = read_shell(ish_basis, ia, nsgs, ncgs)
+                shell.is_cusp = 0 
+                nsgs = nsgs + shell.nsgs
+                ncgs = ncgs + shell.ncgs
+                shell_list.append(shell)
+
+ 
     @jax.jit
-    def cgs_sph_get_optimized(elec_crds, nuc_crds):
+    def cgs_sph_get(elec_crds, nuc_crds):
         """
-        Optimized spherical GTO evaluation using vectorized operations.
+        spherical GTO evaluation using vectorized operations.
         """
         n_nuc = nuc_crds.shape[0]
         shell_nsgs_total = shell_list[-1].isgs + shell_list[-1].nsgs
@@ -80,9 +82,13 @@ def get_psi_fun(mf):
             alpha = shell.alpha
             norm = shell.norm
             rad_s = jnp.sum(jnp.exp(-alpha * r2) * norm)
-            cgs = rad_s
             # Angular part based on angular momentum
             if shell.am == 0:
+                if shell.is_cusp == 1:
+                    cgs = evaluate_cusp_s(r, Z_rc[shell.iat], Z_charges[shell.iat], 
+                                        rad_s, Z_cgto_coeff[shell.iat])
+                else:
+                    cgs = rad_s
                 ao_val_s = ao_val_s.at[shell.iat, shell.isgs:shell.isgs+shell.nsgs].set(cgs)
             elif shell.am == 1:
                 cgs = rad_s * dr
@@ -97,6 +103,8 @@ def get_psi_fun(mf):
                     -cd1*x*z,
                     cd2*(x*x - y*y)
                 ])
+            else:
+                raise ValueError("shell.am > 2 is not supported yet.")
             
             ao_val = ao_val.at[shell.iat, 
                                shell.isgs:shell.isgs+shell.nsgs].set(cgs)
@@ -104,18 +112,18 @@ def get_psi_fun(mf):
         return ao_val, ao_val_s
 
     @jax.jit
-    def get_psi_mo_optimized(elec_crds, nuc_crds):
-        """Optimized molecular orbital evaluation."""
-        ao_val, ao_val_s = jax.vmap(cgs_sph_get_optimized, in_axes=(0, None))(elec_crds, nuc_crds)
+    def get_psi_mo(elec_crds, nuc_crds):
+        """Molecular orbital evaluation."""
+        ao_val, ao_val_s = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds, nuc_crds)
         mo_val = jnp.einsum('ena,am->nem', ao_val, mo_occ_coeff)
         mo_val_s = jnp.einsum('ena,am->nem', ao_val_s, mo_occ_coeff)
         
         return mo_val, mo_val_s
 
     @jax.jit
-    def log_slater_determinant_optimized(elec_crds, nuc_crds):
-        """Optimized Slater determinant calculation."""
-        mo_val, _ = get_psi_mo_optimized(elec_crds, nuc_crds)
+    def log_slater_determinant(elec_crds, nuc_crds):
+        """Slater determinant calculation."""
+        mo_val, _ = get_psi_mo(elec_crds, nuc_crds)
         mo_val = mo_val.sum(axis=0)
         
         # More efficient spin splitting
@@ -129,7 +137,7 @@ def get_psi_fun(mf):
         return log_det_alpha + log_det_beta
 
     @jax.jit
-    def J2_aa(elec_crds, params_vmc):
+    def J2_aa(elec_crds):
         """
         Two-body Jastrow for like-spin electron pairs.
 
@@ -166,7 +174,7 @@ def get_psi_fun(mf):
         return jnp.sum(u_pairs * same_spin_mask_f)
 
     @jax.jit
-    def J2_ab(elec_crds, params_vmc):
+    def J2_ab(elec_crds):
         """
         Two-body Jastrow for opposite-spin electron pairs.
 
@@ -200,15 +208,17 @@ def get_psi_fun(mf):
         # Sum only opposite-spin contributions via masking
         return jnp.sum(u_pairs * opp_spin_mask_f)
 
+    
+    def log_trial_wavefunction(elec_crds, nuc_crds):
+        """Trial wavefunction."""
+        ln_slater = log_slater_determinant(elec_crds, nuc_crds)
+        jastrow_term = J2_aa(elec_crds)+J2_ab(elec_crds) if l_Jastrow else 0.0
+        return ln_slater + jastrow_term
+        
+        
     @jax.jit
-    def log_trial_wavefunction(elec_crds, nuc_crds, params_vmc):
-        """Optimized trial wavefunction."""
-        return log_slater_determinant_optimized(elec_crds, nuc_crds) \
-            + J2_aa(elec_crds, params_vmc) + J2_ab(elec_crds, params_vmc)
-
-    @jax.jit
-    def classical_coulomb_optimized(crds1, chgs1, crds2=None, chgs2=None):
-        """Optimized Coulomb interaction calculation."""
+    def classical_coulomb_energy(crds1, chgs1, crds2=None, chgs2=None):
+        """Coulomb interaction calculation."""
         eps = 0.0
         if crds2 is None:
             # Intra-particle interactions
@@ -226,25 +236,25 @@ def get_psi_fun(mf):
         
     @jax.jit
     def local_energy_ee(elec_crds):
-        """Optimized electron-electron energy."""
-        return classical_coulomb_optimized(elec_crds, e_charges)
+        """Electron-electron energy."""
+        return classical_coulomb_energy(elec_crds, e_charges)
 
     @jax.jit
     def local_energy_nn(nuc_crds):
-        """Optimized nuclear-nuclear energy."""
-        return classical_coulomb_optimized(nuc_crds, Z_charges)
+        """Nuclear-nuclear energy."""
+        return classical_coulomb_energy(nuc_crds, Z_charges)
 
     @jax.jit
     def local_energy_en(elec_crds, nuc_crds):
-        """Optimized electron-nuclear energy."""
-        return classical_coulomb_optimized(elec_crds, e_charges, nuc_crds, Z_charges)
+        """Electron-nuclear energy."""
+        return classical_coulomb_energy(elec_crds, e_charges, nuc_crds, Z_charges)
 
     @jax.jit
-    def local_energy_ke(elec_crds, nuc_crds, params_vmc):
-        """Optimized kinetic energy calculation."""
+    def local_energy_ke(elec_crds, nuc_crds):
+        """Kinetic energy calculation."""
         def _log_psi_flat(p_flat):
             return log_trial_wavefunction(p_flat.reshape(-1, 3),
-                                          nuc_crds, params_vmc)
+                                          nuc_crds)
 
         # Use more efficient gradient calculations
         grad_fn = jax.grad(_log_psi_flat)
@@ -261,4 +271,4 @@ def get_psi_fun(mf):
 
     return (log_trial_wavefunction, 
             (local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke), 
-            get_psi_mo_optimized)
+            get_psi_mo)
