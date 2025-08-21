@@ -5,7 +5,7 @@ from vmc_mlsw.shell import read_shell, evaluate_cusp_s
 from vmc_mlsw.constants import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER, EE_CUSP_VALUE
 
 
-def get_psi_fun(mf, params_vmc, cgto_coeff=None):
+def get_psi_fun(mf, cgto_coeff=None):
     """
     Creates functions for evaluating the wavefunction
     and local energy components from a PySCF mean-field calculation.
@@ -26,17 +26,19 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
     ncgs = 0
     shell_list = []
 
-    l_Jastrow = params_vmc.shape[0] != 0
+
     l_cgto = True
     if cgto_coeff == None:
         cgto_coeff = jnp.array([])
         l_cgto = False
 
     Z_rc = jnp.array([])
+    Z_q0 = jnp.array([])
     Z_cgto_coeff = jnp.array([])
     if l_cgto:
         Z_rc = jnp.array ([0.1 if Z == 1 else 0.2 for Z in Z_charges])
-        Z_cgto_coeff = jnp.array([cgto_coeff[Z] for Z in Z_charges])
+        Z_q0 = jnp.array([cgto_coeff[Z]['q0'] for Z in Z_charges])
+        Z_cgto_coeff = jnp.array([cgto_coeff[Z]['coeff'] for Z in Z_charges])
 
         # Process basis functions for each atom
         for ia, atom in enumerate(mol._atom):
@@ -86,7 +88,7 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
             if shell.am == 0:
                 if shell.is_cusp == 1:
                     cgs = evaluate_cusp_s(r, Z_rc[shell.iat], Z_charges[shell.iat],
-                                        rad_s, Z_cgto_coeff[shell.iat])
+                                        rad_s, Z_q0[shell.iat], Z_cgto_coeff[shell.iat])
                 else:
                     cgs = rad_s
                 ao_val_s = ao_val_s.at[shell.iat, shell.isgs:shell.isgs+shell.nsgs].set(cgs)
@@ -103,8 +105,51 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
                     -cd1*x*z,
                     cd2*(x*x - y*y)
                 ])
+            elif shell.am == 3:
+                cf1 = jnp.sqrt(2.5)*0.5
+                cf2 = 3.0*cf1
+                cf3 = jnp.sqrt(15.0)
+                cf4 = jnp.sqrt(1.5)*0.5
+                cf5 = jnp.sqrt(6.0)
+                cf6 = 1.5
+                cf7 = cf3*0.5
+                x, y, z = dr
+                cgs = rad_s * jnp.array([
+                    y*(cf2*x*x - cf1*y*y), # xxy, yyy
+                    cf3*x*y*z,
+                    y*(cf5*z*z-cf4*(x*x+y*y)),
+                    z*(z*z - cf6*(x*x+y*y)),
+                    -x*(cf5*z*z - cf4*(x*x+y*y)),
+                    z*cf7*(x*x-y*y),
+                    x*(cf2*y*y-cf1*x*x)
+                ])
+            elif shell.am == 4:
+                cg1 = 2.9580398915498085
+                cg2 = 6.2749501990055672
+                cg3 = 2.0916500663351894
+                cg4 = 1.1180339887498949
+                cg5 = 6.7082039324993694
+                cg6 = 2.3717082451262845
+                cg7 = 3.1622776601683795
+                cg8 = 0.55901699437494745
+                cg9 = 3.3541019662496847
+                cg10 = 0.73950997288745213
+                cg11 = 4.4370598373247132
+                x, y, z = dr
+                cgs = rad_s * jnp.array([
+                    cg1*(x*x*x*y-x*y*y*y),
+                    y*z*(cg2*x*x - cg3*y*y),
+                    x*y*cg4*(-x*x - y*y) + cg5*x*y*z*z,
+                    -cg6*x*x*y*z - cg6*y*y*y*z + cg7*y*z*z*z,
+                    (0.375*(x*x*x*x + y*y*y*y + 2.0*x*x*y*y) +
+                     z*z*z*z - 3.0*z*z*(x*x + y*y)),
+                    cg6*x*x*x*z + cg6*x*y*y*z - cg7*x*z*z*z,
+                    cg8*(y*y*y*y - x*x*x*x) + cg9*z*z*(x*x - y*y),
+                    x*z*(cg2*y*y - cg3*x*x),
+                    cg10*(x*x*x*x + y*y*y*y) - cg11*x*x*y*y
+                ])
             else:
-                raise ValueError("shell.am > 2 is not supported yet.")
+                raise ValueError("shell.am > 4 is not supported yet.")
 
             ao_val = ao_val.at[shell.iat,
                                shell.isgs:shell.isgs+shell.nsgs].set(cgs)
@@ -137,7 +182,7 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
         return log_det_alpha + log_det_beta
 
     @jax.jit
-    def J2_aa(elec_crds, curr_params=params_vmc):
+    def J2_aa(elec_crds, curr_params):
         """
         Two-body Jastrow for like-spin electron pairs.
 
@@ -174,7 +219,7 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
         return jnp.sum(u_pairs * same_spin_mask_f)
 
     @jax.jit
-    def J2_ab(elec_crds, curr_params=params_vmc):
+    def J2_ab(elec_crds, curr_params):
         """
         Two-body Jastrow for opposite-spin electron pairs.
 
@@ -208,9 +253,10 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
         # Sum only opposite-spin contributions via masking
         return jnp.sum(u_pairs * opp_spin_mask_f)
 
-    def log_trial_wavefunction(elec_crds, nuc_crds, curr_params=params_vmc):
+    def log_trial_wavefunction(elec_crds, nuc_crds, curr_params):
         """Trial wavefunction."""
         ln_slater = log_slater_determinant(elec_crds, nuc_crds)
+        l_Jastrow = curr_params.shape[0] != 0
         jastrow_term = J2_aa(elec_crds, curr_params) \
             + J2_ab(elec_crds, curr_params) if l_Jastrow else 0.0
         return ln_slater + jastrow_term
@@ -249,7 +295,7 @@ def get_psi_fun(mf, params_vmc, cgto_coeff=None):
         return classical_coulomb_energy(elec_crds, e_charges, nuc_crds, Z_charges)
 
     @jax.jit
-    def local_energy_ke(elec_crds, nuc_crds, curr_params=params_vmc):
+    def local_energy_ke(elec_crds, nuc_crds, curr_params):
         """Kinetic energy calculation."""
         def _log_psi_flat(p_flat):
             return log_trial_wavefunction(p_flat.reshape(-1, 3),

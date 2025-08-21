@@ -22,7 +22,7 @@ def get_vmc_func(mf,
     # relative_nuc_pos = nuc_crds - mass_center
 
     log_trial_wavefunction, local_energy, get_psi_mo \
-        = get_psi_fun(mf, params_vmc, cgto_coeff)
+        = get_psi_fun(mf, cgto_coeff)
 
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
         = local_energy
@@ -66,17 +66,19 @@ def get_vmc_func(mf,
 
     @jax.jit
     def grad_fn_ke(e_pos):
-        return jax.grad(local_energy_ke, argnums=(0, 1))(e_pos, nuc_crds)
+        return jax.grad(local_energy_ke, argnums=(0, 1))(e_pos, nuc_crds, params_vmc)
 
     @jax.jit
     def grad_fn_logpsi(e_pos):
-        return jax.grad(log_trial_wavefunction, argnums=(0, 1))(e_pos, nuc_crds)
+        return jax.grad(log_trial_wavefunction, argnums=(0, 1))(e_pos, nuc_crds, params_vmc)
 
 
     @jax.jit
     def total_local_energy_fn (elec_crds):
-        return (local_energy_ee(elec_crds) + local_energy_en(elec_crds, nuc_crds) +
-                local_energy_ke(elec_crds, nuc_crds) + ener_nn)
+        return (local_energy_ee(elec_crds)
+                + local_energy_en(elec_crds, nuc_crds)
+                + local_energy_ke(elec_crds, nuc_crds, params_vmc)
+                + ener_nn)
 
 
     @jax.jit
@@ -103,8 +105,8 @@ def get_vmc_func(mf,
 
 
         # Vectorized acceptance calculation
-        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds)
-        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds)
+        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds, params_vmc)
+        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds, params_vmc)
 
         acceptance_ratio = jnp.exp(2 * (log_psi_new - log_psi_old))
         accept_prob = jnp.minimum(1.0, acceptance_ratio)
@@ -192,8 +194,8 @@ def get_vmc_func(mf,
 
         idx_cnt = jnp.array(idx_cnt)
         centers = nuc_crds[idx_cnt]
-        walkers = centers[jnp.newaxis,:,:] + \
-            0.05*jax.random.normal(rng, (nwalkers, nelec, 3))
+        walkers = centers[jnp.newaxis,:,:] \
+            + 0.05*jax.random.normal(rng, (nwalkers, nelec, 3))
 
         # Equilibration phase
         @jax.jit

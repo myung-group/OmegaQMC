@@ -20,7 +20,7 @@ def get_vmcopt_func(mf,
     # relative_nuc_pos = nuc_crds - mass_center
 
     log_trial_wavefunction, local_energy, get_psi_mo \
-        = get_psi_fun(mf, params_vmc, cgto_coeff)
+        = get_psi_fun(mf, cgto_coeff)
 
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
         = local_energy
@@ -28,7 +28,7 @@ def get_vmcopt_func(mf,
     # grad_nn_nuc = jax.grad(local_energy_nn)(nuc_crds)
 
     @jax.jit
-    def metropolis_move(rng_key, elec_crds, _step_size):
+    def metropolis_move(rng_key, elec_crds, _step_size, curr_params):
         """Metropolis step."""
         key_prop, key_accept = jax.random.split(rng_key)
 
@@ -45,8 +45,8 @@ def get_vmcopt_func(mf,
         valid_move = (dists_en.min() > min_dist_threshold) & \
             (dists_ee.min() > min_dist_threshold)
 
-        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds)
-        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds)
+        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds, curr_params)
+        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds, curr_params)
 
         accept = (jax.random.uniform(key_accept)
                   < jnp.exp(2 * (log_psi_new - log_psi_old))) & valid_move
@@ -55,7 +55,7 @@ def get_vmcopt_func(mf,
         return new_crds, accept
 
     @jax.jit
-    def total_local_energy_fn(elec_crds, curr_params=params_vmc):
+    def total_local_energy_fn(elec_crds, curr_params):
         return (local_energy_ee(elec_crds)
                 + local_energy_en(elec_crds, nuc_crds)
                 + local_energy_ke(elec_crds, nuc_crds, curr_params)
@@ -96,7 +96,7 @@ def get_vmcopt_func(mf,
 
         @jax.jit
         def equilibration_step(carried_in, _):
-            rkey, w, s = carried_in
+            rkey, w, s, curr_params = carried_in
             rkey0, rkey1 = jax.random.split(rkey)
 
             for _ in range(num_substeps):
@@ -106,17 +106,17 @@ def get_vmcopt_func(mf,
 
                 new_w, accepted \
                     = jax.vmap(metropolis_move,
-                               in_axes=(0, 0, None))(keys, w, s)
+                               in_axes=(0, 0, None, None))(keys, w, s, curr_params)
                 r = accepted.mean()
                 new_s = s * (0.6 + r)
 
-            return (rkey0, new_w, new_s), r
+            return (rkey0, new_w, new_s, curr_params), r
 
-        carry_in = (rng_key, walkers, step_size)
+        carry_in = (rng_key, walkers, step_size, params)
         carry_out, acc_ratios \
             = jax.lax.scan(equilibration_step, carry_in,
                            jnp.arange(num_equilibration))
-        rng_key, walkers, step_size = carry_out
+        rng_key, walkers, step_size, _ = carry_out
         ratio = acc_ratios[-1]
 
         print(f"Equilibration Acceptance Rate: {ratio:.2f}")
@@ -124,7 +124,7 @@ def get_vmcopt_func(mf,
 
         @jax.jit
         def production_step(carried_in, _):
-            rkey, w, s = carried_in
+            rkey, w, s, curr_params = carried_in
             rkey0, rkey1 = jax.random.split(rkey)
 
             for _ in range(num_substeps):
@@ -134,15 +134,16 @@ def get_vmcopt_func(mf,
 
                 new_w, accepted \
                     = jax.vmap(metropolis_move,
-                               in_axes=(0, 0, None))(keys, w, s)
+                               in_axes=(0, 0, None, None))(keys, w, s, curr_params)
                 r = accepted.mean()
 
                 new_s = step_size * (0.6 + r)
 
             # calculate energy
-            energies = jax.vmap(total_local_energy_fn)(new_w)
+            energies = jax.vmap(total_local_energy_fn,
+                                in_axes=(0,None))(new_w, curr_params)
 
-            return (rkey0, new_w, new_s), (r, energies)
+            return (rkey0, new_w, new_s, curr_params), (r, energies)
 
         @jax.jit
         def grad_logpsi_vparams(elec_crds, _params):
@@ -152,7 +153,7 @@ def get_vmcopt_func(mf,
 
         @jax.jit
         def production_step_vpgrad(carried_in, _):
-            rkey, w, s = carried_in
+            rkey, w, s, curr_params = carried_in
             rkey0, rkey1 = jax.random.split(rkey)
 
             for _ in range(num_substeps):
@@ -162,27 +163,27 @@ def get_vmcopt_func(mf,
 
                 new_w, accepted \
                     = jax.vmap(metropolis_move,
-                               in_axes=(0, 0, None))(keys, w, s)
+                               in_axes=(0, 0, None, None))(keys, w, s, curr_params)
                 r = accepted.mean()
 
                 new_s = step_size * (0.6 + r)
 
             # calculate energy
             energies = jax.vmap(total_local_energy_fn,
-                                in_axes=(0, None))(new_w, params)
+                                in_axes=(0, None))(new_w, curr_params)
             dlogpsi = jax.vmap(grad_logpsi_vparams,
-                               in_axes=(0, None))(new_w, params)
+                               in_axes=(0, None))(new_w, curr_params)
             E_mean = jnp.mean(energies)
             diff = energies - E_mean
             vp_grads = 2.0 * jnp.mean(diff[:, None] * dlogpsi, axis=0)
 
-            return (rkey0, new_w, new_s), (r, energies, vp_grads)
+            return (rkey0, new_w, new_s, curr_params), (r, energies, vp_grads)
 
-        carry_in = (rng_key, walkers, step_size)
+        carry_in = (rng_key, walkers, step_size, params)
         carry_out, results \
             = jax.lax.scan(production_step, carry_in,
                            jnp.arange(num_steps))
-        rng_key, walkers, step_size = carry_out
+        rng_key, walkers, step_size, _ = carry_out
         acc_ratios, tw_energies = results
         # tw_energies.shape == num_steps, nwalkers
 
@@ -234,17 +235,17 @@ def get_vmcopt_func(mf,
         m_buf = jnp.zeros_like(params)
         energy_opthist = []
         for epoch in range(num_epochs):
-            carry_in = (rng_key, walkers, step_size)
+            carry_in = (rng_key, walkers, step_size, params)
             carry_out, acc_ratios \
                 = jax.lax.scan(equilibration_step, carry_in,
                                jnp.arange(num_equilibration))
-            rng_key, walkers, step_size = carry_out
+            rng_key, walkers, step_size, _ = carry_out
 
-            carry_in = (rng_key, walkers, step_size)
+            carry_in = (rng_key, walkers, step_size, params)
             carry_out, results \
                 = jax.lax.scan(production_step_vpgrad, carry_in,
                                jnp.arange(num_steps))
-            rng_key, walkers, step_size = carry_out
+            rng_key, walkers, step_size, _ = carry_out
             acc_ratios, tw_energies, vparam_grads = results
 
             enr_mean = tw_energies.mean()
@@ -268,7 +269,7 @@ def get_vmcopt_func(mf,
         tau_int_axis0 = jax.jit(jax.vmap(_tau_int_from_acf, in_axes=0))
         w_tau_int = tau_int_axis0(w_acf)
         w_ste = w_std * jnp.sqrt(w_tau_int / num_steps)
-        enr_ste = jnp.sqrt(jnp.square(w_ste).sum() / nwalkers)
+        enr_ste = jnp.sqrt(jnp.square(w_ste).sum()) / nwalkers
 
         return params, {'energy': {'mean': enr_mean, 'stderr': enr_ste}}
         # params, {'energy': jnp.array(energy_opthist)}

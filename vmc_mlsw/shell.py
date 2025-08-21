@@ -44,22 +44,22 @@ def evaluate_slater_func(r, q0, Z):
     """Evaluate Slater function."""
     return q0 * jnp.exp(-Z * r)
 
-@jax.jit 
-def evaluate_cusp_s(r, rc, Z, rad_s, coeff):
+@jax.jit
+def evaluate_cusp_s(r, rc, Z, rad_s, q0, coeff):
     """Evaluate cusp-corrected s orbital."""
     b = evaluate_b_func(r, rc)
-    s = evaluate_slater_func(r, 1.0, Z)
-    r_over_rc = r / rc 
-    
+    s = evaluate_slater_func(r, q0, Z)
+    r_over_rc = r / rc
+
     # Vectorized computation of powers
     r_powers = jnp.power(r_over_rc, jnp.arange(2, 8))
-    
+
     # Construct the terms
     terms = jnp.concatenate([
         jnp.array([(1-b)*rad_s, b*s]),
         b*s*r_powers
     ])
-    
+
     return jnp.dot(coeff, terms)
 
 def read_shell(ish_basis, ia, nsgs, ncgs):
@@ -70,10 +70,10 @@ def read_shell(ish_basis, ia, nsgs, ncgs):
     # Extract angular momentum from first element
     am = ish_basis[0]
     nprim = len(ish_basis[1:])
-    
+
     # Pre-compute primitive pairs more efficiently
     ip_indices, jp_indices = jnp.triu_indices(nprim, k=0)
-    
+
     # Initialize shell object
     shell = ShellType()
     shell.iat = ia
@@ -90,60 +90,75 @@ def read_shell(ish_basis, ia, nsgs, ncgs):
     if am == 0:
         shell.ncgs = 1
         shell.nsgs = 1
-        
+
         # Vectorized normalization calculation
         cnorm = jnp.exp(0.75 * jnp.log(2.0 * alphas / jnp.pi))
         norm = coeffs * cnorm
-        
+
         # Vectorized overlap calculation
         alpha_sum = alphas[ip_indices] + alphas[jp_indices]
         fac = alpha_sum * jnp.sqrt(alpha_sum)
         overlap_terms = norm[ip_indices] * norm[jp_indices] / fac
-        
+
         # Handle diagonal vs off-diagonal terms
         diagonal_mask = ip_indices == jp_indices
         overlap_terms = jnp.where(diagonal_mask, overlap_terms, 2.0 * overlap_terms)
-        
+
         facs = 1.0 / jnp.sqrt(jnp.sum(overlap_terms) * pi32)
-        
-        shell.alpha = alphas
-        shell.norm = norm * facs
+        norm = norm * facs
 
     elif am == 1:
         shell.ncgs = 3
         shell.nsgs = 3
-        
+
         # Vectorized p-orbital normalization
         cnorm = jnp.exp(0.75 * jnp.log(2.0 * alphas / jnp.pi))
         cnorm = cnorm * jnp.sqrt(4.0 * alphas)
         norm = coeffs * cnorm
-        
+
         # Vectorized overlap calculation for p-orbitals
         alpha_sum = alphas[ip_indices] + alphas[jp_indices]
         fac = alpha_sum * jnp.sqrt(alpha_sum)
         overlap_terms = 0.5 * norm[ip_indices] * norm[jp_indices] / (alpha_sum * fac)
-        
+
         diagonal_mask = ip_indices == jp_indices
         overlap_terms = jnp.where(diagonal_mask, overlap_terms, 2.0 * overlap_terms)
-        
+
         facs = 1.0 / jnp.sqrt(jnp.sum(overlap_terms) * pi32)
-        
-        shell.alpha = alphas
-        shell.norm = norm * facs
+
+        norm = norm * facs
 
     elif am == 2:
         shell.ncgs = 6
         shell.nsgs = 5
-        
+
         # Vectorized d-orbital normalization
-        cnorm = jnp.exp(0.75 * jnp.log(2.0 * alphas / jnp.pi))
-        cnorm = cnorm * 4.0 * alphas / jnp.sqrt(3.0)
+        cnorm = jnp.exp(0.75 * jnp.log(2.0 * alphas / jnp.pi))*(4.0*alphas)
+        cnorm = cnorm / jnp.sqrt(3.0)
         norm = coeffs * cnorm
-        
-        shell.alpha = alphas
-        shell.norm = norm
+
+    elif am == 3:
+        shell.ncgs = 10
+        shell.nsgs = 7
+
+        # Vectorized d-orbital normalization
+        cnorm = jnp.exp(0.75 * jnp.log(2.0 * alphas / jnp.pi))*(4.0*alphas)**(3/2)
+        cnorm = cnorm / jnp.sqrt(15.0)
+        norm = coeffs * cnorm
+
+    elif am == 4:
+        shell.ncgs = 15
+        shell.nsgs = 9
+
+        # Vectorized d-orbital normalization
+        cnorm = jnp.exp(0.75 * jnp.log(2.0 * alphas / jnp.pi))*(4.0*alphas)**2
+        cnorm = cnorm / jnp.sqrt(7.0*15.0)
+        norm = coeffs * cnorm
 
     else:
         raise NotImplementedError(f"Angular momentum {am} not yet implemented")
+
+    shell.alpha = alphas
+    shell.norm = norm
 
     return shell
