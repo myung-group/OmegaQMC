@@ -16,7 +16,8 @@ readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
     "pyscf>=2.0.0",
-    "jax>=0.6"
+    "jax>=0.6",
+    "optax"
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
