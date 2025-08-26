@@ -84,8 +84,8 @@ def read_shell(ish_basis, ia, nsgs, ncgs):
         # Initialize shell object
         shell = ShellType()
         shell.iat = ia
-        shell.isgs = nsgs
-        shell.icgs = ncgs
+        shell.isgs = nsgs + (ic-1)
+        shell.icgs = ncgs + (ic-1)
         shell.am = am
         shell.nprim = nprim
 
