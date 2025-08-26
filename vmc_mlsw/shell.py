@@ -79,13 +79,14 @@ def read_shell(ish_basis, ia, nsgs, ncgs):
 
     alphas = primitives[:, 0]
     shell_list = []
-
+    curr_nsgs = nsgs
+    curr_ncgs = ncgs
     for ic in range (1, ncoef):
         # Initialize shell object
         shell = ShellType()
         shell.iat = ia
-        shell.isgs = nsgs + (ic-1)
-        shell.icgs = ncgs + (ic-1)
+        shell.isgs = curr_nsgs
+        shell.icgs = curr_ncgs
         shell.am = am
         shell.nprim = nprim
 
@@ -163,6 +164,8 @@ def read_shell(ish_basis, ia, nsgs, ncgs):
 
         shell.alpha = alphas
         shell.norm = norm
+        curr_nsgs = curr_nsgs + shell.nsgs
+        curr_ncgs = curr_ncgs + shell.ncgs
         shell_list.append (shell)
 
     return shell_list
