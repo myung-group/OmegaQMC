@@ -156,41 +156,6 @@ def get_vmcopt_func(mf,
 
             return (rkey0, new_w, new_s, curr_params), (r, energies)
 
-        @jax.jit
-        def grad_logpsi_vparams(elec_crds, _params):
-            def _logpsi(p):
-                return log_trial_wavefunction(elec_crds, nuc_crds, p)
-            return jax.grad(_logpsi)(_params)
-
-        @jax.jit
-        def production_step_vpgrad(carried_in, _):
-            rkey, w, s, curr_params = carried_in
-            rkey0, rkey1 = jax.random.split(rkey)
-
-            for _ in range(num_substeps):
-                keys = jax.random.split(rkey1, nwalkers + 1)
-                rkey1 = keys[0]
-                keys = keys[1:]
-
-                new_w, accepted \
-                    = jax.vmap(metropolis_move,
-                               in_axes=(0, 0, None, None))(keys, w, s,
-                                                           curr_params)
-                r = accepted.mean()
-
-                new_s = step_size * (0.6 + r)
-
-            # calculate energy
-            energies = jax.vmap(total_local_energy_fn,
-                                in_axes=(0, None))(new_w, curr_params)
-            dlogpsi = jax.vmap(grad_logpsi_vparams,
-                               in_axes=(0, None))(new_w, curr_params)
-            E_mean = jnp.mean(energies)
-            diff = energies - E_mean
-            vp_grads = 2.0 * jnp.mean(diff[:, None] * dlogpsi, axis=0)
-
-            return (rkey0, new_w, new_s, curr_params), (r, energies, vp_grads)
-
         carry_in = (rng_key, walkers, step_size, params)
         carry_out, results \
             = jax.lax.scan(production_step, carry_in,
@@ -239,40 +204,49 @@ def get_vmcopt_func(mf,
             tau_int = 1.0 + 2.0 * rho_sum
             return jnp.maximum(tau_int, 1.0)
 
-        enr_mean = tw_energies.mean()
-        # enr_wstd = tw_energies.mean(axis=1).std()
-
         def update_epoch(carried_in, epoch):
             # nonlocal tw_energies
             rng_key, walkers, step_size, params, opt_state = carried_in
 
-            carry_in = (rng_key, walkers, step_size, params)
-            carried_out, _ \
-                = jax.lax.scan(equilibration_step, carry_in,
+            carry_in_eq = (rng_key, walkers, step_size, params)
+            carried_out_eq, _ \
+                = jax.lax.scan(equilibration_step, carry_in_eq,
                                jnp.arange(num_equilibration))
-            rng_key, walkers, step_size, _ = carried_out
+            rng_key, walkers, step_size, _ = carried_out_eq
 
-            carry_in = (rng_key, walkers, step_size, params)
-            carried_out, results \
-                = jax.lax.scan(production_step_vpgrad, carry_in,
-                               jnp.arange(num_steps))
-            rng_key, walkers, step_size, _ = carried_out
-            _, tw_energies, vparam_grads = results
-            # tw_energies.shape == num_steps, nwalkers
+            def loss_fn(p):
+                carry_in_prod = (rng_key, walkers, step_size, p)
+                _, (_, tw_energies) \
+                    = jax.lax.scan(production_step, carry_in_prod,
+                                   jnp.arange(num_steps))
 
-            enr_mean = tw_energies.mean()
-            grad_mean = vparam_grads.mean(axis=0)
+                enr_mean = tw_energies.mean()
+                enr_std = tw_energies.std()
+
+                loss = 0.2 * enr_mean + 0.8 * enr_std
+
+                return loss, enr_mean
+
+            (loss_val, enr_mean), grad_mean \
+                = jax.value_and_grad(loss_fn, has_aux=True)(params)
+
             updates, opt_state = optimizer_chosen.update(grad_mean,
                                                          opt_state, params)
             params = optax.apply_updates(params, updates)
 
             jax.debug.print("[Epoch {epoch}/{ne}] "
-                            "<E_loc>: {e:.6f}, params: {vp}",
+                            "loss: {l:.6f}, <E_loc>: {e:.6f}, params: {vp}",
                             epoch=epoch+1, ne=num_epochs,
-                            e=enr_mean, vp=params)
+                            l=loss_val, e=enr_mean, vp=params)
+
+            carry_in_final = (rng_key, walkers, step_size, params)
+            carried_out_final, (_, final_energies) \
+                = jax.lax.scan(production_step, carry_in_final,
+                               jnp.arange(num_steps))
+            rng_key, walkers, step_size, _ = carried_out_final
 
             carry_out = (rng_key, walkers, step_size, params, opt_state)
-            return carry_out, tw_energies
+            return carry_out, final_energies
 
         carry_in_outer = (rng_key, walkers, step_size, params, opt_state)
         carried_out_outer, energies_opthist \
