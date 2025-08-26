@@ -72,7 +72,7 @@ def get_vmcopt_func(mf,
                    num_epochs=20,
                    num_equilibration=5000,
                    step_size=0.25,
-                   lr=0.02, momentum=0.8,
+                   lr=0.02,
                    fname_log="vmc_enr.log",
                    verbose=False):
         """VMC optimizatino run"""
@@ -80,7 +80,7 @@ def get_vmcopt_func(mf,
         params = params_vmc if params_init is None \
             else jnp.array(params_init, dtype=jnp.float64)
 
-        optimizer = optax.sgd(learning_rate=lr, momentum=momentum)
+        optimizer = optax.adam(learning_rate=lr)
         opt_state = optimizer.init(params)
 
         # Initialize electron positions more efficiently
