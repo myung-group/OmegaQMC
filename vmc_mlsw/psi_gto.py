@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 #from functools import partial
-from vmc_mlsw.shell import read_shell, read_two_shells, evaluate_cusp_s
+from vmc_mlsw.shell import read_shell, evaluate_cusp_s
 from vmc_mlsw.constants import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER, EE_CUSP_VALUE
 
 
@@ -40,48 +40,24 @@ def get_psi_fun(mf, cgto_coeff=None):
         Z_q0 = jnp.array([cgto_coeff[Z]['q0'] for Z in Z_charges])
         Z_cgto_coeff = jnp.array([cgto_coeff[Z]['coeff'] for Z in Z_charges])
 
-        # Process basis functions for each atom
-        for ia, atom in enumerate(mol._atom):
-            symb = atom[0]
-            basis = mol._basis[symb]
+    # Process basis functions for each atom
+    for ia, atom in enumerate(mol._atom):
+        symb = atom[0]
+        basis = mol._basis[symb]
 
-            for ish, ish_basis in enumerate(basis):
-                ncoeff = len(ish_basis[1])
-                if ncoeff == 2:
-                    shell = read_shell(ish_basis, ia, nsgs, ncgs)
-                    shell.is_cusp = 1 if ish == 0 else 0
-                    nsgs = nsgs + shell.nsgs
-                    ncgs = ncgs + shell.ncgs
-                    shell_list.append(shell)
-                else:
-                    shell1, shell2 = read_two_shells(ish_basis, ia, nsgs, ncgs)
-                    shell1.is_cusp = 1 if ish == 0 else 0
-                    shell2.is_cusp = 0
-                    nsgs = nsgs + shell1.nsgs + shell2.nsgs
-                    ncgs = ncgs + shell1.ncgs + shell2.ncgs
-                    shell_list.append(shell1)
-                    shell_list.append(shell2)
-    else:
-        for ia, atom in enumerate(mol._atom):
-            symb = atom[0]
-            basis = mol._basis[symb]
+        for ish, ish_basis in enumerate(basis):
 
-            for ish, ish_basis in enumerate(basis):
-                ncoeff = len(ish_basis[1])
-                if ncoeff == 2:
-                    shell = read_shell(ish_basis, ia, nsgs, ncgs)
-                    shell.is_cusp = 0
-                    nsgs = nsgs + shell.nsgs
-                    ncgs = ncgs + shell.ncgs
-                    shell_list.append(shell)
-                else:
-                    shell1, shell2 = read_two_shells(ish_basis, ia, nsgs, ncgs)
-                    shell1.is_cusp = 0
-                    shell2.is_cusp = 0
-                    nsgs = nsgs + shell1.nsgs + shell2.nsgs
-                    ncgs = ncgs + shell1.ncgs + shell2.ncgs
-                    shell_list.append(shell1)
-                    shell_list.append(shell2)
+            shells = read_shell (ish_basis, ia, nsgs, ncgs)
+
+            for jsh, shell in enumerate(shells):
+                shell.is_cusp = 1 if (l_cgto and
+                                      ish == 0
+                                      and jsh == 0) else 0
+
+                nsgs = nsgs + shell.nsgs
+                ncgs = ncgs + shell.ncgs
+                shell_list.append(shell)
+
 
     @jax.jit
     def cgs_sph_get(elec_crds, nuc_crds):
