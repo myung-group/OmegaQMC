@@ -73,15 +73,17 @@ def get_vmcopt_func(mf,
                    num_equilibration=5000,
                    step_size=0.25,
                    lr=0.02,
-                   fname_log="vmc_enr.log",
+                   optimizer="sgd",
                    verbose=False):
         """VMC optimizatino run"""
 
         params = params_vmc if params_init is None \
             else jnp.array(params_init, dtype=jnp.float64)
 
-        optimizer = optax.adam(learning_rate=lr)
-        opt_state = optimizer.init(params)
+        optimizer_chosen = optax.adam(learning_rate=lr) \
+            if "adam" in optimizer.lower() \
+            else optax.sgd(learning_rate=lr)
+        opt_state = optimizer_chosen.init(params)
 
         # Initialize electron positions more efficiently
         rng_key, rng = jax.random.split(rng_key)
@@ -260,8 +262,8 @@ def get_vmcopt_func(mf,
 
             enr_mean = tw_energies.mean()
             grad_mean = vparam_grads.mean(axis=0)
-            updates, opt_state = optimizer.update(grad_mean,
-                                                  opt_state, params)
+            updates, opt_state = optimizer_chosen.update(grad_mean,
+                                                         opt_state, params)
             params = optax.apply_updates(params, updates)
 
             jax.debug.print("[Epoch {epoch}/{ne}] "
