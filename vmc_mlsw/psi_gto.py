@@ -76,7 +76,7 @@ def get_psi_fun(mf, cgto_coeff=None):
                     shell_list.append(shell)
                 else:
                     shell1, shell2 = read_two_shells(ish_basis, ia, nsgs, ncgs)
-                    shell1.is_cusp = 1 0
+                    shell1.is_cusp = 0
                     shell2.is_cusp = 0
                     nsgs = nsgs + shell1.nsgs + shell2.nsgs
                     ncgs = ncgs + shell1.ncgs + shell2.ncgs
