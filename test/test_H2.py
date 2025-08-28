@@ -11,12 +11,12 @@ params_vmc_no_jastrow = jnp.array([])
 
 # H2 molecule
 mol = gto.M(atom='''
-H       0.000000    0.00    0.25
-H       0.000000    0.00   -0.25
+H       0.000000    0.00    0.00
+H       0.000000    0.00    1.40
 ''',
             basis='6-31g',
             # basis='cc-pvdz',
-            unit='Ang')
+            unit='Bohr')
 
 mol.build()
 mf = scf.RHF(mol)
@@ -24,8 +24,8 @@ mf.kernel()
 mf_grad = mf.nuc_grad_method()
 grad = mf_grad.kernel()
 
-nuc_crds = jnp.array(mol.atom_coords(unit='Bohr'))
-print('nuc_crds(Bohr)\n', nuc_crds)
+#nuc_crds = jnp.array(mol.atom_coords(unit='Bohr'))
+#print('nuc_crds(Bohr)\n', nuc_crds)
 
 
 chkfile_grd = 'H2_vmc_631gd_grd.hdf5'
