@@ -30,7 +30,7 @@ print('nuc_crds(Bohr)\n', nuc_crds)
 
 chkfile_grd = 'H2_vmc_631gd_grd.hdf5'
 
-cgto_coeff = {
+cgto_coeff_631g = {
     1: {
         'q0': 0.99999989,
         'coeff': jnp.array ([1., 1.04318788, -0.02914877,  0.78355609, -2.95081258,  5.43507057,
@@ -57,7 +57,7 @@ if l_cusp:
                      params_vmc_no_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
-                     cgto_coeff=cgto_coeff)
+                     cgto_coeff=cgto_coeff_631g)
 else:
     vmc_run, vmc_grad =\
                 get_vmc_func(mf,
@@ -66,13 +66,13 @@ else:
                      chkfile_grd=chkfile_grd,
                      cgto_coeff=None)
 
-l_grad = False
+l_grad = True
 vmc_run(rng_key,
-        nwalkers=1000, 
+        nwalkers=1000,
         num_mc_steps=1000, # MC steps per each walker
         max_mc_iter=500,
         mc_step_size=0.10, # electrons movement distance
-        tolerance_enr_std=0.01, # 
+        tolerance_enr_std=0.01, #
         fname_log='vmc_H2_enr.log',
         l_grad=l_grad)
 
