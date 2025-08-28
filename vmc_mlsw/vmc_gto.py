@@ -325,7 +325,7 @@ def get_vmc_func(mf,
                 f.create_dataset ('grd_nn', data=grad_nn_nuc)
 
 
-    def vmc_gradient_with_space_warping ():
+    def vmc_gradient_with_space_warping (l_std=False):
 
         with h5py.File(chkfile_grd, 'r') as f:
             dict_grd_samples = {}
@@ -343,10 +343,11 @@ def get_vmc_func(mf,
             enr_max = enr_mean + 3.0*enr_std
             enr_min = enr_mean - 3.0*enr_std
 
-            grd_ee_list = []
-            grd_en_list = []
-            grd_ke_list = []
-            grd_pulay_list = []
+            grd_ee_sum = 0.0
+            grd_en_sum = 0.0
+            grd_ke_sum = 0.0
+            grd_pulay_sum = 0.0
+            valid_samples_count = 0
             for iter in range(sampled_iter):
                 grd_ee = dict_grd_samples[f'grd_ee_{iter+1}']
                 grd_en = dict_grd_samples[f'grd_en_{iter+1}']
@@ -354,20 +355,34 @@ def get_vmc_func(mf,
                 grd_logpsi = dict_grd_samples[f'grd_logpsi_{iter+1}']
                 local_energies = dict_grd_samples[f'local_energies_{iter+1}']
 
-                mark = (local_energies > enr_min)*(local_energies < enr_max)
+                if l_std:
+                    mark = (local_energies > enr_min)*(local_energies < enr_max)
+                else:
+                    mark = jnp.ones_like (local_energies, dtype=jnp.bool)
+
                 d_enr = local_energies - enr_mean
                 grd_pulay = 2.0*jnp.einsum('s,snK->snK',
                                         d_enr,
                                         grd_logpsi)
-                grd_ee_list.append (grd_ee[mark].mean(axis=0))
-                grd_en_list.append (grd_en[mark].mean(axis=0))
-                grd_ke_list.append (grd_ke[mark].mean(axis=0))
-                grd_pulay_list.append (grd_pulay[mark].mean(axis=0))
 
-            grd_ee = jnp.stack(grd_ee_list, axis=0).mean(axis=0)
-            grd_en = jnp.stack(grd_en_list, axis=0).mean(axis=0)
-            grd_ke = jnp.stack(grd_ke_list, axis=0).mean(axis=0)
-            grd_pulay = jnp.stack(grd_pulay_list, axis=0).mean(axis=0)
+                if mark.sum() > 0:
+                    grd_ee_sum += grd_ee[mark].sum(axis=0)
+                    grd_en_sum += grd_en[mark].sum(axis=0)
+                    grd_ke_sum += grd_ke[mark].sum(axis=0)
+                    grd_pulay_sum += grd_pulay[mark].sum(axis=0)
+                    valid_samples_count += mark.sum()
+
+
+            if valid_samples_count > 0:
+                grd_ee = grd_ee_sum / valid_samples_count
+                grd_en = grd_en_sum / valid_samples_count
+                grd_ke = grd_ke_sum / valid_samples_count
+                grd_pulay = grd_pulay_sum / valid_samples_count
+            else:
+                grd_ee = jnp.zeros_like (grd_nn)
+                grd_en = jnp.zeros_like (grd_nn)
+                grd_ke = jnp.zeros_like (grd_nn)
+                grd_pulay = jnp.zeros_like (grd_nn)
 
             grd_tot = grd_nn + grd_ee + grd_en + grd_ke + grd_pulay
             with jnp.printoptions (precision=5, suppress=True):
