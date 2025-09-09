@@ -7,7 +7,10 @@ from vmc_mlsw import get_vmc_func
 rng_key = jax.random.key(888)
 
 # No optimizable Jastrow parameters:
-params_vmc_no_jastrow = jnp.array([])
+params_jastrow = {
+    "J1_params" : jnp.array([4.2, 4.2]),  # H_1, H_2
+    "J2_params" : jnp.array([0.6046799, 0.6046799])
+}
 
 # H2 molecule
 mol = gto.M(atom='''
@@ -54,14 +57,14 @@ l_cusp = True
 if l_cusp:
     vmc_run, vmc_grad =\
                 get_vmc_func(mf,
-                     params_vmc_no_jastrow,
+                     params_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
                      cgto_coeff=cgto_coeff_631g)
 else:
     vmc_run, vmc_grad =\
                 get_vmc_func(mf,
-                     params_vmc_no_jastrow,
+                     params_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
                      cgto_coeff=None)

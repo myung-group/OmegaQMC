@@ -244,16 +244,28 @@ def get_psi_fun(mf, cgto_coeff=None):
         # cutoff = jnp.clip(one_minus, a_min=0.0)
         # u_pairs = a_cusp * r_ij * cutoff**m_pow
         u_pairs = a_cusp * r_ij / (1. + curr_params[1]*r_ij)
-
+        #jax.debug.print("-- J2: {}", u_pairs)
         # Sum only opposite-spin contributions via masking
         return jnp.sum(u_pairs * opp_spin_mask_f)
+    
+    @jax.jit
+    def J1(elec_crds, nuc_crds, curr_params):
+        diffs = elec_crds[None, :, :] - nuc_crds[:, None, :]
+        r = jnp.linalg.norm(diffs, axis=-1)
+        u_vals = -Z_charges[:, None] * r / (1.0 + curr_params[:, None] * r)
+        return jnp.sum(u_vals)
 
     def log_trial_wavefunction(elec_crds, nuc_crds, curr_params):
         """Trial wavefunction."""
         ln_slater = log_slater_determinant(elec_crds, nuc_crds)
-        l_Jastrow = curr_params.shape[0] != 0
-        jastrow_term = J2_aa(elec_crds, curr_params) \
-            + J2_ab(elec_crds, curr_params) if l_Jastrow else 0.0
+        l_Jastrow1 = curr_params["J1_params"].shape[0] != 0
+        l_Jastrow2 = curr_params["J2_params"].shape[0] != 0
+
+        jastrow_term = J2_aa(elec_crds, curr_params["J2_params"]) \
+                    + J2_ab(elec_crds, curr_params["J2_params"]) \
+                    if l_Jastrow2 else 0.0
+        jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"]) \
+                    if l_Jastrow1 else 0.0
         return ln_slater + jastrow_term
 
     @jax.jit
@@ -309,6 +321,6 @@ def get_psi_fun(mf, cgto_coeff=None):
 
         return -0.5 * (lap_term + grad_term_sq)
 
-    return (log_trial_wavefunction,
+    return ((log_trial_wavefunction, log_slater_determinant),
             (local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke),
             get_psi_mo)

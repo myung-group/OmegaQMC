@@ -8,8 +8,10 @@ from vmc_mlsw import get_vmc_func
 
 rng_key = jax.random.key(777)
 # No optimizable Jastrow parameters:
-params_vmc_no_jastrow = jnp.array([])
-
+params_vmc_no_jastrow = {
+    "J1_params" : jnp.array([]),
+    "J2_params" : jnp.array([])
+}
 
 mol = gto.M(
               atom='''
