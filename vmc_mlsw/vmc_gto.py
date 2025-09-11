@@ -266,7 +266,7 @@ def get_vmc_func(mf,
         w_grd_logpsi = jnp.vstack (w_grd_logpsi)
 
         with h5py.File(chkfile_grd, h5py_io) as f:
-            f.create_dataset(f'grd_ee_en_ek_{iter}', data=w_grd_ee_en_ke)
+            f.create_dataset(f'grd_ee_en_ke_{iter}', data=w_grd_ee_en_ke)
             f.create_dataset(f'grd_logpsi_{iter}', data=w_grd_logpsi)
             f.create_dataset(f'local_energies_{iter}', data=local_energies)
 
