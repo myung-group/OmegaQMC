@@ -53,6 +53,7 @@ cgto_coeff_631g = {
 }
 
 
+reflection_op_list = ['I', 'x', 'y', 'xy']
 l_cusp = True
 if l_cusp:
     vmc_run, vmc_grad =\
@@ -60,14 +61,16 @@ if l_cusp:
                      params_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
-                     cgto_coeff=cgto_coeff_631g)
+                     cgto_coeff=cgto_coeff_631g,
+                     reflection_op_list=reflection_op_list)
 else:
     vmc_run, vmc_grad =\
                 get_vmc_func(mf,
                      params_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
-                     cgto_coeff=None)
+                     cgto_coeff=None,
+                     reflection_op_list=reflection_op_list)
 
 l_grad = True
 vmc_run(rng_key,
