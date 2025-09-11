@@ -247,7 +247,7 @@ def get_psi_fun(mf, cgto_coeff=None):
         #jax.debug.print("-- J2: {}", u_pairs)
         # Sum only opposite-spin contributions via masking
         return jnp.sum(u_pairs * opp_spin_mask_f)
-    
+
     @jax.jit
     def J1(elec_crds, nuc_crds, curr_params):
         diffs = elec_crds[None, :, :] - nuc_crds[:, None, :]
@@ -321,6 +321,6 @@ def get_psi_fun(mf, cgto_coeff=None):
 
         return -0.5 * (lap_term + grad_term_sq)
 
-    return ((log_trial_wavefunction, log_slater_determinant),
+    return (log_trial_wavefunction,
             (local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke),
             get_psi_mo)
