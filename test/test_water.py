@@ -55,21 +55,15 @@ cgto_coeff_631g = {
 
 
 l_cusp = True
+cgto_coeff = None
 if l_cusp:
-    vmc_run, vmc_grad =\
-                get_vmc_func(mf,
+    cgto_coeff = cgto_coeff_631g
+
+vmc_run, vmc_grad = get_vmc_func(mf,
                      params_vmc_no_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
-                     cgto_coeff=cgto_coeff_631g,
-                     reflection_op_list=['I', 'x', 'y', 'xy'])
-else:
-    vmc_run, vmc_grad =\
-                get_vmc_func(mf,
-                     params_vmc_no_jastrow,
-                     scheme='scheme1',
-                     chkfile_grd=chkfile_grd,
-                     cgto_coeff=None,
+                     cgto_coeff=cgto_coeff,
                      reflection_op_list=['I', 'x', 'y', 'xy'])
 
 l_grad = True
@@ -78,9 +72,9 @@ vmc_run(rng_key,
         num_mc_steps=1000, # MC steps per each walker
         max_mc_iter=500,
         mc_step_size=0.10, # electrons movement distance
-        tolerance_enr_std=0.01, #
+        tolerance_enr_std_per_elec=0.01, #
         fname_log='vmc_H2O_enr.log',
         l_grad=l_grad)
 
 if l_grad:
-    grd = vmc_grad ()
+    grd = vmc_grad (fname_log='vmc_H2O_grd.log')

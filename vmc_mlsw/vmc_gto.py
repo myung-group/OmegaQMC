@@ -1,4 +1,3 @@
-from threading import local
 import jax
 import jax.numpy as jnp
 # from functools import partial
@@ -275,7 +274,7 @@ def get_vmc_func(mf,
                 num_mc_steps=1000,
                 max_mc_iter=500,
                 mc_step_size=0.25,
-                tolerance_enr_std=0.01,
+                tolerance_enr_std_per_elec=0.01,
                 fname_log='vmc_enr.log',
                 l_grad=False):
         """VMC run with better memory management."""
@@ -361,7 +360,7 @@ def get_vmc_func(mf,
         walkers_energies, sampled_walkers = samples
 
         enr_mean = walkers_energies.mean(axis=0).mean()
-        enr_std = walkers_energies.mean(axis=0).std()
+        enr_std = walkers_energies.mean(axis=0).std()/nelec
         iter = 1
         fout = open(fname_log, 'w', 1)
 
@@ -381,7 +380,7 @@ def get_vmc_func(mf,
                            num_batches,
                            h5py_io='w')
 
-        while (iter < max_mc_iter) & (enr_std > tolerance_enr_std):
+        while (iter < max_mc_iter) & (enr_std > tolerance_enr_std_per_elec):
             initial_state = (rng_key, walkers, mc_step_size, ratio)
             final_state, samples = jax.lax.scan (production_step,
                                        initial_state,
@@ -394,7 +393,7 @@ def get_vmc_func(mf,
             walkers_energies = jnp.append (walkers_energies, energies, axis=0)
 
             enr_mean = walkers_energies.mean(axis=0).mean()
-            enr_std = walkers_energies.mean(axis=0).std()
+            enr_std = walkers_energies.mean(axis=0).std()/nelec
 
             print ('iter,enr,std: '
                     f'{iter:5d}  '
@@ -420,12 +419,12 @@ def get_vmc_func(mf,
 
             with h5py.File (chkfile_grd, 'a') as f:
                 f.create_dataset ('enr_mean', data=enr_mean)
-                f.create_dataset ('enr_std', data=enr_std)
+                #f.create_dataset ('enr_std', data=enr_std)
                 f.create_dataset ('sampled_iter', data=sampled_iter, dtype=jnp.int32)
                 f.create_dataset ('grd_nn', data=grad_nn_nuc)
 
 
-    def vmc_gradient_with_space_warping ():
+    def vmc_gradient_with_space_warping (fname_log='vmc_grad.log'):
 
         with h5py.File(chkfile_grd, 'r') as f:
             dict_grd_samples = {}
@@ -437,7 +436,7 @@ def get_vmc_func(mf,
 
             sampled_iter = int (dict_grd_samples['sampled_iter'])
             enr_mean = dict_grd_samples['enr_mean']
-            enr_std = dict_grd_samples['enr_std']
+            #enr_std = dict_grd_samples['enr_std']
             grd_nn = dict_grd_samples['grd_nn']
 
             grd_ee_en_ke_sum = 0.0
@@ -473,10 +472,11 @@ def get_vmc_func(mf,
 
             grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
             with jnp.printoptions (precision=5, suppress=True):
-                print('grd_nn\n', grd_nn)
-                print('grd_ee_en_ke\n', grd_ee_en_ke)
-                print('grd_pulay\n', grd_pulay)
-                print('grd_tot\n', grd_tot)
+                fout = open(fname_log, 'w', 1)
+                print('grd_nn\n', grd_nn, file=fout)
+                print('grd_ee_en_ke\n', grd_ee_en_ke, file=fout)
+                print('grd_pulay\n', grd_pulay, file=fout)
+                print('grd_tot\n', grd_tot, file=fout)
 
             return grd_tot
 
