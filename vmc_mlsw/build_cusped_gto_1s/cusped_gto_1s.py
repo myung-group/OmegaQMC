@@ -4,7 +4,7 @@ from pyscf import gto
 import numpy as np  # For generating quadrature points
 # from scipy.linalg import eig as sci_eig
 from functools import partial
-import jaxopt
+import optax
 
 jax.config.update("jax_enable_x64", True)
 
@@ -356,11 +356,30 @@ def minimize_q0(g_alpha, g_norm, Z, rc, coeff):
         int_cusp = jnp.sum(int_cusp_orb * int_cusp_orb * r2sint * weights)
         return (int_cusp - int_gto)**2
 
-    solver = jaxopt.LBFGS(min_func, maxiter=500)
-    init_params = jnp.array([1.0])
-    res = solver.run(init_params)
-    params, state = res
-    return params
+    cur_params = jnp.array([1.0])
+    if jax.config.jax_logging_level in ["DEBUG", "INFO"]:
+        print('Objective function (first call): {:.2E}'.format(min_func(cur_params)))
+
+    solver = optax.lbfgs()
+    opt_state = solver.init(cur_params)
+    loss_and_grad = optax.value_and_grad_from_state(min_func)
+    tolerance = 1e-6
+
+    max_iter = 500
+    for step in range(max_iter):
+        loss_val, grads = loss_and_grad(cur_params, state=opt_state)
+        updates, opt_state = solver.update(grads, opt_state, cur_params, value=loss_val, grad=grads, value_fn=min_func)
+        cur_params = optax.apply_updates(cur_params, updates)
+        if jax.config.jax_logging_level in ["DEBUG", "INFO"]:
+            print('Objective function: {:.2E}'.format(min_func(cur_params)))
+
+        if jnp.abs(loss_val) < tolerance:
+            break
+
+    if jax.config.jax_logging_level in ["DEBUG", "WARNING"] and step >= max_iter - 1:
+        print("Warning: minimize_q0 has not converged.")
+
+    return cur_params
 
 
 if __name__ == "__main__":
