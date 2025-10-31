@@ -11,6 +11,7 @@ __version__ = "0.1.0"
 
 # Re-export constants from dedicated module
 from vmc_mlsw.constants import (
+    CHEMICAL_ACCURACY,
     JASTROW_EE_L_CUT,
     JASTROW_EE_M_POWER,
     EE_CUSP_VALUE,

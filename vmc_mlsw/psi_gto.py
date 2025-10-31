@@ -1,24 +1,24 @@
 import jax
 import jax.numpy as jnp
-#from functools import partial
+# from functools import partial
 from vmc_mlsw.shell import read_shell, evaluate_cusp_s
 from vmc_mlsw.constants import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER, EE_CUSP_VALUE
 
 
-def get_psi_fun(mf, cgto_coeff=None):
+def get_psi_fun(mf, params_cusp=None):
     """
     Creates functions for evaluating the wavefunction
     and local energy components from a PySCF mean-field calculation.
     """
     # Extract basic molecular information
     mol = mf.mol
-    l_spherical = not mol.cart
+    # l_spherical = not mol.cart
     nocc = jnp.count_nonzero(mf.mo_occ > 0)
     mo_occ_coeff = mf.mo_coeff[:, :nocc]
 
     # Get nuclear and electronic charges
     Z_charges = mol.atom_charges()
-    nelec = mf.mol.tot_electrons()
+    nelec = mol.tot_electrons()
     e_charges = -jnp.ones((nelec))
 
     # Initialize counters
@@ -26,19 +26,17 @@ def get_psi_fun(mf, cgto_coeff=None):
     ncgs = 0
     shell_list = []
 
-
-    l_cgto = True
-    if cgto_coeff == None:
-        cgto_coeff = jnp.array([])
-        l_cgto = False
+    l_cgto = params_cusp is not None
 
     Z_rc = jnp.array([])
-    Z_q0 = jnp.array([])
-    Z_cgto_coeff = jnp.array([])
+    Z_cgao_q0 = jnp.array([])
+    Z_cgao_coeff = jnp.array([])
     if l_cgto:
-        Z_rc = jnp.array ([0.1 if Z == 1 else 0.2 for Z in Z_charges])
-        Z_q0 = jnp.array([cgto_coeff[Z]['q0'] for Z in Z_charges])
-        Z_cgto_coeff = jnp.array([cgto_coeff[Z]['coeff'] for Z in Z_charges])
+        Z_rc = jnp.array([0.1 if Z == 1 else 0.2 for Z in Z_charges])
+        Z_cgao_q0 = jnp.array([params_cusp[mol.atom_symbol(i)]['q0']
+                               for i in range(mol.natm)])
+        Z_cgao_coeff = jnp.array([params_cusp[mol.atom_symbol(i)]['coeff']
+                                  for i in range(mol.natm)])
 
     # Process basis functions for each atom
     for ia, atom in enumerate(mol._atom):
@@ -46,18 +44,16 @@ def get_psi_fun(mf, cgto_coeff=None):
         basis = mol._basis[symb]
 
         for ish, ish_basis in enumerate(basis):
-
-            shells = read_shell (ish_basis, ia, nsgs, ncgs)
+            shells = read_shell(ish_basis, ia, nsgs, ncgs)
 
             for jsh, shell in enumerate(shells):
-                shell.is_cusp = 1 if (l_cgto and
-                                      ish == 0
-                                      and jsh == 0) else 0
+                shell.is_cusp = True \
+                    if l_cgto and ish == 0 and jsh == 0 \
+                    else False
 
                 nsgs = nsgs + shell.nsgs
                 ncgs = ncgs + shell.ncgs
                 shell_list.append(shell)
-
 
     @jax.jit
     def cgs_sph_get(elec_crds, nuc_crds):
@@ -81,12 +77,18 @@ def get_psi_fun(mf, cgto_coeff=None):
             rad_s = jnp.sum(jnp.exp(-alpha * r2) * norm)
             # Angular part based on angular momentum
             if shell.am == 0:
-                if shell.is_cusp == 1:
-                    cgs = evaluate_cusp_s(r, Z_rc[shell.iat], Z_charges[shell.iat],
-                                        rad_s, Z_q0[shell.iat], Z_cgto_coeff[shell.iat])
+                if shell.is_cusp:
+                    cgs = evaluate_cusp_s(r,
+                                          Z_rc[shell.iat],
+                                          Z_charges[shell.iat],
+                                          rad_s,
+                                          Z_cgao_q0[shell.iat],
+                                          Z_cgao_coeff[shell.iat])
                 else:
                     cgs = rad_s
-                ao_val_s = ao_val_s.at[shell.iat, shell.isgs:shell.isgs+shell.nsgs].set(cgs)
+                ao_val_s = ao_val_s.at[shell.iat,
+                                       shell.isgs:shell.isgs+shell.nsgs] \
+                    .set(cgs)
             elif shell.am == 1:
                 cgs = rad_s * dr
             elif shell.am == 2:
@@ -110,7 +112,7 @@ def get_psi_fun(mf, cgto_coeff=None):
                 cf7 = cf3*0.5
                 x, y, z = dr
                 cgs = rad_s * jnp.array([
-                    y*(cf2*x*x - cf1*y*y), # xxy, yyy
+                    y*(cf2*x*x - cf1*y*y),  # xxy, yyy
                     cf3*x*y*z,
                     y*(cf5*z*z-cf4*(x*x+y*y)),
                     z*(z*z - cf6*(x*x+y*y)),
@@ -154,7 +156,8 @@ def get_psi_fun(mf, cgto_coeff=None):
     @jax.jit
     def get_psi_mo(elec_crds, nuc_crds):
         """Molecular orbital evaluation."""
-        ao_val, ao_val_s = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds, nuc_crds)
+        ao_val, ao_val_s \
+            = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds, nuc_crds)
         mo_val = jnp.einsum('ena,am->em', ao_val, mo_occ_coeff)
         mo_val_s = jnp.einsum('ena,am->nem', ao_val_s, mo_occ_coeff)
 
@@ -235,13 +238,15 @@ def get_psi_fun(mf, cgto_coeff=None):
 
         # Jastrow parameters
         a_cusp = 2.0 * EE_CUSP_VALUE  # 1/2 for unlike-spin electrons
+        # L_cut = JASTROW_EE_L_CUT
+        # m_pow = JASTROW_EE_M_POWER
 
         # Cutoff polynomial
         # one_minus = 1.0 - r_ij / L_cut
         # cutoff = jnp.clip(one_minus, a_min=0.0)
         # u_pairs = a_cusp * r_ij * cutoff**m_pow
         u_pairs = a_cusp * r_ij / (1. + curr_params[1]*r_ij)
-        #jax.debug.print("-- J2: {}", u_pairs)
+        # jax.debug.print("-- J2: {}", u_pairs)
         # Sum only opposite-spin contributions via masking
         return jnp.sum(u_pairs * opp_spin_mask_f)
 
@@ -259,16 +264,16 @@ def get_psi_fun(mf, cgto_coeff=None):
         l_Jastrow2 = curr_params["J2_params"].shape[0] != 0
 
         jastrow_term = J2_aa(elec_crds, curr_params["J2_params"]) \
-                    + J2_ab(elec_crds, curr_params["J2_params"]) \
-                    if l_Jastrow2 else 0.0
+            + J2_ab(elec_crds, curr_params["J2_params"]) \
+            if l_Jastrow2 else 0.0
         jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"]) \
-                    if l_Jastrow1 else 0.0
+            if l_Jastrow1 else 0.0
         return ln_slater + jastrow_term
 
     @jax.jit
     def classical_coulomb_energy(crds1, chgs1, crds2=None, chgs2=None):
         """Coulomb interaction calculation."""
-        eps = 1.0e-8
+        eps = jnp.finfo(crds1.dtype).eps
         if crds2 is None:
             # Intra-particle interactions
             i, j = jnp.triu_indices(crds1.shape[0], k=1)
@@ -296,7 +301,8 @@ def get_psi_fun(mf, cgto_coeff=None):
     @jax.jit
     def local_energy_en(elec_crds, nuc_crds):
         """Electron-nuclear energy."""
-        return classical_coulomb_energy(elec_crds, e_charges, nuc_crds, Z_charges)
+        return classical_coulomb_energy(elec_crds, e_charges,
+                                        nuc_crds, Z_charges)
 
     @jax.jit
     def local_energy_ke(elec_crds, nuc_crds, curr_params):
@@ -319,5 +325,6 @@ def get_psi_fun(mf, cgto_coeff=None):
         return -0.5 * (lap_term + grad_term_sq)
 
     return (log_trial_wavefunction,
-            (local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke),
+            (local_energy_ee, local_energy_nn,
+             local_energy_en, local_energy_ke),
             get_psi_mo)

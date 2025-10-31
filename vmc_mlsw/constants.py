@@ -1,4 +1,9 @@
+# vmc_mlsw/constants.py
+
 # Jastrow and other global constants
+
+CHEMICAL_ACCURACY = 0.0015936010974213599
+MIN_DIST_THRESHOLD = 1e-4
 
 # Cutoff distance for electron-electron Jastrow
 JASTROW_EE_L_CUT = 7.5
