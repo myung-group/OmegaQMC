@@ -34,3 +34,4 @@ classifiers = [
 
 [project.optional-dependencies]
 bse = ["basis-set-exchange"]
+
