@@ -249,7 +249,7 @@ def get_vmc_func(mf,
     #             + local_energy_ke(elec_crds, nuc_crds, params_corr)
     #             + enr_nn)
 
-    # @jax.jit
+    @jax.jit
     def metropolis_move_alle(rng_key: jax.Array,
                              elec_crds: jnp.ndarray,
                              _step_size: float) -> Tuple[jnp.ndarray, bool]:
@@ -295,7 +295,7 @@ def get_vmc_func(mf,
 
         return new_crds, 1.0
 
-    # @jax.jit
+    @jax.jit
     def metropolis_move_1w(rng_key: jax.Array,
                            elec_crds: jnp.ndarray,
                            _step_size: float) -> Tuple[jnp.ndarray, bool]:
@@ -438,7 +438,7 @@ def get_vmc_func(mf,
         mc_stepsize = (3 * mc_timestep)**0.5
 
         # Equilibration phase
-        # @jax.jit
+        @jax.jit
         def equilibration_step(state, _):
             rng_key, walkers, step_size = state
             rng_key, key = jax.random.split(rng_key)
