@@ -14,6 +14,7 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
 
     # Precompute static quantities
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
+    # eps = jnp.finfo(nuc_crds.dtype).eps     # softwired epsilon
     nelec = mf.mol.tot_electrons()
     num_nuc = mf.mol.natm
     Z_charges = mf.mol.atom_charges()
