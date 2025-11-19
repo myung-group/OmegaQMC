@@ -97,7 +97,7 @@ def get_psi_fun(mf, cgto_coeff=None):
                     cd1*x*y,
                     cd1*y*z,
                     0.5*(2.0*z*z - x*x - y*y),
-                    -cd1*x*z,
+                    cd1*x*z,
                     cd2*(x*x - y*y)
                 ])
             elif shell.am == 3:
@@ -114,9 +114,9 @@ def get_psi_fun(mf, cgto_coeff=None):
                     cf3*x*y*z,
                     y*(cf5*z*z-cf4*(x*x+y*y)),
                     z*(z*z - cf6*(x*x+y*y)),
-                    -x*(cf5*z*z - cf4*(x*x+y*y)),
+                    x*(cf5*z*z - cf4*(x*x+y*y)),
                     z*cf7*(x*x-y*y),
-                    x*(cf2*y*y-cf1*x*x)
+                    -x*(cf2*y*y-cf1*x*x)
                 ])
             elif shell.am == 4:
                 cg1 = 2.9580398915498085
@@ -138,9 +138,9 @@ def get_psi_fun(mf, cgto_coeff=None):
                     -cg6*x*x*y*z - cg6*y*y*y*z + cg7*y*z*z*z,
                     (0.375*(x*x*x*x + y*y*y*y + 2.0*x*x*y*y) +
                      z*z*z*z - 3.0*z*z*(x*x + y*y)),
-                    cg6*x*x*x*z + cg6*x*y*y*z - cg7*x*z*z*z,
+                    -(cg6*x*x*x*z + cg6*x*y*y*z - cg7*x*z*z*z),
                     cg8*(y*y*y*y - x*x*x*x) + cg9*z*z*(x*x - y*y),
-                    x*z*(cg2*y*y - cg3*x*x),
+                    -x*z*(cg2*y*y - cg3*x*x),
                     cg10*(x*x*x*x + y*y*y*y) - cg11*x*x*y*y
                 ])
             else:
@@ -155,7 +155,7 @@ def get_psi_fun(mf, cgto_coeff=None):
     def get_psi_mo(elec_crds, nuc_crds):
         """Molecular orbital evaluation."""
         ao_val, ao_val_s = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds, nuc_crds)
-        mo_val = jnp.einsum('ena,am->nem', ao_val, mo_occ_coeff)
+        mo_val = jnp.einsum('ena,am->em', ao_val, mo_occ_coeff)
         mo_val_s = jnp.einsum('ena,am->nem', ao_val_s, mo_occ_coeff)
 
         return mo_val, mo_val_s
@@ -164,7 +164,7 @@ def get_psi_fun(mf, cgto_coeff=None):
     def log_slater_determinant(elec_crds, nuc_crds):
         """Slater determinant calculation."""
         mo_val, _ = get_psi_mo(elec_crds, nuc_crds)
-        mo_val = mo_val.sum(axis=0)
+        #mo_val = mo_val.sum(axis=0)
 
         # More efficient spin splitting
         alpha_matrix = mo_val[::2, :]
