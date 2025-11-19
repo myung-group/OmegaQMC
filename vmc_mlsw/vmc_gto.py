@@ -311,10 +311,11 @@ def get_vmc_func(mf,
 
             return (rng_key, new_walkers, new_step_size), ratio
 
+        equil_mc_steps = 5000
         initial_state = (rng_key, walkers, mc_step_size)
         final_state, ratios = jax.lax.scan(equilibration_step,
                                       initial_state,
-                                      jnp.arange(num_mc_steps))
+                                      jnp.arange(equil_mc_steps))
         rng_key, walkers, mc_step_size = final_state
         ratio = ratios[-1]
 
