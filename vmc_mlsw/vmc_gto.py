@@ -53,6 +53,9 @@ def get_vmc_func(mf,
     # In case of a Water Molecule
     l_water = False
     rot_mat = jnp.eye (3)
+    nuc_crds_sym = None
+    nuc_crds_op = {}
+    nuc_crds_sym_op = {}
     if tuple (Z_charges) == (8, 1, 1): # water molecule
         # The oxygen atom is placed on the origin.
         l_water = True
@@ -68,8 +71,6 @@ def get_vmc_func(mf,
         print ('water_sym\n', nuc_crds_sym)
         print ('water_rot_mat', rot_mat)
 
-        nuc_crds_op = {}
-        nuc_crds_sym_op = {}
         for reflection_op in reflection_op_list:
             nuc_crds_op[reflection_op] = reflection_map[reflection_op](nuc_crds)
             nuc_crds_sym_op[reflection_op] = reflection_map[reflection_op](nuc_crds_sym)
@@ -151,7 +152,7 @@ def get_vmc_func(mf,
         proposed_crds = elec_crds + _step_size * noise
 
         # check the sigularity between electron-electron // electron-nuclei
-        min_dist_threshold = 0.0001
+        min_dist_threshold = 1.e-6
         diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
         dists_ee = jnp.sqrt (jnp.sum(diffs_ee*diffs_ee, axis=-1))
 
@@ -166,8 +167,8 @@ def get_vmc_func(mf,
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds, params_vmc)
         log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds, params_vmc)
 
-        acceptance_ratio = jnp.exp(2 * (log_psi_new - log_psi_old))
-        accept_prob = jnp.minimum(1.0, acceptance_ratio)
+        log_acc = 2.0*(log_psi_new - log_psi_old)
+        accept_prob = jnp.where (log_acc > 0.0, 1.0, jnp.exp(log_acc))
 
         accept = (jax.random.uniform(key_accept) < accept_prob) & valid_move
         new_crds = jnp.where(accept, proposed_crds, elec_crds)
@@ -301,13 +302,16 @@ def get_vmc_func(mf,
         def equilibration_step (state, _):
             rng_key, walkers, step_size = state
             rng_key, key = jax.random.split(rng_key)
-            keys = jax.random.split(key, nwalkers)
+            walker_keys = jax.random.split(key, nwalkers)
             new_walkers, accepted = jax.vmap(metropolis_step, in_axes=(0,0,None)) (
-                                        keys,
+                                        walker_keys,
                                         walkers,
                                         step_size)
             ratio = accepted.mean()
-            new_step_size = step_size * (0.5 + ratio)
+            target = 0.4
+            log_step_size = jnp.log(step_size) + 0.05*(ratio-target)
+            new_step_size = jnp.exp(log_step_size)
+            #new_step_size = step_size * (0.5 + ratio)
 
             return (rng_key, new_walkers, new_step_size), ratio
 
@@ -325,41 +329,47 @@ def get_vmc_func(mf,
         # Production phase
         @jax.jit
         def production_step (state, step_number):
-            rng_key, walkers, step_size, _ = state
+            rng_key, walkers, step_size = state
             rng_key, key = jax.random.split(rng_key)
-            keys = jax.random.split(key, nwalkers)
+            walker_keys = jax.random.split(key, nwalkers)
 
             new_walkers, accepted = jax.vmap(metropolis_step, in_axes=(0,0,None)) (
-                                        keys,
+                                        walker_keys,
                                         walkers,
                                         step_size)
 
             ratio = accepted.mean()
-
-            new_step_size = step_size * (0.5 + ratio)
+            target = 0.4
+            log_step_size = jnp.log(step_size) + 0.05*(ratio-target)
+            new_step_size = jnp.exp(log_step_size)
+            #new_step_size = step_size * (0.5 + ratio)
             # calculate energy
-            energies = jax.vmap (total_local_energy_fn) (new_walkers)
+            #energies = jax.vmap (total_local_energy_fn) (new_walkers)
+            enr_ee = jax.vmap(local_energy_ee) (new_walkers)
+            enr_en = jax.vmap (local_energy_en, in_axes=(0, None)) (new_walkers, nuc_crds)
+            enr_ke = jax.vmap (local_energy_ke, in_axes=(0, None, None)) (new_walkers, nuc_crds, params_vmc)
 
-            return (rng_key, new_walkers, new_step_size, ratio), \
-                (energies, new_walkers)
+            return (rng_key, new_walkers, new_step_size), \
+                (enr_ee, enr_en, enr_ke, new_walkers)
 
         # Main sampling phase with pre-allocated arrays
         base_batch_size = 500
         memory_factor = max(1, nelec * num_nuc // 1000)
-        batch_size = max(50, base_batch_size // memory_factor)
+        batch_size = min(50, base_batch_size // memory_factor)
         num_batches = (num_mc_steps*nwalkers//10 + batch_size - 1) // batch_size
         mark_samples = ((jnp.arange (num_mc_steps)+1)%10 == 0)
 
         ratio = 0.5
 
-        initial_state = (rng_key, walkers, mc_step_size, ratio)
+        initial_state = (rng_key, walkers, mc_step_size)
         final_state, samples = jax.lax.scan (production_step,
                                        initial_state,
                                        jnp.arange (num_mc_steps))
 
-        rng_key, walkers, mc_step_size, ratio = final_state
-        walkers_energies, sampled_walkers = samples
+        rng_key, walkers, mc_step_size = final_state
+        enr_ee, enr_en, enr_ke, sampled_walkers = samples
 
+        walkers_energies = enr_ee + enr_en + enr_ke + ener_nn
         enr_mean = walkers_energies.mean(axis=0).mean()
         enr_std = walkers_energies.mean(axis=0).std()/nelec
         iter = 1
@@ -368,7 +378,11 @@ def get_vmc_func(mf,
         print ('iter,enr,std: '
                     f'{iter:5d}  '
                     f'{enr_mean:.6f}  '
-                    f'{enr_std:.6f}',
+                    f'{enr_std:.6f}  '
+                    f'{walkers_energies.mean(): .6f}  '
+                    f'{enr_ee.mean():.6f}  '
+                    f'{enr_en.mean():.6f}  '
+                    f'{enr_ke.mean():.6f}',
                     file=fout)
 
         if l_grad:
@@ -382,13 +396,14 @@ def get_vmc_func(mf,
                            h5py_io='w')
 
         while (iter < max_mc_iter) & (enr_std > tolerance_enr_std_per_elec):
-            initial_state = (rng_key, walkers, mc_step_size, ratio)
+            initial_state = (rng_key, walkers, mc_step_size)
             final_state, samples = jax.lax.scan (production_step,
                                        initial_state,
                                        jnp.arange (num_mc_steps))
 
-            rng_key, walkers, mc_step_size, ratio = final_state
-            energies, sampled_walkers = samples
+            rng_key, walkers, mc_step_size = final_state
+            enr_ee, enr_en, enr_ke, sampled_walkers = samples
+            energies = enr_ee + enr_en + enr_ke + ener_nn
             iter += 1
 
             walkers_energies = jnp.append (walkers_energies, energies, axis=0)
@@ -399,7 +414,11 @@ def get_vmc_func(mf,
             print ('iter,enr,std: '
                     f'{iter:5d}  '
                     f'{enr_mean:.6f}  '
-                    f'{enr_std:.6f}',
+                    f'{enr_std:.6f}  '
+                    f'{energies.mean(): .6f}  '
+                    f'{enr_ee.mean():.6f}  '
+                    f'{enr_en.mean():.6f}  '
+                    f'{enr_ke.mean():.6f}',
                     file=fout)
 
             if l_grad:

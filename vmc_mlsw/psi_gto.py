@@ -164,7 +164,6 @@ def get_psi_fun(mf, cgto_coeff=None):
     def log_slater_determinant(elec_crds, nuc_crds):
         """Slater determinant calculation."""
         mo_val, _ = get_psi_mo(elec_crds, nuc_crds)
-        #mo_val = mo_val.sum(axis=0)
 
         # More efficient spin splitting
         alpha_matrix = mo_val[::2, :]
@@ -236,8 +235,6 @@ def get_psi_fun(mf, cgto_coeff=None):
 
         # Jastrow parameters
         a_cusp = 2.0 * EE_CUSP_VALUE  # 1/2 for unlike-spin electrons
-        # L_cut = JASTROW_EE_L_CUT
-        # m_pow = JASTROW_EE_M_POWER
 
         # Cutoff polynomial
         # one_minus = 1.0 - r_ij / L_cut
@@ -271,7 +268,7 @@ def get_psi_fun(mf, cgto_coeff=None):
     @jax.jit
     def classical_coulomb_energy(crds1, chgs1, crds2=None, chgs2=None):
         """Coulomb interaction calculation."""
-        eps = 0.0
+        eps = 1.0e-8
         if crds2 is None:
             # Intra-particle interactions
             i, j = jnp.triu_indices(crds1.shape[0], k=1)

@@ -317,7 +317,7 @@ def minimize_q0(g_alpha, g_norm, Z, rc, coeff):
 
         return (int_S_cusp - int_S_gto)**2 + (int_H_cusp-int_H_gto)**2
 
-    cur_params = jnp.array([1.0, 1.0])
+    cur_params = jnp.array([1.0])
     if jax.config.jax_logging_level in ["DEBUG", "INFO"]:
         print('Objective function (first call): {:.2E}'.format(min_func(cur_params)))
 
@@ -372,7 +372,6 @@ if __name__ == "__main__":
     coeff_vec = cusp_coeff_vec(g_alpha, g_norm, Z, rc)
 
     q0_min = minimize_q0(g_alpha, g_norm, Z, rc, coeff_vec)
-    coeff_vec = coeff_vec.at[0].set(q0_min[1])
 
     data = {
             int(Z): {
