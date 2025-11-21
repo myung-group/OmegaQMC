@@ -110,6 +110,30 @@ def evaluate_b_func(r, rc):
                      0.0)
 
 
+@partial(jax.jit, static_argnames=['Z', 'rc'])
+def radial_basis_one_minus_b_X(r, g_alpha, g_norm, Z, rc):
+    r2 = r * r
+    b = evaluate_b_func(r, rc)
+    return (1 - b) * jnp.sum(jnp.exp(-g_alpha * r2) * g_norm)
+
+
+@partial(jax.jit, static_argnames=['Z', 'rc', 'order'])
+def radial_basis_b_Q(r, g_alpha, g_norm, Z, rc, order):
+    # g_alpha and g_norm are unused but kept for consistent signature if needed
+    s = evaluate_slater_func(r, 1.0, Z)
+    b = evaluate_b_func(r, rc)
+    return b * s * (r/rc)**order
+
+
+# Full basis function wrapper
+@partial(jax.jit, static_argnames=['Z', 'rc', 'radial_func', 'order'])
+def basis_func_wrapper(e_pos, g_alpha, g_norm, Z, rc, radial_func, order=None):
+    r = jnp.sqrt(jnp.sum(e_pos * e_pos, axis=-1))
+    if order is not None:
+        return radial_func(r, g_alpha, g_norm, Z, rc, order=order)
+    return radial_func(r, g_alpha, g_norm, Z, rc)
+
+
 # JIT-compiled Slater function
 @jax.jit
 def evaluate_slater_func(r, q0, Z):
