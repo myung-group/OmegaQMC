@@ -54,8 +54,8 @@ def get_vmc_func(mf,
     l_water = False
     rot_mat = jnp.eye (3)
     nuc_crds_sym = None
-    nuc_crds_op = {}
-    nuc_crds_sym_op = {}
+    wat_nuc_shift = None
+    wat_nuc_shift_op = {}
     if tuple (Z_charges) == (8, 1, 1): # water molecule
         # The oxygen atom is placed on the origin.
         l_water = True
@@ -65,15 +65,18 @@ def get_vmc_func(mf,
 
         nuc_crds -= nuc_crds[0]
         nuc_crds_sym, rot_mat = symmetrize_water_molecule(nuc_crds)
-        nuc_crds = jnp.einsum('...i,ij->...j', nuc_crds, rot_mat)
-        nuc_crds_sym = jnp.einsum('...i,ij->...j', nuc_crds_sym, rot_mat)
+        ref_nuc_crds = jnp.einsum('...i,ij->...j', nuc_crds, rot_mat)
+        ref_nuc_crds_sym = jnp.einsum('...i,ij->...j', nuc_crds_sym, rot_mat)
+        wat_nuc_shift = ref_nuc_crds_sym - ref_nuc_crds
+
         print ('translated and rotated water\n', nuc_crds)
         print ('water_sym\n', nuc_crds_sym)
         print ('water_rot_mat', rot_mat)
 
         for reflection_op in reflection_op_list:
-            nuc_crds_op[reflection_op] = reflection_map[reflection_op](nuc_crds)
-            nuc_crds_sym_op[reflection_op] = reflection_map[reflection_op](nuc_crds_sym)
+            ref_nuc_crds_op = reflection_map[reflection_op](ref_nuc_crds)
+            ref_nuc_crds_sym_op = reflection_map[reflection_op](ref_nuc_crds_sym)
+            wat_nuc_shift_op[reflection_op] = ref_nuc_crds_sym_op-ref_nuc_crds_op
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
@@ -213,25 +216,34 @@ def get_vmc_func(mf,
 
                 #1) electrons on original water (which is translated and rotated)
                 #   --> electrons on symmetrized water
-                batch_samples_ref = sampled_walkers[start_idx:end_idx]
-                weights = jax.vmap(rescale_fn) (batch_samples_ref)
-                batch_samples_sym = batch_samples_ref + \
-                        jnp.einsum('nk,sen->sek',
-                                   nuc_crds_sym-nuc_crds,
-                                   weights)
+                batch_samples = sampled_walkers[start_idx:end_idx]
+                weights = jax.vmap(rescale_fn) (batch_samples)
+
+                # rotate electrons
+                elec_ref = jnp.einsum('...i,ij->...j',
+                                        batch_samples,
+                                        rot_mat)
+                elec_sym = elec_ref + \
+                            jnp.einsum('nk,sen->sek',
+                            wat_nuc_shift, weights)
+
 
                 grd_ee_en_ke = []
                 grd_logpsi = []
                 for reflection_op in reflection_op_list:
                     # 2) reflection of electrons based on symmetrized water
                     # 3) electrons on symmetrized water --> electrons on original water
-                    batch_samples = reflection_map[reflection_op](batch_samples_sym) - \
+                    elec_sym_op = reflection_map[reflection_op](elec_sym)
+                    elec_ref_op = elec_sym_op - \
                             jnp.einsum('nk,sen->sek',
-                                       nuc_crds_sym_op[reflection_op]-nuc_crds_op[reflection_op],
-                                       weights)
+                            wat_nuc_shift_op[reflection_op],
+                            weights)
+                    elec_pos = jnp.einsum('...i,ji->...j',
+                            elec_ref_op,
+                            rot_mat)
                     # 4) calculate gradients acting on original water and save them
                     g_ee, g_en, g_ke, g_logpsi = \
-                        vmc_gradient_batch (batch_samples)
+                        vmc_gradient_batch (elec_pos)
                     grd_ee_en_ke.append (g_ee+g_en+g_ke)
                     grd_logpsi.append (g_logpsi)
 
@@ -484,11 +496,6 @@ def get_vmc_func(mf,
                 grd_ee_en_ke = jnp.zeros_like (grd_nn)
                 grd_pulay = jnp.zeros_like (grd_nn)
 
-            if l_water:
-                # rotate the gradients
-                grd_nn = jnp.einsum('...j,ij->...i', grd_nn, rot_mat)
-                grd_ee_en_ke = jnp.einsum('...j,ij->...i', grd_ee_en_ke, rot_mat)
-                grd_pulay = jnp.einsum('...j,ij->...i', grd_pulay, rot_mat)
 
             grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
             with jnp.printoptions (precision=5, suppress=True):
