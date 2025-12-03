@@ -352,10 +352,10 @@ if __name__ == "__main__":
     # import json
     # Initialize molecule
     mol = gto.M(
-        atom='Li 0.000000 0.000000 0.000',
+        atom='O  0.000000 0.000000 0.000',
         basis='6-31g',
         unit='Bohr',
-        spin=1
+        spin=0
     )
     mol.build()
     # print ('mol', mol.atom_coords())
