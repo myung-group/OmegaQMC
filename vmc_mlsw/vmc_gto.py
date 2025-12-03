@@ -3,35 +3,14 @@ import jax.numpy as jnp
 # from functools import partial
 import h5py
 from vmc_mlsw.psi_gto import get_psi_fun
-from vmc_mlsw.symm.water_rotation_matrix import symmetrize_water_molecule
+from vmc_mlsw.symm.electron_reflection import (
+    diatomic_reflection_electrons,
+    water_reflection_electrons,
+    water_dimer_reflection_electrons)
 
-@jax.jit
-def apply_reflection_I(coords):
-    return coords
+from vmc_mlsw.vmc_gradient import create_vmc_gradient_save
 
-@jax.jit
-def apply_reflection_x(coords):
-    """Apply reflection across yz-plane (- x-coordinate)."""
-    return coords.at[..., 0].multiply(-1)
-
-@jax.jit
-def apply_reflection_y(coords):
-    """Apply reflection across xz-plane (- y-coordinate)."""
-    return coords.at[..., 1].multiply(-1)
-
-@jax.jit
-def apply_reflection_xy(coords):
-    """Apply reflection across yz-plane and xz-plane (- x,y-coordinate)."""
-    coords = coords.at[..., 0].multiply(-1)
-    coords = coords.at[..., 1].multiply(-1)
-    return coords
-
-reflection_map = {
-    'I' : apply_reflection_I,
-    'x' : apply_reflection_x,
-    'y' : apply_reflection_y,
-    'xy' : apply_reflection_xy
-}
+import sys
 
 
 def get_vmc_func(mf,
@@ -50,33 +29,13 @@ def get_vmc_func(mf,
     Z_charges = mf.mol.atom_charges()
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
-    # In case of a Water Molecule
-    l_water = False
-    rot_mat = jnp.eye (3)
-    nuc_crds_sym = None
-    wat_nuc_shift = None
-    wat_nuc_shift_op = {}
     if tuple (Z_charges) == (8, 1, 1): # water molecule
-        # The oxygen atom is placed on the origin.
-        l_water = True
-        # place the water structure on the yz-plane
-        # R(H2) -  R(H1) : y-axis
-        # vec (0.5*(R(H1)+R(H2) - R(O)): z-axis
+        run_electron_exchange = water_reflection_electrons(nuc_crds)
+    elif tuple (Z_charges) == (8, 1, 1, 8, 1, 1): # water dimer
+        run_electron_exchange = water_dimer_reflection_electrons(nuc_crds)
+    else: # diatomic molecule
+        run_electron_exchange = diatomic_reflection_electrons(nuc_crds)
 
-        nuc_crds -= nuc_crds[0]
-        nuc_crds_sym, rot_mat = symmetrize_water_molecule(nuc_crds)
-        ref_nuc_crds = jnp.einsum('...i,ij->...j', nuc_crds, rot_mat)
-        ref_nuc_crds_sym = jnp.einsum('...i,ij->...j', nuc_crds_sym, rot_mat)
-        wat_nuc_shift = ref_nuc_crds_sym - ref_nuc_crds
-
-        print ('translated and rotated water\n', nuc_crds)
-        print ('water_sym\n', nuc_crds_sym)
-        print ('water_rot_mat', rot_mat)
-
-        for reflection_op in reflection_op_list:
-            ref_nuc_crds_op = reflection_map[reflection_op](ref_nuc_crds)
-            ref_nuc_crds_sym_op = reflection_map[reflection_op](ref_nuc_crds_sym)
-            wat_nuc_shift_op[reflection_op] = ref_nuc_crds_sym_op-ref_nuc_crds_op
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
@@ -90,6 +49,9 @@ def get_vmc_func(mf,
         = local_energy
     ener_nn = local_energy_nn(nuc_crds)
     grad_nn_nuc = jax.grad(local_energy_nn)(nuc_crds)
+
+
+
 
     # --- Redistribute Gradient Samples ---
     @jax.jit
@@ -152,10 +114,12 @@ def get_vmc_func(mf,
 
         # More efficient proposal generation
         noise = jax.random.normal(key_prop, elec_crds.shape)
+        min_dist_threshold = 1.e-6
+
         proposed_crds = elec_crds + _step_size * noise
 
         # check the sigularity between electron-electron // electron-nuclei
-        min_dist_threshold = 1.e-6
+
         diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
         dists_ee = jnp.sqrt (jnp.sum(diffs_ee*diffs_ee, axis=-1))
 
@@ -164,7 +128,6 @@ def get_vmc_func(mf,
 
         valid_move = (dists_en.min() > min_dist_threshold) & \
                 (dists_ee.min() > min_dist_threshold)
-
 
         # Vectorized acceptance calculation
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds, params_vmc)
@@ -177,6 +140,7 @@ def get_vmc_func(mf,
         new_crds = jnp.where(accept, proposed_crds, elec_crds)
 
         return new_crds, accept
+
 
     def vmc_gradient_batch (batch_samples):
 
@@ -199,88 +163,18 @@ def get_vmc_func(mf,
 
         return grd_ee, grd_en, grd_ke, grd_logpsi
 
-    def vmc_gradient_save (iter,
-                           sampled_walkers,
-                           local_energies,
-                           batch_size,
-                           num_batches,
-                           h5py_io='w'):
 
-        n_samples = sampled_walkers.shape[0]
-        w_grd_ee_en_ke = []
-        w_grd_logpsi = []
-        if l_water:
-            for batch_idx in range (num_batches):
-                start_idx = batch_idx * batch_size
-                end_idx = min (start_idx + batch_size, n_samples)
+    vmc_gradient_save = create_vmc_gradient_save (
+        log_trial_wavefunction=log_trial_wavefunction,
+        vmc_gradient_batch=vmc_gradient_batch,
+        rescale_fn=rescale_fn,
+        run_electron_exchange=run_electron_exchange,
+        nuc_crds=nuc_crds,
+        params_vmc=params_vmc,
+        reflection_op_list=reflection_op_list,
+        chkfile_grd=chkfile_grd
+    )
 
-                #1) electrons on original water (which is translated and rotated)
-                #   --> electrons on symmetrized water
-                batch_samples = sampled_walkers[start_idx:end_idx]
-                weights = jax.vmap(rescale_fn) (batch_samples)
-
-                # rotate electrons
-                elec_ref = jnp.einsum('...i,ij->...j',
-                                        batch_samples,
-                                        rot_mat)
-                elec_sym = elec_ref + \
-                            jnp.einsum('nk,sen->sek',
-                            wat_nuc_shift, weights)
-
-
-                grd_ee_en_ke = []
-                grd_logpsi = []
-                for reflection_op in reflection_op_list:
-                    # 2) reflection of electrons based on symmetrized water
-                    # 3) electrons on symmetrized water --> electrons on original water
-                    elec_sym_op = reflection_map[reflection_op](elec_sym)
-                    elec_ref_op = elec_sym_op - \
-                            jnp.einsum('nk,sen->sek',
-                            wat_nuc_shift_op[reflection_op],
-                            weights)
-                    elec_pos = jnp.einsum('...i,ji->...j',
-                            elec_ref_op,
-                            rot_mat)
-                    # 4) calculate gradients acting on original water and save them
-                    g_ee, g_en, g_ke, g_logpsi = \
-                        vmc_gradient_batch (elec_pos)
-                    grd_ee_en_ke.append (g_ee+g_en+g_ke)
-                    grd_logpsi.append (g_logpsi)
-
-                grd_ee_en_ke = jnp.stack (grd_ee_en_ke, axis=0).mean(axis=0)
-                grd_logpsi = jnp.stack(grd_logpsi, axis=0).mean(axis=0)
-
-                w_grd_ee_en_ke.append (grd_ee_en_ke)
-                w_grd_logpsi.append (grd_logpsi)
-
-        else:
-
-            for batch_idx in range (num_batches):
-                start_idx = batch_idx * batch_size
-                end_idx = min (start_idx + batch_size, n_samples)
-
-                grd_ee_en_ke = []
-                grd_logpsi = []
-                for reflection_op in reflection_op_list:
-                    batch_samples = reflection_map[reflection_op](sampled_walkers [start_idx:end_idx])
-                    g_ee, g_en, g_ke, g_logpsi = \
-                        vmc_gradient_batch (batch_samples)
-                    grd_ee_en_ke.append (g_ee+g_en+g_ke)
-                    grd_logpsi.append (g_logpsi)
-                grd_ee_en_ke = jnp.stack (grd_ee_en_ke, axis=0).mean(axis=0)
-                grd_logpsi = jnp.stack(grd_logpsi, axis=0).mean(axis=0)
-
-                w_grd_ee_en_ke.append (grd_ee_en_ke)
-                w_grd_logpsi.append (grd_logpsi)
-
-        # (n_samples, 3)
-        w_grd_ee_en_ke = jnp.vstack(w_grd_ee_en_ke)
-        w_grd_logpsi = jnp.vstack (w_grd_logpsi)
-
-        with h5py.File(chkfile_grd, h5py_io) as f:
-            f.create_dataset(f'grd_ee_en_ke_{iter}', data=w_grd_ee_en_ke)
-            f.create_dataset(f'grd_logpsi_{iter}', data=w_grd_logpsi)
-            f.create_dataset(f'local_energies_{iter}', data=local_energies)
 
     def vmc_run(rng_key,
                 nwalkers=100,
@@ -400,12 +294,15 @@ def get_vmc_func(mf,
         if l_grad:
             sampled_walkers = sampled_walkers[mark_samples].reshape(-1, nelec, 3)
             local_energies = walkers_energies[mark_samples].reshape(-1)
-            vmc_gradient_save (iter,
-                           sampled_walkers,
-                           local_energies,
-                           batch_size,
-                           num_batches,
-                           h5py_io='w')
+
+            accepance_stats = vmc_gradient_save (
+                    iter,
+                    sampled_walkers,
+                    local_energies,
+                    batch_size,
+                    num_batches,
+                    h5py_io='w'
+                )
 
         while (iter < max_mc_iter) & (enr_std > tolerance_enr_std_per_elec):
             initial_state = (rng_key, walkers, mc_step_size)
@@ -437,12 +334,15 @@ def get_vmc_func(mf,
                 sampled_walkers = sampled_walkers[mark_samples].reshape(-1, nelec, 3)
                 local_energies = energies[mark_samples].reshape(-1)
 
-                vmc_gradient_save (iter,
-                               sampled_walkers,
-                               local_energies,
-                               batch_size,
-                               num_batches,
-                               h5py_io='a')
+                accepance_stats = vmc_gradient_save (
+                        iter,
+                        sampled_walkers,
+                        local_energies,
+                        batch_size,
+                        num_batches,
+                        h5py_io='a'
+                    )
+
 
         fout.close()
 
@@ -451,7 +351,6 @@ def get_vmc_func(mf,
 
             with h5py.File (chkfile_grd, 'a') as f:
                 f.create_dataset ('enr_mean', data=enr_mean)
-                #f.create_dataset ('enr_std', data=enr_std)
                 f.create_dataset ('sampled_iter', data=sampled_iter, dtype=jnp.int32)
                 f.create_dataset ('grd_nn', data=grad_nn_nuc)
 
@@ -461,23 +360,24 @@ def get_vmc_func(mf,
         with h5py.File(chkfile_grd, 'r') as f:
             dict_grd_samples = {}
             for key, data in f.items():
-                if key in ['enr_mean', 'enr_std', 'sampled_iter']:
+                if key in ['enr_mean', 'sampled_iter']:
                     dict_grd_samples[key] = data[()]
                 else:
                     dict_grd_samples[key] = jnp.array(data[:])
 
             sampled_iter = int (dict_grd_samples['sampled_iter'])
             enr_mean = dict_grd_samples['enr_mean']
-            #enr_std = dict_grd_samples['enr_std']
             grd_nn = dict_grd_samples['grd_nn']
 
             grd_ee_en_ke_sum = 0.0
             grd_pulay_sum = 0.0
             valid_samples_count = 0
+            grd_ke_sum = 0.0
             for iter in range(sampled_iter):
                 grd_ee_en_ke = dict_grd_samples[f'grd_ee_en_ke_{iter+1}']
                 grd_logpsi = dict_grd_samples[f'grd_logpsi_{iter+1}']
                 local_energies = dict_grd_samples[f'local_energies_{iter+1}']
+                grd_ke = dict_grd_samples[f'grd_ke_{iter+1}']
 
                 d_enr = local_energies - enr_mean
                 grd_pulay = 2.0*jnp.einsum('s,snK->snK',
@@ -488,13 +388,16 @@ def get_vmc_func(mf,
                 grd_ee_en_ke_sum += grd_ee_en_ke.sum(axis=0)
                 grd_pulay_sum += grd_pulay.sum(axis=0)
                 valid_samples_count += local_energies.shape[0]
+                grd_ke_sum += grd_ke.sum(axis=0)
 
             if valid_samples_count > 0:
                 grd_ee_en_ke = grd_ee_en_ke_sum / valid_samples_count
                 grd_pulay = grd_pulay_sum / valid_samples_count
+                grd_ke = grd_ke_sum/valid_samples_count
             else:
                 grd_ee_en_ke = jnp.zeros_like (grd_nn)
                 grd_pulay = jnp.zeros_like (grd_nn)
+                grd_ke = jnp.zeros_like (grd_nn)
 
 
             grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
@@ -502,6 +405,7 @@ def get_vmc_func(mf,
                 fout = open(fname_log, 'w', 1)
                 print('grd_nn\n', grd_nn, file=fout)
                 print('grd_ee_en_ke\n', grd_ee_en_ke, file=fout)
+                print('grd_ke\n', grd_ke, file=fout)
                 print('grd_pulay\n', grd_pulay, file=fout)
                 print('grd_tot\n', grd_tot, file=fout)
 
