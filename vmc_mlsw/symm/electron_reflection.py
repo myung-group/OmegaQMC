@@ -7,7 +7,7 @@ used to improve sampling efficiency in Variational Monte Carlo calculations.
 
 import jax
 import jax.numpy as jnp
-from typing import Callable
+from typing import Callable, List
 
 # Reflection ID mapping
 REFLECTION_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
@@ -248,6 +248,90 @@ def water_dimer_reflection_electrons(nuc_crds: jax.Array) -> Callable:
             r_elec_sym_wat1,
             r_elec_sym_wat2
         )
+
+        # Transform back to original coordinates
+        r_elec_orig = r_elec_sym_combined - jnp.einsum('nk,en->ek', coord_shift, rescale)
+
+        return r_elec_orig
+
+    return run_electron_reflection
+
+
+def water_cluster_reflection_electrons(
+        nuc_crds: jax.Array, 
+        cluster_idx: List
+    ) -> Callable:
+    """
+    Create electron reflection function for water dimer.
+
+    Electrons are dynamically assigned to the closer water molecule
+    based on their distance to the oxygen atoms.
+
+    Args:
+        nuc_crds: Nuclear coordinates [O1, H2, H3, O4, H5, H6] with shape (6, 3)
+
+    Returns:
+        Function that applies reflection to electron coordinates
+    """
+    r_O_ls = []
+    Rmat_wat_ls = []
+    symmetrized_waters = []
+    for idx in cluster_idx:
+        r_O, H1, H2 = nuc_crds[jnp.array(idx)]
+        # Symmetrize both water molecules
+        sym_H = _symmetrize_water(r_O, H1, H2)
+        # Build rotation matrices for both water molecules
+        Rmat_wat = _build_water_rotation_matrix(r_O, sym_H[0], sym_H[1])
+        # Stack results
+        r_O_ls.append(r_O)
+        Rmat_wat_ls.append(jnp.array(Rmat_wat))
+        symmetrized_waters.append(jnp.array([r_O, sym_H[0], sym_H[1]]))
+    nuc_sym_crds = jnp.concatenate(symmetrized_waters)
+
+    # Precompute coordinate shift
+    coord_shift = nuc_sym_crds - nuc_crds
+
+    def run_electron_reflection(r_electrons: jax.Array,
+                                rescale: jax.Array,
+                                reflection_ID: int) -> jax.Array:
+        """
+        Apply reflection to electrons with dynamic water assignment.
+
+        Args:
+            r_electrons: Electron positions (nelec, 3)
+            rescale: Weight matrix for coordinate transformation (nelec, 6)
+            reflection_ID: Reflection operation ID
+
+        Returns:
+            Reflected electron positions (nelec, 3)
+        """
+        # Transform to symmetrized coordinates
+        r_elec_sym = r_electrons + jnp.einsum('nk,en->ek', coord_shift, rescale)
+
+        # Assign electrons to water molecules based on distance to oxygen
+        dist_list = [
+            jnp.linalg.norm(r_elec_sym - r_O_ls[i], axis=-1)
+                for i in range(len(r_O_ls))
+        ]       
+        r_elec_sym_combined = jnp.zeros_like(r_electrons)
+        for i in range(len(r_O_ls)):
+            dist_to_Oi = dist_list[i]
+            belongs_to_wat_i_all = jnp.array([dist_to_Oi < dist for dist in dist_list])
+            row_mask = (jnp.arange(belongs_to_wat_i_all.shape[0]) != i)
+            belongs_to_wat_i_all_except_ii = jnp.where(
+                row_mask[:, None], 
+                belongs_to_wat_i_all,         
+                True              
+            )
+            belongs_to_wat_i = jnp.all(belongs_to_wat_i_all_except_ii, axis=0)
+
+            # Transform to standard frame for both water molecules
+            r_elec_std_wat_i = jnp.einsum('ij,ej->ei', Rmat_wat_ls[i].T, r_elec_sym - r_O_ls[i])
+            # Apply reflection to both
+            r_elec_std_wat_i = _apply_reflection(r_elec_std_wat_i, reflection_ID)
+            # Transform back to symmetrized frame
+            r_elec_sym_wat_i = jnp.einsum('ij,ej->ei', Rmat_wat_ls[i], r_elec_std_wat_i) + r_O_ls[i]
+            r_elec_sym_combined = jnp.where(belongs_to_wat_i[:, None], r_elec_sym_wat_i, r_elec_sym_combined)
 
         # Transform back to original coordinates
         r_elec_orig = r_elec_sym_combined - jnp.einsum('nk,en->ek', coord_shift, rescale)

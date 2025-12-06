@@ -15,8 +15,14 @@ from vmc_mlsw.symm.electron_reflection import (
     diatomic_reflection_electrons,
     water_reflection_electrons,
     water_dimer_reflection_electrons,
+    water_cluster_reflection_electrons
 )
-
+from vmc_mlsw.vmc_utils import (
+    date,
+    batched_binning_analysis,
+    batched_binning_analysis_grds,
+    compute_torque_with_error
+)
 # Reflection operation name to ID mapping
 REFLECTION_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
 
@@ -28,11 +34,14 @@ MIN_DIST_THRESHOLD = 1e-6
 
 
 def _get_electron_reflection_fn(Z_charges: jnp.ndarray,
-                                 nuc_crds: jnp.ndarray) -> Callable:
+                                 nuc_crds: jnp.ndarray,
+                                 cluster_idx: Optional[List[int]]) -> Callable:
     """Select appropriate electron reflection function based on molecular composition."""
     charge_tuple = tuple(Z_charges)
 
-    if charge_tuple == (8, 1, 1):  # Water molecule
+    if cluster_idx is not None:
+        return water_cluster_reflection_electrons(nuc_crds, cluster_idx)
+    elif charge_tuple == (8, 1, 1):  # Water molecule
         return water_reflection_electrons(nuc_crds)
     elif charge_tuple == (8, 1, 1, 8, 1, 1):  # Water dimer
         return water_dimer_reflection_electrons(nuc_crds)
@@ -79,9 +88,10 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
 def get_vmc_func(mf,
                  params_vmc: dict,
                  scheme: str = 'scheme1',
-                 chkfile_grd: str = 'vmc_grd_chk.hdf5',
+                 chkfile: str = 'vmc_chk.hdf5',
                  cgto_coeff: Optional[jnp.ndarray] = None,
-                 reflection_op_list: Optional[List[str]] = None) -> Tuple[Callable, Callable]:
+                 reflection_op_list: Optional[List[str]] = None,
+                 cluster_idx: [List[int]] = None) -> Tuple[Callable, Callable]:
     """
     Create VMC sampling and gradient computation functions.
 
@@ -89,7 +99,7 @@ def get_vmc_func(mf,
         mf: PySCF mean-field object
         params_vmc: VMC parameters (Jastrow coefficients, etc.)
         scheme: Redistribution scheme ('scheme1' or 'scheme2')
-        chkfile_grd: HDF5 checkpoint file for gradient data
+        chkfile: HDF5 checkpoint file for to-restart data and gradient data
         cgto_coeff: Custom GTO coefficients (optional)
         reflection_op_list: List of reflection operations to use
 
@@ -114,7 +124,7 @@ def get_vmc_func(mf,
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
     # Get electron reflection function for this molecular type
-    run_electron_exchange = _get_electron_reflection_fn(Z_charges, nuc_crds)
+    run_electron_exchange = _get_electron_reflection_fn(Z_charges, nuc_crds, cluster_idx)
 
     # Get wavefunction and energy functions
     log_trial_wavefunction, local_energy, get_psi_mo = get_psi_fun(mf, cgto_coeff)
@@ -271,6 +281,8 @@ def get_vmc_func(mf,
         w_grd_ke = jnp.vstack(w_grd_ke)
 
         # Save to HDF5
+        base, ext = chkfile.rsplit('.', 1)
+        chkfile_grd = f"{base}_grd.{ext}"
         with h5py.File(chkfile_grd, h5py_mode) as f:
             f.create_dataset(f'grd_ee_en_ke_{iteration}', data=w_grd_ee_en_ke)
             f.create_dataset(f'grd_logpsi_{iteration}', data=w_grd_logpsi)
@@ -279,14 +291,16 @@ def get_vmc_func(mf,
 
     # --- Main VMC run ---
 
-    def vmc_run(rng_key: jax.Array,
+    def vmc_run(rng_key: int = 888,
                 nwalkers: int = 100,
                 num_mc_steps: int = 1000,
                 max_mc_iter: int = 500,
                 mc_step_size: float = 0.25,
                 tolerance_enr_std_per_elec: float = 0.01,
                 fname_log: str = 'vmc_enr.log',
-                l_grad: bool = False) -> None:
+                l_grad: bool = False,
+                batch_size: int = 50,
+                restart: bool = False) -> None:
         """
         Run VMC sampling with optional gradient computation.
 
@@ -301,6 +315,8 @@ def get_vmc_func(mf,
             l_grad: Whether to compute and save gradients
         """
         # Initialize walkers
+        rng_key_to_restart = rng_key
+        rng_key = jax.random.key(888)
         rng_key, init_key = jax.random.split(rng_key)
         walkers = _initialize_walkers(
             init_key, nwalkers, nelec, Z_charges, nuc_crds, mol_charge
@@ -322,14 +338,29 @@ def get_vmc_func(mf,
 
             return (rng_key, new_walkers, new_step_size), ratio
 
-        initial_state = (rng_key, walkers, mc_step_size)
-        final_state, ratios = jax.lax.scan(
-            equilibration_step, initial_state, jnp.arange(EQUIL_MC_STEPS)
-        )
-        rng_key, walkers, mc_step_size = final_state
-
-        print(f"Equilibration Acceptance Rate: {ratios[-1]:.2f}")
-        print(f"Step size: {mc_step_size:.4f}")
+        if restart:
+            with h5py.File(chkfile, 'r') as f:
+                # Load metadata
+                start_iter = int(f['sampled_iter'][()])
+                mc_step_size = f['mc_step_size'][()]
+                rng_key = int(f['rng_key'][()])
+                rng_key_to_restart = rng_key
+                rng_key = jax.random.key(888)
+                rng_key, init_key = jax.random.split(rng_key)
+                walkers = jnp.array(f['walkers'][:])
+                E_w = list(f['E_w'][:])
+                print(f"Restarting ...")
+                print(f"Step size: {mc_step_size:.4f}")
+        else:
+            initial_state = (rng_key, walkers, mc_step_size)
+            final_state, ratios = jax.lax.scan(
+                equilibration_step, initial_state, jnp.arange(EQUIL_MC_STEPS)
+            )
+            rng_key, walkers, mc_step_size = final_state
+            print(f"Equilibration Acceptance Rate: {ratios[-1]:.2f}")
+            print(f"Step size: {mc_step_size:.4f}")
+            E_w = []
+            start_iter = 0
 
         # Production phase
         @jax.jit
@@ -380,15 +411,16 @@ def get_vmc_func(mf,
         # Batch size computation for gradient calculation
         base_batch_size = 500
         memory_factor = max(1, nelec * num_nuc // 1000)
-        batch_size = min(50, base_batch_size // memory_factor)
+        batch_size = min(batch_size, base_batch_size // memory_factor)
+        print("----------------------------------------------")
+        print(f"Adjusted batch size: {batch_size}")
+        print("----------------------------------------------")
 
         # Main sampling loop
-        E_w = []
-
         with open(fname_log, 'w', buffering=1) as fout:
             print(f"   Iter       Mean        Std            Loc            "
-                  f"EE             EN             KE", file=fout)
-            for iteration in range(max_mc_iter):
+                  f"EE             EN             KE      MM/DD/YYYY HH/MM/SS", file=fout)
+            for iteration in range(start_iter, max_mc_iter):
                 h5py_mode = 'w' if iteration == 0 else 'a'
 
                 initial_state = (rng_key, walkers, mc_step_size)
@@ -407,7 +439,7 @@ def get_vmc_func(mf,
                 E_w_arr = jnp.array(E_w)
                 enr_mean = E_w_arr.mean()
                 enr_std = E_w_arr.mean(axis=0).std() / nelec
-
+                       
                 # Log progress
                 print(
                     f'{iteration+1:5d}  '
@@ -415,14 +447,15 @@ def get_vmc_func(mf,
                     f'{b_enr_loc.mean(): 13.6f}  '
                     f'{b_enr_ee.mean():13.6f}  '
                     f'{b_enr_en.mean():13.6f}  '
-                    f'{b_enr_ke.mean():13.6f}',
+                    f'{b_enr_ke.mean():13.6f}  '
+                    f'{date()}  ',
                     file=fout
                 )
 
                 # Save gradients if requested
                 if l_grad:
                     sampled_walkers = b_walkers.reshape(-1, nelec, 3)
-                    local_energies = b_enr_loc.reshape(-1)
+                    local_energies = b_enr_loc#.reshape(-1)
                     vmc_gradient_save(
                         iteration + 1,
                         sampled_walkers,
@@ -434,16 +467,23 @@ def get_vmc_func(mf,
                 # Check convergence
                 if enr_std < tolerance_enr_std_per_elec:
                     break
+                
+                with h5py.File(chkfile, 'w') as f:
+                    # to restart
+                    f.create_dataset('E_w', data=E_w)
+                    f.create_dataset('rng_key', data=rng_key_to_restart)
+                    f.create_dataset('walkers', data=walkers)
+                    f.create_dataset('mc_step_size', data=mc_step_size)
+                    f.create_dataset('sampled_iter', data=iteration + 1, dtype=jnp.int32)
+                    f.create_dataset('grd_nn', data=grad_nn_nuc)
+                    f.create_dataset('enr_mean', data=enr_mean)
 
-        # Save final gradient metadata
-        if l_grad:
-            with h5py.File(chkfile_grd, 'a') as f:
-                f.create_dataset('enr_mean', data=enr_mean)
-                f.create_dataset('sampled_iter', data=iteration + 1, dtype=jnp.int32)
-                f.create_dataset('grd_nn', data=grad_nn_nuc)
+        xbar, serr, s, kappa = batched_binning_analysis(E_w_arr)
+        e_mean = jnp.array(xbar).mean()
+        e_err = jnp.linalg.norm(serr) / len(serr)
+        print(f'Total energy | error [Ha]: {e_mean:.6f} | {e_err:.6f}')
 
     # --- Gradient post-processing ---
-
     def vmc_gradient_with_space_warping(fname_log: str = 'vmc_grad.log') -> jnp.ndarray:
         """
         Compute nuclear gradients from saved checkpoint data.
@@ -454,15 +494,18 @@ def get_vmc_func(mf,
         Returns:
             Total nuclear gradient array (num_nuc, 3)
         """
-        with h5py.File(chkfile_grd, 'r') as f:
+        with h5py.File(chkfile, 'r') as f:
             # Load metadata
             sampled_iter = int(f['sampled_iter'][()])
             enr_mean = f['enr_mean'][()]
             grd_nn = jnp.array(f['grd_nn'][:])
 
+        base, ext = chkfile.rsplit('.', 1)
+        chkfile_grd = f"{base}_grd.{ext}"
+        with h5py.File(chkfile_grd, 'r') as f:
             # Accumulate gradients from all iterations
-            grd_ee_en_ke_sum = 0.0
-            grd_pulay_sum = 0.0
+            grd_ee_en_ke_sum = []
+            grd_pulay_sum = []
             grd_ke_sum = 0.0
             valid_samples_count = 0
 
@@ -472,28 +515,46 @@ def get_vmc_func(mf,
                 local_energies = jnp.array(f[f'local_energies_{iter_idx}'][:])
                 grd_ke = jnp.array(f[f'grd_ke_{iter_idx}'][:])
 
+                s_nw, n, _ = grd_ee_en_ke.shape
+                s, nw = local_energies.shape
+
                 # Pulay force contribution
                 d_enr = local_energies - enr_mean
-                grd_pulay = 2.0 * jnp.einsum('s,snK->snK', d_enr, grd_logpsi)
+                grd_logpsi = grd_logpsi.reshape(s, nw, n, 3)
+                grd_pulay = 2.0 * jnp.einsum('sb,sbnK->sbnK', d_enr, grd_logpsi)
 
-                grd_ee_en_ke_sum += grd_ee_en_ke.sum(axis=0)
-                grd_pulay_sum += grd_pulay.sum(axis=0)
+                # Regroup
+                grd_ee_en_ke_rg = grd_ee_en_ke.reshape(s, nw, n, 3)
+                grd_pulay = grd_pulay.reshape(s, nw, n, 3)
+
+                grd_ee_en_ke_sum.append(grd_ee_en_ke_rg)
+                grd_pulay_sum.append(grd_pulay)
                 grd_ke_sum += grd_ke.sum(axis=0)
-                valid_samples_count += local_energies.shape[0]
+                valid_samples_count += local_energies.reshape(-1).shape[0]
+
+            grd_ee_en_ke_sum = jnp.vstack(grd_ee_en_ke_sum)
+            grd_pulay_sum = jnp.vstack(grd_pulay_sum)
 
             # Compute averages
             if valid_samples_count > 0:
-                grd_ee_en_ke = grd_ee_en_ke_sum / valid_samples_count
-                grd_pulay = grd_pulay_sum / valid_samples_count
+                grd_arrays = [grd_ee_en_ke_sum, grd_pulay_sum]
+                grd_tot_ls = jnp.sum(jnp.stack(grd_arrays, axis=0), axis=0)
+
+                xbar, serr, s, kappa = batched_binning_analysis_grds(grd_tot_ls)
+
+                grd_tot = jnp.mean(xbar, axis=0) + grd_nn
+                grd_err = jnp.linalg.norm(serr, axis=0) / serr.shape[0]
+
+                grd_ee_en_ke = jnp.mean(grd_ee_en_ke_sum, axis=0).mean(axis=0)
+                grd_pulay = jnp.mean(grd_pulay_sum, axis=0).mean(axis=0)
                 grd_ke = grd_ke_sum / valid_samples_count
             else:
                 grd_ee_en_ke = jnp.zeros_like(grd_nn)
                 grd_pulay = jnp.zeros_like(grd_nn)
                 grd_ke = jnp.zeros_like(grd_nn)
 
-            # Total gradient
-            grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
-
+            # Compute torque
+            torque, dtau = compute_torque_with_error(mf.mol, grd_tot, grd_err)
             # Write results
             with open(fname_log, 'w', buffering=1) as fout:
                 with jnp.printoptions(precision=5, suppress=True):
@@ -502,7 +563,14 @@ def get_vmc_func(mf,
                     print('grd_ke\n', grd_ke, file=fout)
                     print('grd_pulay\n', grd_pulay, file=fout)
                     print('grd_tot\n', grd_tot, file=fout)
+                    print('grd_err\n', grd_err, file=fout)
+                    print('grd_tot\n', grd_tot)
+                    print('grd_err\n', grd_err)
+                    print('torque\n', torque, file=fout)
+                    print('trq_err\n', dtau, file=fout)
+                    print('torque\n', torque)
+                    print('trq_err\n', dtau)
 
-            return grd_tot
+            return grd_tot, grd_err
 
     return vmc_run, vmc_gradient_with_space_warping
