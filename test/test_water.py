@@ -1,10 +1,9 @@
+import os
+os.environ["JAX_ENABLE_X64"] = "1"
 import jax.numpy as jnp
 import jax
-from functools import partial
-
 from pyscf import gto, scf
 from vmc_mlsw import get_vmc_func
-#from vmc_mlsw.vmc_gto_symm import process_symmetric_water_molecule
 
 rng_key = jax.random.key(777)
 # No optimizable Jastrow parameters:
@@ -35,23 +34,14 @@ print('nuc_crds(Bohr)\n', nuc_crds)
 chkfile_grd = 'H2O_vmc_631gd_grd.hdf5'
 
 cgto_coeff_631g = {
-    1: {
-        'q0': 0.99999989,
-        'coeff': jnp.array ([1., 1.04318788, -0.02914877,  0.78355609, -2.95081258,  5.43507057,
- -5.08491278,  1.94265217
-    ])
-    },
-    3: {
-        'q0': 1.00001336,
-        'coeff': jnp.array ([1., 2.61276736,  -0.37992217,   3.7529964,  -12.77929097,
-  19.6449144,  -13.86228449,   3.6941363])
-    },
-    8: {
-        'q0': 0.97846901,
-        'coeff': jnp.array ([1., 12.45593483,   -2.38348622,   30.46159035, -125.8241975,
-  252.619023,   -239.50247682,   86.70949994])
-    }
+    1: {'q0': 0.973382957446313,
+            'coeff': jnp.array([1.0, 1.043187883484018, -0.02914875129226644, 0.7835559367804041, -2.950812002592256, 5.435069523362307, -5.084911845017996, 1.9426518433141349])},
+    8: {'q0': 0.9782267667962238,
+            'coeff': jnp.array([1.0, 12.455780474652094, -2.36689972805331, 30.34950214299913, -125.50398084213195, 252.1603002813416, -239.18053266486535, 86.62256481397924])}
 }
+
+import pprint
+pprint.pprint(cgto_coeff_631g)
 
 
 l_cusp = True

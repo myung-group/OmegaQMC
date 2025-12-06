@@ -4,12 +4,6 @@ import jax
 import jax.numpy as jnp
 from pyscf import gto, scf
 from vmc_mlsw import get_vmc_func
-#import sys
-#import re
-#import json
-#from importlib import resources
-#import math
-
 
 
 # No optimizable Jastrow parameters:
@@ -46,17 +40,11 @@ mf_grad = mf.nuc_grad_method()
 grad = mf_grad.kernel()
 
 chkfile_grd = 'water2_vmc_grd.hdf5'
-cgto_coeff = {
-    1: {
-        'q0': 0.99999989,
-        'coeff': jnp.array ([1., 1.04318788, -0.02914877,  0.78355609, -2.95081258,  5.43507057,
- -5.08491278,  1.94265217])
-    },
-    8: {
-        'q0': 0.97846901,
-        'coeff': jnp.array ([1., 12.45593483,   -2.38348622,   30.46159035, -125.8241975,
-  252.619023,   -239.50247682,   86.70949994])
-    }
+cgto_coeff_631g = {
+    1: {'q0': 0.973382957446313,
+            'coeff': jnp.array([1.0, 1.043187883484018, -0.02914875129226644, 0.7835559367804041, -2.950812002592256, 5.435069523362307, -5.084911845017996, 1.9426518433141349])},
+    8: {'q0': 0.9782267667962238,
+            'coeff': jnp.array([1.0, 12.455780474652094, -2.36689972805331, 30.34950214299913, -125.50398084213195, 252.1603002813416, -239.18053266486535, 86.62256481397924])}
 }
 
 import pprint
@@ -64,25 +52,21 @@ pprint.pprint(cgto_coeff)
 
 
 l_cusp = True
-reflection_op_list = ['I', 'x', 'y', 'xy']
+cgto_coeff = None
 if l_cusp:
-    vmc_run, vmc_grad =\
+    cgto_coeff = cgto_coeff_631g
+
+reflection_op_list = ['I', 'x', 'y', 'xy']
+
+vmc_run, vmc_grad =\
                 get_vmc_func(mf,
                      params_vmc_no_jastrow,
                      scheme='scheme1',
                      chkfile_grd=chkfile_grd,
                      cgto_coeff=cgto_coeff,
                      reflection_op_list=reflection_op_list)
-else:
-    vmc_run, vmc_grad =\
-                get_vmc_func(mf,
-                     params_vmc_no_jastrow,
-                     scheme='scheme1',
-                     chkfile_grd=chkfile_grd,
-                     cgto_coeff=None,
-                     reflection_op_list=reflection_op_list)
-l_grad = True
 
+l_grad = True
 vmc_run(rng_key,
             nwalkers=50,
             num_mc_steps=5000, # MC steps per each walker

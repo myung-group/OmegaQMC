@@ -1,413 +1,507 @@
+"""
+Variational Monte Carlo with Gaussian-Type Orbitals.
+
+This module provides VMC sampling and gradient computation for molecular systems
+using space-warping coordinate transformations for nuclear gradient estimation.
+"""
+
 import jax
 import jax.numpy as jnp
-# from functools import partial
 import h5py
+from typing import Tuple, Callable, Optional, List
+
 from vmc_mlsw.psi_gto import get_psi_fun
 from vmc_mlsw.symm.electron_reflection import (
     diatomic_reflection_electrons,
     water_reflection_electrons,
-    water_dimer_reflection_electrons)
+    water_dimer_reflection_electrons,
+)
 
-from vmc_mlsw.vmc_gradient import create_vmc_gradient_save
+# Reflection operation name to ID mapping
+REFLECTION_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
 
-import sys
+# VMC hyperparameters
+EQUIL_MC_STEPS = 5000
+TARGET_ACCEPTANCE_RATE = 0.4
+STEP_SIZE_ADAPTATION_RATE = 0.05
+MIN_DIST_THRESHOLD = 1e-6
+
+
+def _get_electron_reflection_fn(Z_charges: jnp.ndarray,
+                                 nuc_crds: jnp.ndarray) -> Callable:
+    """Select appropriate electron reflection function based on molecular composition."""
+    charge_tuple = tuple(Z_charges)
+
+    if charge_tuple == (8, 1, 1):  # Water molecule
+        return water_reflection_electrons(nuc_crds)
+    elif charge_tuple == (8, 1, 1, 8, 1, 1):  # Water dimer
+        return water_dimer_reflection_electrons(nuc_crds)
+    else:  # Diatomic or other molecules
+        return diatomic_reflection_electrons(nuc_crds)
+
+
+def _initialize_walkers(rng_key: jax.Array,
+                        nwalkers: int,
+                        nelec: int,
+                        Z_charges: jnp.ndarray,
+                        nuc_crds: jnp.ndarray,
+                        mol_charge: int) -> jnp.ndarray:
+    """Initialize walker positions near nuclear centers."""
+    # Assign electrons to atoms based on atomic number
+    idx_cnt = []
+    for ia, iz in enumerate(Z_charges):
+        idx_cnt.extend([ia] * iz)
+
+    # Adjust for molecular charge
+    if mol_charge < 0:
+        idx_cnt.extend([0] * abs(mol_charge))
+    elif mol_charge > 0:
+        idx_cnt = idx_cnt[:-mol_charge]
+
+    idx_cnt = jnp.array(idx_cnt)
+    centers = nuc_crds[idx_cnt]
+
+    # Initialize with small Gaussian noise around centers
+    noise = jax.random.normal(rng_key, (nwalkers, nelec, 3))
+    walkers = centers[jnp.newaxis, :, :] + 0.05 * noise
+
+    return walkers
+
+
+def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
+    """Adapt step size based on acceptance ratio."""
+    log_step = jnp.log(step_size) + STEP_SIZE_ADAPTATION_RATE * (
+        acceptance_ratio - TARGET_ACCEPTANCE_RATE
+    )
+    return jnp.exp(log_step)
 
 
 def get_vmc_func(mf,
-                 params_vmc,
-                 scheme='scheme1',
-                 chkfile_grd='vmc_grd_chk.hdf5',
-                 cgto_coeff=None,
-                 reflection_op_list=None):
+                 params_vmc: dict,
+                 scheme: str = 'scheme1',
+                 chkfile_grd: str = 'vmc_grd_chk.hdf5',
+                 cgto_coeff: Optional[jnp.ndarray] = None,
+                 reflection_op_list: Optional[List[str]] = None) -> Tuple[Callable, Callable]:
+    """
+    Create VMC sampling and gradient computation functions.
 
+    Args:
+        mf: PySCF mean-field object
+        params_vmc: VMC parameters (Jastrow coefficients, etc.)
+        scheme: Redistribution scheme ('scheme1' or 'scheme2')
+        chkfile_grd: HDF5 checkpoint file for gradient data
+        cgto_coeff: Custom GTO coefficients (optional)
+        reflection_op_list: List of reflection operations to use
+
+    Returns:
+        Tuple of (vmc_run, vmc_gradient_with_space_warping) functions
+    """
+    # Default to identity reflection only
     if reflection_op_list is None:
         reflection_op_list = ['I']
 
+    reflection_ID_list = [REFLECTION_IDS[op] for op in reflection_op_list]
+    num_reflections = len(reflection_ID_list)
+
+    # Extract molecular data
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
     nelec = mf.mol.tot_electrons()
     num_nuc = nuc_crds.shape[0]
     Z_charges = mf.mol.atom_charges()
+    mol_charge = mf.mol.charge
+
+    # Precompute electron pair indices for distance calculations
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
-    if tuple (Z_charges) == (8, 1, 1): # water molecule
-        run_electron_exchange = water_reflection_electrons(nuc_crds)
-    elif tuple (Z_charges) == (8, 1, 1, 8, 1, 1): # water dimer
-        run_electron_exchange = water_dimer_reflection_electrons(nuc_crds)
-    else: # diatomic molecule
-        run_electron_exchange = diatomic_reflection_electrons(nuc_crds)
+    # Get electron reflection function for this molecular type
+    run_electron_exchange = _get_electron_reflection_fn(Z_charges, nuc_crds)
 
+    # Get wavefunction and energy functions
+    log_trial_wavefunction, local_energy, get_psi_mo = get_psi_fun(mf, cgto_coeff)
+    local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke = local_energy
 
-    # atomic_masses = mf.mol.atom_mass_list()
-    # mass_center = jnp.einsum('i,ij->j',
-    #                          atomic_masses, nuc_crds)/atomic_masses.sum()
-    # relative_nuc_pos = nuc_crds - mass_center
-
-    log_trial_wavefunction, local_energy, get_psi_mo \
-        = get_psi_fun(mf, cgto_coeff)
-
-    local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
-        = local_energy
+    # Precompute nuclear-nuclear energy and gradient
     ener_nn = local_energy_nn(nuc_crds)
     grad_nn_nuc = jax.grad(local_energy_nn)(nuc_crds)
 
-
-
-
-    # --- Redistribute Gradient Samples ---
-    @jax.jit
-    def redistribute_samples_scheme1(elec_crds):
-        mo_val, mo_val_s = get_psi_mo(elec_crds, nuc_crds)
-        weight = jnp.einsum('neo,neo->en', mo_val_s, mo_val_s) #**(1.0/4)
-        return weight/jnp.sum(weight, axis=-1, keepdims=True)
-
+    # --- Redistribution schemes for space warping ---
 
     @jax.jit
-    def redistribute_samples_scheme2(elec_crds):
+    def redistribute_scheme1(elec_crds: jnp.ndarray) -> jnp.ndarray:
+        """MO-based redistribution weights."""
+        _, mo_val_s = get_psi_mo(elec_crds, nuc_crds)
+        weight = jnp.einsum('neo,neo->en', mo_val_s, mo_val_s)
+        return weight / jnp.sum(weight, axis=-1, keepdims=True)
+
+    @jax.jit
+    def redistribute_scheme2(elec_crds: jnp.ndarray) -> jnp.ndarray:
+        """Distance-based redistribution weights (1/r^4)."""
         diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
-        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
-        dist = jnp.where (dist < 1e-12, 1e-12, dist)
+        dist_sq = jnp.sum(diff**2, axis=-1)
+        dist = jnp.sqrt(jnp.maximum(dist_sq, 1e-24))
         weight = dist**(-4.0)
-        return weight/jnp.sum(weight, axis=-1, keepdims=True)
+        return weight / jnp.sum(weight, axis=-1, keepdims=True)
 
-    if scheme in ['scheme1']:
-        rescale_fn = redistribute_samples_scheme1
-    elif scheme in ['scheme2']:
-        rescale_fn = redistribute_samples_scheme2
-    else:
-        # default redistribute scheme
-        rescale_fn = redistribute_samples_scheme1
-
+    rescale_fn = redistribute_scheme1 if scheme == 'scheme1' else redistribute_scheme2
     jac_rescale_fn = jax.jacobian(rescale_fn, argnums=0)
 
+    # --- Gradient functions ---
 
     @jax.jit
-    def grad_fn_ee (e_pos):
-        return jax.grad (local_energy_ee) (e_pos)
+    def grad_fn_ee(e_pos: jnp.ndarray) -> jnp.ndarray:
+        return jax.grad(local_energy_ee)(e_pos)
 
     @jax.jit
-    def grad_fn_en(e_pos):
+    def grad_fn_en(e_pos: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(local_energy_en, argnums=(0, 1))(e_pos, nuc_crds)
 
     @jax.jit
-    def grad_fn_ke(e_pos):
+    def grad_fn_ke(e_pos: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(local_energy_ke, argnums=(0, 1))(e_pos, nuc_crds, params_vmc)
 
     @jax.jit
-    def grad_fn_logpsi(e_pos):
+    def grad_fn_logpsi(e_pos: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(log_trial_wavefunction, argnums=(0, 1))(e_pos, nuc_crds, params_vmc)
 
+    # --- Metropolis sampling functions ---
 
     @jax.jit
-    def total_local_energy_fn (elec_crds):
-        return (local_energy_ee(elec_crds)
-                + local_energy_en(elec_crds, nuc_crds)
-                + local_energy_ke(elec_crds, nuc_crds, params_vmc)
-                + ener_nn)
-
-
-    @jax.jit
-    def metropolis_step (rng_key,
-                         elec_crds,
-                         _step_size):
-        """Metropolis step."""
+    def metropolis_step(rng_key: jax.Array,
+                        elec_crds: jnp.ndarray,
+                        step_size: float) -> Tuple[jnp.ndarray, bool]:
+        """Single Metropolis-Hastings step with Gaussian proposal."""
         key_prop, key_accept = jax.random.split(rng_key)
 
-        # More efficient proposal generation
+        # Propose new positions
         noise = jax.random.normal(key_prop, elec_crds.shape)
-        min_dist_threshold = 1.e-6
+        proposed_crds = elec_crds + step_size * noise
 
-        proposed_crds = elec_crds + _step_size * noise
-
-        # check the sigularity between electron-electron // electron-nuclei
-
+        # Check for singularities (electron-electron and electron-nuclear)
         diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
-        dists_ee = jnp.sqrt (jnp.sum(diffs_ee*diffs_ee, axis=-1))
+        dists_ee = jnp.linalg.norm(diffs_ee, axis=-1)
 
-        diffs_en = proposed_crds[:,None,:] - nuc_crds[None, :, :]
-        dists_en = jnp.sqrt (jnp.sum(diffs_en*diffs_en, axis=-1))
+        diffs_en = proposed_crds[:, None, :] - nuc_crds[None, :, :]
+        dists_en = jnp.linalg.norm(diffs_en, axis=-1)
 
-        valid_move = (dists_en.min() > min_dist_threshold) & \
-                (dists_ee.min() > min_dist_threshold)
+        valid_move = (dists_en.min() > MIN_DIST_THRESHOLD) & \
+                     (dists_ee.min() > MIN_DIST_THRESHOLD)
 
-        # Vectorized acceptance calculation
+        # Compute acceptance probability
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds, params_vmc)
         log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds, params_vmc)
 
-        log_acc = 2.0*(log_psi_new - log_psi_old)
-        accept_prob = jnp.where (log_acc > 0.0, 1.0, jnp.exp(log_acc))
-
+        log_acc = 2.0 * (log_psi_new - log_psi_old)
+        accept_prob = jnp.where(log_acc > 0.0, 1.0, jnp.exp(log_acc))
+        #accept_prob = jnp.where(accept_prob < 1.0e-3, 0.0, accept_prob)
         accept = (jax.random.uniform(key_accept) < accept_prob) & valid_move
         new_crds = jnp.where(accept, proposed_crds, elec_crds)
 
         return new_crds, accept
 
+    @jax.jit
+    def metropolis_reflection(rng_key: jax.Array,
+                              elec_crds: jnp.ndarray,
+                              reflection_ID: int) -> jnp.ndarray:
+        """Metropolis step with reflection move."""
+        rescale = rescale_fn(elec_crds)
+        proposed_crds = run_electron_exchange(elec_crds, rescale, reflection_ID)
 
-    def vmc_gradient_batch (batch_samples):
+        # Compute acceptance probability
+        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds, params_vmc)
+        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds, params_vmc)
 
-        grd_ee_elc = jax.vmap (grad_fn_ee) (batch_samples)
-        grd_en_elc, grd_en_nuc = jax.vmap(grad_fn_en) (batch_samples)
-        grd_ke_elc, grd_ke_nuc = jax.vmap(grad_fn_ke) (batch_samples)
-        grd_logpsi_elc, grd_logpsi_nuc = jax.vmap(grad_fn_logpsi) (batch_samples)
+        log_acc = 2.0 * (log_psi_new - log_psi_old)
+        accept_prob = jnp.where(log_acc > 0.0, 1.0, jnp.exp(log_acc))
+        #accept_prob = jnp.where(accept_prob < 1.0e-3, 0.0, accept_prob)
+        accept = jax.random.uniform(rng_key) < accept_prob
+        new_crds = jnp.where(accept, proposed_crds, elec_crds)
 
-        rescale = jax.vmap (rescale_fn) (batch_samples)
-        jac_rescale_elc = jax.vmap(jac_rescale_fn) (batch_samples)
-        novel_correction = 0.5*jnp.einsum('beneK->bnK', jac_rescale_elc)
+        return new_crds
+
+    # --- Gradient batch computation ---
+
+    def vmc_gradient_batch(batch_samples: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
+        """Compute gradients for a batch of samples."""
+        grd_ee_elc = jax.vmap(grad_fn_ee)(batch_samples)
+        grd_en_elc, grd_en_nuc = jax.vmap(grad_fn_en)(batch_samples)
+        grd_ke_elc, grd_ke_nuc = jax.vmap(grad_fn_ke)(batch_samples)
+        grd_logpsi_elc, grd_logpsi_nuc = jax.vmap(grad_fn_logpsi)(batch_samples)
+
+        rescale = jax.vmap(rescale_fn)(batch_samples)
+        jac_rescale_elc = jax.vmap(jac_rescale_fn)(batch_samples)
+        novel_correction = 0.5 * jnp.einsum('beneK->bnK', jac_rescale_elc)
 
         grd_ee = jnp.einsum('beK,ben->bnK', grd_ee_elc, rescale)
         grd_en = grd_en_nuc + jnp.einsum('beK,ben->bnK', grd_en_elc, rescale)
         grd_ke = grd_ke_nuc + jnp.einsum('beK,ben->bnK', grd_ke_elc, rescale)
 
-        grd_logpsi = grd_logpsi_nuc + jnp.einsum('beK,ben->bnK',
-                                                grd_logpsi_elc, rescale)
+        grd_logpsi = grd_logpsi_nuc + jnp.einsum('beK,ben->bnK', grd_logpsi_elc, rescale)
         grd_logpsi += novel_correction
 
         return grd_ee, grd_en, grd_ke, grd_logpsi
 
+    # --- Gradient saving ---
 
-    vmc_gradient_save = create_vmc_gradient_save (
-        log_trial_wavefunction=log_trial_wavefunction,
-        vmc_gradient_batch=vmc_gradient_batch,
-        rescale_fn=rescale_fn,
-        run_electron_exchange=run_electron_exchange,
-        nuc_crds=nuc_crds,
-        params_vmc=params_vmc,
-        reflection_op_list=reflection_op_list,
-        chkfile_grd=chkfile_grd
-    )
+    def vmc_gradient_save(iteration: int,
+                          sampled_walkers: jnp.ndarray,
+                          local_energies: jnp.ndarray,
+                          batch_size: int,
+                          h5py_mode: str = 'w') -> None:
+        """Compute and save gradients to HDF5 checkpoint."""
+        n_samples = sampled_walkers.shape[0]
+        num_batches = (n_samples + batch_size - 1) // batch_size
 
+        w_grd_ee_en_ke = []
+        w_grd_logpsi = []
+        w_grd_ke = []
 
-    def vmc_run(rng_key,
-                nwalkers=100,
-                num_mc_steps=1000,
-                max_mc_iter=500,
-                mc_step_size=0.25,
-                tolerance_enr_std_per_elec=0.01,
-                fname_log='vmc_enr.log',
-                l_grad=False):
-        """VMC run with better memory management."""
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, n_samples)
+            batch_samples = sampled_walkers[start_idx:end_idx]
 
-        # Initialize electron positions more efficiently
-        rng_key, rng = jax.random.split(rng_key)
-        idx_cnt = []
-        for ia, iz in enumerate(Z_charges):
-            idx_cnt.extend([ia] * iz)
+            g_ee, g_en, g_ke, g_logpsi = vmc_gradient_batch(batch_samples)
+            w_grd_ee_en_ke.append(g_ee + g_en + g_ke)
+            w_grd_logpsi.append(g_logpsi)
+            w_grd_ke.append(g_ke)
 
-        # Handle molecular charge
-        if mf.mol.charge < 0:
-            idx_cnt.extend([0] * abs(mf.mol.charge))
-        elif mf.mol.charge > 0:
-            idx_cnt = idx_cnt[:-mf.mol.charge]
+        # Stack all batches
+        w_grd_ee_en_ke = jnp.vstack(w_grd_ee_en_ke)
+        w_grd_logpsi = jnp.vstack(w_grd_logpsi)
+        w_grd_ke = jnp.vstack(w_grd_ke)
 
-        idx_cnt = jnp.array(idx_cnt)
-        centers = nuc_crds[idx_cnt]
-        walkers = centers[jnp.newaxis,:,:] \
-            + 0.05*jax.random.normal(rng, (nwalkers, nelec, 3))
+        # Save to HDF5
+        with h5py.File(chkfile_grd, h5py_mode) as f:
+            f.create_dataset(f'grd_ee_en_ke_{iteration}', data=w_grd_ee_en_ke)
+            f.create_dataset(f'grd_logpsi_{iteration}', data=w_grd_logpsi)
+            f.create_dataset(f'local_energies_{iteration}', data=local_energies)
+            f.create_dataset(f'grd_ke_{iteration}', data=w_grd_ke)
+
+    # --- Main VMC run ---
+
+    def vmc_run(rng_key: jax.Array,
+                nwalkers: int = 100,
+                num_mc_steps: int = 1000,
+                max_mc_iter: int = 500,
+                mc_step_size: float = 0.25,
+                tolerance_enr_std_per_elec: float = 0.01,
+                fname_log: str = 'vmc_enr.log',
+                l_grad: bool = False) -> None:
+        """
+        Run VMC sampling with optional gradient computation.
+
+        Args:
+            rng_key: JAX random key
+            nwalkers: Number of parallel walkers
+            num_mc_steps: MC steps per iteration
+            max_mc_iter: Maximum number of iterations
+            mc_step_size: Initial Metropolis step size
+            tolerance_enr_std_per_elec: Convergence threshold (std per electron)
+            fname_log: Log file path
+            l_grad: Whether to compute and save gradients
+        """
+        # Initialize walkers
+        rng_key, init_key = jax.random.split(rng_key)
+        walkers = _initialize_walkers(
+            init_key, nwalkers, nelec, Z_charges, nuc_crds, mol_charge
+        )
 
         # Equilibration phase
         @jax.jit
-        def equilibration_step (state, _):
+        def equilibration_step(state, _):
             rng_key, walkers, step_size = state
             rng_key, key = jax.random.split(rng_key)
             walker_keys = jax.random.split(key, nwalkers)
-            new_walkers, accepted = jax.vmap(metropolis_step, in_axes=(0,0,None)) (
-                                        walker_keys,
-                                        walkers,
-                                        step_size)
+
+            new_walkers, accepted = jax.vmap(
+                metropolis_step, in_axes=(0, 0, None)
+            )(walker_keys, walkers, step_size)
+
             ratio = accepted.mean()
-            target = 0.4
-            log_step_size = jnp.log(step_size) + 0.05*(ratio-target)
-            new_step_size = jnp.exp(log_step_size)
-            #new_step_size = step_size * (0.5 + ratio)
+            new_step_size = _adapt_step_size(step_size, ratio)
 
             return (rng_key, new_walkers, new_step_size), ratio
 
-        equil_mc_steps = 5000
         initial_state = (rng_key, walkers, mc_step_size)
-        final_state, ratios = jax.lax.scan(equilibration_step,
-                                      initial_state,
-                                      jnp.arange(equil_mc_steps))
+        final_state, ratios = jax.lax.scan(
+            equilibration_step, initial_state, jnp.arange(EQUIL_MC_STEPS)
+        )
         rng_key, walkers, mc_step_size = final_state
-        ratio = ratios[-1]
 
-        print(f"Equilibration Acceptance Rate: {ratio:.2f}")
+        print(f"Equilibration Acceptance Rate: {ratios[-1]:.2f}")
         print(f"Step size: {mc_step_size:.4f}")
 
         # Production phase
         @jax.jit
-        def production_step (state, step_number):
+        def production_step(state, step_number):
             rng_key, walkers, step_size = state
-            rng_key, key = jax.random.split(rng_key)
+            rng_key, key, key_reflection = jax.random.split(rng_key, 3)
             walker_keys = jax.random.split(key, nwalkers)
 
-            new_walkers, accepted = jax.vmap(metropolis_step, in_axes=(0,0,None)) (
-                                        walker_keys,
-                                        walkers,
-                                        step_size)
+            is_move = step_number % min(2, num_reflections)
 
-            ratio = accepted.mean()
-            target = 0.4
-            log_step_size = jnp.log(step_size) + 0.05*(ratio-target)
-            new_step_size = jnp.exp(log_step_size)
-            #new_step_size = step_size * (0.5 + ratio)
-            # calculate energy
-            #energies = jax.vmap (total_local_energy_fn) (new_walkers)
-            enr_ee = jax.vmap(local_energy_ee) (new_walkers)
-            enr_en = jax.vmap (local_energy_en, in_axes=(0, None)) (new_walkers, nuc_crds)
-            enr_ke = jax.vmap (local_energy_ke, in_axes=(0, None, None)) (new_walkers, nuc_crds, params_vmc)
+            def metropolis_branch(_):
+                new_walkers, accepted = jax.vmap(
+                    metropolis_step, in_axes=(0, 0, None)
+                )(walker_keys, walkers, step_size)
+                new_step_size = _adapt_step_size(step_size, accepted.mean())
+                return new_walkers, new_step_size
 
-            return (rng_key, new_walkers, new_step_size), \
-                (enr_ee, enr_en, enr_ke, new_walkers)
+            def reflection_branch(_):
+                reflection_ID = \
+                    jax.random.randint (key_reflection,minval=1,maxval=num_reflections,shape=(nwalkers,))
+                new_walkers = jax.vmap(
+                    metropolis_reflection, in_axes=(0, 0, 0)
+                )(walker_keys, walkers, reflection_ID)
+                return new_walkers, step_size
 
-        # Main sampling phase with pre-allocated arrays
+            new_walkers, new_step_size = jax.lax.cond(
+                is_move == 0,
+                metropolis_branch,
+                reflection_branch,
+                operand=None
+            )
+
+            out_walkers = jnp.where (
+                is_move == 0,
+                new_walkers,
+                walkers
+            )
+
+            # Compute local energies
+            enr_ee = jax.vmap(local_energy_ee)(new_walkers)
+            enr_en = jax.vmap(local_energy_en, in_axes=(0, None))(new_walkers, nuc_crds)
+            enr_ke = jax.vmap(local_energy_ke, in_axes=(0, None, None))(
+                new_walkers, nuc_crds, params_vmc
+            )
+
+            return (rng_key, out_walkers, new_step_size), (enr_ee, enr_en, enr_ke, new_walkers)
+
+        # Batch size computation for gradient calculation
         base_batch_size = 500
         memory_factor = max(1, nelec * num_nuc // 1000)
         batch_size = min(50, base_batch_size // memory_factor)
-        num_batches = (num_mc_steps*nwalkers//10 + batch_size - 1) // batch_size
-        mark_samples = ((jnp.arange (num_mc_steps)+1)%10 == 0)
 
-        ratio = 0.5
+        # Main sampling loop
+        E_w = []
 
-        initial_state = (rng_key, walkers, mc_step_size)
-        final_state, samples = jax.lax.scan (production_step,
-                                       initial_state,
-                                       jnp.arange (num_mc_steps))
+        with open(fname_log, 'w', buffering=1) as fout:
+            print(f"   Iter       Mean        Std            Loc            "
+                  f"EE             EN             KE", file=fout)
+            for iteration in range(max_mc_iter):
+                h5py_mode = 'w' if iteration == 0 else 'a'
 
-        rng_key, walkers, mc_step_size = final_state
-        enr_ee, enr_en, enr_ke, sampled_walkers = samples
-
-        walkers_energies = enr_ee + enr_en + enr_ke + ener_nn
-        enr_mean = walkers_energies.mean(axis=0).mean()
-        enr_std = walkers_energies.mean(axis=0).std()/nelec
-        iter = 1
-        fout = open(fname_log, 'w', 1)
-
-        print ('iter,enr,std: '
-                    f'{iter:5d}  '
-                    f'{enr_mean:.6f}  '
-                    f'{enr_std:.6f}  '
-                    f'{walkers_energies.mean(): .6f}  '
-                    f'{enr_ee.mean():.6f}  '
-                    f'{enr_en.mean():.6f}  '
-                    f'{enr_ke.mean():.6f}',
-                    file=fout)
-
-        if l_grad:
-            sampled_walkers = sampled_walkers[mark_samples].reshape(-1, nelec, 3)
-            local_energies = walkers_energies[mark_samples].reshape(-1)
-
-            accepance_stats = vmc_gradient_save (
-                    iter,
-                    sampled_walkers,
-                    local_energies,
-                    batch_size,
-                    num_batches,
-                    h5py_io='w'
+                initial_state = (rng_key, walkers, mc_step_size)
+                final_state, samples = jax.lax.scan(
+                    production_step, initial_state, jnp.arange(num_mc_steps)
                 )
 
-        while (iter < max_mc_iter) & (enr_std > tolerance_enr_std_per_elec):
-            initial_state = (rng_key, walkers, mc_step_size)
-            final_state, samples = jax.lax.scan (production_step,
-                                       initial_state,
-                                       jnp.arange (num_mc_steps))
+                rng_key, walkers, mc_step_size = final_state
+                b_enr_ee, b_enr_en, b_enr_ke, b_walkers = samples
+                # b_enr_loc [nbatch, nwalkers]
+                b_enr_loc = b_enr_ee + b_enr_en + b_enr_ke + ener_nn
 
-            rng_key, walkers, mc_step_size = final_state
-            enr_ee, enr_en, enr_ke, sampled_walkers = samples
-            energies = enr_ee + enr_en + enr_ke + ener_nn
-            iter += 1
+                # Accumulate energy statistics
+                E_w.append(b_enr_loc.mean(axis=0))
+                # E_w_arr [iteration+1, nwalkers]
+                E_w_arr = jnp.array(E_w)
+                enr_mean = E_w_arr.mean()
+                enr_std = E_w_arr.mean(axis=0).std() / nelec
 
-            walkers_energies = jnp.append (walkers_energies, energies, axis=0)
+                # Log progress
+                print(
+                    f'{iteration+1:5d}  '
+                    f'{enr_mean:13.6f}  {enr_std:10.6f}  '
+                    f'{b_enr_loc.mean(): 13.6f}  '
+                    f'{b_enr_ee.mean():13.6f}  '
+                    f'{b_enr_en.mean():13.6f}  '
+                    f'{b_enr_ke.mean():13.6f}',
+                    file=fout
+                )
 
-            enr_mean = walkers_energies.mean(axis=0).mean()
-            enr_std = walkers_energies.mean(axis=0).std()/nelec
-
-            print ('iter,enr,std: '
-                    f'{iter:5d}  '
-                    f'{enr_mean:.6f}  '
-                    f'{enr_std:.6f}  '
-                    f'{energies.mean(): .6f}  '
-                    f'{enr_ee.mean():.6f}  '
-                    f'{enr_en.mean():.6f}  '
-                    f'{enr_ke.mean():.6f}',
-                    file=fout)
-
-            if l_grad:
-                sampled_walkers = sampled_walkers[mark_samples].reshape(-1, nelec, 3)
-                local_energies = energies[mark_samples].reshape(-1)
-
-                accepance_stats = vmc_gradient_save (
-                        iter,
+                # Save gradients if requested
+                if l_grad:
+                    sampled_walkers = b_walkers.reshape(-1, nelec, 3)
+                    local_energies = b_enr_loc.reshape(-1)
+                    vmc_gradient_save(
+                        iteration + 1,
                         sampled_walkers,
                         local_energies,
                         batch_size,
-                        num_batches,
-                        h5py_io='a'
+                        h5py_mode=h5py_mode
                     )
 
+                # Check convergence
+                if enr_std < tolerance_enr_std_per_elec:
+                    break
 
-        fout.close()
-
+        # Save final gradient metadata
         if l_grad:
-            sampled_iter = iter
+            with h5py.File(chkfile_grd, 'a') as f:
+                f.create_dataset('enr_mean', data=enr_mean)
+                f.create_dataset('sampled_iter', data=iteration + 1, dtype=jnp.int32)
+                f.create_dataset('grd_nn', data=grad_nn_nuc)
 
-            with h5py.File (chkfile_grd, 'a') as f:
-                f.create_dataset ('enr_mean', data=enr_mean)
-                f.create_dataset ('sampled_iter', data=sampled_iter, dtype=jnp.int32)
-                f.create_dataset ('grd_nn', data=grad_nn_nuc)
+    # --- Gradient post-processing ---
 
+    def vmc_gradient_with_space_warping(fname_log: str = 'vmc_grad.log') -> jnp.ndarray:
+        """
+        Compute nuclear gradients from saved checkpoint data.
 
-    def vmc_gradient_with_space_warping (fname_log='vmc_grad.log'):
+        Args:
+            fname_log: Output log file path
 
+        Returns:
+            Total nuclear gradient array (num_nuc, 3)
+        """
         with h5py.File(chkfile_grd, 'r') as f:
-            dict_grd_samples = {}
-            for key, data in f.items():
-                if key in ['enr_mean', 'sampled_iter']:
-                    dict_grd_samples[key] = data[()]
-                else:
-                    dict_grd_samples[key] = jnp.array(data[:])
+            # Load metadata
+            sampled_iter = int(f['sampled_iter'][()])
+            enr_mean = f['enr_mean'][()]
+            grd_nn = jnp.array(f['grd_nn'][:])
 
-            sampled_iter = int (dict_grd_samples['sampled_iter'])
-            enr_mean = dict_grd_samples['enr_mean']
-            grd_nn = dict_grd_samples['grd_nn']
-
+            # Accumulate gradients from all iterations
             grd_ee_en_ke_sum = 0.0
             grd_pulay_sum = 0.0
-            valid_samples_count = 0
             grd_ke_sum = 0.0
-            for iter in range(sampled_iter):
-                grd_ee_en_ke = dict_grd_samples[f'grd_ee_en_ke_{iter+1}']
-                grd_logpsi = dict_grd_samples[f'grd_logpsi_{iter+1}']
-                local_energies = dict_grd_samples[f'local_energies_{iter+1}']
-                grd_ke = dict_grd_samples[f'grd_ke_{iter+1}']
+            valid_samples_count = 0
 
+            for iter_idx in range(1, sampled_iter + 1):
+                grd_ee_en_ke = jnp.array(f[f'grd_ee_en_ke_{iter_idx}'][:])
+                grd_logpsi = jnp.array(f[f'grd_logpsi_{iter_idx}'][:])
+                local_energies = jnp.array(f[f'local_energies_{iter_idx}'][:])
+                grd_ke = jnp.array(f[f'grd_ke_{iter_idx}'][:])
+
+                # Pulay force contribution
                 d_enr = local_energies - enr_mean
-                grd_pulay = 2.0*jnp.einsum('s,snK->snK',
-                                        d_enr,
-                                        grd_logpsi)
-
+                grd_pulay = 2.0 * jnp.einsum('s,snK->snK', d_enr, grd_logpsi)
 
                 grd_ee_en_ke_sum += grd_ee_en_ke.sum(axis=0)
                 grd_pulay_sum += grd_pulay.sum(axis=0)
-                valid_samples_count += local_energies.shape[0]
                 grd_ke_sum += grd_ke.sum(axis=0)
+                valid_samples_count += local_energies.shape[0]
 
+            # Compute averages
             if valid_samples_count > 0:
                 grd_ee_en_ke = grd_ee_en_ke_sum / valid_samples_count
                 grd_pulay = grd_pulay_sum / valid_samples_count
-                grd_ke = grd_ke_sum/valid_samples_count
+                grd_ke = grd_ke_sum / valid_samples_count
             else:
-                grd_ee_en_ke = jnp.zeros_like (grd_nn)
-                grd_pulay = jnp.zeros_like (grd_nn)
-                grd_ke = jnp.zeros_like (grd_nn)
+                grd_ee_en_ke = jnp.zeros_like(grd_nn)
+                grd_pulay = jnp.zeros_like(grd_nn)
+                grd_ke = jnp.zeros_like(grd_nn)
 
-
+            # Total gradient
             grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
-            with jnp.printoptions (precision=5, suppress=True):
-                fout = open(fname_log, 'w', 1)
-                print('grd_nn\n', grd_nn, file=fout)
-                print('grd_ee_en_ke\n', grd_ee_en_ke, file=fout)
-                print('grd_ke\n', grd_ke, file=fout)
-                print('grd_pulay\n', grd_pulay, file=fout)
-                print('grd_tot\n', grd_tot, file=fout)
+
+            # Write results
+            with open(fname_log, 'w', buffering=1) as fout:
+                with jnp.printoptions(precision=5, suppress=True):
+                    print('grd_nn\n', grd_nn, file=fout)
+                    print('grd_ee_en_ke\n', grd_ee_en_ke, file=fout)
+                    print('grd_ke\n', grd_ke, file=fout)
+                    print('grd_pulay\n', grd_pulay, file=fout)
+                    print('grd_tot\n', grd_tot, file=fout)
 
             return grd_tot
 

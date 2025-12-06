@@ -1,3 +1,5 @@
+import os
+os.environ["JAX_ENABLE_X64"] = "1"
 import jax
 import jax.numpy as jnp
 from pyscf import gto, scf, cc
@@ -39,25 +41,6 @@ cc_grad.kernel()
 
 
 chkfile_grd = 'LiH_vmc_631gd_grd.hdf5'
-
-cgto_coeff_631g = {
-    1: {
-        'q0': 0.99999989,
-        'coeff': jnp.array ([1., 1.04318788, -0.02914877,  0.78355609, -2.95081258,  5.43507057,
- -5.08491278,  1.94265217
-    ])
-    },
-    3: {
-        'q0': 1.00001336,
-        'coeff': jnp.array ([1., 2.61276736,  -0.37992217,   3.7529964,  -12.77929097,
-  19.6449144,  -13.86228449,   3.6941363])
-    },
-    8: {
-        'q0': 0.97846901,
-        'coeff': jnp.array ([1., 12.45593483,   -2.38348622,   30.46159035, -125.8241975,
-  252.619023,   -239.50247682,   86.70949994])
-    }
-}
 
 # H: aug-cc-pVTZ | Li: aug-cc-pVTZ
 cgto_coeff_atz = {
