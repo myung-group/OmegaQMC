@@ -102,6 +102,11 @@ def get_vmc_func(mf,
         chkfile: HDF5 checkpoint file for to-restart data and gradient data
         cgto_coeff: Custom GTO coefficients (optional)
         reflection_op_list: List of reflection operations to use
+        cluster_idx: List of indices of water molecules in n-H2O system (n=1,2,..)
+                - Each molecule should be ordered as [O, H-1, H-2]
+                - ex) [[0, 1, 2], [3, 4, 5]]
+                    -> 0, 3: Oxygen, 1, 2, 4, 5: Hydrogen
+                    -> [0, 1, 2]: 1st H2O, [3, 4, 5]: 2nd H2O
 
     Returns:
         Tuple of (vmc_run, vmc_gradient_with_space_warping) functions
@@ -313,10 +318,12 @@ def get_vmc_func(mf,
             tolerance_enr_std_per_elec: Convergence threshold (std per electron)
             fname_log: Log file path
             l_grad: Whether to compute and save gradients
+            batch_size: Batch size for the gradient calculation
+            restart: Restart the simulation from the saved *.hdf5 checkpoint
         """
         # Initialize walkers
         rng_key_to_restart = rng_key
-        rng_key = jax.random.key(888)
+        rng_key = jax.random.key(rng_key)
         rng_key, init_key = jax.random.split(rng_key)
         walkers = _initialize_walkers(
             init_key, nwalkers, nelec, Z_charges, nuc_crds, mol_charge
@@ -345,7 +352,7 @@ def get_vmc_func(mf,
                 mc_step_size = f['mc_step_size'][()]
                 rng_key = int(f['rng_key'][()])
                 rng_key_to_restart = rng_key
-                rng_key = jax.random.key(888)
+                rng_key = jax.random.key(rng_key)
                 rng_key, init_key = jax.random.split(rng_key)
                 walkers = jnp.array(f['walkers'][:])
                 E_w = list(f['E_w'][:])
@@ -484,15 +491,22 @@ def get_vmc_func(mf,
         print(f'Total energy | error [Ha]: {e_mean:.6f} | {e_err:.6f}')
 
     # --- Gradient post-processing ---
-    def vmc_gradient_with_space_warping(fname_log: str = 'vmc_grad.log') -> jnp.ndarray:
+    
+    def vmc_gradient_with_space_warping_(
+        fname_log: str = 'vmc_grad.log',
+        compute_error: bool = False,
+        walker_based_batch_size: int = 10) -> jnp.ndarray:
         """
         Compute nuclear gradients from saved checkpoint data.
 
         Args:
             fname_log: Output log file path
+            compute_error: Compute errors or not of forces and torques 
+                    - forces error calculation requires a large amount of memory
+            walker_based_batch_size: Batch size for error computation based on walker
 
         Returns:
-            Total nuclear gradient array (num_nuc, 3)
+            Total nuclear gradient and gradient's error array (num_nuc, 3), (num_nuc, 3)
         """
         with h5py.File(chkfile, 'r') as f:
             # Load metadata
@@ -504,10 +518,14 @@ def get_vmc_func(mf,
         chkfile_grd = f"{base}_grd.{ext}"
         with h5py.File(chkfile_grd, 'r') as f:
             # Accumulate gradients from all iterations
-            grd_ee_en_ke_sum = []
-            grd_pulay_sum = []
             grd_ke_sum = 0.0
             valid_samples_count = 0
+            if compute_error:
+                grd_ee_en_ke_sum = []
+                grd_pulay_sum = []
+            else:
+                grd_ee_en_ke_sum = 0.0
+                grd_pulay_sum = 0.0
 
             for iter_idx in range(1, sampled_iter + 1):
                 grd_ee_en_ke = jnp.array(f[f'grd_ee_en_ke_{iter_idx}'][:])
@@ -515,46 +533,62 @@ def get_vmc_func(mf,
                 local_energies = jnp.array(f[f'local_energies_{iter_idx}'][:])
                 grd_ke = jnp.array(f[f'grd_ke_{iter_idx}'][:])
 
-                s_nw, n, _ = grd_ee_en_ke.shape
-                s, nw = local_energies.shape
-
                 # Pulay force contribution
                 d_enr = local_energies - enr_mean
-                grd_logpsi = grd_logpsi.reshape(s, nw, n, 3)
-                grd_pulay = 2.0 * jnp.einsum('sb,sbnK->sbnK', d_enr, grd_logpsi)
+                s_nw, n, _ = grd_ee_en_ke.shape
+                s, nw = local_energies.shape
+                if compute_error:
+                    grd_logpsi = grd_logpsi.reshape(s, nw, n, 3)
+                    grd_pulay = 2.0 * jnp.einsum('sb,sbnK->sbnK', d_enr, grd_logpsi)
+                    # Regroup
+                    grd_ee_en_ke_rg = grd_ee_en_ke.reshape(s, nw, n, 3)
+                    grd_pulay_rg = grd_pulay.reshape(s, nw, n, 3)
 
-                # Regroup
-                grd_ee_en_ke_rg = grd_ee_en_ke.reshape(s, nw, n, 3)
-                grd_pulay = grd_pulay.reshape(s, nw, n, 3)
-
-                grd_ee_en_ke_sum.append(grd_ee_en_ke_rg)
-                grd_pulay_sum.append(grd_pulay)
+                    grd_ee_en_ke_sum.append(grd_ee_en_ke_rg)
+                    grd_pulay_sum.append(grd_pulay_rg)
+                else:
+                    d_enr = d_enr.reshape(-1)
+                    grd_pulay = 2.0 * jnp.einsum('s,snK->snK', d_enr, grd_logpsi)
+                    grd_ee_en_ke_sum += grd_ee_en_ke.sum(axis=0)
+                    grd_pulay_sum += grd_pulay.sum(axis=0)
+                
                 grd_ke_sum += grd_ke.sum(axis=0)
                 valid_samples_count += local_energies.reshape(-1).shape[0]
 
-            grd_ee_en_ke_sum = jnp.vstack(grd_ee_en_ke_sum)
-            grd_pulay_sum = jnp.vstack(grd_pulay_sum)
+            if compute_error:
+                grd_ee_en_ke_sum = jnp.vstack(grd_ee_en_ke_sum)
+                grd_pulay_sum = jnp.vstack(grd_pulay_sum)
 
             # Compute averages
             if valid_samples_count > 0:
-                grd_arrays = [grd_ee_en_ke_sum, grd_pulay_sum]
-                grd_tot_ls = jnp.sum(jnp.stack(grd_arrays, axis=0), axis=0)
-
-                xbar, serr, s, kappa = batched_binning_analysis_grds(grd_tot_ls)
-
-                grd_tot = jnp.mean(xbar, axis=0) + grd_nn
-                grd_err = jnp.linalg.norm(serr, axis=0) / serr.shape[0]
-
-                grd_ee_en_ke = jnp.mean(grd_ee_en_ke_sum, axis=0).mean(axis=0)
-                grd_pulay = jnp.mean(grd_pulay_sum, axis=0).mean(axis=0)
                 grd_ke = grd_ke_sum / valid_samples_count
+
+                if compute_error:
+                    grd_arrays = [grd_ee_en_ke_sum, grd_pulay_sum]
+                    grd_tot_ls = jnp.sum(jnp.stack(grd_arrays, axis=0), axis=0)
+
+                    # Compute forces and error
+                    xbar, serr, s, kappa = batched_binning_analysis_grds(
+                        grd_tot_ls, walker_based_batch_size
+                    )
+                    grd_tot = jnp.mean(xbar, axis=0) + grd_nn
+                    grd_err = jnp.linalg.norm(serr, axis=0) / serr.shape[0]
+
+                    # Compute torques and error
+                    torque, dtau = compute_torque_with_error(mf.mol, grd_tot, grd_err)
+
+                    grd_ee_en_ke = jnp.mean(grd_ee_en_ke_sum, axis=0).mean(axis=0)
+                    grd_pulay = jnp.mean(grd_pulay_sum, axis=0).mean(axis=0)
+                else:
+                    grd_ee_en_ke = grd_ee_en_ke_sum / valid_samples_count
+                    grd_pulay = grd_pulay_sum / valid_samples_count
+                    grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
             else:
                 grd_ee_en_ke = jnp.zeros_like(grd_nn)
                 grd_pulay = jnp.zeros_like(grd_nn)
                 grd_ke = jnp.zeros_like(grd_nn)
 
-            # Compute torque
-            torque, dtau = compute_torque_with_error(mf.mol, grd_tot, grd_err)
+
             # Write results
             with open(fname_log, 'w', buffering=1) as fout:
                 with jnp.printoptions(precision=5, suppress=True):
@@ -563,14 +597,141 @@ def get_vmc_func(mf,
                     print('grd_ke\n', grd_ke, file=fout)
                     print('grd_pulay\n', grd_pulay, file=fout)
                     print('grd_tot\n', grd_tot, file=fout)
-                    print('grd_err\n', grd_err, file=fout)
                     print('grd_tot\n', grd_tot)
-                    print('grd_err\n', grd_err)
-                    print('torque\n', torque, file=fout)
-                    print('trq_err\n', dtau, file=fout)
-                    print('torque\n', torque)
-                    print('trq_err\n', dtau)
+                    if compute_error:
+                        print('grd_err\n', grd_err, file=fout)
+                        print('grd_err\n', grd_err)
+                        print('torque\n', torque, file=fout)
+                        print('trq_err\n', dtau, file=fout)
+                        print('torque\n', torque)
+                        print('trq_err\n', dtau)
+            if compute_error:
+                return grd_tot, grd_err
+            else:
+                return grd_tot
 
-            return grd_tot, grd_err
+    # --- Gradient post-processing ---
+
+    def vmc_gradient_with_space_warping(
+        fname_log: str = 'vmc_grad.log',
+        compute_error: bool = False,
+        walker_based_batch_size: int = 10) -> jnp.ndarray:
+        """
+        Compute nuclear gradients from saved checkpoint data.
+
+        Args:
+            fname_log: Output log file path
+            compute_error: Compute errors or not of forces and torques 
+                    - forces error calculation requires a large amount of memory
+            walker_based_batch_size: Batch size for error computation based on walker
+
+        Returns:
+            Total nuclear gradient and gradient's error array (num_nuc, 3), (num_nuc, 3)
+        """
+        with h5py.File(chkfile, 'r') as f:
+            # Load metadata
+            sampled_iter = int(f['sampled_iter'][()])
+            enr_mean = f['enr_mean'][()]
+            grd_nn = jnp.array(f['grd_nn'][:])
+
+        base, ext = chkfile.rsplit('.', 1)
+        chkfile_grd = f"{base}_grd.{ext}"
+        with h5py.File(chkfile_grd, 'r') as f:
+            # Accumulate gradients from all iterations
+            valid_samples_count = 0
+            grd_ke_sum = 0.0
+            grd_ee_en_ke_sum = 0.0
+            grd_pulay_sum = 0.0
+            if compute_error:
+                grd_tot_list = []
+                grd_err_list = []
+
+            for iter_idx in range(1, sampled_iter + 1):
+                grd_ee_en_ke = jnp.array(f[f'grd_ee_en_ke_{iter_idx}'][:])
+                grd_logpsi = jnp.array(f[f'grd_logpsi_{iter_idx}'][:])
+                local_energies = jnp.array(f[f'local_energies_{iter_idx}'][:])
+                grd_ke = jnp.array(f[f'grd_ke_{iter_idx}'][:])
+
+                # Pulay force contribution
+                d_enr = local_energies - enr_mean
+                s_nw, n, _ = grd_ee_en_ke.shape
+                s, nw = local_energies.shape
+                if compute_error:
+                    grd_logpsi = grd_logpsi.reshape(s, nw, n, 3)
+                    grd_pulay = 2.0 * jnp.einsum('sb,sbnK->sbnK', d_enr, grd_logpsi)
+                    # Regroup
+                    grd_ee_en_ke = grd_ee_en_ke.reshape(s, nw, n, 3)
+                    grd_pulay = grd_pulay.reshape(s, nw, n, 3)
+
+                    grd_arrays = [grd_ee_en_ke, grd_pulay]
+                    grd_tot_ls = jnp.sum(jnp.stack(grd_arrays, axis=0), axis=0)
+                    
+                    # Compute forces and error
+                    xbar, serr, s, kappa = batched_binning_analysis_grds(
+                        grd_tot_ls, walker_based_batch_size
+                    )  
+                    grd_tot_list.append(xbar[None, :, :, :])
+                    grd_err_list.append(serr[None, :, :, :])
+
+                    grd_ee_en_ke_sum += grd_ee_en_ke.sum(axis=0)
+                    grd_pulay_sum += grd_pulay.sum(axis=0)
+
+                else:
+                    d_enr = d_enr.reshape(-1)
+                    grd_pulay = 2.0 * jnp.einsum('s,snK->snK', d_enr, grd_logpsi)
+                    grd_ee_en_ke_sum += grd_ee_en_ke.sum(axis=0)
+                    grd_pulay_sum += grd_pulay.sum(axis=0)
+                
+                grd_ke_sum += grd_ke.sum(axis=0)
+                valid_samples_count += local_energies.reshape(-1).shape[0]
+
+            # Compute averages
+            if valid_samples_count > 0:
+                grd_ke = grd_ke_sum / valid_samples_count
+                grd_ee_en_ke = grd_ee_en_ke_sum / valid_samples_count
+                grd_pulay = grd_pulay_sum / valid_samples_count
+
+                if compute_error:
+                    grd_tot_ls = jnp.concatenate(grd_tot_list, axis=0)
+                    grd_err_ls = jnp.concatenate(grd_err_list, axis=0)
+
+                    grd_tot = grd_tot_ls.mean(axis=0).squeeze()
+                    grd_tot = grd_tot.mean(axis=0) + grd_nn
+
+                    grd_err = jnp.linalg.norm(grd_err_ls, axis=0) / grd_err_ls.shape[0]
+                    grd_err = jnp.linalg.norm(grd_err.squeeze(), axis=0) / grd_err.shape[0]
+
+                    # Compute torques and error
+                    torque, dtau = compute_torque_with_error(mf.mol, grd_tot, grd_err)
+                    
+                    grd_ee_en_ke = jnp.mean(grd_ee_en_ke_sum, axis=0).mean(axis=0)
+                    grd_pulay = jnp.mean(grd_pulay_sum, axis=0).mean(axis=0)
+                else:
+                    grd_tot = grd_nn + grd_ee_en_ke + grd_pulay
+            else:
+                grd_ee_en_ke = jnp.zeros_like(grd_nn)
+                grd_pulay = jnp.zeros_like(grd_nn)
+                grd_ke = jnp.zeros_like(grd_nn)
+
+            # Write results
+            with open(fname_log, 'w', buffering=1) as fout:
+                with jnp.printoptions(precision=5, suppress=True):
+                    print('grd_nn\n', grd_nn, file=fout)
+                    print('grd_ee_en_ke\n', grd_ee_en_ke, file=fout)
+                    print('grd_ke\n', grd_ke, file=fout)
+                    print('grd_pulay\n', grd_pulay, file=fout)
+                    print('grd_tot\n', grd_tot, file=fout)
+                    print('grd_tot\n', grd_tot)
+                    if compute_error:
+                        print('grd_err\n', grd_err, file=fout)
+                        print('grd_err\n', grd_err)
+                        print('torque\n', torque, file=fout)
+                        print('trq_err\n', dtau, file=fout)
+                        print('torque\n', torque)
+                        print('trq_err\n', dtau)
+            if compute_error:
+                return grd_tot, grd_err
+            else:
+                return grd_tot
 
     return vmc_run, vmc_gradient_with_space_warping
