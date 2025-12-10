@@ -6,15 +6,7 @@ from pyscf import gto, scf, cc
 from vmc_mlsw import get_vmc_func
 
 
-rng_key = jax.random.key(888)
-
-# No optimizable Jastrow parameters:
-params_jastrow = {
-    "J1_params" : jnp.array([48.89, 8.93]), #4.2, 4.2]),  # H_1, H_2
-    "J2_params" : jnp.array([1.78,  0.917]) #0.6046799, 0.6046799])
-}
-
-# LiH molecule
+# Set H2 molecule
 mol = gto.M(atom='''
 Li       0.000000    0.00    0.00
 H        0.000000    0.00    3.40
@@ -36,11 +28,11 @@ postmf = cc.CCSD(mf).run()
 cc_grad = postmf.nuc_grad_method()
 cc_grad.kernel()
 
-#nuc_crds = jnp.array(mol.atom_coords(unit='Bohr'))
-#print('nuc_crds(Bohr)\n', nuc_crds)
-
-
-chkfile_grd = 'LiH_vmc_631gd_grd.hdf5'
+# Optimized Jastrow parameters
+params_jastrow = {
+    "J1_params" : jnp.array([48.89, 8.93]), #4.2, 4.2]),  # H_1, H_2
+    "J2_params" : jnp.array([1.78,  0.917]) #0.6046799, 0.6046799])
+}
 
 # H: aug-cc-pVTZ | Li: aug-cc-pVTZ
 cgto_coeff_atz = {
@@ -53,8 +45,9 @@ cgto_coeff_atz = {
         },
 }
 
-
+chkfile = 'LiH_vmc_atz.hdf5'
 reflection_op_list = ['I', 'x', 'y', 'xy']
+rng_key = 888
 l_cusp = True
 cgto_coeff = None
 if l_cusp:
@@ -64,7 +57,7 @@ vmc_run, vmc_grad =\
                 get_vmc_func(mf,
                      params_jastrow,
                      scheme='scheme1',
-                     chkfile_grd=chkfile_grd,
+                     chkfile=chkfile,
                      cgto_coeff=cgto_coeff,
                      reflection_op_list=reflection_op_list)
 
@@ -79,4 +72,4 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    grd = vmc_grad (fname_log='vmc_LiH_grd_atz_l34.log')
+    grd, grd_err = vmc_grad (fname_log='vmc_LiH_grd_atz_l34.log')
