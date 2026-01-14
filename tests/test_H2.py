@@ -44,7 +44,7 @@ vmc_run, vmc_grad \
                    cusp_scheme='Quady2025',
                    gr_scheme='scheme1',
                    chkfile_prefix=chkfile_prefix,
-                   reflection_op_list=reflection_op_list)
+                   symmop_list=reflection_op_list)
 
 l_grad = True
 vmc_run(rng_key,

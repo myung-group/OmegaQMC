@@ -1,6 +1,7 @@
 import sys
 import pathlib
 from typing import Callable, List, Optional, Tuple
+from datetime import datetime
 import jax
 import jax.numpy as jnp
 # from functools import partial
@@ -18,16 +19,14 @@ from .symm.electron_reflection import (
     water_cluster_reflection_electrons
 )
 from .vmc_utils import (
-    date,
     batched_binning_analysis,
     batched_binning_analysis_grds,
     compute_torque_with_error
 )
 # Reflection operation name to ID mapping
-REFLECTION_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
+SYMMOP_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
 
 # VMC hyperparameters
-EQUIL_MC_STEPS = 5000
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
 
@@ -125,11 +124,11 @@ def get_vmc_func(mf,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  chkfile_prefix='vmc',
-                 reflection_op_list=["I"],
+                 symmop_list=["I"],
                  cluster_idx: [List[int]] = None) -> Tuple[Callable, Callable]:
-    assert reflection_op_list != []
-    reflection_ID_list = [REFLECTION_IDS[op] for op in reflection_op_list]
-    num_reflections = len(reflection_ID_list)
+    assert symmop_list != []
+    symmop_ID_list = [SYMMOP_IDS[op] for op in symmop_list]
+    num_symmops = len(symmop_ID_list)
 
     chkfile_name = chkfile_prefix + ".chk.h5"
     chkfile_name_grd = chkfile_prefix + "_grd.chk.h5"
@@ -172,7 +171,7 @@ def get_vmc_func(mf,
         print('water_sym\n', nuc_crds_sym)
         print('water_rot_mat', rot_mat)
 
-        for reflection_op in reflection_op_list:
+        for reflection_op in symmop_list:
             nuc_crds_op[reflection_op] = reflection_map[reflection_op](nuc_crds)
             nuc_crds_sym_op[reflection_op] = reflection_map[reflection_op](nuc_crds_sym)
 
@@ -180,6 +179,8 @@ def get_vmc_func(mf,
     # mass_center = jnp.einsum('i,ij->j',
     #                          atomic_masses, nuc_crds)/atomic_masses.sum()
     # relative_nuc_pos = nuc_crds - mass_center
+    timestamp_init = datetime.now()
+    print("Begin time: {}".format(timestamp_init))
 
     if cusp_scheme == "Quady2025":
         params_cusp = {}
@@ -378,7 +379,7 @@ def get_vmc_func(mf,
             grd_ee_en = []
             grd_logpsi = []
             grd_ke = []
-            for r_op in reflection_op_list:
+            for r_op in symmop_list:
                 batch_samples = reflection_map[r_op](
                     sampled_walkers[start_idx:end_idx, :, :]
                     )
@@ -553,9 +554,11 @@ def get_vmc_func(mf,
         print("ℹ️ Adjusted batch size, number of batches: "
               f"{batch_size}, {num_batches}")
         print("# block_cnt        E_loc_mean      E_loc_std"
-              "       eePotential     enPotential     Kinetic",
+              "       eePotential     enPotential     Kinetic"
+              "          ∆t_block",
               file=fout)
 
+        timestamp_prev = datetime.now()
         # Main sampling phase with pre-allocated arrays
         for block_cnt in range(block_cnt_start,
                                block_cnt_start+num_blocks):
@@ -589,8 +592,11 @@ def get_vmc_func(mf,
             E_b.append(E_mean)              # append to block data
             # std_E_b.append(std_E_s)
 
+            timestamp_curr = datetime.now()
+            tdelta_block = (timestamp_curr - timestamp_prev).total_seconds()
             print(f"{block_cnt:>8d}{E_mean:>24.8e}{std_E_s:>16.8e}"
-                  f"{enr_ee:>16.8e}{enr_en:>16.8e}{enr_ke:>16.8e}",
+                  f"{enr_ee:>16.8e}{enr_en:>16.8e}{enr_ke:>16.8e}"
+                  f"{tdelta_block:>16.6f}",
                   file=fout)
 
             if l_grad:
@@ -601,6 +607,8 @@ def get_vmc_func(mf,
 
             # if std_E_s < tolerance_enr_std_per_elec * nelec:
             #     break
+
+            timestamp_prev = timestamp_curr
 
         if not (fname_log is None
                 or (isinstance(fname_log, str) and fname_log == "")):
@@ -615,6 +623,11 @@ def get_vmc_func(mf,
                 f.create_dataset('block_count', data=block_cnt,
                                  dtype=jnp.int32)
                 f.create_dataset('grd_nn', data=grad_nn_nuc)
+
+        timestamp_fin = datetime.now()
+        print("End time: {}\t({:.6f} seconds total)"
+              .format(timestamp_fin,
+                      (timestamp_fin-timestamp_init).total_seconds()))
 
     # --- Gradient post-processing ---
     def vmc_gradient_with_space_warping(

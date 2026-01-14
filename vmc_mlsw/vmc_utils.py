@@ -3,7 +3,6 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
 from jax import lax
-from datetime import datetime
 
 jax.config.update("jax_enable_x64", True)
 
@@ -65,7 +64,7 @@ def batched_binning_analysis(x, batch_size=100):
     n_walkers = x.shape[1] # (samples, walkers)
     results = []
     for i in range(0, n_walkers, batch_size):
-        x_chunk = x[:, i:i+batch_size] 
+        x_chunk = x[:, i:i+batch_size]
         xbar, serr, s, kappa = jax.vmap(
             do_binning_analysis, in_axes=1, out_axes=(0,0,0,0)
             )(x_chunk)
@@ -83,7 +82,7 @@ def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
     n_walkers = grd_tot_ls.shape[1] # (samples, walkers, N_nuclear, xyz)
     results = []
     for i in range(0, n_walkers, batch_size):
-        sub = grd_tot_ls[:, i:i+batch_size]  
+        sub = grd_tot_ls[:, i:i+batch_size]
         xbar, serr, s, kappa = do_binning_analysis_grds(sub)
         results.append((xbar, serr, s, kappa))
     xbar_all = jnp.concatenate([r[0] for r in results], axis=0)
@@ -105,13 +104,13 @@ def compute_torque_with_error(mol, grd, grd_err):
     x, y, z = coords.T
     dFx, dFy, dFz = grd_err.T
     dtau_sq = jnp.stack([
-        (y * dFz)**2 + (z * dFy)**2, 
-        (z * dFx)**2 + (x * dFz)**2, 
-        (x * dFy)**2 + (y * dFx)**2, 
+        (y * dFz)**2 + (z * dFy)**2,
+        (z * dFx)**2 + (x * dFz)**2,
+        (x * dFy)**2 + (y * dFx)**2,
     ])
     dtau_sq = jnp.sum(dtau_sq, axis=1)
     dtau = jnp.sqrt(dtau_sq)
-    
+
     return torque, dtau
 
 def compute_energy_with_error(chkfile):
@@ -129,6 +128,3 @@ def compute_energy_with_error(chkfile):
         e_err = jnp.linalg.norm(serr) / len(serr)
 
     return e_mean, e_err
-
-def date(fmt="%m/%d/%Y %H:%M:%S"):
-    return datetime.now().strftime(fmt)

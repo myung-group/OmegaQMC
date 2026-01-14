@@ -94,7 +94,7 @@ vmc_run, vmc_grad = get_vmc_func(
     scheme='scheme1',
     chkfile=chkfile,
     cgto_coeff=cgto_coeff,
-    reflection_op_list=reflection_op_list,
+    symmop_list=reflection_op_list,
     cluster_idx=None
 )
 
