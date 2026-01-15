@@ -23,8 +23,6 @@ from .vmc_utils import (
     batched_binning_analysis_grds,
     compute_torque_with_error
 )
-# Reflection operation name to ID mapping
-SYMMOP_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
 
 # VMC hyperparameters
 TARGET_ACCEPTANCE_RATE = 0.4
@@ -87,7 +85,7 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
 
 
 @jax.jit
-def apply_reflection_I(coords):
+def apply_identity(coords):
     return coords
 
 
@@ -104,18 +102,53 @@ def apply_reflection_y(coords):
 
 
 @jax.jit
-def apply_reflection_xy(coords):
-    """Apply reflection across yz-plane and xz-plane (- x,y-coordinate)."""
-    coords = coords.at[..., 0].multiply(-1)
-    coords = coords.at[..., 1].multiply(-1)
-    return coords
+def apply_reflection_z(coords):
+    """Apply reflection across xy-plane (- z-coordinate)."""
+    return coords.at[..., 2].multiply(-1)
 
 
-reflection_map = {
-    'I': apply_reflection_I,
+@jax.jit
+def apply_rotation_2(coords):
+    """Apply 180-degree rotation about z-axis (- x,y-coordinate)."""
+    return coords.at[..., [0, 1]].multiply(-1)
+
+
+@jax.jit
+def apply_rotation_p4(coords):
+    """Apply 90-degree ccw rotation about z-axis (-y, x)."""
+    return coords.at[..., [0, 1]].set(coords[..., [1, 0]]) \
+        .at[..., 0].multiply(-1)
+
+
+@jax.jit
+def apply_rotation_m4(coords):
+    """Apply 90-degree cw rotation about z-axis (y, -x)."""
+    return coords.at[..., [0, 1]].set(coords[..., [1, 0]]) \
+        .at[..., 1].multiply(-1)
+
+
+@jax.jit
+def apply_inversion(coords):
+    """Negate all coordinates."""
+    return coords.at[..., [0, 1, 2]].multiply(-1)
+
+
+symmetry_operations_map = {
+    'I': apply_identity,
+    '1': apply_identity,
+    '-I': apply_inversion,
+    '-1': apply_inversion,
+    'inv': apply_inversion,
     'x': apply_reflection_x,
     'y': apply_reflection_y,
-    'xy': apply_reflection_xy
+    'z': apply_reflection_z,
+    'sigma_x': apply_reflection_x,
+    'sigma_y': apply_reflection_y,
+    'sigma_z': apply_reflection_z,
+    'Cp4': apply_rotation_p4,
+    'Cm4': apply_rotation_m4,
+    'xy': apply_rotation_2,
+    'C2': apply_rotation_2
 }
 
 
@@ -127,8 +160,6 @@ def get_vmc_func(mf,
                  symmop_list=["I"],
                  cluster_idx: [List[int]] = None) -> Tuple[Callable, Callable]:
     assert symmop_list != []
-    symmop_ID_list = [SYMMOP_IDS[op] for op in symmop_list]
-    num_symmops = len(symmop_ID_list)
 
     chkfile_name = chkfile_prefix + ".chk.h5"
     chkfile_name_grd = chkfile_prefix + "_grd.chk.h5"
@@ -171,9 +202,9 @@ def get_vmc_func(mf,
         print('water_sym\n', nuc_crds_sym)
         print('water_rot_mat', rot_mat)
 
-        for reflection_op in symmop_list:
-            nuc_crds_op[reflection_op] = reflection_map[reflection_op](nuc_crds)
-            nuc_crds_sym_op[reflection_op] = reflection_map[reflection_op](nuc_crds_sym)
+        for s_op in symmop_list:
+            nuc_crds_op[s_op] = symmetry_operations_map[s_op](nuc_crds)
+            nuc_crds_sym_op[s_op] = symmetry_operations_map[s_op](nuc_crds_sym)
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
@@ -218,7 +249,7 @@ def get_vmc_func(mf,
         dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
         dist = jnp.where(dist < eps, eps, dist)
         weight = dist**(-4.0)
-        return weight/jnp.sum(weight, axis=-1, keepdims=True)
+        return weight / jnp.sum(weight, axis=-1, keepdims=True)
 
     rescale_fn = redistribute_scheme2 \
         if 'scheme2' in gr_scheme \
@@ -379,8 +410,8 @@ def get_vmc_func(mf,
             grd_ee_en = []
             grd_logpsi = []
             grd_ke = []
-            for r_op in symmop_list:
-                batch_samples = reflection_map[r_op](
+            for s_op in symmop_list:
+                batch_samples = symmetry_operations_map[s_op](
                     sampled_walkers[start_idx:end_idx, :, :]
                     )
                 g_ee, g_en, g_ke, g_logpsi = vmc_gradient_batch(batch_samples)

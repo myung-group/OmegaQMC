@@ -57,7 +57,7 @@ pprint.pprint(cgto_coeff)
 chkfile = 'water2_vmc.hdf5'
 
 # Set parameters
-reflection_op_list = ['I', 'x', 'y', 'xy']
+reflection_op_list = ['I', 'x', 'y', 'C2']
 rng_key = 888
 l_cusp = True
 if not l_cusp:

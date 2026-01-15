@@ -43,7 +43,7 @@ vmc_run, vmc_grad = get_vmc_func(mf, params_vmc_no_jastrow,
                                  cusp_scheme='Quady2025',
                                  gr_scheme='scheme1',
                                  chkfile_prefix=chkfile_prefix,
-                                 symmop_list=['I', 'x', 'y', 'xy'])
+                                 symmop_list=['I', 'x', 'y', 'C2'])
 
 l_grad = True
 vmc_run(rng_key,

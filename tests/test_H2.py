@@ -37,14 +37,15 @@ mf.kernel()
 
 chkfile_prefix = 'H2_vmc_{}'.format(bset_name)
 
-reflection_op_list = ['I', 'x', 'y', 'xy']
+# symmetry_op_list = ['I', 'x', y', 'C2']
+symmetry_op_list = ['I', 'C2', 'Cp4', 'Cm4']
 
 vmc_run, vmc_grad \
     = get_vmc_func(mf, params_jastrow,
                    cusp_scheme='Quady2025',
                    gr_scheme='scheme1',
                    chkfile_prefix=chkfile_prefix,
-                   symmop_list=reflection_op_list)
+                   symmop_list=symmetry_op_list)
 
 l_grad = True
 vmc_run(rng_key,
@@ -56,8 +57,8 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    forces = vmc_grad()
+    forces, std_forces = vmc_grad()
 
 
 def test_force():
-    assert forces[0, 2] == approx(-0.000819990074, abs=1e-6)
+    assert forces[0, 2] == approx(-0.000344851447, abs=1e-6)

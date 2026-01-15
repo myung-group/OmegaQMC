@@ -26,7 +26,7 @@ mol.build()
 mf = scf.RHF(mol)
 mf.kernel()
 
-# reflection_op_list = ['I', 'x', 'y', 'xy']
+# reflection_op_list = ['I', 'x', 'y', 'C2']
 
 vmcopt_run = get_vmcopt_func(mf, params_jastrow)
 params_jastrow_final, E_data = vmcopt_run(rng_key)

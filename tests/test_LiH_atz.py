@@ -36,8 +36,9 @@ mf.kernel()
 
 chkfile_prefix = 'LiH_vmc_aVTZ'
 
-reflection_op_list = ['I', 'x', 'y', 'xy']
-# 'xy' here means negate both x and y coordinates
+reflection_op_list = ['I', 'x', 'y', 'C2']
+# 'C2' here means 180-degree rotation
+#                 ... or negate both x and y coordinates
 
 vmc_run, vmc_grad \
     = get_vmc_func(mf, params_jastrow,
