@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from pyscf import gto, scf
 from vmc_mlsw.vmc_gto import get_vmc_func
+from vmc_mlsw.utils import format_basis_name
 # from vmc_mlsw.vmc_gto_symm import process_symmetric_diatomic_molecule
 from pytest import approx
 
@@ -34,8 +35,7 @@ mf.kernel()
 # nuc_crds = jnp.array(mol.atom_coords(unit='Bohr'))
 # print('nuc_crds(Bohr)\n', nuc_crds)
 
-
-chkfile_prefix = 'H2_vmc_{}'.format(bset_name)
+chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
 
 # symmetry_op_list = ['I', 'x', y', 'C2']
 symmetry_op_list = ['I', 'C2', 'Cp4', 'Cm4']

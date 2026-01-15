@@ -1,8 +1,9 @@
 import h5py
+from pyscf.gto.basis import _format_basis_name
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
-from jax import lax
+# from jax import lax
 
 jax.config.update("jax_enable_x64", True)
 
@@ -30,9 +31,11 @@ def do_binning_analysis(a):
         kappa_init = 1.0
         N = ac.shape[0]
         start = (N >> 1) + 1
+
         def cond_func(carry):
             i, kappa = carry
             return jnp.logical_and(i < N, ac[i] >= 0)
+
         def body_func(carry):
             i, kappa = carry
             return (i+1, kappa + 2.0*ac[i])
@@ -45,6 +48,7 @@ def do_binning_analysis(a):
     serr = s*(kappa/ssize)**(0.5)
     return (xbar, serr, s, kappa)
 
+
 @jax.jit
 def do_binning_analysis_grds(grd_tot_ls):
     # grd_tot_ls: (samples, walkers, N_nuclear, xyz)
@@ -52,34 +56,34 @@ def do_binning_analysis_grds(grd_tot_ls):
                 jax.vmap(     # nuclear axis
                     jax.vmap(     # xyz axis
                         do_binning_analysis,
-                        in_axes=1, out_axes=(0,0,0,0)
+                        in_axes=1, out_axes=(0, 0, 0, 0)
                     ),
-                    in_axes=1, out_axes=(0,0,0,0)
+                    in_axes=1, out_axes=(0, 0, 0, 0)
                 ),
-                in_axes=1, out_axes=(0,0,0,0)
+                in_axes=1, out_axes=(0, 0, 0, 0)
     )(grd_tot_ls)
 
 
 def batched_binning_analysis(x, batch_size=100):
-    n_walkers = x.shape[1] # (samples, walkers)
+    n_walkers = x.shape[1]      # (samples, walkers)
     results = []
     for i in range(0, n_walkers, batch_size):
         x_chunk = x[:, i:i+batch_size]
         xbar, serr, s, kappa = jax.vmap(
-            do_binning_analysis, in_axes=1, out_axes=(0,0,0,0)
+            do_binning_analysis, in_axes=1, out_axes=(0, 0, 0, 0)
             )(x_chunk)
         results.append((xbar, serr, s, kappa))
 
     xbar_all = jnp.concatenate([r[0] for r in results])
     serr_all = jnp.concatenate([r[1] for r in results])
-    s_all    = jnp.concatenate([r[2] for r in results])
-    kappa_all= jnp.concatenate([r[3] for r in results])
+    s_all = jnp.concatenate([r[2] for r in results])
+    kappa_all = jnp.concatenate([r[3] for r in results])
 
     return xbar_all, serr_all, s_all, kappa_all
 
 
 def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
-    n_walkers = grd_tot_ls.shape[1] # (samples, walkers, N_nuclear, xyz)
+    n_walkers = grd_tot_ls.shape[1]     # (samples, walkers, N_nuclear, xyz)
     results = []
     for i in range(0, n_walkers, batch_size):
         sub = grd_tot_ls[:, i:i+batch_size]
@@ -87,8 +91,8 @@ def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
         results.append((xbar, serr, s, kappa))
     xbar_all = jnp.concatenate([r[0] for r in results], axis=0)
     serr_all = jnp.concatenate([r[1] for r in results], axis=0)
-    s_all    = jnp.concatenate([r[2] for r in results], axis=0)
-    kappa_all= jnp.concatenate([r[3] for r in results], axis=0)
+    s_all = jnp.concatenate([r[2] for r in results], axis=0)
+    kappa_all = jnp.concatenate([r[3] for r in results], axis=0)
     return xbar_all, serr_all, s_all, kappa_all
 
 
@@ -113,6 +117,7 @@ def compute_torque_with_error(mol, grd, grd_err):
 
     return torque, dtau
 
+
 def compute_energy_with_error(chkfile):
     with h5py.File(chkfile, 'r') as f:
         dict_grd_samples = {}
@@ -128,3 +133,7 @@ def compute_energy_with_error(chkfile):
         e_err = jnp.linalg.norm(serr) / len(serr)
 
     return e_mean, e_err
+
+
+def format_basis_name(basisname: str):
+    return _format_basis_name(basisname).replace('*', 's')

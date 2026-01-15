@@ -18,7 +18,7 @@ from .symm.electron_reflection import (
     water_dimer_reflection_electrons,
     water_cluster_reflection_electrons
 )
-from .vmc_utils import (
+from .utils import (
     batched_binning_analysis,
     batched_binning_analysis_grds,
     compute_torque_with_error
