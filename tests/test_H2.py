@@ -37,8 +37,10 @@ mf.kernel()
 
 chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
 
-# symmetry_op_list = ['I', 'x', y', 'C2']
-symmetry_op_list = ['I', 'C2', 'Cp4', 'Cm4']
+# symmetry_op_list = ['I', 'x', 'y', 'C2']
+symmetry_op_list = ['I', 'C2']
+# symmetry_op_list = ['I', 'C2', 'Cp4', 'Cm4']
+# symmetry_op_list = ['I']
 
 vmc_run, vmc_grad \
     = get_vmc_func(mf, params_jastrow,

@@ -10,9 +10,9 @@ jax.config.update("jax_enable_x64", True)
 
 @jax.jit
 def do_binning_analysis(a):
-    ssize = a.shape[0]
+    num_steps = a.shape[0]
     xbar = jnp.mean(a)
-    s = jnp.std(a)
+    sdev = jnp.std(a)
     # ac = jnp.correlate(a-xbar, a-xbar, mode='full')
     x = a - xbar
     ac = fftconvolve(x, x[::-1], mode="full")
@@ -26,7 +26,7 @@ def do_binning_analysis(a):
                 break
             else:
                 kappa += (2.0*ac[i1])
-        serr = s*(kappa/ssize)**(0.5)
+        serr = s*(kappa/num_steps)**(0.5)
         """
         kappa_init = 1.0
         N = ac.shape[0]
@@ -45,13 +45,13 @@ def do_binning_analysis(a):
         return kappa
 
     kappa = compute_kappa(ac)
-    serr = s*(kappa/ssize)**(0.5)
-    return (xbar, serr, s, kappa)
+    serr = sdev*(kappa/num_steps)**(0.5)
+    return (xbar, serr, sdev, kappa)
 
 
 @jax.jit
 def do_binning_analysis_grds(grd_tot_ls):
-    # grd_tot_ls: (samples, walkers, N_nuclear, xyz)
+    # grd_tot_ls.shape == (samples, num_walkers, num_nuc, xyz)
     return jax.vmap(      # walker axis
                 jax.vmap(     # nuclear axis
                     jax.vmap(     # xyz axis
@@ -83,7 +83,8 @@ def batched_binning_analysis(x, batch_size=100):
 
 
 def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
-    n_walkers = grd_tot_ls.shape[1]     # (samples, walkers, N_nuclear, xyz)
+    # grd_tot_ls.shape == (num_steps_per_block, num_walkers, num_nuc, xyz)
+    n_walkers = grd_tot_ls.shape[1]
     results = []
     for i in range(0, n_walkers, batch_size):
         sub = grd_tot_ls[:, i:i+batch_size]
@@ -94,6 +95,18 @@ def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
     s_all = jnp.concatenate([r[2] for r in results], axis=0)
     kappa_all = jnp.concatenate([r[3] for r in results], axis=0)
     return xbar_all, serr_all, s_all, kappa_all
+
+
+def compute_torque(mol, grd):
+    coords = jnp.array([mol.atom_coord(i) for i in range(mol.natm)])
+    masses = jnp.array(mol.atom_mass_list())
+    # Center of mass
+    ref = jnp.average(coords, axis=0, weights=masses)
+    # Compute torque
+    r = coords - ref
+    torque = jnp.sum(jnp.cross(r, -grd), axis=0)
+
+    return torque
 
 
 def compute_torque_with_error(mol, grd, grd_err):
