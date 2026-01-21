@@ -148,5 +148,13 @@ def compute_energy_with_error(chkfile):
     return e_mean, e_err
 
 
-def format_basis_name(basisname: str):
-    return _format_basis_name(basisname).replace('*', 's')
+def format_basis_name(basisname: str | dict):
+    if isinstance(basisname, dict):
+        # Get all string values and find the longest one
+        string_values = [v for v in basisname.values() if isinstance(v, str)]
+        if string_values:
+            return _format_basis_name(max(string_values, key=len)).replace('*', 's')
+        else:
+            return "gen"
+    else:
+        return _format_basis_name(basisname).replace('*', 's')

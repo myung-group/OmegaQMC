@@ -14,13 +14,13 @@ params_vmc_no_jastrow = {
     "J2_params": jnp.array([])
 }
 
-# atoms_string = '''
-# O                0.   0.   0.
-# H                0.   1.52610182  1.12172672
-# H                0.  -1.51745721  1.11537270
-# '''
-atoms_string = "H2O-expt.xyz"
-modrv = generate_molecular_orbitals(atoms_string, units="Angstrom",
+atoms_string = '''
+O                0.   0.   0.
+H                0.   1.52610182  1.12172672
+H                0.  -1.51745721  1.11537270
+'''
+
+modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
                                     basis=bset_name)
 
 chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))

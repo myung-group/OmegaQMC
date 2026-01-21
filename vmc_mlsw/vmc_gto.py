@@ -91,7 +91,7 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
 def generate_molecular_orbitals(astr: str,
                                 unit: str = None, units: str = "Bohr",
                                 spin: int = 0,
-                                basis: str = "aug-cc-pVTZ",
+                                basis: str | dict = "aug-cc-pVTZ",
                                 postHF: str = None):
     """ PySCF wrapper """
     if unit is not None:
