@@ -713,24 +713,24 @@ def get_vmc_func(mf,
                 # Pulay force contribution
                 d_enr = local_energies - enr_mean
 
-                # num_samples_per_block, nelec, 3 == grd_ee_en.shape
+                # num_samples_per_block, num_nuc, 3 == grd_ee_en.shape
                 num_steps_per_block, num_walkers = local_energies.shape
                 if compute_errors:
                     # Regroup
                     grd_ee_en = grd_ee_en.reshape(num_steps_per_block,
-                                                  num_walkers, nelec, 3)
+                                                  num_walkers, num_nuc, 3)
                     grd_ke = grd_ke.reshape(num_steps_per_block,
-                                            num_walkers, nelec, 3)
+                                            num_walkers, num_nuc, 3)
                     grd_logpsi = grd_logpsi.reshape(num_steps_per_block,
-                                                    num_walkers, nelec, 3)
+                                                    num_walkers, num_nuc, 3)
                     grd_pulay = 2.0 * jnp.einsum('sw,swnK->swnK',
                                                  d_enr, grd_logpsi)
                     # grd_pulay = grd_pulay.reshape(num_steps_per_block,
-                    #                               num_walkers, nelec, 3)
+                    #                               num_walkers, num_nuc, 3)
 
                     grd_nn_sw = jnp.broadcast_to(
                         grd_nn[jnp.newaxis, jnp.newaxis, :, :],
-                        (num_steps_per_block, num_walkers, nelec, 3)
+                        (num_steps_per_block, num_walkers, num_nuc, 3)
                         )
                     grd_arrays = [grd_nn_sw,
                                   grd_ee_en, grd_ke,
@@ -820,12 +820,11 @@ def get_vmc_func(mf,
                                            -grd_tot[i, 0], grd_err[i, 0],
                                            -grd_tot[i, 1], grd_err[i, 1],
                                            -grd_tot[i, 2], grd_err[i, 2]))
-                    fout.write("Total torques\n")
-                    fout.write("{:4s}{:>16.6g} ± {:>12.6g}"
+                    fout.write("Total torque\n")
+                    fout.write("    {:>16.6g} ± {:>12.6g}"
                                "{:>16.6g} ± {:>12.6g}"
                                "{:>16.6g} ± {:>12.6g}\n"
-                               .format(mf.mol.atom_symbol(i),
-                                       torque[0], dtau[0],
+                               .format(torque[0], dtau[0],
                                        torque[1], dtau[1],
                                        torque[2], dtau[2]))
                 else:
@@ -836,10 +835,9 @@ def get_vmc_func(mf,
                                            -grd_tot[i, 0],
                                            -grd_tot[i, 1],
                                            -grd_tot[i, 2]))
-                    fout.write("Total torques\n")
-                    fout.write("{:4s}{:>16.6g}{:>16.6g}{:>16.6g}\n"
-                               .format(mf.mol.atom_symbol(i),
-                                       torque[0], torque[1], torque[2]))
+                    fout.write("Total torque\n")
+                    fout.write("    {:>16.6g}{:>16.6g}{:>16.6g}\n"
+                               .format(torque[0], torque[1], torque[2]))
                 fout.write("\n")
 
                 if not (fname_log is None

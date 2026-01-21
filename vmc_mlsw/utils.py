@@ -98,7 +98,7 @@ def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
 
 
 def compute_torque(mol, grd):
-    coords = jnp.array([mol.atom_coord(i) for i in range(mol.natm)])
+    coords = jnp.array(mol.atom_coords())
     masses = jnp.array(mol.atom_mass_list())
     # Center of mass
     ref = jnp.average(coords, axis=0, weights=masses)
@@ -110,7 +110,7 @@ def compute_torque(mol, grd):
 
 
 def compute_torque_with_error(mol, grd, grd_err):
-    coords = jnp.array([mol.atom_coord(i) for i in range(mol.natm)])
+    coords = jnp.array(mol.atom_coords())
     masses = jnp.array(mol.atom_mass_list())
     # Center of mass
     ref = jnp.average(coords, axis=0, weights=masses)
