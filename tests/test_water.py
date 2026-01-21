@@ -1,14 +1,12 @@
-import jax.numpy as jnp
 import jax
-# from functools import partial
-
-from pyscf import gto, scf
-from vmc_mlsw import get_vmc_func
+import jax.numpy as jnp
+from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
+from vmc_mlsw.utils import format_basis_name
 # from vmc_mlsw.vmc_gto_symm import process_symmetric_water_molecule
 
 rng_key = jax.random.key(777)
 bset_name = "cc-pVDZ"
-# other choices: 6-31G, cc-pVDZ
+# other choices: 6-31G, cc-pVDZ, etc.
 
 # No optimizable Jastrow parameters:
 params_vmc_no_jastrow = {
@@ -16,30 +14,18 @@ params_vmc_no_jastrow = {
     "J2_params": jnp.array([])
 }
 
-mol = gto.M(
-              atom='''
-O                0.   0.   0.
-H                0.   1.52610182  1.12172672
-H                0.  -1.51745721  1.11537270
-''',
-              basis=bset_name,
-              unit='Ang'
-          )
-# O        0.000000  0.000000  0.000000
-# H        0.000000  0.000000  0.957800
-# H        0.927385  0.000000 -0.239451
-mol.build()
-mf = scf.RHF(mol)
-mf.kernel()
-mf_grad = mf.nuc_grad_method()
-grad = mf_grad.kernel()
+# atoms_string = '''
+# O                0.   0.   0.
+# H                0.   1.52610182  1.12172672
+# H                0.  -1.51745721  1.11537270
+# '''
+atoms_string = "H2O-expt.xyz"
+modrv = generate_molecular_orbitals(atoms_string, units="Angstrom",
+                                    basis=bset_name)
 
-# nuc_crds = mol.atom_coords(unit='Bohr')
-# print('nuc_crds(Bohr)\n', nuc_crds)
+chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 
-chkfile_prefix = 'H2O_vmc_{}'.format(bset_name)
-
-vmc_run, vmc_grad = get_vmc_func(mf, params_vmc_no_jastrow,
+vmc_run, vmc_grad = get_vmc_func(modrv, params_vmc_no_jastrow,
                                  cusp_scheme='Quady2025',
                                  gr_scheme='scheme1',
                                  chkfile_prefix=chkfile_prefix,
@@ -55,4 +41,4 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    grd = vmc_grad()
+    grd = vmc_grad(compute_errors=True)

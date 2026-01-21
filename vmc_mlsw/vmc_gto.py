@@ -2,6 +2,8 @@ import sys
 import pathlib
 from typing import Callable, List, Optional, Tuple
 from datetime import datetime
+import numpy as np
+from pyscf import gto, scf
 import jax
 import jax.numpy as jnp
 # from functools import partial
@@ -9,6 +11,7 @@ import h5py
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 from .symm.water_rotation_matrix import symmetrize_water_molecule
+from .symm.operations import symmetry_operations_map
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
@@ -85,72 +88,44 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
     return jnp.exp(log_step)
 
 
-@jax.jit
-def apply_identity(coords):
-    return coords
+def generate_molecular_orbitals(astr: str,
+                                unit: str = None, units: str = "Bohr",
+                                spin: int = 0,
+                                basis: str = "aug-cc-pVTZ",
+                                postHF: str = None):
+    """ PySCF wrapper """
+    if unit is not None:
+        units = unit
+        # "unit" (sic) takes precedence
+    if astr.endswith(".xyz") \
+            and (units.upper().startswith("B")
+                 or units.upper().startswith("AU")):
+        print("⚠️ WARNING! XYZ input uses Å units by default, "
+              "but the units specified by the user is Bohrs.")
 
+    mol = gto.M(atom=astr, basis=basis, unit=units)
+    # see pyscf.gto.mole.is_au(unit)
 
-@jax.jit
-def apply_reflection_x(coords):
-    """Apply reflection across yz-plane (- x-coordinate)."""
-    return coords.at[..., 0].multiply(-1)
+    coords = mol.atom_coords()
+    masses = mol.atom_mass_list()
+    centroid = np.average(coords, axis=0, weights=masses)
+    mol.set_geom_(coords - centroid, unit=units)
 
+    mol.build()
+    mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
+    mf.kernel()
+    # mf_grad = mf.nuc_grad_method()
+    # grad = mf_grad.kernel()
 
-@jax.jit
-def apply_reflection_y(coords):
-    """Apply reflection across xz-plane (- y-coordinate)."""
-    return coords.at[..., 1].multiply(-1)
+    if postHF is not None:
+        if postHF == "CCSD":
+            from pyscf import cc
+            postmf = cc.CCSD(mf).run()
+            # cc_grad = postmf.nuc_grad_method()
+            # cc_grad.kernel()
+            return postmf
 
-
-@jax.jit
-def apply_reflection_z(coords):
-    """Apply reflection across xy-plane (- z-coordinate)."""
-    return coords.at[..., 2].multiply(-1)
-
-
-@jax.jit
-def apply_rotation_2(coords):
-    """Apply 180-degree rotation about z-axis (- x,y-coordinate)."""
-    return coords.at[..., [0, 1]].multiply(-1)
-
-
-@jax.jit
-def apply_rotation_p4(coords):
-    """Apply 90-degree ccw rotation about z-axis (-y, x)."""
-    return coords.at[..., [0, 1]].set(coords[..., [1, 0]]) \
-        .at[..., 0].multiply(-1)
-
-
-@jax.jit
-def apply_rotation_m4(coords):
-    """Apply 90-degree cw rotation about z-axis (y, -x)."""
-    return coords.at[..., [0, 1]].set(coords[..., [1, 0]]) \
-        .at[..., 1].multiply(-1)
-
-
-@jax.jit
-def apply_inversion(coords):
-    """Negate all coordinates."""
-    return coords.at[..., [0, 1, 2]].multiply(-1)
-
-
-symmetry_operations_map = {
-    'I': apply_identity,
-    '1': apply_identity,
-    '-I': apply_inversion,
-    '-1': apply_inversion,
-    'inv': apply_inversion,
-    'x': apply_reflection_x,
-    'y': apply_reflection_y,
-    'z': apply_reflection_z,
-    'sigma_x': apply_reflection_x,
-    'sigma_y': apply_reflection_y,
-    'sigma_z': apply_reflection_z,
-    'Cp4': apply_rotation_p4,
-    'Cm4': apply_rotation_m4,
-    'xy': apply_rotation_2,
-    'C2': apply_rotation_2
-}
+    return mf
 
 
 def get_vmc_func(mf,

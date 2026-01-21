@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
-from pyscf import gto, scf
-# , cc
-from vmc_mlsw import get_vmc_func
+from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
 
 rng_key = jax.random.key(888)
 
@@ -15,33 +13,23 @@ params_jastrow = {
     "J2_params": jnp.array([1.78,  0.917])
 }
 
-# LiH molecule
-mol = gto.M(atom='''
-Li       0.000000    0.00    0.00
-H        0.000000    0.00    {:.6f}
-'''.format(L),
-            basis=bset_name,
-            unit='Bohr')
+atoms_string = '''
+    Li       0.000000    0.00    0.00
+    H        0.000000    0.00    {:.6f}
+'''.format(L)
 
-mol.build()
-mf = scf.RHF(mol)
-mf.kernel()
-
-# mf_grad = mf.nuc_grad_method()
-# grad = mf_grad.kernel()
-
-# postmf = cc.CCSD(mf).run()
-# cc_grad = postmf.nuc_grad_method()
-# cc_grad.kernel()
+modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
+                                    basis=bset_name)
 
 chkfile_prefix = 'LiH_vmc_aVTZ'
 
-reflection_op_list = ['I', 'x', 'y', 'C2']
+# reflection_op_list = ['I', 'x', 'y', 'C2']
+reflection_op_list = ['I', 'C2']
 # 'C2' here means 180-degree rotation
 #                 ... or negate both x and y coordinates
 
 vmc_run, vmc_grad \
-    = get_vmc_func(mf, params_jastrow,
+    = get_vmc_func(modrv, params_jastrow,
                    cusp_scheme='Quady2025',
                    gr_scheme='scheme1',
                    chkfile_prefix=chkfile_prefix,
@@ -57,4 +45,4 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    forces = vmc_grad()
+    forces = vmc_grad(compute_errors=True)

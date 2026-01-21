@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from pyscf import gto, scf
+from vmc_mlsw import generate_molecular_orbitals
 from vmc_mlsw.vmcopt_gto_fast import get_vmcopt_func
 
 rng_key = jax.random.key(888)
@@ -14,21 +14,17 @@ params_jastrow = {
     "J2_params": jnp.array([1.5846,  0.9614])
 }
 
-# LiH molecule
-mol = gto.M(atom='''
-Li       0.000000    0.00    0.00
-H        0.000000    0.00    {:.6f}
-'''.format(L),
-            basis=bset_name,
-            unit='Bohr')
+atoms_string = '''
+    Li       0.000000    0.00    0.00
+    H        0.000000    0.00    {:.6f}
+'''.format(L)
 
-mol.build()
-mf = scf.RHF(mol)
-mf.kernel()
+modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
+                                    basis=bset_name)
 
 # reflection_op_list = ['I', 'x', 'y', 'C2']
 
-vmcopt_run = get_vmcopt_func(mf, params_jastrow)
+vmcopt_run = get_vmcopt_func(modrv, params_jastrow)
 params_jastrow_final, E_data = vmcopt_run(rng_key)
 print(params_jastrow_final)
 print(E_data)

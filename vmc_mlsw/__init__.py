@@ -1,6 +1,6 @@
 """VMC-MLSW"""
 
-from vmc_mlsw.vmc_gto import get_vmc_func
+from vmc_mlsw.vmc_gto import generate_molecular_orbitals, get_vmc_func
 from vmc_mlsw.vmcopt_gto import get_vmcopt_func
 #from vmc_mlsw import psi_gto
 #from vmc_mlsw import psi_gto_cusp
