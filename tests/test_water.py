@@ -41,4 +41,4 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    grd = vmc_grad(compute_errors=True)
+    grd = vmc_grad()

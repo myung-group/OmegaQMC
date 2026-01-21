@@ -49,7 +49,7 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    forces, std_forces = vmc_grad(compute_errors=True)
+    forces, std_forces = vmc_grad()
 
 
 def test_force():
