@@ -1,6 +1,6 @@
 import sys
 import pathlib
-from typing import Callable, List, Optional, Tuple
+from collections.abc import Callable, Collection
 from datetime import datetime
 import numpy as np
 from pyscf import gto, scf
@@ -21,12 +21,6 @@ from .symm.electron_reflection import (
     water_dimer_reflection_electrons,
     water_cluster_reflection_electrons
 )
-from .utils import (
-    batched_binning_analysis,
-    batched_binning_analysis_grds,
-    compute_torque,
-    compute_torque_with_error
-)
 
 # VMC hyperparameters
 TARGET_ACCEPTANCE_RATE = 0.4
@@ -37,7 +31,8 @@ jax.config.update("jax_enable_x64", True)
 
 def _get_electron_reflection_fn(Z_charges: jnp.ndarray,
                                 nuc_crds: jnp.ndarray,
-                                cluster_idx: Optional[List[int]]) -> Callable:
+                                cluster_idx: Collection[int] | None) \
+                                    -> Callable:
     """Select appropriate electron reflection function
     based on molecular composition."""
     charge_tuple = tuple(Z_charges)
@@ -129,20 +124,41 @@ def generate_molecular_orbitals(astr: str,
 
 
 def get_vmc_func(mf,
-                 params_corr,
+                 params_corr: dict | None,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  prefix='vmc',
                  symmop_list=["I"],
-                 cluster_idx: [List[int]] = None) -> Tuple[Callable, Callable]:
+                 cluster_idx: Collection[int] = None) \
+                     -> tuple[Callable, Callable]:
     assert symmop_list != []
 
+    # check prefix
     suffixes_checked = [".chk.h5", ".grd.h5"]
     for s in suffixes_checked:
         if prefix.endswith(s):
             prefix = prefix[:-len(s)]
     ofname_chkpt = prefix + ".chk.h5"
     ofname_grd = prefix + ".grd.h5"
+
+    # check params_corr
+    if params_corr is None:
+        params_corr = dict()
+    else:
+        kList = []
+        for k, v in params_corr.items():
+            assert isinstance(k, str)
+            assert isinstance(v, jnp.ndarray)
+            if (k == "J1_params" or k == "J2_params") \
+                    and params_corr[k].shape[0] < 2:
+                jax.debug.print(
+                    f"⚠️ WARNING! Correlation parameter set \"{k}\" "
+                    "requires 2 elements, but the user provided less.  "
+                    "Deleting..."
+                    )
+                kList.append(k)
+        for k in kList:
+            del params_corr[k]
 
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
     eps = jnp.finfo(nuc_crds.dtype).eps     # softwired epsilon
@@ -241,16 +257,16 @@ def get_vmc_func(mf,
         return jax.grad(local_energy_ee)(e_pos)
 
     @jax.jit
-    def grad_fn_en(e_pos: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def grad_fn_en(e_pos: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(local_energy_en, argnums=(0, 1))(e_pos, nuc_crds)
 
     @jax.jit
-    def grad_fn_ke(e_pos: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def grad_fn_ke(e_pos: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(local_energy_ke,
                         argnums=(0, 1))(e_pos, nuc_crds, params_corr)
 
     @jax.jit
-    def grad_fn_logpsi(e_pos: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def grad_fn_logpsi(e_pos: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(log_trial_wavefunction,
                         argnums=(0, 1))(e_pos, nuc_crds, params_corr)
 
@@ -264,7 +280,7 @@ def get_vmc_func(mf,
     @jax.jit
     def metropolis_move_alle(rng_key: jax.Array,
                              elec_crds: jnp.ndarray,
-                             _step_size: float) -> Tuple[jnp.ndarray, bool]:
+                             _step_size: float) -> tuple[jnp.ndarray, bool]:
         """Single Metropolis-Hastings step with Gaussian proposal."""
         key_displace, key_accept = jax.random.split(rng_key)
 
@@ -310,7 +326,7 @@ def get_vmc_func(mf,
     @jax.jit
     def metropolis_move_1w(rng_key: jax.Array,
                            elec_crds: jnp.ndarray,
-                           _step_size: float) -> Tuple[jnp.ndarray, bool]:
+                           _step_size: float) -> tuple[jnp.ndarray, bool]:
         """Single-walker displacements"""
         key_dtype, key_prop, key_accept = jax.random.split(rng_key, 3)
 
@@ -346,7 +362,7 @@ def get_vmc_func(mf,
 
     # --- Gradient batch computation ---
     def vmc_gradient_batch(batch_samples: jnp.ndarray) \
-            -> Tuple[jnp.ndarray, ...]:
+            -> tuple[jnp.ndarray, ...]:
         grd_ee_elc = jax.vmap(grad_fn_ee)(batch_samples)
         grd_en_elc, grd_en_nuc = jax.vmap(grad_fn_en)(batch_samples)
         grd_ke_elc, grd_ke_nuc = jax.vmap(grad_fn_ke)(batch_samples)
@@ -436,7 +452,7 @@ def get_vmc_func(mf,
                 mc_timestep: float = 0.1,
                 fname_log: str = None,
                 mode_restart: bool = False,
-                l_grad: bool = False) -> None:
+                compute_gradients: bool = False) -> None:
         """VMC run with better memory management."""
         # tolerance_enr_std_per_elec=CHEMICAL_ACCURACY,
         if isinstance(rng_key, int):
@@ -564,7 +580,7 @@ def get_vmc_func(mf,
             g.create_dataset("ao_basis", data=" ".join(aobs))
             g.create_dataset("units", data=mf.mol.unit.upper())
 
-        if l_grad:
+        if compute_gradients:
             p = pathlib.Path(ofname_grd)
             if p.exists():
                 p.unlink()
@@ -630,7 +646,7 @@ def get_vmc_func(mf,
                   f"{tdelta_block:>16.6f}",
                   file=fout)
 
-            if l_grad:
+            if compute_gradients:
                 vmc_gradient_save(block_cnt,
                                   sampled_walkers.reshape(-1, nelec, 3),
                                   E_loc_sw,

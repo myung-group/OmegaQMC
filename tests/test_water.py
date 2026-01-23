@@ -39,7 +39,7 @@ vmc_run(rng_key,
         num_blocks=10,
         num_blocks_equil=5,       # MC blocks for equilibration
         mc_timestep=0.1,    # Brownian time; will be auto-adjusted
-        l_grad=l_grad)
+        compute_gradients=l_grad)
 
 if l_grad:
     grd = vmc_grad(prefix=chkfile_prefix)

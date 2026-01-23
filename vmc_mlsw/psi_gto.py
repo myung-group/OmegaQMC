@@ -257,17 +257,18 @@ def get_psi_fun(mf, params_cusp=None):
         u_vals = -Z_charges[:, None] * r / (1.0 + curr_params[:, None] * r)
         return jnp.sum(u_vals)
 
+    @jax.jit
     def log_trial_wavefunction(elec_crds, nuc_crds, curr_params):
         """Trial wavefunction."""
         ln_slater = log_slater_determinant(elec_crds, nuc_crds)
-        l_Jastrow1 = curr_params["J1_params"].shape[0] != 0
-        l_Jastrow2 = curr_params["J2_params"].shape[0] != 0
 
-        jastrow_term = J2_aa(elec_crds, curr_params["J2_params"]) \
-            + J2_ab(elec_crds, curr_params["J2_params"]) \
-            if l_Jastrow2 else 0.0
-        jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"]) \
-            if l_Jastrow1 else 0.0
+        jastrow_term = 0.0
+        if "J1_params" in curr_params:
+            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"])
+        if "J2_params" in curr_params:
+            jastrow_term += J2_aa(elec_crds, curr_params["J2_params"]) \
+                + J2_ab(elec_crds, curr_params["J2_params"])
+
         return ln_slater + jastrow_term
 
     @jax.jit
