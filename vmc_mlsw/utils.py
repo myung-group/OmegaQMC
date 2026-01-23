@@ -137,9 +137,9 @@ def compute_energy_with_error(chkfile):
     with h5py.File(chkfile, 'r') as f:
         dict_grd_samples = {}
 
-        for key, data in f.items():
+        for key, val in f.items():
             if key in ["E_w"]:
-                dict_grd_samples[key] = jnp.array(data[:])
+                dict_grd_samples[key] = jnp.array(val[:])
 
         walkers_energies = dict_grd_samples["E_w"]
         xbar, serr, s, kappa = batched_binning_analysis(walkers_energies)
@@ -191,20 +191,21 @@ def vmc_forces_with_space_warping(
         myMol = gto.M(atom=mole_data, basis="mini", unit=myUnits)
 
         dict_grd_samples = {}
-        for key, data in f.items():
-            if isinstance(data, h5py.Group):
-                continue
-            elif data.ndim == 0:
-                dict_grd_samples[key] = data[()]    # scalar
+        for key, val in f.items():
+            if isinstance(val, h5py.Group):
+                dict_grd_samples[key] = {}
+                for key2, val2 in val.items():
+                    if not val2.shape:
+                        dict_grd_samples[key][key2] = val2[()].decode()
+                    else:
+                        dict_grd_samples[key][key2] = jnp.array(val2)
+            elif val.ndim == 0:
+                dict_grd_samples[key] = val[()]    # scalar
             else:
-                dict_grd_samples[key] = jnp.array(data[:])
+                dict_grd_samples[key] = jnp.array(val[:])
 
-        # num_blocks = int(dict_grd_samples['num_blocks'])
-        grad_list \
-            = list(filter(lambda x: x.startswith("grd_logpsi_"), f.keys()))
-        block_nums = []
-        for g in grad_list:
-            block_nums.append(int(g[len("grd_logpsi_"):]))
+        block_nums = [int(k)
+                      for k in dict_grd_samples["local_energies"].keys()]
         block_nums.sort()
         # num_blocks = len(block_nums)
         # block_cnt_start = block_nums[0]
@@ -212,8 +213,8 @@ def vmc_forces_with_space_warping(
         loc_e_list = []
         for block_cnt in block_nums:
             local_energies \
-                = dict_grd_samples[f'local_energies_{block_cnt}']
-            loc_e_list.append(local_energies)
+                = dict_grd_samples["local_energies"][f'{block_cnt}']
+            loc_e_list.append(jnp.array(local_energies))
         enr_mean = jnp.vstack(loc_e_list).mean()
 
         # enr_std = dict_grd_samples['enr_std']
@@ -228,11 +229,11 @@ def vmc_forces_with_space_warping(
         grd_err_list = []
 
         for block_cnt in block_nums:
-            grd_ee_en = dict_grd_samples[f'grd_ee_en_{block_cnt}']
-            grd_logpsi = dict_grd_samples[f'grd_logpsi_{block_cnt}']
+            grd_ee_en = dict_grd_samples['grd_ee_en'][f'{block_cnt}']
+            grd_ke = dict_grd_samples['grd_ke'][f'{block_cnt}']
+            grd_logpsi = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
             local_energies \
-                = dict_grd_samples[f'local_energies_{block_cnt}']
-            grd_ke = jnp.array(f[f'grd_ke_{block_cnt}'][:])
+                = jnp.array(dict_grd_samples['local_energies'][f'{block_cnt}'])
 
             # Pulay force contribution
             d_enr = local_energies - enr_mean

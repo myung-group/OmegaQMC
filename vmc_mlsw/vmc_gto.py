@@ -430,19 +430,17 @@ def get_vmc_func(mf,
 
         # Save to HDF5
         with h5py.File(ofname_grd, "a") as f:
-            if f'grd_ee_en_{block_cnt}' in f.keys():
-                del f[f'grd_ee_en_{block_cnt}']
-            if f'grd_logpsi_{block_cnt}' in f.keys():
-                del f[f'grd_logpsi_{block_cnt}']
-            if f'local_energies_{block_cnt}' in f.keys():
-                del f[f'local_energies_{block_cnt}']
-            if f'grd_ke_{block_cnt}' in f.keys():
-                del f[f'grd_ke_{block_cnt}']
-            f.create_dataset(f'grd_ee_en_{block_cnt}', data=w_grd_ee_en)
-            f.create_dataset(f'grd_logpsi_{block_cnt}', data=w_grd_logpsi)
-            f.create_dataset(f'local_energies_{block_cnt}',
-                             data=local_energies)
-            f.create_dataset(f'grd_ke_{block_cnt}', data=w_grd_ke)
+            block_cnt_str = f'{block_cnt}'
+            for k in ['grd_ee_en', 'grd_ke', 'grd_logpsi', 'local_energies']:
+                if k not in f.keys():
+                    f.create_group(k)
+                if block_cnt_str in f['grd_ee_en'].keys():
+                    del f['grd_ee_en'][block_cnt_str]
+            f['grd_ee_en'].create_dataset(block_cnt_str, data=w_grd_ee_en)
+            f['grd_ke'].create_dataset(block_cnt_str, data=w_grd_ke)
+            f['grd_logpsi'].create_dataset(block_cnt_str, data=w_grd_logpsi)
+            f['local_energies'].create_dataset(block_cnt_str,
+                                               data=local_energies)
 
     # --- Main VMC run ---
     def vmc_run(rng_key: int | jnp.ndarray,
