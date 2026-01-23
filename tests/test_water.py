@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
+from vmc_mlsw.utils import vmc_forces_with_space_warping as vmc_grad
 from vmc_mlsw.utils import format_basis_name
 # from vmc_mlsw.vmc_gto_symm import process_symmetric_water_molecule
 
@@ -25,11 +26,11 @@ modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
 
 chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 
-vmc_run, vmc_grad = get_vmc_func(modrv, params_vmc_no_jastrow,
-                                 cusp_scheme='Quady2025',
-                                 gr_scheme='scheme1',
-                                 chkfile_prefix=chkfile_prefix,
-                                 symmop_list=['I', 'x', 'y', 'C2'])
+vmc_run = get_vmc_func(modrv, params_vmc_no_jastrow,
+                       cusp_scheme='Quady2025',
+                       gr_scheme='scheme1',
+                       prefix=chkfile_prefix,
+                       symmop_list=['I', 'x', 'y', 'C2'])
 
 l_grad = True
 vmc_run(rng_key,
@@ -41,4 +42,4 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    grd = vmc_grad()
+    grd = vmc_grad(prefix=chkfile_prefix)

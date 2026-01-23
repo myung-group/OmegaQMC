@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
+from vmc_mlsw.utils import vmc_forces_with_space_warping as vmc_grad
 from vmc_mlsw.utils import format_basis_name
 # from vmc_mlsw.vmc_gto_symm import process_symmetric_diatomic_molecule
 from pytest import approx
@@ -31,12 +32,12 @@ chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
 symmetry_op_list = ['I', 'C2']
 # symmetry_op_list = ['I', 'C2', 'Cp4', 'Cm4']
 # symmetry_op_list = ['I']
-
-vmc_run, vmc_grad \
+# , vmc_grad
+vmc_run \
     = get_vmc_func(modrv, params_jastrow,
                    cusp_scheme='Quady2025',
                    gr_scheme='scheme1',
-                   chkfile_prefix=chkfile_prefix,
+                   prefix=chkfile_prefix,
                    symmop_list=symmetry_op_list)
 
 l_grad = True
@@ -49,7 +50,7 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    forces, std_forces = vmc_grad()
+    forces, std_forces = vmc_grad(prefix=chkfile_prefix)
 
 
 def test_force():

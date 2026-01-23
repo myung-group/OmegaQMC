@@ -101,7 +101,7 @@ def generate_molecular_orbitals(astr: str,
             and (units.upper().startswith("B")
                  or units.upper().startswith("AU")):
         print("⚠️ WARNING! XYZ input uses Å units by default, "
-              "but the units specified by the user is Bohrs.")
+              "but the user has specified Bohrs.")
 
     mol = gto.M(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
@@ -132,13 +132,17 @@ def get_vmc_func(mf,
                  params_corr,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
-                 chkfile_prefix='vmc',
+                 prefix='vmc',
                  symmop_list=["I"],
                  cluster_idx: [List[int]] = None) -> Tuple[Callable, Callable]:
     assert symmop_list != []
 
-    chkfile_name = chkfile_prefix + ".chk.h5"
-    chkfile_name_grd = chkfile_prefix + "_grd.chk.h5"
+    suffixes_checked = [".chk.h5", ".grd.h5"]
+    for s in suffixes_checked:
+        if prefix.endswith(s):
+            prefix = prefix[:-len(s)]
+    ofname_chkpt = prefix + ".chk.h5"
+    ofname_grd = prefix + ".grd.h5"
 
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
     eps = jnp.finfo(nuc_crds.dtype).eps     # softwired epsilon
@@ -210,7 +214,7 @@ def get_vmc_func(mf,
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
         = local_energy
     enr_nn = local_energy_nn(nuc_crds)
-    grad_nn_nuc = jax.grad(local_energy_nn)(nuc_crds)
+    grd_nn = jax.grad(local_energy_nn)(nuc_crds)
 
     # --- Gradient sample redistribution schemes for space warping ---
     @jax.jit
@@ -409,7 +413,7 @@ def get_vmc_func(mf,
         w_grd_logpsi = jnp.vstack(w_grd_logpsi)
 
         # Save to HDF5
-        with h5py.File(chkfile_name_grd, "a") as f:
+        with h5py.File(ofname_grd, "a") as f:
             if f'grd_ee_en_{block_cnt}' in f.keys():
                 del f[f'grd_ee_en_{block_cnt}']
             if f'grd_logpsi_{block_cnt}' in f.keys():
@@ -431,7 +435,8 @@ def get_vmc_func(mf,
                 num_blocks: int = 1000, num_blocks_equil: int = 100,
                 mc_timestep: float = 0.1,
                 fname_log: str = None,
-                mode_restart: bool = False, l_grad: bool = False) -> None:
+                mode_restart: bool = False,
+                l_grad: bool = False) -> None:
         """VMC run with better memory management."""
         # tolerance_enr_std_per_elec=CHEMICAL_ACCURACY,
         if isinstance(rng_key, int):
@@ -461,7 +466,7 @@ def get_vmc_func(mf,
         # walkers.shape == (num_walkers, nelec, 3)
 
         if mode_restart:
-            with h5py.File(chkfile_name, 'r') as f:
+            with h5py.File(ofname_chkpt, 'r') as f:
                 # Load metadata
                 block_cnt_start = int(f['block_count'][()])
                 mc_stepsize = f['mc_stepsize'][()]
@@ -530,14 +535,6 @@ def get_vmc_func(mf,
         # ratios.shape == (num_steps_per_block,)
         # energies.shape == (num_steps_per_block, num_walkers)
 
-        # initial_state = (rng_key, walkers, mc_stepsize)
-        # final_state, result = jax.lax.scan(production_step,
-        #                                    initial_state,
-        #                                    jnp.arange(num_steps_per_block))
-
-        # rng_key, walkers, mc_stepsize = final_state
-        # ratios, walkers_energies = result
-
         if fname_log is None \
                 or (isinstance(fname_log, str) and fname_log == ""):
             fout = sys.stdout
@@ -545,12 +542,39 @@ def get_vmc_func(mf,
             fout = open(fname_log, 'w', 1)
 
         # could turn this into a one-liner if requirement becomes Python 3.8+
-        p = pathlib.Path(chkfile_name)
+        p = pathlib.Path(ofname_chkpt)
         if p.exists():
             p.unlink()
-        p = pathlib.Path(chkfile_name_grd)
-        if p.exists():
-            p.unlink()
+        with h5py.File(ofname_chkpt, 'a') as f:
+            f.create_dataset("version", data="0.1.0")
+            # TODO: take versionm info from pyproject.toml using tomli/tomllib
+
+            g = f.create_group("timestamps")
+            g.create_dataset("start",
+                             data=str(timestamp_init))
+
+            g = f.create_group("system")
+            asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
+            g.create_dataset("atom_symbols", data=" ".join(asym))
+            g.create_dataset("atom_coords", data=mf.mol.atom_coords())
+            aobs = [mf.mol.basis] * num_nuc \
+                if isinstance(mf.mol.basis, str) \
+                else [mf.mol.basis[asym[i]] for i in range(num_nuc)]
+            # TODO: add pseudopotentials ~"atom_pp" here as needed
+            g.create_dataset("ao_basis", data=" ".join(aobs))
+            g.create_dataset("units", data=mf.mol.unit.upper())
+
+        if l_grad:
+            p = pathlib.Path(ofname_grd)
+            if p.exists():
+                p.unlink()
+            with h5py.File(ofname_grd, 'a') as f:
+                f.create_dataset('grd_nn', data=grd_nn)
+                g = f.create_group("system")
+                asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
+                g.create_dataset("atom_symbols", data=" ".join(asym))
+                g.create_dataset("atom_coords", data=mf.mol.atom_coords())
+                g.create_dataset("units", data=mf.mol.unit.upper())
 
         base_batch_size = 500
         memory_factor = max(1, nelec * num_nuc // 1000)
@@ -621,174 +645,18 @@ def get_vmc_func(mf,
                 or (isinstance(fname_log, str) and fname_log == "")):
             fout.close()
 
-        if l_grad:
-            with h5py.File(chkfile_name, 'a') as f:
-                f.create_dataset('E_blocks', data=E_b)
-                f.create_dataset('rng_key',
-                                 data=jax.random.key_data(rng_key_to_restart))
-                # f.create_dataset('enr_mean', data=enr_mean)
-                f.create_dataset('block_count', data=block_cnt,
-                                 dtype=jnp.int32)
-                f.create_dataset('grd_nn', data=grad_nn_nuc)
-
         timestamp_fin = datetime.now()
         print("End time: {}\t({:.6f} seconds total)"
               .format(timestamp_fin,
                       (timestamp_fin-timestamp_init).total_seconds()))
 
-    # --- Gradient post-processing ---
-    def vmc_gradient_with_space_warping(
-            fname_log: str = None,
-            walker_based_batch_size: int = 10
-            ) -> jnp.ndarray:
-        with h5py.File(chkfile_name, 'r') as f:
-            # Load metadata
-            # block_cnt_start = int(f['block_count'][()])
-            # enr_mean = f['enr_mean'][()]
-            enr_mean = f["E_blocks"][:].mean()
-            grd_nn = jnp.array(f['grd_nn'][:])
+        with h5py.File(ofname_chkpt, 'a') as f:
+            f.create_dataset('E_blocks', data=E_b)
+            f.create_dataset('rng_key',
+                             data=jax.random.key_data(rng_key_to_restart))
+            f.create_dataset('block_count', data=block_cnt,
+                             dtype=jnp.int32)
+            f.create_dataset('walkers', data=sampled_walkers[-1, :, :, :])
+            f["timestamps"].create_dataset("end", data=str(timestamp_fin))
 
-        with h5py.File(chkfile_name_grd, 'r') as f:
-            dict_grd_samples = {}
-            for key, data in f.items():
-                if data.ndim == 0:
-                    dict_grd_samples[key] = data[()]    # scalar
-                else:
-                    dict_grd_samples[key] = jnp.array(data[:])
-
-            # num_blocks = int(dict_grd_samples['num_blocks'])
-            grad_list \
-                = list(filter(lambda x: x.startswith("grd_logpsi_"), f.keys()))
-            block_nums = []
-            for g in grad_list:
-                block_nums.append(int(g[len("grd_logpsi_"):]))
-            block_nums.sort()
-            # num_blocks = len(block_nums)
-            # block_cnt_start = block_nums[0]
-            # enr_mean = dict_grd_samples['enr_mean']
-            # enr_std = dict_grd_samples['enr_std']
-            # grd_nn = dict_grd_samples['grd_nn']
-
-            valid_samples_count = 0
-            grd_ke_sum = 0.0
-            grd_ee_en_sum = 0.0
-            grd_pulay_sum = 0.0
-
-            grd_tot_list = []
-            grd_err_list = []
-
-            for block_cnt in block_nums:
-                grd_ee_en = dict_grd_samples[f'grd_ee_en_{block_cnt}']
-                grd_logpsi = dict_grd_samples[f'grd_logpsi_{block_cnt}']
-                local_energies \
-                    = dict_grd_samples[f'local_energies_{block_cnt}']
-                grd_ke = jnp.array(f[f'grd_ke_{block_cnt}'][:])
-
-                # Pulay force contribution
-                d_enr = local_energies - enr_mean
-
-                # num_samples_per_block, num_nuc, 3 == grd_ee_en.shape
-                num_steps_per_block, num_walkers = local_energies.shape
-
-                # Regroup
-                grd_ee_en = grd_ee_en.reshape(num_steps_per_block,
-                                              num_walkers, num_nuc, 3)
-                grd_ke = grd_ke.reshape(num_steps_per_block,
-                                        num_walkers, num_nuc, 3)
-                grd_logpsi = grd_logpsi.reshape(num_steps_per_block,
-                                                num_walkers, num_nuc, 3)
-                grd_pulay = 2.0 * jnp.einsum('sw,swnK->swnK',
-                                             d_enr, grd_logpsi)
-
-                grd_nn_sw = jnp.broadcast_to(
-                    grd_nn[jnp.newaxis, jnp.newaxis, :, :],
-                    (num_steps_per_block, num_walkers, num_nuc, 3)
-                    )
-                grd_arrays = [grd_nn_sw,
-                              grd_ee_en, grd_ke,
-                              grd_pulay]
-                grd_tot_sw = jnp.stack(grd_arrays, axis=0).sum(axis=0)
-
-                # Compute forces and error
-                xbar, serr, sdev, kappa = batched_binning_analysis_grds(
-                    grd_tot_sw, walker_based_batch_size
-                )
-                grd_tot_list.append(xbar[None, :, :, :])
-                grd_err_list.append(serr[None, :, :, :])
-
-                grd_ee_en_sum += grd_ee_en.sum(axis=0)
-                grd_ke_sum += grd_ke.sum(axis=0)
-                grd_pulay_sum += grd_pulay.sum(axis=0)
-
-                valid_samples_count += local_energies.shape[0]
-                # do not include num_walkers factor
-
-            # Compute averages
-            if valid_samples_count > 0:
-                grd_ee_en = grd_ee_en_sum / valid_samples_count
-                grd_ke = grd_ke_sum / valid_samples_count
-                grd_pulay = grd_pulay_sum / valid_samples_count
-
-                grd_tot_bw = jnp.concatenate(grd_tot_list, axis=0)
-                grd_err_bw = jnp.concatenate(grd_err_list, axis=0)
-
-                # mean over blocks, then walkers
-                grd_tot = grd_tot_bw.mean(axis=0).squeeze()
-                grd_tot = grd_tot.mean(axis=0)
-
-                grd_err = jnp.linalg.norm(grd_err_bw, axis=0).squeeze() \
-                    / grd_err_bw.shape[0]
-                grd_err = jnp.linalg.norm(grd_err, axis=0) \
-                    / grd_err.shape[0]
-
-                # Compute torques and error
-                torque, dtau \
-                    = compute_torque_with_error(mf.mol, grd_tot, grd_err)
-
-                grd_ee_en = jnp.mean(grd_ee_en, axis=0)
-                grd_ke = jnp.mean(grd_ke, axis=0)
-                grd_pulay = jnp.mean(grd_pulay, axis=0)
-            else:
-                grd_ee_en = jnp.zeros_like(grd_nn)
-                grd_ke = jnp.zeros_like(grd_nn)
-                grd_pulay = jnp.zeros_like(grd_nn)
-
-            # Write results
-            with jnp.printoptions(precision=12, suppress=True):
-                if fname_log is None \
-                        or (isinstance(fname_log, str) and fname_log == ""):
-                    fout = sys.stdout
-                else:
-                    fout = open(fname_log, 'w', 1)
-
-                print('NN gradients\n', grd_nn, file=fout)
-                print('ee+eN gradients\n', grd_ee_en, file=fout)
-                print('KE gradients\n', grd_ke, file=fout)
-                print('Pulay gradients\n', grd_pulay, file=fout)
-                print('Total gradients\n', grd_tot, file=fout)
-
-                fout.write("Total forces (-gradients)\n")
-                for i in range(num_nuc):
-                    fout.write("{:4s}{:>16.6g} ± {:>12.6g}"
-                               "{:>16.6g} ± {:>12.6g}"
-                               "{:>16.6g} ± {:>12.6g}\n"
-                               .format(mf.mol.atom_symbol(i),
-                                       -grd_tot[i, 0], grd_err[i, 0],
-                                       -grd_tot[i, 1], grd_err[i, 1],
-                                       -grd_tot[i, 2], grd_err[i, 2]))
-                fout.write("Total torque\n")
-                fout.write("    {:>16.6g} ± {:>12.6g}"
-                           "{:>16.6g} ± {:>12.6g}"
-                           "{:>16.6g} ± {:>12.6g}\n"
-                           .format(torque[0], dtau[0],
-                                   torque[1], dtau[1],
-                                   torque[2], dtau[2]))
-                fout.write("\n")
-
-                if not (fname_log is None
-                        or (isinstance(fname_log, str) and fname_log == "")):
-                    fout.close()
-
-            return -grd_tot, grd_err
-
-    return vmc_run, vmc_gradient_with_space_warping
+    return vmc_run

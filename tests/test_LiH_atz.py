@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
+from vmc_mlsw.utils import vmc_forces_with_space_warping as vmc_grad
 
 rng_key = jax.random.key(888)
 
@@ -28,11 +29,11 @@ reflection_op_list = ['I', 'C2']
 # 'C2' here means 180-degree rotation
 #                 ... or negate both x and y coordinates
 
-vmc_run, vmc_grad \
+vmc_run \
     = get_vmc_func(modrv, params_jastrow,
                    cusp_scheme='Quady2025',
                    gr_scheme='scheme1',
-                   chkfile_prefix=chkfile_prefix,
+                   prefix=chkfile_prefix,
                    symmop_list=reflection_op_list)
 
 l_grad = True
@@ -45,4 +46,4 @@ vmc_run(rng_key,
         l_grad=l_grad)
 
 if l_grad:
-    forces = vmc_grad()
+    forces = vmc_grad(prefix=chkfile_prefix)
