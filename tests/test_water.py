@@ -22,7 +22,8 @@ H                0.  -1.51745721  1.11537270
 '''
 
 modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
-                                    basis=bset_name)
+                                    basis=bset_name,
+                                    ignore_hydrogen_mass=True)
 
 chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 

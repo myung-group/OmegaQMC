@@ -87,7 +87,8 @@ def generate_molecular_orbitals(astr: str,
                                 unit: str = None, units: str = "Bohr",
                                 spin: int = 0,
                                 basis: str | dict = "aug-cc-pVTZ",
-                                postHF: str = None):
+                                postHF: str = None,
+                                ignore_hydrogen_mass: bool = False):
     """ PySCF wrapper """
     if unit is not None:
         units = unit
@@ -103,10 +104,15 @@ def generate_molecular_orbitals(astr: str,
 
     coords = mol.atom_coords()
     masses = mol.atom_mass_list()
+    if ignore_hydrogen_mass:
+        Z = mol.atom_charges()
+        masses = np.where(Z == 1, 0.0, masses)
     centroid = np.average(coords, axis=0, weights=masses)
     mol.set_geom_(coords - centroid, unit=units)
-
     mol.build()
+    if mol.verbose == 3:
+        print(mol.atom)
+
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
     mf.kernel()
     # mf_grad = mf.nuc_grad_method()
@@ -173,34 +179,6 @@ def get_vmc_func(mf,
     # Get electron reflection function for this molecular type
     run_electron_exchange \
         = _get_electron_reflection_fn(Z_charges, nuc_crds, cluster_idx)
-
-    # In case of a Water Molecule
-    l_water = False
-    rot_mat = jnp.eye(3)
-    nuc_crds_sym = None
-    nuc_crds_op = {}
-    nuc_crds_sym_op = {}
-
-    # TODO: this needs to be soft-wired ... I'll come back to this
-    #       after polishing the runs with (pre-oriented) H2
-    if tuple(Z_charges) == (8, 1, 1):   # water molecule
-        # The oxygen atom is placed on the origin.
-        l_water = True
-        # place the water structure on the yz-plane
-        # R(H2) -  R(H1) : y-axis
-        # vec (0.5*(R(H1)+R(H2) - R(O)): z-axis
-
-        nuc_crds -= nuc_crds[0]
-        nuc_crds_sym, rot_mat = symmetrize_water_molecule(nuc_crds)
-        nuc_crds = jnp.einsum('...i,ij->...j', nuc_crds, rot_mat)
-        nuc_crds_sym = jnp.einsum('...i,ij->...j', nuc_crds_sym, rot_mat)
-        print('translated and rotated water\n', nuc_crds)
-        print('water_sym\n', nuc_crds_sym)
-        print('water_rot_mat', rot_mat)
-
-        for s_op in symmop_list:
-            nuc_crds_op[s_op] = symmetry_operations_map[s_op](nuc_crds)
-            nuc_crds_sym_op[s_op] = symmetry_operations_map[s_op](nuc_crds_sym)
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
