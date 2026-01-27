@@ -32,3 +32,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 
+[project.optional-dependencies]
+bse = ["basis-set-exchange"]
+

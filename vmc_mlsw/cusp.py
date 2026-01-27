@@ -2,10 +2,93 @@ import jax
 import jax.numpy as jnp
 from pyscf import gto
 import numpy as np  # For generating quadrature points
+# from scipy.linalg import eig as sci_eig
 from functools import partial
 import optax
+import pickle
+import os
 
 jax.config.update("jax_enable_x64", True)
+
+CUSP_PARAMS_FILE = os.path.join(os.path.dirname(__file__), 'cusp_params.pkl')
+
+# Ground state spins (2S) for elements 1-36
+# Based on ground state electronic configurations
+GROUND_STATE_SPINS_2S = {
+    "H": 1, "He": 0,
+    "Li": 1, "Be": 0, "B": 1, "C": 2, "N": 3, "O": 2, "F": 1, "Ne": 0,
+    "Na": 1, "Mg": 0, "Al": 1, "Si": 2, "P": 3, "S": 2, "Cl": 1, "Ar": 0,
+    "K": 1, "Ca": 0, "Sc": 1, "Ti": 2, "V": 3, "Cr": 6, "Mn": 5, "Fe": 4,
+    "Co": 3, "Ni": 2, "Cu": 1, "Zn": 0, "Ga": 1, "Ge": 2, "As": 3, "Se": 2,
+    "Br": 1, "Kr": 0
+}
+
+
+def get_cusp_params(elem, basis_name):
+    """
+    Generates or retrieves from cache the cusp correction data
+    for a given element and basis set.
+
+    Args:
+        elem (str): The element, e.g., H, He, Li, ...
+        basis_name (str): The name of the basis set, e.g., '6-31g'.
+
+    Returns:
+        dict: A dictionary containing the 'q0' and 'coeff' for the given atom.
+    """
+    assert isinstance(basis_name, str)
+
+    # Create a key for the cache
+    mol_temp = gto.M(atom=f"{elem} 0 0 0",
+                     basis=basis_name,
+                     spin=GROUND_STATE_SPINS_2S[elem])
+    key = (mol_temp.atom_symbol(0), basis_name)
+    # If we're going to test and switch between different cusping schemes,
+    # we would introduce a third element (label) in key above.
+    # But I'm keeping it fixed to CGAOWS for now... --DCY
+
+    # Load cache if it exists
+    if os.path.exists(CUSP_PARAMS_FILE):
+        with open(CUSP_PARAMS_FILE, 'rb') as f:
+            cusp_data_cache = pickle.load(f)
+    else:
+        cusp_data_cache = {}
+
+    # Check if data is in cache
+    if key in cusp_data_cache:
+        print(f"Loading cached cusp data for {key}")
+        return {key[0]: cusp_data_cache[key]}
+
+    print(f"Generating cusp data for {key}")
+    # If not in cache, generate it
+    mol = gto.M(
+        atom=f"{elem} 0 0 0",
+        basis=basis_name,
+        unit='Bohr',
+        spin=GROUND_STATE_SPINS_2S[elem]
+    )
+    mol.build()
+
+    symb = mol._atom[0][0]
+    Z = mol.atom_charges()[0]
+    rc = 0.1 if Z == 1 else 0.2
+    basis = mol._basis[symb]
+
+    g_alpha, g_norm = gto_1s_alpha_norm(basis)
+    coeff_vec = cusp_coeff_vec(g_alpha, g_norm, Z, rc)
+    q0_min = minimize_q0(g_alpha, g_norm, Z, rc, coeff_vec)
+
+    data = {
+        'q0': q0_min.tolist()[0],
+        'coeff': coeff_vec.tolist()
+    }
+
+    # Save to cache
+    cusp_data_cache[key] = data
+    with open(CUSP_PARAMS_FILE, 'wb') as f:
+        pickle.dump(cusp_data_cache, f)
+
+    return {key[0]: data}
 
 
 # Helper function to generate Gauss-Legendre quadrature points and weights
@@ -39,12 +122,14 @@ def radial_basis_one_minus_b_X(r, g_alpha, g_norm, Z, rc):
     b = evaluate_b_func(r, rc)
     return (1 - b) * jnp.sum(jnp.exp(-g_alpha * r2) * g_norm)
 
+
 @partial(jax.jit, static_argnames=['Z', 'rc', 'order'])
 def radial_basis_b_Q(r, g_alpha, g_norm, Z, rc, order):
     # g_alpha and g_norm are unused but kept for consistent signature if needed
     s = evaluate_slater_func(r, 1.0, Z)
     b = evaluate_b_func(r, rc)
     return b * s * (r/rc)**order
+
 
 # Full basis function wrapper
 @partial(jax.jit, static_argnames=['Z', 'rc', 'radial_func', 'order'])
@@ -54,9 +139,12 @@ def basis_func_wrapper(e_pos, g_alpha, g_norm, Z, rc, radial_func, order=None):
         return radial_func(r, g_alpha, g_norm, Z, rc, order=order)
     return radial_func(r, g_alpha, g_norm, Z, rc)
 
+
 # JIT-compiled integrand for overlap (S) matrix
-@partial(jax.jit, static_argnames=['bra_func', 'ket_func', 'Z', 'rc', 'bra_order', 'ket_order'])
-def integrand_at_rtp(r, theta, phi, bra_func, ket_func, g_alpha, g_norm, Z, rc,
+@partial(jax.jit, static_argnames=['bra_func', 'ket_func', 'Z', 'rc',
+                                   'bra_order', 'ket_order'])
+def integrand_at_rtp(r, theta, phi, bra_func, ket_func,
+                     g_alpha, g_norm, Z, rc,
                      bra_order=None, ket_order=None):
     sint = jnp.sin(theta)
     r2 = r * r
@@ -68,8 +156,13 @@ def integrand_at_rtp(r, theta, phi, bra_func, ket_func, g_alpha, g_norm, Z, rc,
     e_pos = jnp.stack([xoc, yoc, zoc], axis=-1)
 
     # Vmap to evaluate the function for all points
-    bra_map = lambda e: basis_func_wrapper(e, g_alpha, g_norm, Z, rc, bra_func, bra_order)
-    ket_map = lambda e: basis_func_wrapper(e, g_alpha, g_norm, Z, rc, ket_func, ket_order)
+    def bra_map(e):
+        return basis_func_wrapper(e, g_alpha, g_norm, Z, rc,
+                                  bra_func, bra_order)
+
+    def ket_map(e):
+        return basis_func_wrapper(e, g_alpha, g_norm, Z, rc,
+                                  ket_func, ket_order)
 
     bra = jax.vmap(bra_map)(e_pos)
     ket = jax.vmap(ket_map)(e_pos)
@@ -78,11 +171,11 @@ def integrand_at_rtp(r, theta, phi, bra_func, ket_func, g_alpha, g_norm, Z, rc,
 
 
 # JIT-compiled integrand for Hamiltonian (H) matrix
-@partial(jax.jit, static_argnames=['bra_func', 'ket_func', 'Z', 'rc', 'bra_order', 'ket_order'])
+@partial(jax.jit, static_argnames=['bra_func', 'ket_func', 'Z', 'rc',
+                                   'bra_order', 'ket_order'])
 def integrand_at_rtp_H(r, theta, phi, bra_func, ket_func,
                        g_alpha, g_norm, Z, rc,
                        bra_order=None, ket_order=None):
-
     # dV = r*r sin(theta) d_r d_theta d_phi
     sint = jnp.sin(theta)
     r2 = r * r
@@ -92,10 +185,15 @@ def integrand_at_rtp_H(r, theta, phi, bra_func, ket_func,
     r_val = r
 
     # We define a function of r only, and then vmap on r_val
-    bra_rad = lambda r_in: bra_func(r_in, g_alpha, g_norm, Z, rc, order=bra_order) \
-        if bra_order is not None else bra_func(r_in, g_alpha, g_norm, Z, rc)
-    ket_rad = lambda r_in: ket_func(r_in, g_alpha, g_norm, Z, rc, order=ket_order) \
-        if ket_order is not None else ket_func(r_in, g_alpha, g_norm, Z, rc)
+    def bra_rad(r_in):
+        return bra_func(r_in, g_alpha, g_norm, Z, rc, order=bra_order) \
+            if bra_order is not None \
+            else bra_func(r_in, g_alpha, g_norm, Z, rc)
+
+    def ket_rad(r_in):
+        return ket_func(r_in, g_alpha, g_norm, Z, rc, order=ket_order) \
+            if ket_order is not None \
+            else ket_func(r_in, g_alpha, g_norm, Z, rc)
 
     bra = jax.vmap(bra_rad)(r_val)
     ket = jax.vmap(ket_rad)(r_val)
@@ -109,7 +207,8 @@ def integrand_at_rtp_H(r, theta, phi, bra_func, ket_func,
 
     # 1D Laplacian on a spherically symmetric function
     # Handle r=0 singularity by using jnp.where
-    laplacian_ket = d2ket_dr2 + jnp.where(r_val > 1e-10, 2.0 / r_val * dket_dr, 0.0)
+    laplacian_ket = d2ket_dr2 \
+        + jnp.where(r_val > 1e-10, 2.0 / r_val * dket_dr, 0.0)
 
     # Kinetic energy integrand part: bra * (-0.5 * Nabla^2_ket) * dV
     retval_kE = bra * (-0.5 * laplacian_ket) * r2sint
@@ -124,7 +223,8 @@ def integrand_at_rtp_H(r, theta, phi, bra_func, ket_func,
 
 
 # JIT-compiled integration function using Gauss-Legendre quadrature
-@partial(jax.jit, static_argnames=['bra_func', 'ket_func', 'Z', 'rc', 'n_points', 'bra_order', 'ket_order'])
+@partial(jax.jit, static_argnames=['bra_func', 'ket_func', 'Z', 'rc',
+                                   'n_points', 'bra_order', 'ket_order'])
 def test_integrand_at_rtp(bra_func, ket_func,
                           g_alpha, g_norm, Z, rc, n_points=32,
                           bra_order=None, ket_order=None):
@@ -151,7 +251,7 @@ def test_integrand_at_rtp(bra_func, ket_func,
     # Compute total weights
     weights = (w_r_grid * w_theta_grid * w_phi_grid).ravel()
 
-    r_flat= r_grid.ravel()
+    r_flat = r_grid.ravel()
     theta_flat = theta_grid.ravel()
     phi_flat = phi_grid.ravel()
 
@@ -160,7 +260,7 @@ def test_integrand_at_rtp(bra_func, ket_func,
                               bra_func, ket_func,
                               g_alpha, g_norm, Z, rc,
                               bra_order, ket_order)
-
+    # print ('S_vals', S_vals.shape)
     H_vals = integrand_at_rtp_H(r_flat, theta_flat, phi_flat,
                                 bra_func, ket_func,
                                 g_alpha, g_norm, Z, rc,
@@ -173,20 +273,22 @@ def test_integrand_at_rtp(bra_func, ket_func,
     return S_rc, H_rc
 
 
-# JIT-compiled basis functions - **Renamed and adjusted to be radial_func**
-radial_basis_one_minus_b_X_wrapped = radial_basis_one_minus_b_X # for consistent naming in cusp_coeff_vec
+# JIT-compiled basis functions
+radial_basis_one_minus_b_X_wrapped = radial_basis_one_minus_b_X
+
 
 @partial(jax.jit, static_argnames=['Z', 'rc', 'order'])
 def radial_basis_b_Q_wrapped(r, g_alpha, g_norm, Z, rc, order):
     return radial_basis_b_Q(r, g_alpha, g_norm, Z, rc, order)
 
+
 def cusp_coeff_vec(g_alpha, g_norm, Z, rc):
     # Define basis functions for different orders
     basis_funcs_with_orders = [
-        (radial_basis_one_minus_b_X_wrapped, None), #(1-b)*X
-        (radial_basis_b_Q_wrapped, 0),             # b*Q * r^0
-        (radial_basis_b_Q_wrapped, 2),             # b*Q * r^2 (order 1 is skipped for cusp condition)
-        (radial_basis_b_Q_wrapped, 3),             # b*Q * r^3
+        (radial_basis_one_minus_b_X_wrapped, None),     # (1-b)*X
+        (radial_basis_b_Q_wrapped, 0),  # b*Q * r^0
+        (radial_basis_b_Q_wrapped, 2),  # b*Q * r^2 (order 1 skipped, cusp)
+        (radial_basis_b_Q_wrapped, 3),  # b*Q * r^3
         (radial_basis_b_Q_wrapped, 4),
         (radial_basis_b_Q_wrapped, 5),
         (radial_basis_b_Q_wrapped, 6),
@@ -202,10 +304,10 @@ def cusp_coeff_vec(g_alpha, g_norm, Z, rc):
         for j, (ket_func, ket_order) in enumerate(basis_funcs_with_orders):
             S_rc, H_rc = test_integrand_at_rtp(bra_func, ket_func,
                                                g_alpha, g_norm, Z, rc,
-                                               bra_order=bra_order, ket_order=ket_order)
+                                               bra_order=bra_order,
+                                               ket_order=ket_order)
             H_mat = H_mat.at[i, j].set(H_rc)
             S_mat = S_mat.at[i, j].set(S_rc)
-
 
     L = jnp.linalg.cholesky(S_mat)
     # If Cholesky fails, add small regularization
@@ -234,7 +336,6 @@ def cusp_coeff_vec(g_alpha, g_norm, Z, rc):
 
 
 def gto_1s_alpha_norm(basis):
-
     ish = basis[0]      # 1s orbital
     # Pre-compute primitive pairs more efficiently
     nprim = len(ish[1:])
@@ -263,6 +364,7 @@ def gto_1s_alpha_norm(basis):
 
     return alphas, norm * facs
 
+
 @jax.jit
 def evaluate_cusp_s(r, rc, Z, q0, rad_s, coeff):
     """Evaluate cusp-corrected s orbital."""
@@ -283,7 +385,6 @@ def evaluate_cusp_s(r, rc, Z, q0, rad_s, coeff):
 
 
 def minimize_q0(g_alpha, g_norm, Z, rc, coeff):
-
     # 1. Define GTO radial function for integration
     @partial(jax.jit, static_argnames=['Z', 'rc'])
     def radial_gto_1s_orb(r, g_alpha, g_norm, Z, rc):
@@ -291,35 +392,39 @@ def minimize_q0(g_alpha, g_norm, Z, rc, coeff):
         rad_s = jnp.sum(jnp.exp(-g_alpha*r2)*g_norm)
         return rad_s
 
-    # 2. Integrate GTO overlap and Hamiltonian (using the efficient radial-only integrand)
-    int_S_gto, int_H_gto = test_integrand_at_rtp(radial_gto_1s_orb, radial_gto_1s_orb,
+    # 2. Integrate GTO overlap and Hamiltonian
+    # (using the efficient radial-only integrand)
+    int_S_gto, int_H_gto = test_integrand_at_rtp(radial_gto_1s_orb,
+                                                 radial_gto_1s_orb,
                                                  g_alpha, g_norm, Z, rc)
 
     # Simplified cusp function for the rest of minimize_q0
     @partial(jax.jit, static_argnames=['Z', 'rc'])
-    def cusp_1s_orb_min_func (r, g_alpha, g_norm, Z, rc, q0, coeff_vec):
+    def cusp_1s_orb_min_func(r, g_alpha, g_norm, Z, rc, q0, coeff_vec):
         r2 = r * r
         rad_s = jnp.sum(jnp.exp(-g_alpha*r2)*g_norm)
         cgs = evaluate_cusp_s(r, rc, Z, q0, rad_s, coeff_vec)
         return cgs
 
-
     @jax.jit
     def min_func(params):
         qq0 = params[0]
-        #coeff0 = coeff.at[0].set(params[1])
+        # coeff0 = coeff.at[0].set(params[1])
         # Define a partial function to be used in the integrator
-        cusp_func_partial = partial(cusp_1s_orb_min_func, q0=qq0, coeff_vec=coeff)
+        cusp_func_partial = partial(cusp_1s_orb_min_func,
+                                    q0=qq0, coeff_vec=coeff)
 
         # Use the optimized integration function
-        int_S_cusp, int_H_cusp = test_integrand_at_rtp(cusp_func_partial, cusp_func_partial,
+        int_S_cusp, int_H_cusp = test_integrand_at_rtp(cusp_func_partial,
+                                                       cusp_func_partial,
                                                        g_alpha, g_norm, Z, rc)
 
         return (int_S_cusp - int_S_gto)**2 + (int_H_cusp-int_H_gto)**2
 
     cur_params = jnp.array([1.0])
     if jax.config.jax_logging_level in ["DEBUG", "INFO"]:
-        print('Objective function (first call): {:.2E}'.format(min_func(cur_params)))
+        print('Objective function (first call): {:.2E}'
+              .format(min_func(cur_params)))
 
     solver = optax.lbfgs()
     opt_state = solver.init(cur_params)
@@ -330,10 +435,11 @@ def minimize_q0(g_alpha, g_norm, Z, rc, coeff):
     l_not_converged = True
     for step in range(max_iter):
         loss_val, grads = loss_and_grad(cur_params, state=opt_state)
-        updates, opt_state = solver.update(grads, opt_state, cur_params,
-                                            value=loss_val, grad=grads, value_fn=min_func)
+        updates, opt_state \
+            = solver.update(grads, opt_state, cur_params,
+                            value=loss_val, grad=grads, value_fn=min_func)
         cur_params = optax.apply_updates(cur_params, updates)
-        print (step+1, loss_val)
+        print(step+1, loss_val)
         if jax.config.jax_logging_level in ["DEBUG", "INFO"]:
             print('Objective function: {:.2E}'.format(min_func(cur_params)))
 
@@ -341,45 +447,8 @@ def minimize_q0(g_alpha, g_norm, Z, rc, coeff):
             l_not_converged = False
             break
 
-    if jax.config.jax_logging_level in ["DEBUG", "WARNING"] and l_not_converged:
+    if jax.config.jax_logging_level in ["DEBUG", "WARNING"] \
+            and l_not_converged:
         print("Warning: minimize_q0 has not converged.")
 
     return cur_params
-
-
-if __name__ == "__main__":
-    # from scipy.linalg import eig as sci_eig
-    # import json
-    # Initialize molecule
-    mol = gto.M(
-        atom='O  0.000000 0.000000 0.000',
-        basis='6-31g',
-        unit='Bohr',
-        spin=0
-    )
-    mol.build()
-    # print ('mol', mol.atom_coords())
-    # Extract basis information
-    symb = mol._atom[0][0]
-    Z = mol.atom_charges()[0]
-    rc = 0.1 if Z == 1 else 0.2
-    print('Z', Z, 'rc', rc)
-    basis = mol._basis[symb]
-
-    g_alpha, g_norm = gto_1s_alpha_norm(basis)
-
-    # Compute matrices
-    coeff_vec = cusp_coeff_vec(g_alpha, g_norm, Z, rc)
-
-    q0_min = minimize_q0(g_alpha, g_norm, Z, rc, coeff_vec)
-
-    data = {
-            int(Z): {
-                'q0': q0_min.tolist()[0],
-                'coeff': coeff_vec.tolist()
-                }
-            }
-
-    # json_data = json.dumps(data, indent=4)
-    print('Result')
-    print(data)

@@ -8,6 +8,10 @@ from pyscf import gto, scf
 from importlib import resources
 
 from vmc_mlsw import get_vmc_func
+from vmc_mlsw.vmc_utils import (
+    compute_torque_with_error,
+    compute_energy_with_error
+)
 
 
 # Set H2 molecule
@@ -47,11 +51,9 @@ pprint.pprint(cgto_coeff)
 chkfile = 'H2_vmc_631gd.hdf5'
 
 # Set parameters
-reflection_op_list = ['I', 'x', 'y', 'xy']
+reflection_op_list = ['I', 'x', 'y', 'C2']
 rng_key = 888
 l_cusp = True
-if not l_cusp:
-    cgto_coeff = None
 l_grad = True
 
 # Load VMC functions 
@@ -61,23 +63,13 @@ vmc_run, vmc_grad = get_vmc_func(
     scheme='scheme1',
     chkfile=chkfile,
     cgto_coeff=cgto_coeff,
-    reflection_op_list=reflection_op_list,
+    symmop_list=reflection_op_list,
     cluster_idx=None
 )
 
-# Run VMC
-vmc_run(
-    rng_key=rng_key,
-    nwalkers=1000,
-    num_mc_steps=1000, # MC steps per each walker
-    max_mc_iter=500,
-    mc_step_size=0.10, # electrons movement distance
-    tolerance_enr_std_per_elec=0.01, # VMC termination criteria
-    fname_log='vmc_H2_enr.log',
-    l_grad=l_grad,
-    batch_size=500,    # Batch size for gradient calc. (memory vs. speed trade-off)
-    restart=False,     # Restart or initial run
-)                      # File {chkfile} is required for restarting.
+# Calculate energy and error using {chkfile}
+e_mean, e_err = compute_energy_with_error(chkfile)
+print(f'Total energy | error [Ha]: {e_mean:.6f} | {e_err:.6f}')
 
 # Compute gradients of energy
 if l_grad:
@@ -85,5 +77,6 @@ if l_grad:
         fname_log='vmc_H2_grd.log',
         compute_error=True,
         walker_based_batch_size=10  # Walker-based Batch size for error calc. 
-    )                                
-
+    ) 
+    # Compute torque and error
+    # torque, dtau = compute_torque_with_error(mol, grd, grd_err)

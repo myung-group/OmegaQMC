@@ -80,7 +80,7 @@ cluster_idx = [
 ]
 
 # Set parameters
-reflection_op_list = ['I', 'x', 'y', 'xy']
+reflection_op_list = ['I', 'x', 'y', 'C2']
 rng_key = 888
 l_grad = True
 l_cusp = True
@@ -94,7 +94,7 @@ vmc_run, vmc_grad = get_vmc_func(
     scheme='scheme1',
     chkfile=chkfile,
     cgto_coeff=cgto_coeff,
-    reflection_op_list=reflection_op_list,
+    symmop_list=reflection_op_list,
     cluster_idx=None
 )
 

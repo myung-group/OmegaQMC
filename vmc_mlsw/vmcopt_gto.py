@@ -3,16 +3,17 @@ import jax.numpy as jnp
 import optax
 # from functools import partial
 # import h5py
-from vmc_mlsw.psi_gto import get_psi_fun
+from .psi_gto import get_psi_fun
+from .cusp import get_cusp_params
+from .constants import MIN_DIST_THRESHOLD
+
+jax.config.update("jax_enable_x64", True)
 
 
-def get_vmcopt_func(mf,
-                    params_vmc,
-                    cgto_coeff=None):
-
+def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
     nelec = mf.mol.tot_electrons()
-    # num_nuc = nuc_crds.shape[0]
+    num_nuc = mf.mol.natm
     Z_charges = mf.mol.atom_charges()
     i_e, j_e = jnp.triu_indices(nelec, k=1)
     # atomic_masses = mf.mol.atom_mass_list()
@@ -20,12 +21,25 @@ def get_vmcopt_func(mf,
     #                          atomic_masses, nuc_crds)/atomic_masses.sum()
     # relative_nuc_pos = nuc_crds - mass_center
 
+    if cusp_scheme == "Quady2025":
+        params_cusp = {}
+        for i in range(num_nuc):
+            atom_symbol = mf.mol.atom_symbol(i)
+            if atom_symbol not in params_cusp:
+                if isinstance(mf.mol.basis, str):
+                    p = get_cusp_params(atom_symbol, mf.mol.basis)
+                else:
+                    p = get_cusp_params(atom_symbol, mf.mol.basis[atom_symbol])
+                params_cusp[atom_symbol] = p[atom_symbol]
+    else:
+        params_cusp = None
+
     log_trial_wavefunction, local_energy, get_psi_mo \
-        = get_psi_fun(mf, cgto_coeff)
+        = get_psi_fun(mf, params_cusp=params_cusp)
 
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
         = local_energy
-    ener_nn = local_energy_nn(nuc_crds)
+    enr_nn = local_energy_nn(nuc_crds)
     # grad_nn_nuc = jax.grad(local_energy_nn)(nuc_crds)
 
     @jax.jit
@@ -33,18 +47,17 @@ def get_vmcopt_func(mf,
         """Metropolis step."""
         key_prop, key_accept = jax.random.split(rng_key)
 
-        proposed_crds = elec_crds + \
-            _step_size * jax.random.normal(key_prop, elec_crds.shape)
+        proposed_crds = elec_crds \
+            + _step_size * jax.random.normal(key_prop, elec_crds.shape)
 
-        min_dist_threshold = 1e-4
         diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
-        dists_ee = jnp.sqrt(jnp.sum(diffs_ee*diffs_ee, axis=-1))
+        dists_ee = jnp.linalg.norm(diffs_ee, axis=-1)
 
         diffs_en = proposed_crds[:, None, :] - nuc_crds[None, :, :]
-        dists_en = jnp.sqrt(jnp.sum(diffs_en*diffs_en, axis=-1))
+        dists_en = jnp.linalg.norm(diffs_en, axis=-1)
 
-        valid_move = (dists_en.min() > min_dist_threshold) & \
-            (dists_ee.min() > min_dist_threshold)
+        valid_move = (dists_en.min() > MIN_DIST_THRESHOLD) & \
+            (dists_ee.min() > MIN_DIST_THRESHOLD)
 
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
                                              curr_params)
@@ -62,28 +75,27 @@ def get_vmcopt_func(mf,
         return (local_energy_ee(elec_crds)
                 + local_energy_en(elec_crds, nuc_crds)
                 + local_energy_ke(elec_crds, nuc_crds, curr_params)
-                + ener_nn)
+                + enr_nn)
 
     def vmcopt_run(rng_key,
-                   nwalkers=100,
-                   params_init=None,
-                   num_steps=50000,
-                   num_substeps=10,
-                   num_epochs=20,
-                   num_equilibration=5000,
-                   step_size=0.25,
-                   lr=0.02,
+                   num_walkers=1000,
+                   params_corr_init=None, num_epochs=20,
+                   num_steps_per_block=1000, num_steps_decorr=1,
+                   num_blocks=10, num_blocks_equil=10,
+                   mc_timestep=0.1,
+                   fname_log: str = None,
+                   lr=0.1,
                    optimizer="sgd",
                    verbose=False):
-        """VMC optimizatino run"""
+        """VMC optimization run"""
 
-        params = params_vmc if params_init is None \
-            else jnp.array(params_init, dtype=jnp.float64)
+        params_corr = params_corr_preset if params_corr_init is None \
+            else jnp.array(params_corr_init, dtype=jnp.float64)
 
         optimizer_chosen = optax.adam(learning_rate=lr) \
             if "adam" in optimizer.lower() \
             else optax.sgd(learning_rate=lr)
-        opt_state = optimizer_chosen.init(params)
+        opt_state = optimizer_chosen.init(params_corr)
 
         # Initialize electron positions more efficiently
         rng_key, rng = jax.random.split(rng_key)
@@ -100,69 +112,64 @@ def get_vmcopt_func(mf,
         idx_cnt = jnp.array(idx_cnt)
         centers = nuc_crds[idx_cnt]
         walkers = centers[jnp.newaxis, :, :] \
-            + 0.05 * jax.random.normal(rng, (nwalkers, nelec, 3))
+            + 0.05 * jax.random.normal(rng, (num_walkers, nelec, 3))
+        mc_stepsize = (3 * mc_timestep)**0.5
 
         @jax.jit
         def equilibration_step(carried_in, _):
             rkey, w, s, curr_params = carried_in
             rkey0, rkey1 = jax.random.split(rkey)
+            keys = jax.random.split(rkey1, num_walkers + 1)
+            rkey1 = keys[0]
+            keys = keys[1:]
 
-            for _ in range(num_substeps):
-                keys = jax.random.split(rkey1, nwalkers + 1)
-                rkey1 = keys[0]
-                keys = keys[1:]
-
-                new_w, accepted \
-                    = jax.vmap(metropolis_move,
-                               in_axes=(0, 0, None, None))(keys, w, s,
-                                                           curr_params)
-                r = accepted.mean()
-                new_s = s * (0.6 + r)
+            new_w, accepted \
+                = jax.vmap(metropolis_move,
+                           in_axes=(0, 0, None, None))(keys, w, s,
+                                                       curr_params)
+            r = accepted.mean()
+            new_s = s * (0.6 + r)
 
             return (rkey0, new_w, new_s, curr_params), r
 
-        carry_in = (rng_key, walkers, step_size, params)
-        carry_out, acc_ratios \
-            = jax.lax.scan(equilibration_step, carry_in,
-                           jnp.arange(num_equilibration))
-        rng_key, walkers, step_size, _ = carry_out
+        for _ in range(num_blocks_equil):
+            carry_in = (rng_key, walkers, mc_stepsize, params_corr)
+            carry_out, acc_ratios \
+                = jax.lax.scan(equilibration_step, carry_in,
+                               jnp.arange(num_steps_per_block))
+            rng_key, walkers, mc_stepsize, _ = carry_out
+
+        mc_timestep = mc_stepsize * mc_stepsize / 3
         ratio = acc_ratios[-1]
 
-        print(f"Equilibration Acceptance Rate: {ratio:.2f}")
-        print(f"Step size: {step_size:.4f}")
+        print(f"ℹ️ Equilibration acceptance rate: {ratio:.2f}")
+        print(f"ℹ️ Adjusted step size: {mc_stepsize:.4f} bohr "
+              f"~ {mc_timestep:.4f} Ha⁻¹ in Brownian time")
 
         @jax.jit
         def production_step(carried_in, _):
             rkey, w, s, curr_params = carried_in
-            rkey0, rkey1 = jax.random.split(rkey)
 
-            for _ in range(num_substeps):
-                keys = jax.random.split(rkey1, nwalkers + 1)
+            for _ in range(num_steps_decorr):
+                rkey0, rkey1 = jax.random.split(rkey)
+                keys = jax.random.split(rkey1, num_walkers + 1)
                 rkey1 = keys[0]
                 keys = keys[1:]
-
                 new_w, accepted \
                     = jax.vmap(metropolis_move,
                                in_axes=(0, 0, None, None))(keys, w, s,
                                                            curr_params)
-                r = accepted.mean()
+                w = new_w
 
-                new_s = step_size * (0.6 + r)
+            r = accepted.mean()
+            # new_s = step_size * (0.6 + r)
 
             # calculate energy
             energies = jax.vmap(total_local_energy_fn,
                                 in_axes=(0, None))(new_w,
                                                    curr_params)
 
-            return (rkey0, new_w, new_s, curr_params), (r, energies)
-
-        carry_in = (rng_key, walkers, step_size, params)
-        carry_out, results \
-            = jax.lax.scan(production_step, carry_in,
-                           jnp.arange(num_steps))
-        rng_key, walkers, step_size, _ = carry_out
-        acc_ratios, tw_energies = results
-        # tw_energies.shape == num_steps, nwalkers
+            return (rkey0, new_w, s, curr_params), (r, energies)
 
         def _acf_fft_jnp(x: jnp.ndarray) -> jnp.ndarray:
             """Normalized autocorrelation function via FFT (numpy)."""
@@ -206,67 +213,82 @@ def get_vmcopt_func(mf,
 
         def update_epoch(carried_in, epoch):
             # nonlocal tw_energies
-            rng_key, walkers, step_size, params, opt_state = carried_in
+            nonlocal mc_stepsize
+            rng_key, walkers, \
+                params_corr_epoch, opt_state = carried_in
 
-            carry_in_eq = (rng_key, walkers, step_size, params)
-            carried_out_eq, _ \
-                = jax.lax.scan(equilibration_step, carry_in_eq,
-                               jnp.arange(num_equilibration))
-            rng_key, walkers, step_size, _ = carried_out_eq
+            for t in range(num_blocks_equil):
+                carry_in_eq = (rng_key, walkers, mc_stepsize,
+                               params_corr_epoch)
+                carried_out_eq, acc_ratios \
+                    = jax.lax.scan(equilibration_step, carry_in_eq,
+                                   jnp.arange(num_steps_per_block))
+                rng_key, walkers, mc_stepsize, _ = carried_out_eq
 
             def loss_fn(p):
-                carry_in_prod = (rng_key, walkers, step_size, p)
-                _, (_, tw_energies) \
-                    = jax.lax.scan(production_step, carry_in_prod,
-                                   jnp.arange(num_steps))
+                nonlocal rng_key, walkers
+                for block_cnt in range(1, num_blocks+1):
+                    carry_in_prod = (rng_key, walkers, mc_stepsize, p)
+                    carried_out_prod, (acc_ratios, energies_sw) \
+                        = jax.lax.scan(production_step, carry_in_prod,
+                                       jnp.arange(num_steps_per_block))
+                    rng_key, walkers, _, _ = carried_out_prod
 
-                enr_mean = tw_energies.mean()
-                enr_std = tw_energies.std()
+                E_s = energies_sw.mean(axis=1)      # mean over walkers
 
-                loss = 0.2 * enr_mean + 0.8 * enr_std
+                E_mean = E_s.mean()                 # mean over steps
+                std_E_s = E_s.std()                 # std over steps
 
-                return loss, enr_mean
+                loss = 0.2 * E_mean + 0.8 * std_E_s
+
+                return loss, E_mean
 
             (loss_val, enr_mean), grad_mean \
-                = jax.value_and_grad(loss_fn, has_aux=True)(params)
+                = jax.value_and_grad(loss_fn, has_aux=True)(params_corr_epoch)
 
             updates, opt_state = optimizer_chosen.update(grad_mean,
-                                                         opt_state, params)
-            params = optax.apply_updates(params, updates)
+                                                         opt_state,
+                                                         params_corr_epoch)
+            params_corr_epoch = optax.apply_updates(params_corr_epoch, updates)
 
             jax.debug.print("[Epoch {epoch}/{ne}] "
-                            "loss: {l:.6f}, <E_loc>: {e:.6f}, params: {vp}",
+                            "loss: {l:.6f}, <E_loc>: {e:.6f}, "
+                            "params_corr_epoch: {vp}",
                             epoch=epoch+1, ne=num_epochs,
-                            l=loss_val, e=enr_mean, vp=params)
+                            l=loss_val, e=enr_mean, vp=params_corr_epoch)
 
-            carry_in_final = (rng_key, walkers, step_size, params)
+            carry_in_final = (rng_key, walkers, mc_stepsize, params_corr_epoch)
             carried_out_final, (_, final_energies) \
                 = jax.lax.scan(production_step, carry_in_final,
-                               jnp.arange(num_steps))
-            rng_key, walkers, step_size, _ = carried_out_final
+                               jnp.arange(num_steps_per_block))
+            rng_key, walkers, _, _ = carried_out_final
 
-            carry_out = (rng_key, walkers, step_size, params, opt_state)
+            carry_out = (rng_key, walkers,
+                         params_corr_epoch, opt_state)
             return carry_out, final_energies
 
-        carry_in_outer = (rng_key, walkers, step_size, params, opt_state)
+        carry_in_outer = (rng_key, walkers,
+                          params_corr, opt_state)
         carried_out_outer, energies_opthist \
             = jax.lax.scan(update_epoch, carry_in_outer,
                            jnp.arange(num_epochs))
         energies_opthist.block_until_ready()
 
-        rng_key, walkers, step_size, params, opt_state = carried_out_outer
+        rng_key, walkers, params_corr, opt_state = carried_out_outer
 
-        tw_energies = energies_opthist[-1]
-        enr_mean = tw_energies.mean()
-        w_std = jnp.std(tw_energies, axis=0)
+        energies_sw = energies_opthist[-1]
+
+        E_mean = energies_sw.mean()
+        std_E_w = jnp.std(energies_sw, axis=0)
+
         acf_axis1 = jax.jit(jax.vmap(_acf_fft_jnp, in_axes=1))
-        w_acf = acf_axis1(tw_energies)
+        w_acf = acf_axis1(energies_sw)
         tau_int_axis0 = jax.jit(jax.vmap(_tau_int_from_acf, in_axes=0))
         w_tau_int = tau_int_axis0(w_acf)
-        w_ste = w_std * jnp.sqrt(w_tau_int / num_steps)
-        enr_ste = jnp.sqrt(jnp.square(w_ste).sum()) / nwalkers
+        ste_E_w = std_E_w * jnp.sqrt(w_tau_int / num_steps_per_block)
+        E_stderr = jnp.sqrt(jnp.square(ste_E_w).sum()) / num_walkers
 
-        return params, {'energy': {'mean': enr_mean, 'stderr': enr_ste}}
-        # params, {'energy': jnp.array(energy_opthist)}
+        return params_corr, {'energy': {'mean': E_mean, 'stderr': E_stderr}}
+        # params_corr, {'energy': jnp.array(energy_opthist)}
 
     return vmcopt_run
