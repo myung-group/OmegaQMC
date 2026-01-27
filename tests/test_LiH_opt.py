@@ -22,7 +22,7 @@ atoms_string = '''
 modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
                                     basis=bset_name)
 
-# reflection_op_list = ['I', 'x', 'y', 'C2']
+# reflection_op_list = ['I', 'x', 'y', 'Rz180']
 
 vmcopt_run = get_vmcopt_func(modrv, params_jastrow)
 params_jastrow_final, E_data = vmcopt_run(rng_key)

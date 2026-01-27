@@ -31,7 +31,7 @@ vmc_run = get_vmc_func(modrv, params_vmc_no_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
                        prefix=chkfile_prefix,
-                       symmop_list=['I', 'x', 'y', 'C2'])
+                       symmop_list=['I', 'x', 'y', 'Rz180'])
 
 l_grad = True
 vmc_run(rng_key,

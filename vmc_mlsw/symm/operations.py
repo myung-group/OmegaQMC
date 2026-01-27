@@ -25,20 +25,20 @@ def apply_reflection_z(coords):
 
 
 @jax.jit
-def apply_rotation_2(coords):
+def apply_rotation_z180(coords):
     """Apply 180-degree rotation about z-axis (- x,y-coordinate)."""
     return coords.at[..., [0, 1]].multiply(-1)
 
 
 @jax.jit
-def apply_rotation_p4(coords):
+def apply_rotation_z90(coords):
     """Apply 90-degree ccw rotation about z-axis (-y, x)."""
     return coords.at[..., [0, 1]].set(coords[..., [1, 0]]) \
         .at[..., 0].multiply(-1)
 
 
 @jax.jit
-def apply_rotation_m4(coords):
+def apply_rotation_z270(coords):
     """Apply 90-degree cw rotation about z-axis (y, -x)."""
     return coords.at[..., [0, 1]].set(coords[..., [1, 0]]) \
         .at[..., 1].multiply(-1)
@@ -62,8 +62,11 @@ symmetry_operations_map = {
     'sigma_x': apply_reflection_x,
     'sigma_y': apply_reflection_y,
     'sigma_z': apply_reflection_z,
-    'Cp4': apply_rotation_p4,
-    'Cm4': apply_rotation_m4,
-    'xy': apply_rotation_2,
-    'C2': apply_rotation_2
+    'Cp4': apply_rotation_z90,
+    'Rz90': apply_rotation_z90,
+    'Cm4': apply_rotation_z270,
+    'Rz270': apply_rotation_z270,
+    'xy': apply_rotation_z180,
+    'Rz180': apply_rotation_z180,
+    'C2': apply_rotation_z180
 }

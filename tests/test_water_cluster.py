@@ -80,7 +80,7 @@ cluster_idx = [
 ]
 
 # Set parameters
-reflection_op_list = ['I', 'x', 'y', 'C2']
+reflection_op_list = ['I', 'x', 'y', 'Rz180']
 rng_key = 888
 l_grad = True
 l_cusp = True

@@ -20,11 +20,12 @@ SYMM_OP_IDS = {
     # Reflections across coordinate planes
     'x': 1,        # reflect x
     'y': 2,        # reflect y
-    'xy': 3,       # reflect x and y (same as 180° about z)
+    'z': 3,       # reflect z
+    'xy': 5,       # reflect x and y (same as 180° about z)
     # Rotations about z-axis (counter-clockwise when looking down +z)
     'Rz90': 4,
-    'Rz180': 3,    # alias to avoid redundancy with 'xy'
-    'Rz270': 5,
+    'Rz180': 5,    # alias to avoid redundancy with 'xy'
+    'Rz270': 6,
 }
 
 
@@ -43,10 +44,11 @@ def _rotation_matrix_z(theta: float) -> jax.Array:
 _SYMM_OP_MATRICES = jnp.stack([
     jnp.eye(3),                        # 0: Identity
     jnp.diag(jnp.array([-1.0,  1.0, 1.0])),  # 1: Reflect x
-    jnp.diag(jnp.array([1.0, -1.0, 1.0])),  # 2: Reflect y
-    jnp.diag(jnp.array([-1.0, -1.0, 1.0])),  # 3: Reflect xy / 180° about z
+    jnp.diag(jnp.array([1.0, -1.0, 1.0])),   # 2: Reflect y
+    jnp.diag(jnp.array([1.0, 1.0, -1.0])),   # 3: Reflect z
     _rotation_matrix_z(jnp.pi / 2.0),        # 4: 90-degree rotation about z
-    _rotation_matrix_z(3.0 * jnp.pi / 2.0),  # 5: 270-degree rotation about z
+    jnp.diag(jnp.array([-1.0, -1.0, 1.0])),  # 5: Reflect xy / 180° about z
+    _rotation_matrix_z(3.0 * jnp.pi / 2.0),  # 6: 270-degree rotation about z
 ])
 
 

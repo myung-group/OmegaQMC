@@ -10,12 +10,12 @@ import jax.numpy as jnp
 import h5py
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
-from .symm.water_rotation_matrix import symmetrize_water_molecule
+# from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import symmetry_operations_map
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
-from .symm.electron_reflection import (
+from .symm.electron_relocate import (
     diatomic_reflection_electrons,
     water_reflection_electrons,
     water_dimer_reflection_electrons,
@@ -29,7 +29,7 @@ STEP_SIZE_ADAPTATION_RATE = 0.05
 jax.config.update("jax_enable_x64", True)
 
 
-def _get_electron_reflection_fn(Z_charges: jnp.ndarray,
+def _get_electron_relocation_fn(Z_charges: jnp.ndarray,
                                 nuc_crds: jnp.ndarray,
                                 cluster_idx: Collection[int] | None) \
                                     -> Callable:
@@ -159,7 +159,7 @@ def get_vmc_func(mf,
                     and params_corr[k].shape[0] < 2:
                 jax.debug.print(
                     f"⚠️ WARNING! Correlation parameter set \"{k}\" "
-                    "requires 2 elements, but the user provided less.  "
+                    "requires 2 elements, but the user provided fewer.  "
                     "Deleting..."
                     )
                 kList.append(k)
@@ -177,8 +177,8 @@ def get_vmc_func(mf,
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
     # Get electron reflection function for this molecular type
-    run_electron_exchange \
-        = _get_electron_reflection_fn(Z_charges, nuc_crds, cluster_idx)
+    propose_electron_relocation \
+        = _get_electron_relocation_fn(Z_charges, nuc_crds, cluster_idx)
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
@@ -286,8 +286,8 @@ def get_vmc_func(mf,
                               reflection_ID: int) -> jnp.ndarray:
         """Metropolis step with reflection move."""
         rescale = rescale_fn(elec_crds)
-        proposed_crds = run_electron_exchange(elec_crds,
-                                              rescale, reflection_ID)
+        proposed_crds = propose_electron_relocation(elec_crds,
+                                                    rescale, reflection_ID)
 
         # Compute acceptance probability
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
