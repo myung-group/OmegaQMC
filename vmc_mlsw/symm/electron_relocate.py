@@ -1,26 +1,29 @@
 """
-Electron reflection operations for VMC symmetry exploitation.
+Electron relocation operations for VMC symmetry exploitation.
 
-This module provides reflection operations for electrons in molecular systems,
-used to improve sampling efficiency in Variational Monte Carlo calculations.
+This module provides symmetry operations (reflections and rotations) for
+electrons in molecular systems, used to improve sampling efficiency in
+Variational Monte Carlo calculations.
 """
 
 import jax
 import jax.numpy as jnp
-from typing import Callable, List
+from collections.abc import Callable
+
+from .operations import symmetry_operations_map
 
 # Symmetry operation ID mapping (reflections + rotations).
-# Existing reflection names are preserved for backward compatibility.
+# Existing operation names are preserved for backward compatibility.
 #
 # Keys are human-readable operation labels, values are integer IDs used
-# to index into the symmetry matrix table below.
+# to index into the symmetry operation tables below.
 SYMM_OP_IDS = {
     # Identity
     'I': 0,
     # Reflections across coordinate planes
     'x': 1,        # reflect x
     'y': 2,        # reflect y
-    'z': 3,       # reflect z
+    'z': 3,        # reflect z
     'xy': 5,       # reflect x and y (same as 180° about z)
     # Rotations about z-axis (counter-clockwise when looking down +z)
     'Rz90': 4,
@@ -28,28 +31,12 @@ SYMM_OP_IDS = {
     'Rz270': 6,
 }
 
+# Canonical ordering of symmetry operations by integer ID.
+SYMM_OP_LABELS = ['I', 'x', 'y', 'z', 'Rz90', 'Rz180', 'Rz270']
 
-def _rotation_matrix_z(theta: float) -> jax.Array:
-    """Return 3x3 rotation matrix for rotation about the z-axis by theta."""
-    c = jnp.cos(theta)
-    s = jnp.sin(theta)
-    return jnp.array([[c, -s, 0.0],
-                      [s,  c, 0.0],
-                      [0.0, 0.0, 1.0]])
-
-
-# Pre-computed symmetry matrices for efficiency
-# First entries reproduce the original reflection behaviour, followed by
-# additional rotations about the z-axis. 'xy' and 'Rz180' share the same ID.
-_SYMM_OP_MATRICES = jnp.stack([
-    jnp.eye(3),                        # 0: Identity
-    jnp.diag(jnp.array([-1.0,  1.0, 1.0])),  # 1: Reflect x
-    jnp.diag(jnp.array([1.0, -1.0, 1.0])),   # 2: Reflect y
-    jnp.diag(jnp.array([1.0, 1.0, -1.0])),   # 3: Reflect z
-    _rotation_matrix_z(jnp.pi / 2.0),        # 4: 90-degree rotation about z
-    jnp.diag(jnp.array([-1.0, -1.0, 1.0])),  # 5: Reflect xy / 180° about z
-    _rotation_matrix_z(3.0 * jnp.pi / 2.0),  # 6: 270-degree rotation about z
-])
+# Tuple of symmetry-operation functions corresponding to SYMM_OP_LABELS.
+_SYMM_OP_FUNCS = tuple(symmetry_operations_map[label]
+                       for label in SYMM_OP_LABELS)
 
 
 def _apply_symmetry_operation(
@@ -62,16 +49,14 @@ def _apply_symmetry_operation(
 
     Args:
         r_electrons: Electron positions with shape (nelec, 3)
-        symm_op_id: Integer ID indexing `SYMM_OP_IDS`
+        symm_op_id: Integer ID indexing `SYMM_OP_LABELS`
 
     Returns:
         Transformed electron positions with shape (nelec, 3)
     """
-    # Use dynamic indexing to select the appropriate symmetry matrix
-    op_matrix = jax.lax.dynamic_index_in_dim(
-        _SYMM_OP_MATRICES, symm_op_id, axis=0, keepdims=False
-    )
-    return jnp.einsum('ij,ej->ei', op_matrix, r_electrons)
+    # Use JAX control flow to select the appropriate symmetry function,
+    # which is implemented in `vmc_mlsw/symm/operations.py`.
+    return jax.lax.switch(symm_op_id, _SYMM_OP_FUNCS, r_electrons)
 
 
 def _symmetrize_water(r_O: jax.Array, r_H1: jax.Array, r_H2: jax.Array):
@@ -309,7 +294,7 @@ def water_dimer_reflection_electrons(nuc_crds: jax.Array) -> Callable:
 
 def water_cluster_reflection_electrons(
         nuc_crds: jax.Array,
-        cluster_idx: List
+        cluster_idx: list
         ) -> Callable:
     """
     Create electron reflection function for water dimer.
