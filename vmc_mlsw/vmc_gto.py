@@ -2,15 +2,19 @@ import sys
 import pathlib
 from collections.abc import Callable, Collection
 from datetime import datetime
+
 from pyscf import gto, scf, symm
 import jax
 import jax.numpy as jnp
 # from functools import partial
 import h5py
+
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import symmetry_operations_map
+from .symm.point_groups import (auto_symmetrize_molecule,
+                                detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
@@ -87,7 +91,8 @@ def generate_molecular_orbitals(astr: str,
                                 spin: int = 0,
                                 basis: str | dict = "aug-cc-pVTZ",
                                 postHF: str = None,
-                                ignore_hydrogen_mass: bool = False):
+                                ignore_hydrogen_mass: bool = False,
+                                enable_symmetrization: bool = True):
     """ PySCF wrapper """
     if unit is not None:
         units = unit
@@ -119,6 +124,41 @@ def generate_molecular_orbitals(astr: str,
     # Apply symmetry-based transformation: center and rotate to principal axes
     mol.atom = symm.geom.shift_atom(mol._atom, mass_center, axes)
     mol.build()
+
+    # Apply additional symmetrization for improved numerical precision
+    if enable_symmetrization:
+        # Check if symmetrization is beneficial for this molecule
+        try:
+            quality = detect_symmetry_quality(mol.atom, gpname)
+
+            if mol.verbose >= 3:
+                print("Symmetry quality check - Max deviation: "
+                      f"{quality['max_deviation']:.2e}")
+                print("Needs symmetrization: "
+                      f"{quality['needs_symmetrization']}")
+
+            if quality['needs_symmetrization']:
+                # Apply automatic symmetrization
+                symmetrized_atoms = auto_symmetrize_molecule(mol.atom, gpname)
+
+                # Apply symmetrization regardless
+                mol.atom = symmetrized_atoms
+                mol.build()
+
+                if mol.verbose >= 3:
+                    print(f"Applied {gpname} symmetrization "
+                          "for improved numerical precision")
+                    print(mol.atom)
+                    mol.atom = symmetrized_atoms
+                    mol.build()
+
+                    if mol.verbose >= 3:
+                        print(f"Applied {gpname} symmetrization "
+                              "for improved numerical precision")
+                        print(mol.atom)
+        except Exception as e:
+            if mol.verbose >= 2:
+                print(f"Symmetrization skipped due to error: {e}")
 
     if mol.verbose >= 3:
         print(f"Detected point group: {gpname}")

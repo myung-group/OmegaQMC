@@ -15,13 +15,27 @@ params_vmc_no_jastrow = {
     "J2_params": jnp.array([])
 }
 
+# atoms_string = '''
+# O                0.000000    0.000000    0.000000
+# H                0.000000    0.000000    0.957800
+# H                0.927385    0.000000   -0.239451
+# '''
+
+# # bohr
+# atoms_string = '''
+# O                0.   0.   0.
+# H                0.   1.52610182  1.12172672
+# H                0.  -1.51745721  1.11537270
+# '''
+
+# angs
 atoms_string = '''
-O                0.   0.   0.
-H                0.   1.52610182  1.12172672
-H                0.  -1.51745721  1.11537270
+O                0.000000    0.000000    0.117306
+H                0.000000    0.757208   -0.469224
+H                0.000000   -0.757208   -0.469224
 '''
 
-modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
+modrv = generate_molecular_orbitals(atoms_string, units="ang",
                                     basis=bset_name,
                                     ignore_hydrogen_mass=True)
 
@@ -39,7 +53,7 @@ vmc_run(rng_key,
         num_steps_per_block=100,  # MC steps per each walker
         num_blocks=10,
         num_blocks_equil=5,       # MC blocks for equilibration
-        mc_timestep=0.1,    # Brownian time; will be auto-adjusted
+        mc_timestep=0.002,    # Brownian time; will be auto-adjusted
         compute_gradients=l_grad)
 
 if l_grad:
