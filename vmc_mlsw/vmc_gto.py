@@ -189,7 +189,7 @@ def get_vmc_func(mf,
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
     # Get electron reflection function for this molecular type
-    propose_electron_relocation \
+    propose_electron_displacement \
         = _get_electron_displacement_fn(Z_charges, nuc_crds, cluster_idx)
 
     # atomic_masses = mf.mol.atom_mass_list()
@@ -298,8 +298,8 @@ def get_vmc_func(mf,
                               reflection_ID: int) -> jnp.ndarray:
         """Metropolis step with reflection move."""
         rescale = rescale_fn(elec_crds)
-        proposed_crds = propose_electron_relocation(elec_crds,
-                                                    rescale, reflection_ID)
+        proposed_crds = propose_electron_displacement(elec_crds,
+                                                      rescale, reflection_ID)
 
         # Compute acceptance probability
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
