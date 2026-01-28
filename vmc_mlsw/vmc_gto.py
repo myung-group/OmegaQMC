@@ -3,7 +3,7 @@ import pathlib
 from collections.abc import Callable, Collection
 from datetime import datetime
 import numpy as np
-from pyscf import gto, scf
+from pyscf import gto, scf, symm
 import jax
 import jax.numpy as jnp
 # from functools import partial
@@ -102,15 +102,27 @@ def generate_molecular_orbitals(astr: str,
     mol = gto.M(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
 
-    coords = mol.atom_coords()
-    masses = mol.atom_mass_list()
+    # Handle deprecated ignore_hydrogen_mass parameter
     if ignore_hydrogen_mass:
-        Z = mol.atom_charges()
-        masses = np.where(Z == 1, 0.0, masses)
-    centroid = np.average(coords, axis=0, weights=masses)
-    mol.set_geom_(coords - centroid, unit=units)
+        import warnings
+        warnings.warn(
+            "ignore_hydrogen_mass parameter is deprecated when using symmetry-based "
+            "alignment. The molecule will be centered at its physical center of mass "
+            "as computed by PySCF for proper symmetry detection.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
+    # Detect symmetry and get principal axes transformation
+    gpname, mass_center, axes = symm.geom.detect_symm(mol._atom)
+
+    # Apply symmetry-based transformation: center and rotate to principal axes
+    mol.atom = symm.geom.shift_atom(mol._atom, mass_center, axes)
     mol.build()
-    if mol.verbose == 3:
+
+    if mol.verbose >= 3:
+        print(f"Detected point group: {gpname}")
+        print(f"Principal axes transformation:\n{axes}")
         print(mol.atom)
 
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
