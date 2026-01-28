@@ -2,7 +2,6 @@ import sys
 import pathlib
 from collections.abc import Callable, Collection
 from datetime import datetime
-import numpy as np
 from pyscf import gto, scf, symm
 import jax
 import jax.numpy as jnp
@@ -15,7 +14,7 @@ from .symm.operations import symmetry_operations_map
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
-from .symm.electron_relocate import (
+from .symm.electron_displace import (
     diatomic_reflection_electrons,
     water_reflection_electrons,
     water_dimer_reflection_electrons,
@@ -29,10 +28,10 @@ STEP_SIZE_ADAPTATION_RATE = 0.05
 jax.config.update("jax_enable_x64", True)
 
 
-def _get_electron_relocation_fn(Z_charges: jnp.ndarray,
-                                nuc_crds: jnp.ndarray,
-                                cluster_idx: Collection[int] | None) \
-                                    -> Callable:
+def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
+                                  nuc_crds: jnp.ndarray,
+                                  cluster_idx: Collection[int] | None) \
+                                      -> Callable:
     """Select appropriate electron reflection function
     based on molecular composition."""
     charge_tuple = tuple(Z_charges)
@@ -106,9 +105,10 @@ def generate_molecular_orbitals(astr: str,
     if ignore_hydrogen_mass:
         import warnings
         warnings.warn(
-            "ignore_hydrogen_mass parameter is deprecated when using symmetry-based "
-            "alignment. The molecule will be centered at its physical center of mass "
-            "as computed by PySCF for proper symmetry detection.",
+            "ignore_hydrogen_mass parameter is deprecated when using "
+            "symmetry-based alignment. The molecule will be centered "
+            "at its physical center of mass as computed by PySCF for "
+            "proper symmetry detection.",
             DeprecationWarning,
             stacklevel=2
         )
@@ -190,7 +190,7 @@ def get_vmc_func(mf,
 
     # Get electron reflection function for this molecular type
     propose_electron_relocation \
-        = _get_electron_relocation_fn(Z_charges, nuc_crds, cluster_idx)
+        = _get_electron_displacement_fn(Z_charges, nuc_crds, cluster_idx)
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
