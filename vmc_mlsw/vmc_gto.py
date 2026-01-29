@@ -410,6 +410,7 @@ def get_vmc_func(mf,
                                     in_axes=(0, 0, None))
 
     # --- Gradient batch computation ---
+    @jax.jit
     def vmc_gradient_batch(batch_samples: jnp.ndarray) \
             -> tuple[jnp.ndarray, ...]:
         grd_ee_elc = jax.vmap(grad_fn_ee)(batch_samples)

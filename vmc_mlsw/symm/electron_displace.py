@@ -133,6 +133,7 @@ def diatomic_reflection_electrons(nuc_crds: jax.Array) -> Callable:
     Returns:
         Function that applies a symmetry operation to electron coordinates
     """
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
@@ -165,6 +166,7 @@ def water_reflection_electrons(nuc_crds: jax.Array) -> Callable:
     # Precompute coordinate shift
     coord_shift = nuc_symm_crds - nuc_crds
 
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
@@ -233,6 +235,7 @@ def water_dimer_reflection_electrons(nuc_crds: jax.Array) -> Callable:
     # Precompute coordinate shift
     coord_shift = nuc_symm_crds - nuc_crds
 
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
@@ -327,6 +330,7 @@ def water_cluster_reflection_electrons(
     # Precompute coordinate shift
     coord_shift = nuc_symm_crds - nuc_crds
 
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:

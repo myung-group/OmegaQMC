@@ -335,6 +335,7 @@ def cusp_coeff_vec(g_alpha, g_norm, Z, rc):
     return coeff_vec
 
 
+@jax.jit
 def gto_1s_alpha_norm(basis):
     ish = basis[0]      # 1s orbital
     # Pre-compute primitive pairs more efficiently
