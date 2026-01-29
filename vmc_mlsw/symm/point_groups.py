@@ -68,7 +68,9 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
         }
         super().__init__('C2v', operations)
 
-    def symmetrize_water_molecule(self, coords: np.ndarray) -> np.ndarray:
+    def symmetrize_water_molecule(self, coords: np.ndarray,
+                                  center: Optional[np.ndarray] = None) \
+            -> np.ndarray:
         """
         Specialized symmetrization for water molecules.
         Ensures equal OH bond lengths and proper H-O-H angle
@@ -95,8 +97,9 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
         # Place H atoms at equal distance from z-axis, symmetric in xy-plane
         # Use the average bond length and angle
 
-        # Default water angle ~104.5 degrees
-        target_angle = angle if angle > 0.1 else 104.5 * math.pi / 180
+        # Default water angle ~104.4776 degrees
+        # Hoy1979 doi:10.1016/0022-2852(79)90019-5
+        target_angle = angle if angle > 0.1 else 104.4776 * math.pi / 180
 
         # Place H atoms symmetrically about z-axis in xz-plane
         # H atoms at same z coordinate, opposite x coordinates
@@ -112,7 +115,11 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
         H1_new = H1_new + O_new
         H2_new = H2_new + O_new
 
-        return np.array([O_new, H1_new, H2_new])
+        coords_adjusted = np.array([O_new, H1_new, H2_new])
+        if center is not None:
+            return coords_adjusted - center
+        else:
+            return coords_adjusted
 
     def symmetrize(self, coords: np.ndarray,
                    center: Optional[np.ndarray] = None) -> np.ndarray:
@@ -122,7 +129,7 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
         # Check if this looks like a water molecule
         # (3 atoms with O-H-H pattern)
         if len(coords) == 3:
-            return self.symmetrize_water_molecule(coords)
+            return self.symmetrize_water_molecule(coords, center)
 
         # For other molecules, use the general symmetrization
         return super().symmetrize(coords, center)
