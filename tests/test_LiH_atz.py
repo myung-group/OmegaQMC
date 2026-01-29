@@ -24,8 +24,8 @@ modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
 
 chkfile_prefix = 'LiH_vmc_aVTZ'
 
-# reflection_op_list = ['I', 'x', 'y', 'Rz180']
-reflection_op_list = ['I', 'Rz180']
+# reflection_op_list = ['E', 'x', 'y', 'Rz180']
+reflection_op_list = ['E', 'Rz180']
 # 'Rz180' here means 180-degree rotation
 #                 ... or negate both x and y coordinates
 

@@ -15,29 +15,31 @@ params_vmc_no_jastrow = {
     "J2_params": jnp.array([])
 }
 
-# atoms_string = '''
-# O                0.000000    0.000000    0.000000
-# H                0.000000    0.000000    0.957800
-# H                0.927385    0.000000   -0.239451
-# '''
+myUnits = "ang"
+atoms_string = '''
+O                0.000000    0.000000    0.000000
+H                0.000000    0.000000    0.957800
+H                0.927385    0.000000   -0.239451
+'''
 
-# # bohr
+# myUnits = "bohr"
 # atoms_string = '''
 # O                0.   0.   0.
 # H                0.   1.52610182  1.12172672
 # H                0.  -1.51745721  1.11537270
 # '''
 
-# angs
-atoms_string = '''
-O                0.000000    0.000000    0.117306
-H                0.000000    0.757208   -0.469224
-H                0.000000   -0.757208   -0.469224
-'''
+# myUnits = "ang"
+# atoms_string = '''
+# O                0.000000    0.000000    0.117306
+# H                0.000000    0.757208   -0.469224
+# H                0.000000   -0.757208   -0.469224
+# '''
 
-modrv = generate_molecular_orbitals(atoms_string, units="ang",
+modrv = generate_molecular_orbitals(atoms_string, units=myUnits,
                                     basis=bset_name,
-                                    ignore_hydrogen_mass=True)
+                                    symmetrization_level=2,
+                                    ignore_hydrogen_mass=False)
 
 chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 
@@ -45,7 +47,7 @@ vmc_run = get_vmc_func(modrv, params_vmc_no_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
                        prefix=chkfile_prefix,
-                       symmop_list=['I', 'x', 'y', 'Rz180'])
+                       symmop_list=['E', 'x', 'y', 'Rz180'])
 
 l_grad = True
 vmc_run(rng_key,

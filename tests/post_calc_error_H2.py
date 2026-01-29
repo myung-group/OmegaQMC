@@ -51,7 +51,7 @@ pprint.pprint(cgto_coeff)
 chkfile = 'H2_vmc_631gd.hdf5'
 
 # Set parameters
-reflection_op_list = ['I', 'x', 'y', 'Rz180']
+reflection_op_list = ['E', 'x', 'y', 'Rz180']
 rng_key = 888
 l_cusp = True
 l_grad = True

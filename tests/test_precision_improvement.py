@@ -34,7 +34,7 @@ def test_numerical_precision_improvement():
     print("-" * 50)
     mf_no_symm = generate_molecular_orbitals(water_string, units="Angstrom",
                                              basis="cc-pVDZ",
-                                             enable_symmetrization=False,
+                                             symmetrization_level=0,
                                              spin=0)
 
     coords_no_symm = mf_no_symm.mol.atom_coords()
@@ -65,7 +65,7 @@ def test_numerical_precision_improvement():
     print("-" * 50)
     mf_symm = generate_molecular_orbitals(water_string, units="Angstrom",
                                           basis="cc-pVDZ",
-                                          enable_symmetrization=True,
+                                          symmetrization_level=2,
                                           spin=0)
 
     coords_symm = mf_symm.mol.atom_coords()

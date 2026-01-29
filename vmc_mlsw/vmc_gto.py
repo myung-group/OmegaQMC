@@ -2,6 +2,7 @@ import sys
 import pathlib
 from collections.abc import Callable, Collection
 from datetime import datetime
+import warnings
 
 from pyscf import gto, scf, symm
 import jax
@@ -92,7 +93,7 @@ def generate_molecular_orbitals(astr: str,
                                 basis: str | dict = "aug-cc-pVTZ",
                                 postHF: str = None,
                                 ignore_hydrogen_mass: bool = False,
-                                enable_symmetrization: bool = True):
+                                symmetrization_level: int = 1):
     """ PySCF wrapper """
     if unit is not None:
         units = unit
@@ -106,27 +107,39 @@ def generate_molecular_orbitals(astr: str,
     mol = gto.M(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
 
-    # Handle deprecated ignore_hydrogen_mass parameter
+    if symmetrization_level >= 1:
+        # Detect symmetry and get principal axes transformation
+        gpname, centroid, axes = symm.geom.detect_symm(mol._atom)
+        # Apply symmetry-based transformation:
+        # center and rotate to principal axes
+        mol.atom = symm.geom.shift_atom(mol._atom, centroid, axes)
+        mol.build()
+
     if ignore_hydrogen_mass:
-        import warnings
-        warnings.warn(
-            "ignore_hydrogen_mass parameter is deprecated when using "
-            "symmetry-based alignment. The molecule will be centered "
-            "at its physical center of mass as computed by PySCF for "
-            "proper symmetry detection.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-
-    # Detect symmetry and get principal axes transformation
-    gpname, mass_center, axes = symm.geom.detect_symm(mol._atom)
-
-    # Apply symmetry-based transformation: center and rotate to principal axes
-    mol.atom = symm.geom.shift_atom(mol._atom, mass_center, axes)
-    mol.build()
+        import numpy as np
+        Z = mol.atom_charges()
+        masses_adjusted = np.where(Z == 1, 0.0, mol.atom_mass_list())
+        if masses_adjusted.sum() > 0.0:
+            centroid = np.average(mol.atom_coords(), axis=0,
+                                  weights=masses_adjusted)
+            mol.set_geom_(mol.atom_coords() - centroid, unit=units)
+            mol.build()
+        else:
+            warnings.warn(
+                "ignore_hydrogen_mass parameter will be disabled "
+                "for systems that consist of only hydrogen atoms.",
+                stacklevel=2
+            )
 
     # Apply additional symmetrization for improved numerical precision
-    if enable_symmetrization:
+    if symmetrization_level >= 2:
+        if ignore_hydrogen_mass:
+            warnings.warn(
+                "ignore_hydrogen_mass parameter will be disabled "
+                "for symmetrization_level >= 2.",
+                stacklevel=2
+            )
+
         # Check if symmetrization is beneficial for this molecule
         try:
             quality = detect_symmetry_quality(mol.atom, gpname)
@@ -148,21 +161,11 @@ def generate_molecular_orbitals(astr: str,
                 if mol.verbose >= 3:
                     print(f"Applied {gpname} symmetrization "
                           "for improved numerical precision")
-                    print(mol.atom)
-                    mol.atom = symmetrized_atoms
-                    mol.build()
-
-                    if mol.verbose >= 3:
-                        print(f"Applied {gpname} symmetrization "
-                              "for improved numerical precision")
-                        print(mol.atom)
         except Exception as e:
             if mol.verbose >= 2:
                 print(f"Symmetrization skipped due to error: {e}")
 
     if mol.verbose >= 3:
-        print(f"Detected point group: {gpname}")
-        print(f"Principal axes transformation:\n{axes}")
         print(mol.atom)
 
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
@@ -176,9 +179,13 @@ def generate_molecular_orbitals(astr: str,
             postmf = cc.CCSD(mf).run()
             # cc_grad = postmf.nuc_grad_method()
             # cc_grad.kernel()
+            postmf.mol.symmetry = gpname
             return postmf
-
-    return mf
+    else:
+        # XXX: hack - merely tag the molecule afterwards
+        #      without doing any symmetry-adapted SCF
+        mf.mol.symmetry = gpname
+        return mf
 
 
 def get_vmc_func(mf,
@@ -186,10 +193,22 @@ def get_vmc_func(mf,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  prefix='vmc',
-                 symmop_list=["I"],
+                 symmop_list=["E"],
                  cluster_idx: Collection[int] = None) \
                      -> tuple[Callable, Callable]:
     assert symmop_list != []
+    # TODO: Later, change symmop_list to an internal list
+    # that is chosen automatically based on the symmetry
+    # detected from the molecule.
+    # Use symmetry_adapted_forces (:bool) as the argument that replaces it.
+
+    if (not mf.mol.symmetry or mf.mol.symmetry == 'C1') \
+            and len(symmop_list) > 1:
+        warnings.warn(
+            "Calculating symmetry-adapted forces "
+            "on a system with no symmetry (C1)",
+            stacklevel=2
+        )
 
     # check prefix
     suffixes_checked = [".chk.h5", ".grd.h5"]

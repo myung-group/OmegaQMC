@@ -11,6 +11,9 @@ import numpy as np
 import math
 from typing import Dict, List, Optional
 
+# Import PySCF for atomic mass data
+from pyscf.data.elements import MASSES, ELEMENTS_PROTON
+
 
 class PointGroupSymmetrizer:
     """Base class for point group symmetrization."""
@@ -55,6 +58,38 @@ class PointGroupSymmetrizer:
         return symmetrized
 
 
+def _calculate_center_of_mass(coords: np.ndarray, symbols: List[str]) \
+        -> np.ndarray:
+    """
+    Calculate the center of mass for a set of atomic coordinates.
+
+    Args:
+        coords: Atomic coordinates (N, 3)
+        symbols: List of element symbols (e.g., ['O', 'H', 'H'])
+
+    Returns:
+        Center of mass coordinates (3,)
+    """
+    if len(coords) != len(symbols):
+        raise ValueError("Number of coordinates and symbols must match")
+
+    total_mass = 0.0
+    weighted_coords = np.zeros(3)
+
+    for coord, symbol in zip(coords, symbols):
+        # Get atomic number from element symbol
+        if symbol not in ELEMENTS_PROTON:
+            raise ValueError(f"Unknown element symbol: {symbol}")
+
+        atomic_number = ELEMENTS_PROTON[symbol]
+        mass = MASSES[atomic_number]
+
+        total_mass += mass
+        weighted_coords += mass * coord
+
+    return weighted_coords / total_mass
+
+
 class C2vSymmetrizer(PointGroupSymmetrizer):
     """C2v point group symmetrizer."""
 
@@ -69,15 +104,29 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
         super().__init__('C2v', operations)
 
     def symmetrize_water_molecule(self, coords: np.ndarray,
-                                  center: Optional[np.ndarray] = None) \
+                                  center: Optional[np.ndarray] = None,
+                                  symbols: Optional[List[str]] = None) \
             -> np.ndarray:
         """
         Specialized symmetrization for water molecules.
         Ensures equal OH bond lengths and proper H-O-H angle
         while maintaining C2v symmetry.
+
+        Args:
+            coords: Nuclear coordinates (N, 3)
+            center: Center point for operations
+                    (default: calculate center of mass)
+            symbols: List of element symbols (default: ['O', 'H', 'H'])
         """
         if len(coords) != 3:
             raise ValueError("Water symmetrization requires exactly 3 atoms")
+
+        # Set default symbols if not provided
+        if symbols is None:
+            symbols = ['O', 'H', 'H']
+
+        if len(symbols) != 3:
+            raise ValueError("Water symmetrization requires exactly 3 symbols")
 
         O, H1, H2 = coords[0], coords[1], coords[2]
 
@@ -116,23 +165,37 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
         H2_new = H2_new + O_new
 
         coords_adjusted = np.array([O_new, H1_new, H2_new])
+
+        # Handle center of mass calculation if center is not provided
         if center is not None:
             return coords_adjusted - center
         else:
-            return coords_adjusted
+            # Calculate center of mass using atomic masses
+            com = _calculate_center_of_mass(coords_adjusted, symbols)
+            return coords_adjusted - com
 
     def symmetrize(self, coords: np.ndarray,
-                   center: Optional[np.ndarray] = None) -> np.ndarray:
+                   center: Optional[np.ndarray] = None,
+                   symbols: Optional[List[str]] = None) -> np.ndarray:
         """
         Apply C2v symmetrization with special handling for water molecules.
+
+        Args:
+            coords: Nuclear coordinates (N, 3)
+            center: Center point for operations
+            symbols: List of element symbols (optional, for water molecules)
         """
         # Check if this looks like a water molecule
         # (3 atoms with O-H-H pattern)
         if len(coords) == 3:
-            return self.symmetrize_water_molecule(coords, center)
+            # Set default symbols if not provided
+            if symbols is None:
+                symbols = ['O', 'H', 'H']
+            return self.symmetrize_water_molecule(coords, center, symbols)
 
         # For other molecules, use the general symmetrization
-        return super().symmetrize(coords, center)
+        parent_symmetrizer = super(C2vSymmetrizer, self)
+        return parent_symmetrizer.symmetrize(coords, center)
 
 
 class CsSymmetrizer(PointGroupSymmetrizer):
@@ -271,10 +334,13 @@ def auto_symmetrize_molecule(atom_coords: List,
     try:
         symmetrizer = get_symmetrizer(point_group)
 
-        if center is None:
-            center = np.mean(coords, axis=0)
-
-        symmetrized_coords = symmetrizer.symmetrize(coords, center)
+        # Pass symbols to symmetrizer for water molecules (C2v case)
+        if isinstance(symmetrizer, C2vSymmetrizer) and len(symbols) == 3:
+            # C2vSymmetrizer supports symbols parameter
+            symmetrized_coords = symmetrizer.symmetrize(coords, center,
+                                                        symbols=symbols)
+        else:
+            symmetrized_coords = symmetrizer.symmetrize(coords, center)
 
         # Reconstruct atom list in same format as input
         if is_pyscf_format:
@@ -328,10 +394,6 @@ def symmetrize_molecule(atom_coords: List,
 
     # Get symmetrizer
     symmetrizer = get_symmetrizer(point_group)
-
-    # If no center specified, use geometric center
-    if center is None:
-        center = np.mean(coords, axis=0)
 
     # Apply symmetrization
     symmetrized_coords = symmetrizer.symmetrize(coords, center)
