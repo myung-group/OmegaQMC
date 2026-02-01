@@ -28,10 +28,10 @@ modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
 
 chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
 
-# symmetry_op_list = ['I', 'x', 'y', 'C2']
-symmetry_op_list = ['I', 'C2']
-# symmetry_op_list = ['I', 'C2', 'Cp4', 'Cm4']
-# symmetry_op_list = ['I']
+# symmetry_op_list = ['E', 'x', 'y', 'Rz180']
+symmetry_op_list = ['E', 'Rz180']
+# symmetry_op_list = ['E', 'Rz180', 'Rz90', 'Rz270']
+# symmetry_op_list = ['E']
 
 vmc_run = get_vmc_func(modrv, params_jastrow,
                        cusp_scheme='Quady2025',

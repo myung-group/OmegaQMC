@@ -15,15 +15,31 @@ params_vmc_no_jastrow = {
     "J2_params": jnp.array([])
 }
 
+myUnits = "ang"
 atoms_string = '''
-O                0.   0.   0.
-H                0.   1.52610182  1.12172672
-H                0.  -1.51745721  1.11537270
+O                0.000000    0.000000    0.000000
+H                0.000000    0.000000    0.957800
+H                0.927385    0.000000   -0.239451
 '''
 
-modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
+# myUnits = "bohr"
+# atoms_string = '''
+# O                0.   0.   0.
+# H                0.   1.52610182  1.12172672
+# H                0.  -1.51745721  1.11537270
+# '''
+
+# myUnits = "ang"
+# atoms_string = '''
+# O                0.000000    0.000000    0.117306
+# H                0.000000    0.757208   -0.469224
+# H                0.000000   -0.757208   -0.469224
+# '''
+
+modrv = generate_molecular_orbitals(atoms_string, units=myUnits,
                                     basis=bset_name,
-                                    ignore_hydrogen_mass=True)
+                                    symmetrization_level=2,
+                                    ignore_hydrogen_mass=False)
 
 chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 
@@ -31,7 +47,7 @@ vmc_run = get_vmc_func(modrv, params_vmc_no_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
                        prefix=chkfile_prefix,
-                       symmop_list=['I', 'x', 'y', 'C2'])
+                       symmop_list=['E', 'x', 'y', 'Rz180'])
 
 l_grad = True
 vmc_run(rng_key,
@@ -39,7 +55,7 @@ vmc_run(rng_key,
         num_steps_per_block=100,  # MC steps per each walker
         num_blocks=10,
         num_blocks_equil=5,       # MC blocks for equilibration
-        mc_timestep=0.1,    # Brownian time; will be auto-adjusted
+        mc_timestep=0.002,    # Brownian time; will be auto-adjusted
         compute_gradients=l_grad)
 
 if l_grad:

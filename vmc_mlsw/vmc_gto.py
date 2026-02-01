@@ -2,20 +2,24 @@ import sys
 import pathlib
 from collections.abc import Callable, Collection
 from datetime import datetime
-import numpy as np
-from pyscf import gto, scf
+import warnings
+
+from pyscf import gto, scf, symm
 import jax
 import jax.numpy as jnp
 # from functools import partial
 import h5py
+
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
-from .symm.water_rotation_matrix import symmetrize_water_molecule
+# from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import symmetry_operations_map
+from .symm.point_groups import (auto_symmetrize_molecule,
+                                detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
-from .symm.electron_reflection import (
+from .symm.electron_displace import (
     diatomic_reflection_electrons,
     water_reflection_electrons,
     water_dimer_reflection_electrons,
@@ -29,10 +33,10 @@ STEP_SIZE_ADAPTATION_RATE = 0.05
 jax.config.update("jax_enable_x64", True)
 
 
-def _get_electron_reflection_fn(Z_charges: jnp.ndarray,
-                                nuc_crds: jnp.ndarray,
-                                cluster_idx: Collection[int] | None) \
-                                    -> Callable:
+def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
+                                  nuc_crds: jnp.ndarray,
+                                  cluster_idx: Collection[int] | None) \
+                                      -> Callable:
     """Select appropriate electron reflection function
     based on molecular composition."""
     charge_tuple = tuple(Z_charges)
@@ -88,7 +92,8 @@ def generate_molecular_orbitals(astr: str,
                                 spin: int = 0,
                                 basis: str | dict = "aug-cc-pVTZ",
                                 postHF: str = None,
-                                ignore_hydrogen_mass: bool = False):
+                                ignore_hydrogen_mass: bool = False,
+                                symmetrization_level: int = 1):
     """ PySCF wrapper """
     if unit is not None:
         units = unit
@@ -102,15 +107,65 @@ def generate_molecular_orbitals(astr: str,
     mol = gto.M(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
 
-    coords = mol.atom_coords()
-    masses = mol.atom_mass_list()
+    if symmetrization_level >= 1:
+        # Detect symmetry and get principal axes transformation
+        gpname, centroid, axes = symm.geom.detect_symm(mol._atom)
+        # Apply symmetry-based transformation:
+        # center and rotate to principal axes
+        mol.atom = symm.geom.shift_atom(mol._atom, centroid, axes)
+        mol.build()
+
     if ignore_hydrogen_mass:
+        import numpy as np
         Z = mol.atom_charges()
-        masses = np.where(Z == 1, 0.0, masses)
-    centroid = np.average(coords, axis=0, weights=masses)
-    mol.set_geom_(coords - centroid, unit=units)
-    mol.build()
-    if mol.verbose == 3:
+        masses_adjusted = np.where(Z == 1, 0.0, mol.atom_mass_list())
+        if masses_adjusted.sum() > 0.0:
+            centroid = np.average(mol.atom_coords(), axis=0,
+                                  weights=masses_adjusted)
+            mol.set_geom_(mol.atom_coords() - centroid, unit=units)
+            mol.build()
+        else:
+            warnings.warn(
+                "ignore_hydrogen_mass parameter will be disabled "
+                "for systems that consist of only hydrogen atoms.",
+                stacklevel=2
+            )
+
+    # Apply additional symmetrization for improved numerical precision
+    if symmetrization_level >= 2:
+        if ignore_hydrogen_mass:
+            warnings.warn(
+                "ignore_hydrogen_mass parameter will be disabled "
+                "for symmetrization_level >= 2.",
+                stacklevel=2
+            )
+
+        # Check if symmetrization is beneficial for this molecule
+        try:
+            quality = detect_symmetry_quality(mol.atom, gpname)
+
+            if mol.verbose >= 3:
+                print("Symmetry quality check - Max deviation: "
+                      f"{quality['max_deviation']:.2e}")
+                print("Needs symmetrization: "
+                      f"{quality['needs_symmetrization']}")
+
+            if quality['needs_symmetrization']:
+                # Apply automatic symmetrization
+                symmetrized_atoms = auto_symmetrize_molecule(mol.atom, gpname)
+
+                # Apply symmetrization regardless
+                mol.atom = symmetrized_atoms
+                mol.build()
+
+                if mol.verbose >= 3:
+                    print(f"Applied {gpname} symmetrization "
+                          "for improved numerical precision")
+        except Exception as e:
+            if mol.verbose >= 2:
+                print(f"Symmetrization skipped due to error: {e}")
+
+    if mol.verbose >= 3:
         print(mol.atom)
 
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
@@ -124,9 +179,13 @@ def generate_molecular_orbitals(astr: str,
             postmf = cc.CCSD(mf).run()
             # cc_grad = postmf.nuc_grad_method()
             # cc_grad.kernel()
+            postmf.mol.symmetry = gpname
             return postmf
-
-    return mf
+    else:
+        # XXX: hack - merely tag the molecule afterwards
+        #      without doing any symmetry-adapted SCF
+        mf.mol.symmetry = gpname
+        return mf
 
 
 def get_vmc_func(mf,
@@ -134,10 +193,22 @@ def get_vmc_func(mf,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  prefix='vmc',
-                 symmop_list=["I"],
+                 symmop_list=["E"],
                  cluster_idx: Collection[int] = None) \
                      -> tuple[Callable, Callable]:
     assert symmop_list != []
+    # TODO: Later, change symmop_list to an internal list
+    # that is chosen automatically based on the symmetry
+    # detected from the molecule.
+    # Use symmetry_adapted_forces (:bool) as the argument that replaces it.
+
+    if (not mf.mol.symmetry or mf.mol.symmetry == 'C1') \
+            and len(symmop_list) > 1:
+        warnings.warn(
+            "Calculating symmetry-adapted forces "
+            "on a system with no symmetry (C1)",
+            stacklevel=2
+        )
 
     # check prefix
     suffixes_checked = [".chk.h5", ".grd.h5"]
@@ -159,7 +230,7 @@ def get_vmc_func(mf,
                     and params_corr[k].shape[0] < 2:
                 jax.debug.print(
                     f"⚠️ WARNING! Correlation parameter set \"{k}\" "
-                    "requires 2 elements, but the user provided less.  "
+                    "requires 2 elements, but the user provided fewer.  "
                     "Deleting..."
                     )
                 kList.append(k)
@@ -177,8 +248,8 @@ def get_vmc_func(mf,
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
     # Get electron reflection function for this molecular type
-    run_electron_exchange \
-        = _get_electron_reflection_fn(Z_charges, nuc_crds, cluster_idx)
+    propose_electron_displacement \
+        = _get_electron_displacement_fn(Z_charges, nuc_crds, cluster_idx)
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
@@ -286,8 +357,8 @@ def get_vmc_func(mf,
                               reflection_ID: int) -> jnp.ndarray:
         """Metropolis step with reflection move."""
         rescale = rescale_fn(elec_crds)
-        proposed_crds = run_electron_exchange(elec_crds,
-                                              rescale, reflection_ID)
+        proposed_crds = propose_electron_displacement(elec_crds,
+                                                      rescale, reflection_ID)
 
         # Compute acceptance probability
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
@@ -339,6 +410,7 @@ def get_vmc_func(mf,
                                     in_axes=(0, 0, None))
 
     # --- Gradient batch computation ---
+    @jax.jit
     def vmc_gradient_batch(batch_samples: jnp.ndarray) \
             -> tuple[jnp.ndarray, ...]:
         grd_ee_elc = jax.vmap(grad_fn_ee)(batch_samples)

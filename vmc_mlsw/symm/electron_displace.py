@@ -1,43 +1,62 @@
 """
-Electron reflection operations for VMC symmetry exploitation.
+Electron relocation operations for VMC symmetry exploitation.
 
-This module provides reflection operations for electrons in molecular systems,
-used to improve sampling efficiency in Variational Monte Carlo calculations.
+This module provides symmetry operations (reflections and rotations) for
+electrons in molecular systems, used to improve sampling efficiency in
+Variational Monte Carlo calculations.
 """
 
 import jax
 import jax.numpy as jnp
-from typing import Callable, List
+from collections.abc import Callable
 
-# Reflection ID mapping
-REFLECTION_IDS = {'I': 0, 'x': 1, 'y': 2, 'xy': 3}
+from .operations import symmetry_operations_map
 
-# Pre-computed reflection matrices for efficiency
-# Each matrix applies the corresponding reflection in the xy-plane
-_REFLECTION_MATRICES = jnp.array([
-    [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],   # Identity
-    [[-1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],  # Reflect x
-    [[1., 0., 0.], [0., -1., 0.], [0., 0., 1.]],  # Reflect y
-    [[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]], # Reflect xy
-])
+# Symmetry operation ID mapping (reflections + rotations).
+# Existing operation names are preserved for backward compatibility.
+#
+# Keys are human-readable operation labels, values are integer IDs used
+# to index into the symmetry operation tables below.
+SYMM_OP_IDS = {
+    # Identity
+    'I': 0,
+    # Reflections across coordinate planes
+    'x': 1,        # reflect x
+    'y': 2,        # reflect y
+    'z': 3,        # reflect z
+    'xy': 5,       # reflect x and y (same as 180° about z)
+    # Rotations about z-axis (counter-clockwise when looking down +z)
+    'Rz90': 4,
+    'Rz180': 5,    # alias to avoid redundancy with 'xy'
+    'Rz270': 6,
+}
+
+# Canonical ordering of symmetry operations by integer ID.
+SYMM_OP_LABELS = ['I', 'x', 'y', 'z', 'Rz90', 'Rz180', 'Rz270']
+
+# Tuple of symmetry-operation functions corresponding to SYMM_OP_LABELS.
+_SYMM_OP_FUNCS = tuple(symmetry_operations_map[label]
+                       for label in SYMM_OP_LABELS)
 
 
-def _apply_reflection(r_electrons: jax.Array, reflection_ID: int) -> jax.Array:
+def _apply_symmetry_operation(
+    r_electrons: jax.Array,
+    symm_op_id: int
+) -> jax.Array:
     """
-    Apply reflection operation to electron coordinates.
+    Apply a symmetry operation (reflection or rotation)
+    to electron coordinates.
 
     Args:
         r_electrons: Electron positions with shape (nelec, 3)
-        reflection_ID: Integer ID (0=identity, 1=x, 2=y, 3=xy)
+        symm_op_id: Integer ID indexing `SYMM_OP_LABELS`
 
     Returns:
-        Reflected electron positions with shape (nelec, 3)
+        Transformed electron positions with shape (nelec, 3)
     """
-    # Use dynamic indexing to select the appropriate reflection matrix
-    ref_matrix = jax.lax.dynamic_index_in_dim(
-        _REFLECTION_MATRICES, reflection_ID, axis=0, keepdims=False
-    )
-    return jnp.einsum('ij,ej->ei', ref_matrix, r_electrons)
+    # Use JAX control flow to select the appropriate symmetry function,
+    # which is implemented in `vmc_mlsw/symm/operations.py`.
+    return jax.lax.switch(symm_op_id, _SYMM_OP_FUNCS, r_electrons)
 
 
 def _symmetrize_water(r_O: jax.Array, r_H1: jax.Array, r_H2: jax.Array):
@@ -50,7 +69,7 @@ def _symmetrize_water(r_O: jax.Array, r_H1: jax.Array, r_H2: jax.Array):
         r_H2: Second hydrogen position (3,)
 
     Returns:
-        Tuple of (r_H1_sym, r_H2_sym) with equalized bond lengths
+        Tuple of (r_H1_symm, r_H2_symm) with equalized bond lengths
     """
     v_OH1 = r_H1 - r_O
     v_OH2 = r_H2 - r_O
@@ -58,15 +77,15 @@ def _symmetrize_water(r_O: jax.Array, r_H1: jax.Array, r_H2: jax.Array):
     r_OH2 = jnp.linalg.norm(v_OH2)
     r_avg = 0.5 * (r_OH1 + r_OH2)
 
-    r_H1_sym = r_O + r_avg * v_OH1 / r_OH1
-    r_H2_sym = r_O + r_avg * v_OH2 / r_OH2
+    r_H1_symm = r_O + r_avg * v_OH1 / r_OH1
+    r_H2_symm = r_O + r_avg * v_OH2 / r_OH2
 
-    return r_H1_sym, r_H2_sym
+    return r_H1_symm, r_H2_symm
 
 
 def _build_water_rotation_matrix(r_O: jax.Array,
-                                  r_H1_sym: jax.Array,
-                                  r_H2_sym: jax.Array) -> jax.Array:
+                                 r_H1_symm: jax.Array,
+                                 r_H2_symm: jax.Array) -> jax.Array:
     """
     Build rotation matrix for transforming to water's standard frame.
 
@@ -77,14 +96,14 @@ def _build_water_rotation_matrix(r_O: jax.Array,
 
     Args:
         r_O: Oxygen position (3,)
-        r_H1_sym: First symmetrized hydrogen position (3,)
-        r_H2_sym: Second symmetrized hydrogen position (3,)
+        r_H1_symm: First symmetrized hydrogen position (3,)
+        r_H2_symm: Second symmetrized hydrogen position (3,)
 
     Returns:
         Rotation matrix (3, 3)
     """
-    r_H1_shifted = r_H1_sym - r_O
-    r_H2_shifted = r_H2_sym - r_O
+    r_H1_shifted = r_H1_symm - r_O
+    r_H2_shifted = r_H2_symm - r_O
 
     # z-axis: bisector direction
     midpoint = 0.5 * (r_H1_shifted + r_H2_shifted)
@@ -112,12 +131,15 @@ def diatomic_reflection_electrons(nuc_crds: jax.Array) -> Callable:
         nuc_crds: Nuclear coordinates with shape (2, 3)
 
     Returns:
-        Function that applies reflection to electron coordinates
+        Function that applies a symmetry operation to electron coordinates
     """
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
-        return _apply_reflection(r_electrons, reflection_ID)
+        # `reflection_ID` is kept for backward compatibility; it indexes
+        # the unified symmetry-operation matrix table.
+        return _apply_symmetry_operation(r_electrons, reflection_ID)
 
     return run_electron_reflection
 
@@ -130,20 +152,21 @@ def water_reflection_electrons(nuc_crds: jax.Array) -> Callable:
         nuc_crds: Nuclear coordinates [O, H1, H2] with shape (3, 3)
 
     Returns:
-        Function that applies reflection to electron coordinates
+        Function that applies a symmetry operation to electron coordinates
     """
     r_O, r_H1, r_H2 = nuc_crds[0], nuc_crds[1], nuc_crds[2]
 
     # Symmetrize water molecule
-    r_H1_sym, r_H2_sym = _symmetrize_water(r_O, r_H1, r_H2)
-    nuc_sym_crds = jnp.stack([r_O, r_H1_sym, r_H2_sym])
+    r_H1_symm, r_H2_symm = _symmetrize_water(r_O, r_H1, r_H2)
+    nuc_symm_crds = jnp.stack([r_O, r_H1_symm, r_H2_symm])
 
     # Build rotation matrix
-    Rmat = _build_water_rotation_matrix(r_O, r_H1_sym, r_H2_sym)
+    Rmat = _build_water_rotation_matrix(r_O, r_H1_symm, r_H2_symm)
 
     # Precompute coordinate shift
-    coord_shift = nuc_sym_crds - nuc_crds
+    coord_shift = nuc_symm_crds - nuc_crds
 
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
@@ -159,20 +182,22 @@ def water_reflection_electrons(nuc_crds: jax.Array) -> Callable:
             Reflected electron positions (nelec, 3)
         """
         # Transform to symmetrized coordinates
-        r_elec_sym = r_electrons + jnp.einsum('nk,en->ek', coord_shift, rescale)
+        r_elec_symm = r_electrons \
+            + jnp.einsum('nk,en->ek', coord_shift, rescale)
 
         # Transform to standard frame
-        r_elec_shifted = r_elec_sym - r_O
+        r_elec_shifted = r_elec_symm - r_O
         r_elec_std = jnp.einsum('ij,ej->ei', Rmat.T, r_elec_shifted)
 
-        # Apply reflection
-        r_elec_std = _apply_reflection(r_elec_std, reflection_ID)
+        # Apply symmetry operation in the standard frame
+        r_elec_std = _apply_symmetry_operation(r_elec_std, reflection_ID)
 
         # Transform back to symmetrized frame
-        r_elec_sym = jnp.einsum('ij,ej->ei', Rmat, r_elec_std) + r_O
+        r_elec_symm = jnp.einsum('ij,ej->ei', Rmat, r_elec_std) + r_O
 
         # Transform back to original coordinates
-        r_elec_orig = r_elec_sym - jnp.einsum('nk,en->ek', coord_shift, rescale)
+        r_elec_orig = r_elec_symm \
+            - jnp.einsum('nk,en->ek', coord_shift, rescale)
 
         return r_elec_orig
 
@@ -187,27 +212,30 @@ def water_dimer_reflection_electrons(nuc_crds: jax.Array) -> Callable:
     based on their distance to the oxygen atoms.
 
     Args:
-        nuc_crds: Nuclear coordinates [O1, H2, H3, O4, H5, H6] with shape (6, 3)
+        nuc_crds: Nuclear coordinates [O1, H2, H3, O4, H5, H6]
+        with shape (6, 3)
 
     Returns:
-        Function that applies reflection to electron coordinates
+        Function that applies a symmetry operation to electron coordinates
     """
     r_O1, r_H2, r_H3 = nuc_crds[0], nuc_crds[1], nuc_crds[2]
     r_O4, r_H5, r_H6 = nuc_crds[3], nuc_crds[4], nuc_crds[5]
 
     # Symmetrize both water molecules
-    r_H2_sym, r_H3_sym = _symmetrize_water(r_O1, r_H2, r_H3)
-    r_H5_sym, r_H6_sym = _symmetrize_water(r_O4, r_H5, r_H6)
+    r_H2_symm, r_H3_symm = _symmetrize_water(r_O1, r_H2, r_H3)
+    r_H5_symm, r_H6_symm = _symmetrize_water(r_O4, r_H5, r_H6)
 
-    nuc_sym_crds = jnp.stack([r_O1, r_H2_sym, r_H3_sym, r_O4, r_H5_sym, r_H6_sym])
+    nuc_symm_crds = jnp.stack([r_O1, r_H2_symm, r_H3_symm,
+                              r_O4, r_H5_symm, r_H6_symm])
 
     # Build rotation matrices for both water molecules
-    Rmat_wat1 = _build_water_rotation_matrix(r_O1, r_H2_sym, r_H3_sym)
-    Rmat_wat2 = _build_water_rotation_matrix(r_O4, r_H5_sym, r_H6_sym)
+    Rmat_wat1 = _build_water_rotation_matrix(r_O1, r_H2_symm, r_H3_symm)
+    Rmat_wat2 = _build_water_rotation_matrix(r_O4, r_H5_symm, r_H6_symm)
 
     # Precompute coordinate shift
-    coord_shift = nuc_sym_crds - nuc_crds
+    coord_shift = nuc_symm_crds - nuc_crds
 
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
@@ -223,34 +251,44 @@ def water_dimer_reflection_electrons(nuc_crds: jax.Array) -> Callable:
             Reflected electron positions (nelec, 3)
         """
         # Transform to symmetrized coordinates
-        r_elec_sym = r_electrons + jnp.einsum('nk,en->ek', coord_shift, rescale)
+        r_elec_symm = r_electrons \
+            + jnp.einsum('nk,en->ek', coord_shift, rescale)
 
         # Assign electrons to water molecules based on distance to oxygen
-        dist_to_O1 = jnp.linalg.norm(r_elec_sym - r_O1, axis=-1)
-        dist_to_O4 = jnp.linalg.norm(r_elec_sym - r_O4, axis=-1)
+        dist_to_O1 = jnp.linalg.norm(r_elec_symm - r_O1, axis=-1)
+        dist_to_O4 = jnp.linalg.norm(r_elec_symm - r_O4, axis=-1)
         belongs_to_wat1 = dist_to_O1 < dist_to_O4  # (nelec,)
 
         # Transform to standard frame for both water molecules
-        r_elec_std_wat1 = jnp.einsum('ij,ej->ei', Rmat_wat1.T, r_elec_sym - r_O1)
-        r_elec_std_wat2 = jnp.einsum('ij,ej->ei', Rmat_wat2.T, r_elec_sym - r_O4)
+        r_elec_std_wat1 = jnp.einsum('ij,ej->ei',
+                                     Rmat_wat1.T, r_elec_symm - r_O1)
+        r_elec_std_wat2 = jnp.einsum('ij,ej->ei',
+                                     Rmat_wat2.T, r_elec_symm - r_O4)
 
-        # Apply reflection to both
-        r_elec_std_wat1 = _apply_reflection(r_elec_std_wat1, reflection_ID)
-        r_elec_std_wat2 = _apply_reflection(r_elec_std_wat2, reflection_ID)
+        # Apply symmetry operation to both
+        r_elec_std_wat1 = _apply_symmetry_operation(
+            r_elec_std_wat1, reflection_ID
+        )
+        r_elec_std_wat2 = _apply_symmetry_operation(
+            r_elec_std_wat2, reflection_ID
+        )
 
         # Transform back to symmetrized frame
-        r_elec_sym_wat1 = jnp.einsum('ij,ej->ei', Rmat_wat1, r_elec_std_wat1) + r_O1
-        r_elec_sym_wat2 = jnp.einsum('ij,ej->ei', Rmat_wat2, r_elec_std_wat2) + r_O4
+        r_elec_symm_wat1 = jnp.einsum('ij,ej->ei',
+                                      Rmat_wat1, r_elec_std_wat1) + r_O1
+        r_elec_symm_wat2 = jnp.einsum('ij,ej->ei',
+                                      Rmat_wat2, r_elec_std_wat2) + r_O4
 
         # Select based on water assignment
-        r_elec_sym_combined = jnp.where(
+        r_elec_symm_combined = jnp.where(
             belongs_to_wat1[:, None],
-            r_elec_sym_wat1,
-            r_elec_sym_wat2
+            r_elec_symm_wat1,
+            r_elec_symm_wat2
         )
 
         # Transform back to original coordinates
-        r_elec_orig = r_elec_sym_combined - jnp.einsum('nk,en->ek', coord_shift, rescale)
+        r_elec_orig = r_elec_symm_combined \
+            - jnp.einsum('nk,en->ek', coord_shift, rescale)
 
         return r_elec_orig
 
@@ -258,9 +296,9 @@ def water_dimer_reflection_electrons(nuc_crds: jax.Array) -> Callable:
 
 
 def water_cluster_reflection_electrons(
-        nuc_crds: jax.Array, 
-        cluster_idx: List
-    ) -> Callable:
+        nuc_crds: jax.Array,
+        cluster_idx: list
+        ) -> Callable:
     """
     Create electron reflection function for water dimer.
 
@@ -268,10 +306,11 @@ def water_cluster_reflection_electrons(
     based on their distance to the oxygen atoms.
 
     Args:
-        nuc_crds: Nuclear coordinates [O1, H2, H3, O4, H5, H6] with shape (6, 3)
+        nuc_crds: Nuclear coordinates [O1, H2, H3, O4, H5, H6]
+        with shape (6, 3)
 
     Returns:
-        Function that applies reflection to electron coordinates
+        Function that applies a symmetry operation to electron coordinates
     """
     r_O_ls = []
     Rmat_wat_ls = []
@@ -279,18 +318,19 @@ def water_cluster_reflection_electrons(
     for idx in cluster_idx:
         r_O, H1, H2 = nuc_crds[jnp.array(idx)]
         # Symmetrize both water molecules
-        sym_H = _symmetrize_water(r_O, H1, H2)
+        symm_H = _symmetrize_water(r_O, H1, H2)
         # Build rotation matrices for both water molecules
-        Rmat_wat = _build_water_rotation_matrix(r_O, sym_H[0], sym_H[1])
+        Rmat_wat = _build_water_rotation_matrix(r_O, symm_H[0], symm_H[1])
         # Stack results
         r_O_ls.append(r_O)
         Rmat_wat_ls.append(jnp.array(Rmat_wat))
-        symmetrized_waters.append(jnp.array([r_O, sym_H[0], sym_H[1]]))
-    nuc_sym_crds = jnp.concatenate(symmetrized_waters)
+        symmetrized_waters.append(jnp.array([r_O, symm_H[0], symm_H[1]]))
+    nuc_symm_crds = jnp.concatenate(symmetrized_waters)
 
     # Precompute coordinate shift
-    coord_shift = nuc_sym_crds - nuc_crds
+    coord_shift = nuc_symm_crds - nuc_crds
 
+    @jax.jit
     def run_electron_reflection(r_electrons: jax.Array,
                                 rescale: jax.Array,
                                 reflection_ID: int) -> jax.Array:
@@ -306,35 +346,46 @@ def water_cluster_reflection_electrons(
             Reflected electron positions (nelec, 3)
         """
         # Transform to symmetrized coordinates
-        r_elec_sym = r_electrons + jnp.einsum('nk,en->ek', coord_shift, rescale)
+        r_elec_symm = r_electrons \
+            + jnp.einsum('nk,en->ek', coord_shift, rescale)
 
         # Assign electrons to water molecules based on distance to oxygen
         dist_list = [
-            jnp.linalg.norm(r_elec_sym - r_O_ls[i], axis=-1)
-                for i in range(len(r_O_ls))
-        ]       
-        r_elec_sym_combined = jnp.zeros_like(r_electrons)
+            jnp.linalg.norm(r_elec_symm - r_O_ls[i], axis=-1)
+            for i in range(len(r_O_ls))
+        ]
+        r_elec_symm_combined = jnp.zeros_like(r_electrons)
         for i in range(len(r_O_ls)):
             dist_to_Oi = dist_list[i]
-            belongs_to_wat_i_all = jnp.array([dist_to_Oi < dist for dist in dist_list])
+            belongs_to_wat_i_all = jnp.array([dist_to_Oi < dist
+                                              for dist in dist_list])
             row_mask = (jnp.arange(belongs_to_wat_i_all.shape[0]) != i)
             belongs_to_wat_i_all_except_ii = jnp.where(
-                row_mask[:, None], 
-                belongs_to_wat_i_all,         
-                True              
+                row_mask[:, None],
+                belongs_to_wat_i_all,
+                True
             )
             belongs_to_wat_i = jnp.all(belongs_to_wat_i_all_except_ii, axis=0)
 
-            # Transform to standard frame for both water molecules
-            r_elec_std_wat_i = jnp.einsum('ij,ej->ei', Rmat_wat_ls[i].T, r_elec_sym - r_O_ls[i])
-            # Apply reflection to both
-            r_elec_std_wat_i = _apply_reflection(r_elec_std_wat_i, reflection_ID)
+            # Transform to standard frame for this water molecule
+            r_elec_std_wat_i = jnp.einsum('ij,ej->ei',
+                                          Rmat_wat_ls[i].T,
+                                          r_elec_symm - r_O_ls[i])
+            # Apply symmetry operation in the standard frame
+            r_elec_std_wat_i = _apply_symmetry_operation(
+                r_elec_std_wat_i, reflection_ID
+            )
             # Transform back to symmetrized frame
-            r_elec_sym_wat_i = jnp.einsum('ij,ej->ei', Rmat_wat_ls[i], r_elec_std_wat_i) + r_O_ls[i]
-            r_elec_sym_combined = jnp.where(belongs_to_wat_i[:, None], r_elec_sym_wat_i, r_elec_sym_combined)
+            r_elec_symm_wat_i = jnp.einsum('ij,ej->ei',
+                                           Rmat_wat_ls[i],
+                                           r_elec_std_wat_i) + r_O_ls[i]
+            r_elec_symm_combined \
+                = jnp.where(belongs_to_wat_i[:, None],
+                            r_elec_symm_wat_i, r_elec_symm_combined)
 
         # Transform back to original coordinates
-        r_elec_orig = r_elec_sym_combined - jnp.einsum('nk,en->ek', coord_shift, rescale)
+        r_elec_orig = r_elec_symm_combined \
+            - jnp.einsum('nk,en->ek', coord_shift, rescale)
 
         return r_elec_orig
 
@@ -380,7 +431,7 @@ if __name__ == "__main__":
     print("\n1. Testing single water molecule reflection:")
     reflect_water = water_reflection_electrons(nuc_crds_water)
 
-    for ref_name, ref_id in REFLECTION_IDS.items():
+    for ref_name, ref_id in SYMM_OP_IDS.items():
         reflected = reflect_water(walkers_water, rescale_water, ref_id)
         print(f"   Reflection '{ref_name}': shape = {reflected.shape}")
 
@@ -388,14 +439,15 @@ if __name__ == "__main__":
     key = jax.random.key(123)
     nelec_dimer = 20
     walkers_dimer = jax.random.normal(key, (nelec_dimer, 3)) * 0.5
-    walkers_dimer = walkers_dimer.at[10:, 2].add(3.0)  # Shift half to second water
+    walkers_dimer = walkers_dimer.at[10:, 2].add(3.0)
+    # Shift half to second water
     rescale_dimer = compute_rescale(walkers_dimer, nuc_crds_dimer)
 
     # Test water dimer reflection
     print("\n2. Testing water dimer reflection:")
     reflect_dimer = water_dimer_reflection_electrons(nuc_crds_dimer)
 
-    for ref_name, ref_id in REFLECTION_IDS.items():
+    for ref_name, ref_id in SYMM_OP_IDS.items():
         reflected = reflect_dimer(walkers_dimer, rescale_dimer, ref_id)
         print(f"   Reflection '{ref_name}': shape = {reflected.shape}")
 
@@ -405,14 +457,16 @@ if __name__ == "__main__":
     dist_before_O4 = jnp.linalg.norm(walkers_dimer - r_O4, axis=-1)
     assigned_before = dist_before_O1 < dist_before_O4
 
-    reflected_y = reflect_dimer(walkers_dimer, rescale_dimer, REFLECTION_IDS['y'])
+    reflected_y = reflect_dimer(walkers_dimer,
+                                rescale_dimer, SYMM_OP_IDS['y'])
     dist_after_O1 = jnp.linalg.norm(reflected_y - r_O1, axis=-1)
     dist_after_O4 = jnp.linalg.norm(reflected_y - r_O4, axis=-1)
     assigned_after = dist_after_O1 < dist_after_O4
 
     preserved = jnp.all(assigned_before == assigned_after)
     n_wat1 = assigned_before.sum()
-    print(f"   Electrons in Water 1: {n_wat1}, Water 2: {nelec_dimer - n_wat1}")
+    print(f"   Electrons in Water 1: {n_wat1}, "
+          f"Water 2: {nelec_dimer - n_wat1}")
     print(f"   Assignment preserved: {preserved}")
 
     # JIT compilation test
