@@ -30,7 +30,9 @@ chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
 
 # symmetry_op_list = ['E', 'x', 'y', 'Rz180']
 symmetry_op_list = ['E', 'Rz180']
+# symmetry_op_list = ['E', 'i']
 # symmetry_op_list = ['E', 'Rz180', 'Rz90', 'Rz270']
+# symmetry_op_list = ['Rz90', 'Rz270']
 # symmetry_op_list = ['E']
 
 vmc_run = get_vmc_func(modrv, params_jastrow,
