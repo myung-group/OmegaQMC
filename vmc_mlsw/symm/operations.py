@@ -1,4 +1,5 @@
 import jax
+from pyscf import gto, symm
 
 
 @jax.jit
@@ -64,14 +65,16 @@ def apply_rotation_y180(coords):
 
 @jax.jit
 def apply_S4(coords):
-    """Apply S4 improper rotation (C4³ followed by σh): (x,y,z) → (y, -x, -z)."""
+    """Apply S4 improper rotation (C4³ followed by σh): (x,y,z)
+    → (y, -x, -z)."""
     result = coords.at[..., [0, 1]].set(coords[..., [1, 0]])
     return result.at[..., [1, 2]].multiply(-1)
 
 
 @jax.jit
 def apply_S4_3(coords):
-    """Apply S4³ improper rotation (C4 followed by σh): (x,y,z) → (-y, x, -z)."""
+    """Apply S4³ improper rotation (C4 followed by σh): (x,y,z)
+    → (-y, x, -z)."""
     result = coords.at[..., [0, 1]].set(coords[..., [1, 0]])
     return result.at[..., [0, 2]].multiply(-1)
 
@@ -135,3 +138,63 @@ symmetry_operations_map = {
     'C2z': apply_rotation_z180,
     'C2': apply_rotation_z180
 }
+
+
+def populate_fragment_symmops(mol: gto.Mole):
+    """Detect symmetry of each molecular fragment
+    and populate map_frag_symmops.
+
+    For each fragment, detects the point group using PySCF and maps it to
+    a list of symmetry operation strings compatible
+    with symmetry_operations_map.
+
+    Supported point groups: C1, Cs, C2v, C2h, D2h
+    """
+    # Map point groups to symmetry operation lists
+    POINT_GROUP_OPS = {
+        'C1': ['E'],
+        'Cs': ['E', 'z'],           # σ_h (horizontal mirror in xy-plane)
+        'C2v': ['E', 'C2', 'x', 'y'],  # C2(z), σ_v(yz), σ_v(xz)
+        'C2h': ['E', 'C2', 'i', 'z'],  # C2(z), inversion, σ_h
+        'D2h': ['E', 'C2z', 'C2x', 'C2y', 'x', 'y', 'z', 'i'],  # Full D2h
+        # Linear molecule approximations
+        'C4v': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
+        'D4h': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
+                'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
+        'Coov': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
+        # → C4v
+        'Dooh': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
+                 'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
+        # → D4h
+    }
+
+    mol.map_frag_symmops = {}
+
+    # Build atom list with fragment assignments
+    # (from parse_molecular_inspheres)
+    # mol.map_nuc_frag[i] gives fragment ID for atom i
+    # mol._atom[i] = (symbol, coords) for each atom
+
+    for frag_id in mol.map_frag_ctr.keys():
+        # Extract atoms belonging to this fragment
+        frag_atoms = []
+        for atom_idx, atom_frag_id in enumerate(mol.map_nuc_frag):
+            if atom_frag_id == frag_id:
+                frag_atoms.append(mol._atom[atom_idx])
+
+        if len(frag_atoms) == 0:
+            mol.map_frag_symmops[frag_id] = ['E']
+            continue
+
+        # Detect point group for this fragment
+        try:
+            gpname, _, _ = symm.geom.detect_symm(frag_atoms)
+        except Exception:
+            gpname = 'C1'
+
+        # Map to supported operations (default to C1 if unknown)
+        if gpname in POINT_GROUP_OPS:
+            mol.map_frag_symmops[frag_id] = POINT_GROUP_OPS[gpname]
+        else:
+            # For unsupported point groups, fall back to identity only
+            mol.map_frag_symmops[frag_id] = ['E']
