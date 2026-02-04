@@ -12,31 +12,46 @@ from collections.abc import Callable
 
 from .operations import symmetry_operations_map
 
-# Symmetry operation ID mapping (reflections + rotations).
-# Existing operation names are preserved for backward compatibility.
-#
-# Keys are human-readable operation labels, values are integer IDs used
-# to index into the symmetry operation tables below.
-SYMM_OP_IDS = {
-    # Identity
-    'I': 0,
-    # Reflections across coordinate planes
-    'x': 1,        # reflect x
-    'y': 2,        # reflect y
-    'z': 3,        # reflect z
-    'xy': 5,       # reflect x and y (same as 180° about z)
-    # Rotations about z-axis (counter-clockwise when looking down +z)
-    'Rz90': 4,
-    'Rz180': 5,    # alias to avoid redundancy with 'xy'
-    'Rz270': 6,
-}
-
-# Canonical ordering of symmetry operations by integer ID.
-SYMM_OP_LABELS = ['I', 'x', 'y', 'z', 'Rz90', 'Rz180', 'Rz270']
+# Canonical ordering of symmetry operations.
+# This list includes all operations from symmetry_operations_map that might
+# be used in symmop_list (from POINT_GROUP_OPS).
+SYMM_OP_LABELS = [
+    'E',      # 0: Identity (PySCF style)
+    'x',      # 1: Reflect across yz-plane (sx)
+    'y',      # 2: Reflect across xz-plane (sy)
+    'z',      # 3: Reflect across xy-plane (sz, sh)
+    'Rz90',   # 4: 90° rotation about z
+    'Rz180',  # 5: 180° rotation about z (C2, C2z)
+    'Rz270',  # 6: 270° rotation about z
+    'i',      # 7: Inversion
+    'C2x',    # 8: 180° rotation about x
+    'C2y',    # 9: 180° rotation about y
+    'S4',     # 10: S4 improper rotation
+    'S4_3',   # 11: S4^3 improper rotation
+    'C2xy',   # 12: 180° rotation about xy diagonal
+    'C2xmy',  # 13: 180° rotation about x,-y diagonal
+    'sxy',    # 14: Diagonal mirror (xy plane)
+    'sxmy',   # 15: Diagonal mirror (x,-y plane)
+]
 
 # Tuple of symmetry-operation functions corresponding to SYMM_OP_LABELS.
 _SYMM_OP_FUNCS = tuple(symmetry_operations_map[label]
                        for label in SYMM_OP_LABELS)
+
+# Mapping from operation string labels to integer indices.
+# Includes aliases for PySCF-style labels (E, C2, C2z, sx, sy, sz, sh).
+SYMM_OP_STRING_TO_ID = {label: i for i, label in enumerate(SYMM_OP_LABELS)}
+# Add aliases
+SYMM_OP_STRING_TO_ID.update({
+    'I': 0,       # Alias for E
+    'C2': 5,      # Alias for Rz180
+    'C2z': 5,     # Alias for Rz180
+    'sx': 1,      # Alias for x
+    'sy': 2,      # Alias for y
+    'sz': 3,      # Alias for z
+    'sh': 3,      # Alias for z (horizontal mirror)
+    'xy': 5,      # Alias for Rz180
+})
 
 
 def _apply_symmetry_operation(

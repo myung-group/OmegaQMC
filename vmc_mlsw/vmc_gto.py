@@ -2,6 +2,7 @@ import sys
 import pathlib
 from collections.abc import Callable, Collection
 from datetime import datetime
+from typing import NamedTuple
 import warnings
 
 from pyscf import gto, scf, symm
@@ -24,7 +25,8 @@ from .symm.electron_displace import (
     diatomic_reflection_electrons,
     water_reflection_electrons,
     water_dimer_reflection_electrons,
-    water_cluster_reflection_electrons
+    water_cluster_reflection_electrons,
+    SYMM_OP_STRING_TO_ID
 )
 
 # VMC hyperparameters
@@ -32,6 +34,20 @@ TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
 
 jax.config.update("jax_enable_x64", True)
+
+
+class MoveParams(NamedTuple):
+    """Unified parameters for all Metropolis move types.
+
+    Attributes:
+        step_size: Step size for Gaussian random walk moves.
+        reflection_ID: Index into symmop_list (strings from OPERATOR_TABLE).
+            Converted to internal operation index via symmop_index_map.
+        rescale: Weight matrix for coordinate transformation (nelec, num_nuc).
+    """
+    step_size: float
+    symmop_ID: int  # Index into symmop_list
+    rescale: jnp.ndarray
 
 
 def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
@@ -277,6 +293,14 @@ def get_vmc_func(mf,
     # detected from the molecule.
     # Use symmetry_adapted_forces (:bool) as the argument that replaces it.
 
+    # Build mapping from symmop_list indices to internal operation IDs.
+    # symmop_list contains strings from pyscf.symm.param.OPERATOR_TABLE.
+    num_symm_ops = len(symmop_list)
+    symmop_index_map = jnp.array(
+        [SYMM_OP_STRING_TO_ID[op] for op in symmop_list],
+        dtype=jnp.int32
+    )
+
     if mf.mol.groupname == 'C1' and len(symmop_list) > 1:
         warnings.warn(
             "Calculating symmetry-adapted forces "
@@ -403,22 +427,23 @@ def get_vmc_func(mf,
     @jax.jit
     def metropolis_move_alle(rng_key: jax.Array,
                              elec_crds: jnp.ndarray,
-                             _step_size: float) -> tuple[jnp.ndarray, bool]:
-        """Single Metropolis-Hastings step with Gaussian proposal."""
-        key_displace, key_accept = jax.random.split(rng_key)
+                             move_params: MoveParams) \
+            -> tuple[jnp.ndarray, float]:
+        """Gaussian proposal. Returns (proposed_crds, proposal_ratio)."""
+        key_displace, _ = jax.random.split(rng_key)
+        _step_size = move_params.step_size
 
-        # More efficient proposal generation
         proposed_crds = elec_crds \
             + _step_size * jax.random.normal(key_displace, elec_crds.shape)
 
-        # Check for sigularities (electron-electron and electron-nuclei)
+        # Check for singularities (electron-electron and electron-nuclei)
         diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
         dists_ee = jnp.linalg.norm(diffs_ee, axis=-1)
 
         diffs_en = proposed_crds[:, None, :] - nuc_crds[None, :, :]
         dists_en = jnp.linalg.norm(diffs_en, axis=-1)
 
-        # whether this is a valid move
+        # Whether this is a valid move
         is_invalid_move = (dists_en.min() < MIN_DIST_THRESHOLD) \
             | (dists_ee.min() < MIN_DIST_THRESHOLD)
         return jax.lax.cond(is_invalid_move,
@@ -428,47 +453,64 @@ def get_vmc_func(mf,
     @jax.jit
     def metropolis_reflection(rng_key: jax.Array,
                               elec_crds: jnp.ndarray,
-                              reflection_ID: int) -> jnp.ndarray:
-        """Metropolis step with reflection move."""
-        rescale = rescale_fn(elec_crds)
+                              move_params: MoveParams) \
+            -> tuple[jnp.ndarray, float]:
+        """Reflection/symmetry proposal. Returns (proposed_crds, 1.0).
+
+        Args:
+            rng_key: JAX random key (unused for deterministic reflection)
+            elec_crds: Electron coordinates (nelec, 3)
+            move_params: MoveParams with symmop_ID as index into symmop_list
+
+        symmop_ID indexes into symmop_list (PySCF-style strings like
+        'E', 'C2z', 'sx'). It is converted to internal operation index via
+        symmop_index_map before being passed to propose_electron_displacement.
+        """
+        rescale = move_params.rescale
+        # Convert symmop_list index to internal operation index
+        internal_op_id = symmop_index_map[move_params.symmop_ID]
+
         proposed_crds = propose_electron_displacement(elec_crds,
-                                                      rescale, reflection_ID)
+                                                      rescale, internal_op_id)
 
-        # Compute acceptance probability
-        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
-                                             params_corr)
-        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds,
-                                             params_corr)
-
-        accept = jax.random.uniform(rng_key) \
-            < jnp.exp(2.0 * (log_psi_new - log_psi_old))
-        new_crds = jnp.where(accept, proposed_crds, elec_crds)
-
-        return new_crds, 1.0
+        # Symmetric proposal -> proposal_ratio = 1.0
+        return proposed_crds, 1.0
 
     @jax.jit
     def metropolis_move_1w(rng_key: jax.Array,
                            elec_crds: jnp.ndarray,
                            _step_size: float) -> tuple[jnp.ndarray, bool]:
-        """Single-walker displacements"""
+        """Single-walker displacements using jax.lax.switch."""
         key_dtype, key_prop, key_accept = jax.random.split(rng_key, 3)
 
-        # TODO: extend to more displacement types
-        # trial_displacements = [metropolis_move_alle, metropolis_reflection]
-        # displacement_idx = jax.random.choice(key_dtype, jnp.arange(2))
+        # Random reflection type: index into symmop_list (PySCF-style strings)
+        # num_symm_ops = len(symmop_list) is captured from closure
+        symmop_chosen = jax.random.randint(key_dtype, (), 0, num_symm_ops)
 
+        # Precompute rescale (always computed for JAX tracing consistency)
+        rescale = rescale_fn(elec_crds)
+
+        move_params = MoveParams(
+            step_size=_step_size,
+            symmop_ID=symmop_chosen,
+            rescale=rescale
+        )
+
+        # # Randomly select: 0 = Gaussian, 1 = reflection
+        # trial_displacements = [metropolis_move_alle, metropolis_reflection]
+        # displacement_idx = jax.random.randint(key_dtype, (), 0, 2)
         trial_displacements = [metropolis_move_alle]
         displacement_idx = 0
 
         proposed_crds, proposal_ratio = jax.lax.switch(
-                displacement_idx,
-                trial_displacements,
-                key_prop,
-                elec_crds,
-                _step_size
-                )
+            displacement_idx,
+            trial_displacements,
+            key_prop,
+            elec_crds,
+            move_params
+        )
 
-        # Vectorized acceptance calculation
+        # Unified acceptance calculation
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
                                              params_corr)
         log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds,
