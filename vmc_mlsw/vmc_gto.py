@@ -15,7 +15,9 @@ from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 from .utils import parse_molecular_inspheres
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
-from .symm.operations import symmetry_operations_map, populate_fragment_symmops
+from .symm.operations import (symmetry_operations_map,
+                              populate_fragment_symmops,
+                              get_global_symmops)
 from .symm.point_groups import (auto_symmetrize_molecule,
                                 detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
@@ -224,14 +226,16 @@ def get_vmc_func(mf,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  prefix='vmc',
-                 symmop_list=["E"],
+                 symmop_list: list[str] | None = None,
                  cluster_idx: Collection[int] = None) \
                      -> tuple[Callable, Callable]:
+    # Auto-derive symmetry operations if not provided
+    if symmop_list is None:
+        symmop_list = get_global_symmops(mf.mol)
+        if mf.mol.verbose >= 2:
+            print(f"Auto-derived symmetry operations: {symmop_list}")
+
     assert symmop_list != []
-    # TODO: Later, change symmop_list to an internal list
-    # that is chosen automatically based on the symmetry
-    # detected from the molecule.
-    # Use symmetry_adapted_forces (:bool) as the argument that replaces it.
 
     # Build mapping from symmop_list indices to internal operation IDs.
     # symmop_list contains strings from pyscf.symm.param.OPERATOR_TABLE.

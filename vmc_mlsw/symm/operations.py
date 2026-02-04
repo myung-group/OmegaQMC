@@ -140,6 +140,61 @@ symmetry_operations_map = {
 }
 
 
+# Map point groups to symmetry operation lists
+POINT_GROUP_OPS = {
+    'C1': ['E'],
+    'Cs': ['E', 'z'],           # σ_h (horizontal mirror in xy-plane)
+    'C2v': ['E', 'C2', 'x', 'y'],  # C2(z), σ_v(yz), σ_v(xz)
+    'C2h': ['E', 'C2', 'i', 'z'],  # C2(z), inversion, σ_h
+    'D2h': ['E', 'C2z', 'C2x', 'C2y', 'x', 'y', 'z', 'i'],  # Full D2h
+    # Linear molecule approximations
+    'C4v': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
+    'D4h': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
+            'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
+    'Coov': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
+    # → C4v
+    'Dooh': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
+             'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
+    # → D4h
+}
+
+
+def get_global_symmops(mol: gto.Mole) -> list[str]:
+    """Extract symmetry operations valid for the entire molecule.
+
+    For single-fragment molecules, returns all fragment operations.
+    For multi-fragment molecules, returns intersection of all fragment
+    operations (only globally-valid ops that preserve the entire structure).
+
+    Args:
+        mol: PySCF Mole object with map_frag_symmops attribute
+
+    Returns:
+        List of symmetry operation strings (e.g., ['E', 'C2', 'x', 'y'])
+    """
+    if not hasattr(mol, 'map_frag_symmops') or not mol.map_frag_symmops:
+        return ['E']
+
+    frag_ops_list = list(mol.map_frag_symmops.values())
+
+    if len(frag_ops_list) == 0:
+        return ['E']
+
+    if len(frag_ops_list) == 1:
+        # Single fragment: use all its operations
+        return list(frag_ops_list[0])
+
+    # Multi-fragment: compute intersection
+    common_ops = set(frag_ops_list[0])
+    for frag_ops in frag_ops_list[1:]:
+        common_ops &= set(frag_ops)
+
+    # Ensure 'E' (identity) is always present
+    common_ops.add('E')
+
+    return list(common_ops) if common_ops else ['E']
+
+
 def populate_fragment_symmops(mol: gto.Mole):
     """Detect symmetry of each molecular fragment
     and populate map_frag_symmops.
@@ -148,26 +203,9 @@ def populate_fragment_symmops(mol: gto.Mole):
     a list of symmetry operation strings compatible
     with symmetry_operations_map.
 
-    Supported point groups: C1, Cs, C2v, C2h, D2h
+    Supported point groups: C1, Cs, C2v, C2h, D2h, C4v, D4h
+    Linear molecules (Coov, Dooh) are mapped to C4v, D4h respectively.
     """
-    # Map point groups to symmetry operation lists
-    POINT_GROUP_OPS = {
-        'C1': ['E'],
-        'Cs': ['E', 'z'],           # σ_h (horizontal mirror in xy-plane)
-        'C2v': ['E', 'C2', 'x', 'y'],  # C2(z), σ_v(yz), σ_v(xz)
-        'C2h': ['E', 'C2', 'i', 'z'],  # C2(z), inversion, σ_h
-        'D2h': ['E', 'C2z', 'C2x', 'C2y', 'x', 'y', 'z', 'i'],  # Full D2h
-        # Linear molecule approximations
-        'C4v': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
-        'D4h': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
-                'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
-        'Coov': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
-        # → C4v
-        'Dooh': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
-                 'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
-        # → D4h
-    }
-
     mol.map_frag_symmops = {}
 
     # Build atom list with fragment assignments
