@@ -1,7 +1,9 @@
 import sys
 import h5py
+import numpy as np
 from pyscf import gto
 from pyscf.gto.basis import _format_basis_name
+from pyscf.data.elements import MASSES, ELEMENTS_PROTON
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
@@ -97,6 +99,102 @@ def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
     s_all = jnp.concatenate([r[2] for r in results], axis=0)
     kappa_all = jnp.concatenate([r[3] for r in results], axis=0)
     return xbar_all, serr_all, s_all, kappa_all
+
+
+def compute_center_of_mass(coords: np.ndarray, symbols: list[str],
+                           ignore_hydrogen_mass: bool = False) \
+        -> np.ndarray:
+    """
+    Calculate the center of mass for a set of atomic coordinates.
+
+    Args:
+        coords: Atomic coordinates (N, 3)
+        symbols: List of element symbols (e.g., ['O', 'H', 'H'])
+
+    Returns:
+        Center of mass coordinates (3,)
+    """
+    if len(coords) != len(symbols):
+        raise ValueError("Number of coordinates and symbols must match")
+
+    total_mass = 0.0
+    weighted_coords = np.zeros(3)
+
+    # TODO: np.average(coords, axis=0, weights=masses) 형식으로 단순화
+    for coord, symbol in zip(coords, symbols):
+        # Get atomic number from element symbol
+        if symbol not in ELEMENTS_PROTON:
+            raise ValueError(f"Unknown element symbol: {symbol}")
+
+        atomic_number = ELEMENTS_PROTON[symbol]
+        mass = 0 \
+            if atomic_number == 1 and ignore_hydrogen_mass \
+            else MASSES[atomic_number]
+
+        total_mass += mass
+        weighted_coords += mass * coord
+
+    return weighted_coords / total_mass
+
+
+def parse_molecular_inspheres(mol: gto.Mole):
+    assert hasattr(mol, "ignore_hydrogen_mass")
+
+    if mol.atom_string.endswith(".xyz"):
+        with open(mol.atom_string, 'r') as f:
+            Z = f.readlines()
+        if "molecule:I:1" not in Z[1]:
+            print("⚠️ WARNING! Line 2 of {} should have a properties block "
+                  "indicating a column with molecular fragment indices "
+                  "e.g. 'Properties=species:S:1:pos:R:3:molecule:I:1'"
+                  .format(mol.atom_string))
+        Z = list(filter(lambda x: x.strip() != "", Z[2:]))
+    else:
+        Z = mol.atom_string.strip().split('\n')
+    # natm = len(Z)
+
+    Y = []
+    mol.map_nuc_frag = []
+    for line in Z:
+        z = line.strip().split()
+        if len(z) >= 5:
+            m = int(z[4])
+            z = [z[0], float(z[1]), float(z[2]), float(z[3]), m]
+        elif len(z) == 4:
+            m = 0
+            z = [z[0], float(z[1]), float(z[2]), float(z[3]), m]
+        else:
+            m = 0
+            z = [z[0], 0, 0, 0, m]
+        mol.map_nuc_frag.append(m)
+        Y.append(z)
+
+    mol.map_frag_ctr = dict()
+    for k in set(mol.map_nuc_frag):
+        symbols = []
+        X = []
+        for y in Y:
+            if y[4] == k:
+                symbols.append(y[0])
+                X.append(y[1:4])
+        mol.map_frag_ctr[k] = compute_center_of_mass(np.array(X), symbols)
+
+    seed_points = list(mol.map_frag_ctr.values())
+
+    # Compute Voronoi in-radii (half-distance to nearest neighbor)
+    if len(seed_points) <= 1:
+        # Single fragment: no Voronoi boundaries, return infinite radius
+        mol.inradii = [np.inf] * len(seed_points)
+    else:
+        seed_array = np.array(seed_points)
+        # Compute pairwise distances
+        diff = seed_array[:, np.newaxis, :] - seed_array[np.newaxis, :, :]
+        dist_matrix = np.linalg.norm(diff, axis=-1)
+        # Set diagonal to inf to exclude self-distances
+        np.fill_diagonal(dist_matrix, np.inf)
+        # In-radius is half the distance to nearest neighbor
+        min_distances = dist_matrix.min(axis=1)
+        mol.inradii = (min_distances / 2.0).tolist()
 
 
 def compute_torque(mol, grd):

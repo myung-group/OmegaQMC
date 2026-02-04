@@ -9,16 +9,15 @@ starting with C2v for water molecules and designed to be extensible.
 
 import numpy as np
 import math
-from typing import Dict, List, Optional
+from typing import Optional
 
-# Import PySCF for atomic mass data
-from pyscf.data.elements import MASSES, ELEMENTS_PROTON
+from ..utils import compute_center_of_mass
 
 
 class PointGroupSymmetrizer:
     """Base class for point group symmetrization."""
 
-    def __init__(self, name: str, operations: Dict[str, np.ndarray]):
+    def __init__(self, name: str, operations: dict[str, np.ndarray]):
         self.name = name
         self.operations = operations
 
@@ -58,38 +57,6 @@ class PointGroupSymmetrizer:
         return symmetrized
 
 
-def _calculate_center_of_mass(coords: np.ndarray, symbols: List[str]) \
-        -> np.ndarray:
-    """
-    Calculate the center of mass for a set of atomic coordinates.
-
-    Args:
-        coords: Atomic coordinates (N, 3)
-        symbols: List of element symbols (e.g., ['O', 'H', 'H'])
-
-    Returns:
-        Center of mass coordinates (3,)
-    """
-    if len(coords) != len(symbols):
-        raise ValueError("Number of coordinates and symbols must match")
-
-    total_mass = 0.0
-    weighted_coords = np.zeros(3)
-
-    for coord, symbol in zip(coords, symbols):
-        # Get atomic number from element symbol
-        if symbol not in ELEMENTS_PROTON:
-            raise ValueError(f"Unknown element symbol: {symbol}")
-
-        atomic_number = ELEMENTS_PROTON[symbol]
-        mass = MASSES[atomic_number]
-
-        total_mass += mass
-        weighted_coords += mass * coord
-
-    return weighted_coords / total_mass
-
-
 class C2vSymmetrizer(PointGroupSymmetrizer):
     """C2v point group symmetrizer."""
 
@@ -105,7 +72,7 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
 
     def symmetrize_water_molecule(self, coords: np.ndarray,
                                   center: Optional[np.ndarray] = None,
-                                  symbols: Optional[List[str]] = None) \
+                                  symbols: Optional[list[str]] = None) \
             -> np.ndarray:
         """
         Specialized symmetrization for water molecules.
@@ -171,12 +138,12 @@ class C2vSymmetrizer(PointGroupSymmetrizer):
             return coords_adjusted - center
         else:
             # Calculate center of mass using atomic masses
-            com = _calculate_center_of_mass(coords_adjusted, symbols)
+            com = compute_center_of_mass(coords_adjusted, symbols)
             return coords_adjusted - com
 
     def symmetrize(self, coords: np.ndarray,
                    center: Optional[np.ndarray] = None,
-                   symbols: Optional[List[str]] = None) -> np.ndarray:
+                   symbols: Optional[list[str]] = None) -> np.ndarray:
         """
         Apply C2v symmetrization with special handling for water molecules.
 
@@ -283,9 +250,9 @@ def get_symmetrizer(point_group: str, **kwargs) -> PointGroupSymmetrizer:
     return SYMMETRIZER_REGISTRY[point_group](**kwargs)
 
 
-def auto_symmetrize_molecule(atom_coords: List,
+def auto_symmetrize_molecule(atom_coords: list,
                              detected_point_group: str,
-                             center: Optional[np.ndarray] = None) -> List:
+                             center: Optional[np.ndarray] = None) -> list:
     """
     Automatically symmetrize molecular coordinates using the most appropriate
     point group operations based on the detected point group
@@ -361,9 +328,9 @@ def auto_symmetrize_molecule(atom_coords: List,
         return atom_coords
 
 
-def symmetrize_molecule(atom_coords: List,
+def symmetrize_molecule(atom_coords: list,
                         point_group: str,
-                        center: Optional[np.ndarray] = None) -> List:
+                        center: Optional[np.ndarray] = None) -> list:
     """
     Symmetrize molecular coordinates using point group operations.
 
@@ -411,9 +378,9 @@ def symmetrize_molecule(atom_coords: List,
     return symmetrized_atoms
 
 
-def detect_symmetry_quality(atom_coords: List,
+def detect_symmetry_quality(atom_coords: list,
                             point_group: str,
-                            tolerance: float = 1e-5) -> Dict[str, float]:
+                            tolerance: float = 1e-5) -> dict[str, float]:
     """
     Analyze the quality of molecular symmetry.
 

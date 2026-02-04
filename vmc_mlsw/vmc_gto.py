@@ -12,6 +12,7 @@ import h5py
 
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
+from .utils import parse_molecular_inspheres
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import symmetry_operations_map
 from .symm.point_groups import (auto_symmetrize_molecule,
@@ -98,14 +99,17 @@ def generate_molecular_orbitals(astr: str,
     if unit is not None:
         units = unit
         # "unit" (sic) takes precedence
-    if astr.endswith(".xyz") \
-            and (units.upper().startswith("B")
-                 or units.upper().startswith("AU")):
-        print("⚠️ WARNING! XYZ input uses Å units by default, "
-              "but the user has specified Bohrs.")
+
+    if astr.endswith(".xyz"):
+        if units.upper().startswith("B") or units.upper().startswith("AU"):
+            print("⚠️ WARNING! XYZ input uses Å units by default, "
+                  "but the user has specified Bohrs.")
+        elif units is None or units == "":
+            units = "angstroms"
 
     mol = gto.M(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
+    mol.atom_string = astr
 
     if symmetrization_level >= 1:
         # Detect symmetry and get principal axes transformation
@@ -115,6 +119,8 @@ def generate_molecular_orbitals(astr: str,
         mol.atom = symm.geom.shift_atom(mol._atom, centroid, axes)
         mol.build()
 
+    # TODO: 여기를 포함하여 모든 centroid 계산을
+    # utils.compute_center_of_mass 호출하는 것으로 일원화 할 것
     if ignore_hydrogen_mass:
         import numpy as np
         Z = mol.atom_charges()
@@ -168,6 +174,9 @@ def generate_molecular_orbitals(astr: str,
     if mol.verbose >= 3:
         print(mol.atom)
 
+    mol.ignore_hydrogen_mass = ignore_hydrogen_mass
+    parse_molecular_inspheres(mol)
+
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
     mf.kernel()
     # mf_grad = mf.nuc_grad_method()
@@ -179,12 +188,12 @@ def generate_molecular_orbitals(astr: str,
             postmf = cc.CCSD(mf).run()
             # cc_grad = postmf.nuc_grad_method()
             # cc_grad.kernel()
-            postmf.mol.symmetry = gpname
+            postmf.mol.groupname = gpname
             return postmf
     else:
         # XXX: hack - merely tag the molecule afterwards
         #      without doing any symmetry-adapted SCF
-        mf.mol.symmetry = gpname
+        mf.mol.groupname = gpname
         return mf
 
 
@@ -202,8 +211,7 @@ def get_vmc_func(mf,
     # detected from the molecule.
     # Use symmetry_adapted_forces (:bool) as the argument that replaces it.
 
-    if (not mf.mol.symmetry or mf.mol.symmetry == 'C1') \
-            and len(symmop_list) > 1:
+    if mf.mol.groupname == 'C1' and len(symmop_list) > 1:
         warnings.warn(
             "Calculating symmetry-adapted forces "
             "on a system with no symmetry (C1)",
