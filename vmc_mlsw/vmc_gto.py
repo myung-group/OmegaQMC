@@ -176,6 +176,12 @@ def generate_molecular_orbitals(astr: str,
 
     mol.ignore_hydrogen_mass = ignore_hydrogen_mass
     parse_molecular_inspheres(mol)
+    assert hasattr(mol, "map_nuc_frag")
+    assert hasattr(mol, "map_frag_ctr") and isinstance(mol.map_frag_ctr, dict)
+    assert hasattr(mol, "inradii") and isinstance(mol.inradii, dict)
+
+    populate_fragment_symmops(mol)
+    # TODO: later use symmetrization_level option
 
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
     mf.kernel()
@@ -195,6 +201,10 @@ def generate_molecular_orbitals(astr: str,
         #      without doing any symmetry-adapted SCF
         mf.mol.groupname = gpname
         return mf
+
+
+def populate_fragment_symmops(mol: gto.Mole):
+    pass
 
 
 def get_vmc_func(mf,

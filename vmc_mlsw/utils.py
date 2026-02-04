@@ -169,7 +169,7 @@ def parse_molecular_inspheres(mol: gto.Mole):
         mol.map_nuc_frag.append(m)
         Y.append(z)
 
-    mol.map_frag_ctr = dict()
+    mol.map_frag_ctr = dict[int, np.array]()
     for k in set(mol.map_nuc_frag):
         symbols = []
         X = []
@@ -182,9 +182,10 @@ def parse_molecular_inspheres(mol: gto.Mole):
     seed_points = list(mol.map_frag_ctr.values())
 
     # Compute Voronoi in-radii (half-distance to nearest neighbor)
+    mol.inradii = dict[int, float]()
     if len(seed_points) <= 1:
         # Single fragment: no Voronoi boundaries, return infinite radius
-        mol.inradii = [np.inf] * len(seed_points)
+        mol.inradii[0] = mol.inradii[1] = np.inf
     else:
         seed_array = np.array(seed_points)
         # Compute pairwise distances
@@ -194,7 +195,10 @@ def parse_molecular_inspheres(mol: gto.Mole):
         np.fill_diagonal(dist_matrix, np.inf)
         # In-radius is half the distance to nearest neighbor
         min_distances = dist_matrix.min(axis=1)
-        mol.inradii = (min_distances / 2.0).tolist()
+
+        for i, r in zip(mol.map_frag_ctr.keys(),
+                        (min_distances / 2.0).tolist()):
+            mol.inradii[i] = r
 
 
 def compute_torque(mol, grd):
