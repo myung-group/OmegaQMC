@@ -1,6 +1,6 @@
 """VMC-MLSW"""
 
-from vmc_mlsw.vmc_gto import generate_molecular_orbitals, get_vmc_func
+from vmc_mlsw.vmc_gto import get_vmc_func
 from vmc_mlsw.vmcopt_gto import get_vmcopt_func
 #from vmc_mlsw import psi_gto
 #from vmc_mlsw import psi_gto_cusp
@@ -11,7 +11,6 @@ __version__ = "0.1.0"
 
 # Re-export constants from dedicated module
 from vmc_mlsw.constants import (
-    CHEMICAL_ACCURACY,
     JASTROW_EE_L_CUT,
     JASTROW_EE_M_POWER,
     EE_CUSP_VALUE,
