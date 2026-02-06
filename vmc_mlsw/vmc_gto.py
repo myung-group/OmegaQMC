@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import NamedTuple
 import warnings
 
-from pyscf import gto, scf, symm
+from pyscf import scf, symm
 import jax
 import jax.numpy as jnp
 # from functools import partial

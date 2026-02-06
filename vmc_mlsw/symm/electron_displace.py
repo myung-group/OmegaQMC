@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from collections.abc import Callable
 
-from .operations import symmetry_operations_map
+from .operations import symmetry_operations_map, apply_reflection_z
 
 # Canonical ordering of symmetry operations.
 # This list includes all operations from symmetry_operations_map that might
@@ -405,6 +405,57 @@ def water_cluster_reflection_electrons(
         return r_elec_orig
 
     return run_electron_reflection
+
+
+def reflect_xy_planar(elec_crds: jax.Array,
+                      frag_nuc_crds: jax.Array,
+                      frag_centroid: jax.Array,
+                      inradius: float) -> jax.Array:
+    """Reflect electrons through a planar fragment's molecular plane.
+
+    Only electrons within `inradius` of `frag_centroid` are reflected;
+    the rest are left unchanged.
+
+    Algorithm:
+        1. SVD of centered fragment nuclear coords → rotation matrix Vh
+           where Vh[2] is the plane normal (smallest singular value direction)
+        2. Translate electrons so centroid is at origin
+        3. Rotate electrons into fragment principal frame (plane → xy)
+        4. Apply z-reflection (flip z-coordinate)
+        5. Inverse rotate and translate back
+
+    Args:
+        elec_crds: Electron coordinates (nelec, 3)
+        frag_nuc_crds: Nuclear coordinates of fragment atoms (n_frag_atoms, 3)
+        frag_centroid: Center of mass of the fragment (3,)
+        inradius: Fragment inradius — only electrons within this distance
+                  of frag_centroid are reflected
+
+    Returns:
+        Proposed electron coordinates (nelec, 3)
+    """
+    # 1. Compute rotation matrix from fragment geometry
+    centered_nucs = frag_nuc_crds - frag_centroid
+    _, _, Vh = jnp.linalg.svd(centered_nucs, full_matrices=True)
+    # Vh rows: principal axes. Vh[2] = plane normal (least variance).
+    # R = Vh rotates the fragment plane onto xy.
+
+    # 2. Translate electrons to fragment-centered frame
+    elec_centered = elec_crds - frag_centroid
+
+    # 3. Rotate into fragment principal frame (plane → xy)
+    elec_rotated = elec_centered @ Vh.T
+
+    # 4. Reflect through xy-plane (z → -z)
+    elec_reflected = apply_reflection_z(elec_rotated)
+
+    # 5. Rotate back and translate
+    elec_proposed = elec_reflected @ Vh + frag_centroid
+
+    # 6. Only apply to electrons within inradius of centroid
+    dist = jnp.linalg.norm(elec_centered, axis=-1)   # (nelec,)
+    mask = dist <= inradius                            # (nelec,)
+    return jnp.where(mask[:, None], elec_proposed, elec_crds)
 
 
 if __name__ == "__main__":
