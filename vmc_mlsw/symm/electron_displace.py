@@ -460,24 +460,20 @@ def reflect_xy_planar(elec_crds: jax.Array,
 
 if __name__ == "__main__":
     # Test the reflection functions
+    jax.config.update("jax_enable_x64", True)
+
     print("=" * 70)
     print("Testing Electron Reflection Functions")
     print("=" * 70)
 
-    # Test water molecule setup
+    # C2v water operations to test
+    test_ops = {'E': 0, 'x': 1, 'y': 2, 'C2': 5}
+
+    # --- Single water molecule ---
     r_O = jnp.array([0.0, 0.0, 0.0])
     r_H1 = jnp.array([0.96, 0.0, 0.0])
     r_H2 = jnp.array([0.0, 0.99, 0.0])
     nuc_crds_water = jnp.stack([r_O, r_H1, r_H2])
-
-    # Test water dimer setup
-    r_O1 = jnp.array([0.0, 0.0, 0.0])
-    r_H2 = jnp.array([0.96, 0.0, 0.0])
-    r_H3 = jnp.array([0.0, 0.99, 0.0])
-    r_O4 = jnp.array([0.0, 0.0, 3.0])
-    r_H5 = jnp.array([0.96, 0.0, 3.0])
-    r_H6 = jnp.array([0.0, 0.99, 3.0])
-    nuc_crds_dimer = jnp.stack([r_O1, r_H2, r_H3, r_O4, r_H5, r_H6])
 
     def compute_rescale(elec_crds, nuc_crds):
         """Compute rescaling weights based on inverse distance."""
@@ -487,44 +483,48 @@ if __name__ == "__main__":
         weight = dist**(-4.0)
         return weight / jnp.sum(weight, axis=-1, keepdims=True)
 
-    # Create test electrons for water
     key = jax.random.key(42)
     nelec_water = 10
     walkers_water = jax.random.normal(key, (nelec_water, 3)) * 0.5
     rescale_water = compute_rescale(walkers_water, nuc_crds_water)
 
-    # Test water reflection
     print("\n1. Testing single water molecule reflection:")
     reflect_water = water_reflection_electrons(nuc_crds_water)
 
-    for ref_name, ref_id in SYMM_OP_IDS.items():
+    for ref_name, ref_id in test_ops.items():
         reflected = reflect_water(walkers_water, rescale_water, ref_id)
         print(f"   Reflection '{ref_name}': shape = {reflected.shape}")
 
-    # Create test electrons for dimer
+    # --- Water dimer ---
+    r_O1 = jnp.array([0.0, 0.0, 0.0])
+    r_H2 = jnp.array([0.96, 0.0, 0.0])
+    r_H3 = jnp.array([0.0, 0.99, 0.0])
+    r_O4 = jnp.array([0.0, 0.0, 3.0])
+    r_H5 = jnp.array([0.96, 0.0, 3.0])
+    r_H6 = jnp.array([0.0, 0.99, 3.0])
+    nuc_crds_dimer = jnp.stack([r_O1, r_H2, r_H3, r_O4, r_H5, r_H6])
+
     key = jax.random.key(123)
     nelec_dimer = 20
     walkers_dimer = jax.random.normal(key, (nelec_dimer, 3)) * 0.5
     walkers_dimer = walkers_dimer.at[10:, 2].add(3.0)
-    # Shift half to second water
     rescale_dimer = compute_rescale(walkers_dimer, nuc_crds_dimer)
 
-    # Test water dimer reflection
     print("\n2. Testing water dimer reflection:")
     reflect_dimer = water_dimer_reflection_electrons(nuc_crds_dimer)
 
-    for ref_name, ref_id in SYMM_OP_IDS.items():
+    for ref_name, ref_id in test_ops.items():
         reflected = reflect_dimer(walkers_dimer, rescale_dimer, ref_id)
         print(f"   Reflection '{ref_name}': shape = {reflected.shape}")
 
     # Verify assignment preservation
-    print("\n3. Verifying electron assignment preservation:")
+    print("\n3. Verifying electron assignment preservation (dimer):")
     dist_before_O1 = jnp.linalg.norm(walkers_dimer - r_O1, axis=-1)
     dist_before_O4 = jnp.linalg.norm(walkers_dimer - r_O4, axis=-1)
     assigned_before = dist_before_O1 < dist_before_O4
 
     reflected_y = reflect_dimer(walkers_dimer,
-                                rescale_dimer, SYMM_OP_IDS['y'])
+                                rescale_dimer, SYMM_OP_STRING_TO_ID['y'])
     dist_after_O1 = jnp.linalg.norm(reflected_y - r_O1, axis=-1)
     dist_after_O4 = jnp.linalg.norm(reflected_y - r_O4, axis=-1)
     assigned_after = dist_after_O1 < dist_after_O4
@@ -535,14 +535,50 @@ if __name__ == "__main__":
           f"Water 2: {nelec_dimer - n_wat1}")
     print(f"   Assignment preserved: {preserved}")
 
-    # JIT compilation test
-    print("\n4. JIT compilation test:")
+    # --- Fragment-level reflect_xy_planar ---
+    print("\n4. Testing reflect_xy_planar (fragment-level reflection):")
+
+    # Water in the xz-plane: molecular plane has normal along y
+    frag_nuc = jnp.array([
+        [0.0, 0.0, 0.0],       # O
+        [1.0, 0.0, 0.8],       # H1
+        [-1.0, 0.0, 0.8],      # H2
+    ])
+    frag_centroid = frag_nuc.mean(axis=0)
+    inradius = 3.0
+
+    elec_test = jnp.array([
+        [0.5, 0.3, 0.2],       # near (within inradius)
+        [0.0, -0.5, 0.0],      # near (within inradius)
+        [10.0, 10.0, 10.0],    # far  (outside inradius)
+        [-0.3, 0.1, 0.5],      # near (within inradius)
+    ])
+
+    result = reflect_xy_planar(elec_test, frag_nuc, frag_centroid, inradius)
+    print(f"   Input  shape: {elec_test.shape}")
+    print(f"   Output shape: {result.shape}")
+
+    far_unchanged = jnp.allclose(result[2], elec_test[2])
+    print(f"   Far electron unchanged: {far_unchanged}")
+
+    result2 = reflect_xy_planar(result, frag_nuc, frag_centroid, inradius)
+    involution = jnp.allclose(result2, elec_test, atol=1e-12)
+    print(f"   Involution (apply twice = identity): {involution}")
+
+    dist_orig = jnp.linalg.norm(elec_test[:3] - frag_centroid, axis=-1)
+    dist_refl = jnp.linalg.norm(result[:3] - frag_centroid, axis=-1)
+    dist_preserved = jnp.allclose(dist_orig, dist_refl, atol=1e-12)
+    print(f"   Distances from centroid preserved: {dist_preserved}")
+
+    # --- JIT compilation test ---
+    print("\n5. JIT compilation test:")
     reflect_water_jit = jax.jit(reflect_water)
     reflect_dimer_jit = jax.jit(reflect_dimer)
+    reflect_planar_jit = jax.jit(reflect_xy_planar)
 
-    # Warm up
     _ = reflect_water_jit(walkers_water, rescale_water, 1)
     _ = reflect_dimer_jit(walkers_dimer, rescale_dimer, 1)
+    _ = reflect_planar_jit(elec_test, frag_nuc, frag_centroid, inradius)
 
     print("   JIT compilation successful!")
     print("\n" + "=" * 70)
