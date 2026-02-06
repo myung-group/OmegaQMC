@@ -12,7 +12,6 @@ import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
 # from jax import lax
 
-jax.config.update("jax_enable_x64", True)
 
 
 @jax.jit

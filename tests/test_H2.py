@@ -6,7 +6,6 @@ from vmc_mlsw.utils import format_basis_name
 # from vmc_mlsw.vmc_gto_symm import process_symmetric_diatomic_molecule
 from pytest import approx
 
-jax.config.update("jax_enable_x64", True)
 rng_key = jax.random.key(888)
 
 L = 1.4010

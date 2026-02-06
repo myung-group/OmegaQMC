@@ -8,8 +8,6 @@ import optax
 import pickle
 import os
 
-jax.config.update("jax_enable_x64", True)
-
 CUSP_PARAMS_FILE = os.path.join(os.path.dirname(__file__), 'cusp_params.pkl')
 
 # Ground state spins (2S) for elements 1-36

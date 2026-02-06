@@ -1,5 +1,7 @@
 """VMC-MLSW"""
 
+import vmc_mlsw.config  # noqa: F401  (activates jax_enable_x64)
+
 from vmc_mlsw.vmc_gto import generate_molecular_orbitals, get_vmc_func
 from vmc_mlsw.vmcopt_gto import get_vmcopt_func
 #from vmc_mlsw import psi_gto

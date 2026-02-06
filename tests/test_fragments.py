@@ -11,8 +11,6 @@ from vmc_mlsw import generate_molecular_orbitals
 # Import _initialize_walkers from vmc_gto (it's a module-level function)
 from vmc_mlsw.vmc_gto import _initialize_walkers
 
-jax.config.update("jax_enable_x64", True)
-
 rng_key = jax.random.key(42)
 bset_name = '6-31G'
 

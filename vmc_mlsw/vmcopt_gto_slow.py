@@ -7,8 +7,6 @@ from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 from .constants import MIN_DIST_THRESHOLD
 
-jax.config.update("jax_enable_x64", True)
-
 
 def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))

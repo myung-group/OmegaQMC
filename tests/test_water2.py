@@ -6,7 +6,6 @@ from vmc_mlsw.utils import vmc_forces_with_space_warping as vmc_forces
 from vmc_mlsw.utils import format_basis_name
 
 
-jax.config.update("jax_enable_x64", True)
 rng_key = jax.random.key(888)
 bset_name = '6-31G'
 

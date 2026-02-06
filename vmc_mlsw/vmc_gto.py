@@ -35,8 +35,6 @@ from .symm.electron_displace import (
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
 
-jax.config.update("jax_enable_x64", True)
-
 
 class MoveParams(NamedTuple):
     """Unified parameters for all Metropolis move types.

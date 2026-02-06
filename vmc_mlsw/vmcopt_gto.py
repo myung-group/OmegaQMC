@@ -6,8 +6,6 @@ from .cusp import get_cusp_params
 from .psi_gto import get_psi_fun
 from .constants import MIN_DIST_THRESHOLD
 
-jax.config.update("jax_enable_x64", True)
-
 
 def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
     """Create VMC optimization function with improved efficiency."""
