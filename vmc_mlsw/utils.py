@@ -1,9 +1,12 @@
+import os
 import sys
 import h5py
 import numpy as np
-from pyscf import gto
+from pyscf import __config__, gto
+from pyscf.lib import logger, param
 from pyscf.gto.basis import _format_basis_name
-from pyscf.data.elements import MASSES, ELEMENTS_PROTON
+from pyscf.data.elements import MASSES, ELEMENTS_PROTON, \
+        is_ghost_atom, _atom_symbol
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
@@ -140,17 +143,24 @@ def compute_center_of_mass(coords: np.ndarray, symbols: list[str],
 def parse_molecular_inspheres(mol: gto.Mole):
     assert hasattr(mol, "ignore_hydrogen_mass")
 
-    if mol.atom_string.endswith(".xyz"):
-        with open(mol.atom_string, 'r') as f:
-            Z = f.readlines()
-        if "molecule:I:1" not in Z[1]:
-            print("⚠️ WARNING! Line 2 of {} should have a properties block "
-                  "indicating a column with molecular fragment indices "
-                  "e.g. 'Properties=species:S:1:pos:R:3:molecule:I:1'"
-                  .format(mol.atom_string))
-        Z = list(filter(lambda x: x.strip() != "", Z[2:]))
+    if isinstance(mol._atom, str):
+        if mol._atom.endswith(".xyz"):
+            with open(mol._atom, 'r') as f:
+                Z = f.readlines()
+            if "molecule:I:1" not in Z[1]:
+                print("⚠️ WARNING! Line 2 of {} should have a properties "
+                      "block indicating a column with molecular "
+                      "fragment indices "
+                      "e.g. 'Properties=species:S:1:pos:R:3:molecule:I:1'"
+                      .format(mol._atom))
+            Z = list(filter(lambda x: x.strip() != "", Z[2:]))
+        else:
+            Z = mol._atom.strip().split('\n')
     else:
-        Z = mol.atom_string.strip().split('\n')
+        Z = []
+        for a in mol._atom:
+            assert len(a) == 3
+            Z.append(f"{a[0]} {a[1][0]} {a[1][1]} {a[1][2]} {a[2]}")
     # natm = len(Z)
 
     Y = []
@@ -199,6 +209,187 @@ def parse_molecular_inspheres(mol: gto.Mole):
         for i, r in zip(mol.map_frag_ctr.keys(),
                         (min_distances / 2.0).tolist()):
             mol.inradii[i] = r
+
+
+def _parse_default_basis(basis, uniq_atoms):
+    if isinstance(basis, (str, tuple, list)):
+        # default basis for all atoms
+        _basis = {a: basis for a in uniq_atoms}
+    elif 'default' in basis:
+        default_basis = basis['default']
+        _basis = {a: default_basis for a in uniq_atoms}
+        _basis.update(basis)
+        del _basis['default']
+    else:
+        _basis = basis
+    return _basis
+
+
+def _length_in_au(unit):
+    '''Converts the input unit string into its length in A.U.'''
+    if isinstance(unit, str):
+        if gto.is_au(unit):
+            unit = 1.
+        else:
+            unit = 1/param.BOHR
+    else:
+        unit = 1./unit
+    return unit
+
+
+class Mole_custom(gto.Mole):
+    def format_atom(self, atoms, origin=0, axes=None,
+                    unit=getattr(__config__, 'UNIT', 'Ang')):
+        def str2atm(line):
+            dat = line.split()
+            try:
+                coords = [float(x) for x in dat[1:4]]
+            except ValueError:
+                if gto.DISABLE_EVAL:
+                    raise ValueError('Failed to parse geometry %s' % line)
+                else:
+                    coords = list(eval(','.join(dat[1:4])))
+
+            if len(dat) >= 5:
+                frag = int(dat[4])
+            else:
+                frag = 0
+
+            if len(coords) != 3:
+                raise ValueError('Coordinates error in %s' % line)
+            return [_atom_symbol(dat[0]), coords, frag]
+
+        if isinstance(atoms, str):
+            # The input atoms points to a geometry file
+            if os.path.isfile(atoms):
+                try:
+                    atoms = gto.fromfile(atoms)
+                except ValueError:
+                    sys.stderr.write('\nFailed to parse geometry file  %s\n\n'
+                                     % atoms)
+                    raise
+
+            atoms = atoms.replace(';', '\n').replace(',', ' ') \
+                .replace('\t', ' ')
+            fmt_atoms = []
+            for dat in atoms.split('\n'):
+                dat = dat.strip()
+                if dat and dat[0] != '#':
+                    fmt_atoms.append(dat)
+
+            if len(fmt_atoms[0].split()) < 4:
+                fmt_atoms = gto.from_zmatrix('\n'.join(fmt_atoms))
+            else:
+                fmt_atoms = [str2atm(line) for line in fmt_atoms]
+        else:
+            fmt_atoms = []
+            for atom in atoms:
+                if isinstance(atom, str):
+                    if atom.lstrip()[0] != '#':
+                        fmt_atoms.append(str2atm(atom.replace(',', ' ')))
+                else:
+                    frag = int(atom[4]) if len(atom) >= 5 \
+                        else int(atom[2]) if len(atom) == 3 \
+                        else 0
+
+                    if isinstance(atom[1], (int, float)):
+                        fmt_atoms.append([_atom_symbol(atom[0]), atom[1:4],
+                                          frag])
+                    else:
+                        fmt_atoms.append([_atom_symbol(atom[0]), atom[1],
+                                          frag])
+
+        if len(fmt_atoms) == 0:
+            return []
+
+        if axes is None:
+            axes = np.eye(3)
+
+        unit = _length_in_au(unit)
+        c = np.array([a[1] for a in fmt_atoms], dtype=np.double)
+        c = np.einsum('ix,kx->ki', axes * unit, c - origin)
+        z = [a[0] for a in fmt_atoms]
+        f = [a[2] for a in fmt_atoms]
+        return list(zip(z, c.tolist(), f))
+
+    def check_sanity(self):
+        if isinstance(self.ecp, str):
+            return self
+
+        if isinstance(self.basis, str) and not self.ecp:
+            elements = [x[0] for x in self._atom]
+            ecp, ecp_atoms = gto.bse_predefined_ecp(self.basis, elements)
+            if ecp_atoms:
+                logger.warn(self, 'ECP not specified. '
+                            f'The basis set {self.basis} include an ECP. '
+                            f'Recommended ECP: {ecp}.')
+        elif isinstance(self.basis, dict) and isinstance(self.ecp, dict):
+            _basis = self.basis
+            if 'default' in _basis:
+                uniq_atoms = {a[0] for a in self._atom}
+                basis = _parse_default_basis(_basis, uniq_atoms)
+            else:
+                basis = _basis
+            for element, basname in basis.items():
+                if isinstance(basname, str) and not self.ecp.get(element):
+                    ecp, ecp_atoms = gto.bse_predefined_ecp(basname, element)
+                    if ecp_atoms:
+                        logger.warn(self, f'ECP for {element} not specified. '
+                                    f'The basis set {basname} include an ECP. '
+                                    f'Recommended ECP: {ecp}.')
+            basis = None
+        return self
+
+    def set_geom_(self, atoms_or_coords, unit=None, symmetry=None,
+                  inplace=True):
+        if inplace:
+            mol = self
+        else:
+            mol = self.copy(deep=False)
+            mol._env = mol._env.copy()
+
+        if unit is None:
+            _unit = mol.unit
+        else:
+            _unit = _length_in_au(unit)
+            if _unit != _length_in_au(self.unit):
+                logger.warn(mol, 'Mole.unit (%s) is changed to %s',
+                            self.unit, unit)
+                mol.unit = unit
+
+        if symmetry is None:
+            symmetry = mol.symmetry
+
+        if isinstance(atoms_or_coords, np.ndarray):
+            mol.atom = [[a[0], b, a[2]]
+                        for a, b in zip(mol._atom, atoms_or_coords.tolist())]
+        else:
+            mol.atom = atoms_or_coords
+
+        if isinstance(atoms_or_coords, np.ndarray) and not symmetry:
+            _unit = _length_in_au(mol.unit)
+            mol._atom = list(zip([x[0] for x in mol._atom],
+                                 (atoms_or_coords * _unit).tolist()))
+            ptr = mol._atm[:, gto.PTR_COORD]
+            mol._env[ptr+0] = _unit * atoms_or_coords[:, 0]
+            mol._env[ptr+1] = _unit * atoms_or_coords[:, 1]
+            mol._env[ptr+2] = _unit * atoms_or_coords[:, 2]
+            # reset nuclear energy
+            mol.enuc = None
+        else:
+            mol.symmetry = symmetry
+            mol.build(False, False)
+
+        if mol.verbose >= logger.INFO:
+            logger.info(mol, 'New geometry')
+            for ia, atom in enumerate(mol._atom):
+                coorda = tuple([x * param.BOHR for x in atom[1]])
+                coordb = tuple(atom[1])
+                coords = coorda + coordb
+                logger.info(mol, ' %3d %-4s %16.12f %16.12f %16.12f AA  '
+                            '%16.12f %16.12f %16.12f Bohr',
+                            ia+1, mol.atom_symbol(ia), *coords)
+        return mol
 
 
 def compute_torque(mol, grd):

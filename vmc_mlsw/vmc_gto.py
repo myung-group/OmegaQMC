@@ -13,7 +13,7 @@ import h5py
 
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
-from .utils import parse_molecular_inspheres
+from .utils import parse_molecular_inspheres, Mole_custom, _length_in_au
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import (symmetry_operations_map,
                               populate_fragment_symmops,
@@ -125,16 +125,20 @@ def generate_molecular_orbitals(astr: str,
         elif units is None or units == "":
             units = "angstroms"
 
-    mol = gto.M(atom=astr, basis=basis, unit=units)
+    # mol = gto.M(atom=astr, basis=basis, unit=units)
+    mol = Mole_custom()
+    mol.build(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
-    mol.atom_string = astr
 
     if symmetrization_level >= 1:
         # Detect symmetry and get principal axes transformation
         gpname, centroid, axes = symm.geom.detect_symm(mol._atom)
         # Apply symmetry-based transformation:
         # center and rotate to principal axes
-        mol.atom = symm.geom.shift_atom(mol._atom, centroid, axes)
+        mol.atom = [[a[0], a[1] / _length_in_au(units), b[2]]
+                    for a, b in zip(symm.geom.shift_atom(mol._atom,
+                                                         centroid, axes),
+                                    mol._atom)]
         mol.build()
 
     # TODO: 여기를 포함하여 모든 centroid 계산을
@@ -146,7 +150,8 @@ def generate_molecular_orbitals(astr: str,
         if masses_adjusted.sum() > 0.0:
             centroid = np.average(mol.atom_coords(), axis=0,
                                   weights=masses_adjusted)
-            mol.set_geom_(mol.atom_coords() - centroid, unit=units)
+            mol.set_geom_((mol.atom_coords() - centroid)
+                          / _length_in_au(units))
             mol.build()
         else:
             warnings.warn(
@@ -190,7 +195,9 @@ def generate_molecular_orbitals(astr: str,
                 print(f"Symmetrization skipped due to error: {e}")
 
     if mol.verbose >= 3:
-        print(mol.atom)
+        print(mol._atom)
+        # mol._atom and mol.atom_coords() in au (internal)
+        # mol.atom in input units
 
     mol.ignore_hydrogen_mass = ignore_hydrogen_mass
     parse_molecular_inspheres(mol)

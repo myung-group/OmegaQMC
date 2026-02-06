@@ -15,19 +15,19 @@ params_vmc_no_jastrow = {
     "J2_params": jnp.array([])
 }
 
-myUnits = "ang"
-atoms_string = '''
-O                0.000000    0.000000    0.000000
-H                0.000000    0.000000    0.957800
-H                0.927385    0.000000   -0.239451
-'''
-
-# myUnits = "bohr"
+# myUnits = "ang"
 # atoms_string = '''
-# O                0.   0.   0.
-# H                0.   1.52610182  1.12172672
-# H                0.  -1.51745721  1.11537270
+# O                0.000000    0.000000    0.000000
+# H                0.000000    0.000000    0.957800
+# H                0.927385    0.000000   -0.239451
 # '''
+
+myUnits = "bohr"
+atoms_string = '''
+O                0.   0.   0.
+H                0.   1.52610182  1.12172672
+H                0.  -1.51745721  1.11537270
+'''
 
 # myUnits = "ang"
 # atoms_string = '''
@@ -46,8 +46,7 @@ chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 vmc_run = get_vmc_func(modrv, params_vmc_no_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
-                       prefix=chkfile_prefix,
-                       symmop_list=['E', 'x', 'y', 'Rz180'])
+                       prefix=chkfile_prefix)
 
 l_grad = True
 vmc_run(rng_key,
