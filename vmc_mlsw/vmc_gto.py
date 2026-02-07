@@ -17,7 +17,8 @@ from .utils import parse_molecular_inspheres, Mole_custom, _length_in_au
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import (symmetry_operations_map,
                               populate_fragment_symmops,
-                              get_global_symmops)
+                              get_global_symmops,
+                              apply_reflection_z)
 from .symm.point_groups import (auto_symmetrize_molecule,
                                 detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
@@ -52,20 +53,67 @@ class MoveParams(NamedTuple):
 
 def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
                                   nuc_crds: jnp.ndarray,
-                                  cluster_idx: Collection[int] | None) \
-                                      -> Callable:
+                                  cluster_idx: Collection[int] | None,
+                                  mol=None) \
+                                      -> tuple[Callable, tuple | None]:
     """Select appropriate electron reflection function
-    based on molecular composition."""
+    based on molecular composition.
+
+    Returns:
+        (propose_fn, frag_reflect_data) where frag_reflect_data is
+        (frag_centroids, frag_inradii, frag_Vh, frag_is_planar) for
+        planar fragments, or None if no fragment is planar.
+    """
     charge_tuple = tuple(Z_charges)
 
     if cluster_idx is not None:
-        return water_cluster_reflection_electrons(nuc_crds, cluster_idx)
+        propose_fn = water_cluster_reflection_electrons(nuc_crds, cluster_idx)
     elif charge_tuple == (8, 1, 1):  # Water molecule
-        return water_reflection_electrons(nuc_crds)
+        propose_fn = water_reflection_electrons(nuc_crds)
     elif charge_tuple == (8, 1, 1, 8, 1, 1):  # Water dimer
-        return water_dimer_reflection_electrons(nuc_crds)
+        propose_fn = water_dimer_reflection_electrons(nuc_crds)
     else:  # Diatomic or other molecules
-        return diatomic_reflection_electrons(nuc_crds)
+        propose_fn = diatomic_reflection_electrons(nuc_crds)
+
+    # Precompute fragment-level planar reflection data
+    frag_reflect_data = None
+    if mol is not None and hasattr(mol, 'map_frag_symmops'):
+        frag_ids = sorted(mol.map_frag_ctr.keys())
+        num_frags = len(frag_ids)
+
+        centroids_list = []
+        inradii_list = []
+        Vh_list = []
+        is_planar_list = []
+
+        for fid in frag_ids:
+            frag_ops = mol.map_frag_symmops.get(fid, ['E'])
+            frag_atom_indices = [i for i, f in enumerate(mol.map_nuc_frag)
+                                 if f == fid]
+            is_planar = (frag_ops != ['E'] and len(frag_atom_indices) >= 3)
+
+            centroid = jnp.array(mol.map_frag_ctr[fid])
+            centroids_list.append(centroid)
+            inradii_list.append(mol.inradii[fid])
+
+            if is_planar:
+                frag_nuc = nuc_crds[jnp.array(frag_atom_indices)]
+                centered = frag_nuc - centroid
+                _, _, Vh = jnp.linalg.svd(centered, full_matrices=True)
+                Vh_list.append(Vh)
+            else:
+                Vh_list.append(jnp.eye(3))
+            is_planar_list.append(is_planar)
+
+        if any(is_planar_list):
+            frag_reflect_data = (
+                jnp.stack(centroids_list),               # (num_frags, 3)
+                jnp.array(inradii_list),                  # (num_frags,)
+                jnp.stack(Vh_list),                       # (num_frags, 3, 3)
+                jnp.array(is_planar_list, dtype=jnp.bool_)  # (num_frags,)
+            )
+
+    return propose_fn, frag_reflect_data
 
 
 def _initialize_walkers(rng_key: jax.Array,
@@ -295,8 +343,13 @@ def get_vmc_func(mf,
     i_e, j_e = jnp.triu_indices(nelec, k=1)
 
     # Get electron reflection function for this molecular type
-    propose_electron_displacement \
-        = _get_electron_displacement_fn(Z_charges, nuc_crds, cluster_idx)
+    propose_electron_displacement, frag_reflect_data \
+        = _get_electron_displacement_fn(Z_charges, nuc_crds, cluster_idx,
+                                        mol=mf.mol)
+    any_frag_planar = frag_reflect_data is not None
+    if any_frag_planar:
+        frag_centroids, frag_inradii, frag_Vh, frag_is_planar \
+            = frag_reflect_data
 
     # atomic_masses = mf.mol.atom_mass_list()
     # mass_center = jnp.einsum('i,ij->j',
@@ -425,54 +478,148 @@ def get_vmc_func(mf,
         # Symmetric proposal -> proposal_ratio = 1.0
         return proposed_crds, 1.0
 
-    @jax.jit
-    def metropolis_move_1w(rng_key: jax.Array,
-                           elec_crds: jnp.ndarray,
-                           _step_size: float) -> tuple[jnp.ndarray, bool]:
-        """Single-walker displacements using jax.lax.switch."""
-        key_dtype, key_prop, key_accept = jax.random.split(rng_key, 3)
+    if any_frag_planar:
+        @jax.jit
+        def metropolis_fragment_reflection(
+                rng_key: jax.Array,
+                elec_crds: jnp.ndarray,
+                move_params: MoveParams) \
+                -> tuple[jnp.ndarray, float]:
+            """Fragment-level planar reflection proposal.
 
-        # Random reflection type: index into symmop_list (PySCF-style strings)
-        # num_symmops = len(symmop_list) is captured from closure
-        symmop_chosen = jax.random.randint(key_dtype, (), 0, num_symmops)
+            Picks a random electron, finds its nearest fragment centroid
+            (Voronoi assignment), and reflects all electrons within that
+            fragment's inradius through the fragment's molecular plane.
+            """
+            # 1. Pick a random electron
+            elec_idx = jax.random.randint(rng_key, (), 0, nelec)
+            elec_pos = elec_crds[elec_idx]  # (3,)
 
-        # Precompute rescale (always computed for JAX tracing consistency)
-        rescale = rescale_fn(elec_crds)
+            # 2. Find nearest fragment centroid (Voronoi assignment)
+            dists = jnp.linalg.norm(
+                frag_centroids - elec_pos[None, :], axis=-1
+            )  # (num_frags,)
+            frag_idx = jnp.argmin(dists)
 
-        move_params = MoveParams(
-            step_size=_step_size,
-            symmop_ID=symmop_chosen,
-            rescale=rescale
-        )
+            # 3. Index precomputed fragment data
+            Vh = frag_Vh[frag_idx]               # (3, 3)
+            centroid = frag_centroids[frag_idx]   # (3,)
+            inradius = frag_inradii[frag_idx]     # scalar
+            is_planar = frag_is_planar[frag_idx]  # bool
 
-        # # Randomly select: 0 = Gaussian, 1 = reflection
-        # trial_displacements = [metropolis_move_alle, metropolis_reflection]
-        # displacement_idx = jax.random.randint(key_dtype, (), 0, 2)
-        trial_displacements = [metropolis_move_alle]
-        displacement_idx = 0
+            # 4. Reflect (inlined reflect_xy_planar with precomputed Vh)
+            elec_centered = elec_crds - centroid
+            elec_rotated = elec_centered @ Vh.T
+            elec_reflected = apply_reflection_z(elec_rotated)
+            elec_proposed = elec_reflected @ Vh + centroid
 
-        proposed_crds, proposal_ratio = jax.lax.switch(
-            displacement_idx,
-            trial_displacements,
-            key_prop,
-            elec_crds,
-            move_params
-        )
+            # 5. Mask: within inradius AND fragment is planar
+            dist_from_centroid = jnp.linalg.norm(elec_centered, axis=-1)
+            mask = is_planar & (dist_from_centroid <= inradius)
+            proposed_crds = jnp.where(mask[:, None],
+                                      elec_proposed, elec_crds)
 
-        # Unified acceptance calculation
-        log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
-                                             params_corr)
-        log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds,
-                                             params_corr)
+            # Symmetric proposal -> proposal_ratio = 1.0
+            return proposed_crds, 1.0
 
-        accept = jax.random.uniform(key_accept) \
-            < jnp.exp(2.0 * (log_psi_new - log_psi_old)) * proposal_ratio
-        new_crds = jnp.where(accept, proposed_crds, elec_crds)
+        @jax.jit
+        def metropolis_move_1w(rng_key: jax.Array,
+                               elec_crds: jnp.ndarray,
+                               _step_size: float,
+                               step_count: int) \
+                -> tuple[jnp.ndarray, bool, bool]:
+            """Single-walker: deterministic alternation between
+            Gaussian and fragment-level reflection."""
+            key_dtype, key_prop, key_accept \
+                = jax.random.split(rng_key, 3)
 
-        return new_crds, accept
+            symmop_chosen = jax.random.randint(
+                key_dtype, (), 0, num_symmops)
+            rescale = rescale_fn(elec_crds)
+
+            move_params = MoveParams(
+                step_size=_step_size,
+                symmop_ID=symmop_chosen,
+                rescale=rescale
+            )
+
+            # Deterministic alternation:
+            #   even steps = Gaussian, odd steps = fragment reflection
+            displacement_idx = step_count % 2
+            trial_displacements = [metropolis_move_alle,
+                                   metropolis_fragment_reflection]
+
+            proposed_crds, proposal_ratio = jax.lax.switch(
+                displacement_idx,
+                trial_displacements,
+                key_prop,
+                elec_crds,
+                move_params
+            )
+
+            log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
+                                                 params_corr)
+            log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds,
+                                                 params_corr)
+
+            accept = jax.random.uniform(key_accept) \
+                < jnp.exp(2.0 * (log_psi_new - log_psi_old)) \
+                * proposal_ratio
+            new_crds = jnp.where(accept, proposed_crds, elec_crds)
+
+            is_gaussian = (displacement_idx == 0)
+            return new_crds, accept, is_gaussian
+
+    else:
+        @jax.jit
+        def metropolis_move_1w(rng_key: jax.Array,
+                               elec_crds: jnp.ndarray,
+                               _step_size: float,
+                               step_count: int) \
+                -> tuple[jnp.ndarray, bool, bool]:
+            """Single-walker: random alternation between Gaussian
+            and global reflection (original behavior)."""
+            key_dtype, key_prop, key_accept \
+                = jax.random.split(rng_key, 3)
+
+            symmop_chosen = jax.random.randint(
+                key_dtype, (), 0, num_symmops)
+            rescale = rescale_fn(elec_crds)
+
+            move_params = MoveParams(
+                step_size=_step_size,
+                symmop_ID=symmop_chosen,
+                rescale=rescale
+            )
+
+            # Random alternation (original behavior)
+            trial_displacements = [metropolis_move_alle,
+                                   metropolis_reflection]
+            displacement_idx = jax.random.randint(key_dtype, (), 0, 2)
+
+            proposed_crds, proposal_ratio = jax.lax.switch(
+                displacement_idx,
+                trial_displacements,
+                key_prop,
+                elec_crds,
+                move_params
+            )
+
+            log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
+                                                 params_corr)
+            log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds,
+                                                 params_corr)
+
+            accept = jax.random.uniform(key_accept) \
+                < jnp.exp(2.0 * (log_psi_new - log_psi_old)) \
+                * proposal_ratio
+            new_crds = jnp.where(accept, proposed_crds, elec_crds)
+
+            is_gaussian = (displacement_idx == 0)
+            return new_crds, accept, is_gaussian
 
     metropolis_move_allw = jax.vmap(metropolis_move_1w,
-                                    in_axes=(0, 0, None))
+                                    in_axes=(0, 0, None, None))
 
     # --- Gradient batch computation ---
     @jax.jit
@@ -581,17 +728,24 @@ def get_vmc_func(mf,
 
         # Equilibration phase
         @jax.jit
-        def equilibration_step(state, _):
+        def equilibration_step(state, step_idx):
             rng_key, walkers, step_size = state
             rng_key, key = jax.random.split(rng_key)
             walker_keys = jax.random.split(key, num_walkers)
-            new_walkers, accepted \
-                = metropolis_move_allw(walker_keys, walkers, step_size)
+            new_walkers, accepted, is_gaussian \
+                = metropolis_move_allw(walker_keys, walkers, step_size,
+                                       step_idx)
 
-            ratio = accepted.mean()
-            new_step_size = _adapt_step_size(step_size, ratio)
+            # Only use Gaussian acceptance for step size adaptation
+            n_gauss = jnp.sum(is_gaussian)
+            gauss_accept_sum = jnp.where(is_gaussian, accepted, 0.0).sum()
+            gauss_ratio = jnp.where(
+                n_gauss > 0,
+                gauss_accept_sum / n_gauss,
+                TARGET_ACCEPTANCE_RATE)
+            new_step_size = _adapt_step_size(step_size, gauss_ratio)
 
-            return (rng_key, new_walkers, new_step_size), ratio
+            return (rng_key, new_walkers, new_step_size), gauss_ratio
         # walkers.shape == (num_walkers, nelec, 3)
 
         if mode_restart:
@@ -637,11 +791,13 @@ def get_vmc_func(mf,
         def production_step(state, step_number):
             rng_key, walkers, step_size = state
 
-            for _ in range(num_steps_decorr):
+            for d in range(num_steps_decorr):
                 rng_key, key_displace = jax.random.split(rng_key)
                 walker_keys = jax.random.split(key_displace, num_walkers)
-                new_walkers, accepted \
-                    = metropolis_move_allw(walker_keys, walkers, step_size)
+                step_count = step_number * num_steps_decorr + d
+                new_walkers, accepted, _is_gaussian \
+                    = metropolis_move_allw(walker_keys, walkers, step_size,
+                                           step_count)
                 walkers = new_walkers
 
             ratio = accepted.mean()
