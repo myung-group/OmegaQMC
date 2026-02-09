@@ -17,6 +17,8 @@ from .utils import parse_molecular_inspheres, Mole_custom, _length_in_au
 from .symm.operations import (symmetry_operations_map,
                               populate_fragment_symmops,
                               get_global_symmops,
+                              apply_reflection_x,
+                              apply_reflection_y,
                               apply_reflection_z)
 from .symm.point_groups import (auto_symmetrize_molecule,
                                 detect_symmetry_quality)
@@ -434,6 +436,62 @@ def get_vmc_func(mf,
 
         return proposed_crds, 1.0
 
+    def metropolis_fragment_reflection_x(rng_key: jax.Array,
+                                         elec_crds: jnp.ndarray,
+                                         step_size: float,
+                                         frag_idx: int) \
+            -> tuple[jnp.ndarray, float]:
+        """Fragment-level x-reflection proposal.
+
+        Reflects all electrons within frag_idx's inradius through
+        the fragment's yz-plane. `rng_key` and `step_size`
+        unused (present for lax.switch signature compat).
+        """
+        Vh = frag_Vh[frag_idx]               # (3, 3)
+        centroid = frag_centroids[frag_idx]   # (3,)
+        inradius = frag_inradii[frag_idx]     # scalar
+        is_planar = frag_is_planar[frag_idx]  # bool
+
+        elec_centered = elec_crds - centroid
+        elec_rotated = elec_centered @ Vh.T
+        elec_reflected = apply_reflection_x(elec_rotated)
+        elec_proposed = elec_reflected @ Vh + centroid
+
+        dist_from_centroid = jnp.linalg.norm(elec_centered, axis=-1)
+        mask = is_planar & (dist_from_centroid <= inradius)
+        proposed_crds = jnp.where(mask[:, None],
+                                  elec_proposed, elec_crds)
+
+        return proposed_crds, 1.0
+
+    def metropolis_fragment_reflection_y(rng_key: jax.Array,
+                                         elec_crds: jnp.ndarray,
+                                         step_size: float,
+                                         frag_idx: int) \
+            -> tuple[jnp.ndarray, float]:
+        """Fragment-level y-reflection proposal.
+
+        Reflects all electrons within frag_idx's inradius through
+        the fragment's xz-plane. `rng_key` and `step_size`
+        unused (present for lax.switch signature compat).
+        """
+        Vh = frag_Vh[frag_idx]               # (3, 3)
+        centroid = frag_centroids[frag_idx]   # (3,)
+        inradius = frag_inradii[frag_idx]     # scalar
+        is_planar = frag_is_planar[frag_idx]  # bool
+
+        elec_centered = elec_crds - centroid
+        elec_rotated = elec_centered @ Vh.T
+        elec_reflected = apply_reflection_y(elec_rotated)
+        elec_proposed = elec_reflected @ Vh + centroid
+
+        dist_from_centroid = jnp.linalg.norm(elec_centered, axis=-1)
+        mask = is_planar & (dist_from_centroid <= inradius)
+        proposed_crds = jnp.where(mask[:, None],
+                                  elec_proposed, elec_crds)
+
+        return proposed_crds, 1.0
+
     def metropolis_fragment_noop(rng_key: jax.Array,
                                  elec_crds: jnp.ndarray,
                                  step_size: float,
@@ -452,10 +510,11 @@ def get_vmc_func(mf,
 
         1. Pick a random electron and find its fragment (Voronoi).
         2. Per-fragment alternation:
-             planar    -> deterministic (step_count % 2)
+             planar    -> deterministic (step_count % 4)
              non-planar -> random
-        3. Three-way dispatch:
-             0 = Gaussian, 1 = fragment reflection, 2 = no-op
+        3. Five-way dispatch:
+             0 = Gaussian, 1 = z-reflection, 2 = x-reflection,
+             3 = y-reflection, 4 = no-op
         """
         key_elec, key_disp, key_prop, key_accept \
             = jax.random.split(rng_key, 4)
@@ -471,19 +530,22 @@ def get_vmc_func(mf,
         # 2. Per-fragment alternation type
         displacement_idx = jnp.where(
             is_planar,
-            step_count % 2,
+            step_count % 4,
             jax.random.randint(key_disp, (), 0, 2))
 
-        # 3. Three-way dispatch
+        # 3. Five-way dispatch
         switch_idx = jnp.where(
             displacement_idx == 0, 0,
-            jnp.where(is_planar, 1, 2))
+            jnp.where(~is_planar, 4,         # noop for non-planar
+                      displacement_idx))      # 1=z, 2=x, 3=y for planar
 
         proposed_crds, proposal_ratio = jax.lax.switch(
             switch_idx,
-            [metropolis_move_alle,
-             metropolis_fragment_reflection_z,
-             metropolis_fragment_noop],
+            [metropolis_move_alle,                  # 0: Gaussian
+             metropolis_fragment_reflection_z,       # 1: z-reflection
+             metropolis_fragment_reflection_x,       # 2: x-reflection
+             metropolis_fragment_reflection_y,       # 3: y-reflection
+             metropolis_fragment_noop],              # 4: no-op
             key_prop, elec_crds, _step_size, frag_idx)
 
         # 4. Metropolis accept/reject
