@@ -23,12 +23,9 @@ from .symm.point_groups import (auto_symmetrize_molecule,
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
-from .symm.electron_displace import SYMM_OP_STRING_TO_ID
-
 # VMC hyperparameters
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
-
 
 
 def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
@@ -409,10 +406,10 @@ def get_vmc_func(mf,
                             lambda: (proposed_crds, 0.0),
                             lambda: (proposed_crds, 1.0))
 
-    def metropolis_fragment_reflection(rng_key: jax.Array,
-                                       elec_crds: jnp.ndarray,
-                                       step_size: float,
-                                       frag_idx: int) \
+    def metropolis_fragment_reflection_z(rng_key: jax.Array,
+                                         elec_crds: jnp.ndarray,
+                                         step_size: float,
+                                         frag_idx: int) \
             -> tuple[jnp.ndarray, float]:
         """Fragment-level planar reflection proposal.
 
@@ -485,7 +482,7 @@ def get_vmc_func(mf,
         proposed_crds, proposal_ratio = jax.lax.switch(
             switch_idx,
             [metropolis_move_alle,
-             metropolis_fragment_reflection,
+             metropolis_fragment_reflection_z,
              metropolis_fragment_noop],
             key_prop, elec_crds, _step_size, frag_idx)
 
