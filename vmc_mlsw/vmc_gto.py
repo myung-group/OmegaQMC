@@ -19,7 +19,10 @@ from .symm.operations import (symmetry_operations_map,
                               get_global_symmops,
                               apply_reflection_x,
                               apply_reflection_y,
-                              apply_reflection_z)
+                              apply_reflection_z,
+                              apply_rotation_x180,
+                              apply_rotation_y180,
+                              apply_rotation_z180)
 from .symm.point_groups import (auto_symmetrize_molecule,
                                 detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
@@ -492,6 +495,90 @@ def get_vmc_func(mf,
 
         return proposed_crds, 1.0
 
+    def metropolis_fragment_rotation_x180(rng_key: jax.Array,
+                                          elec_crds: jnp.ndarray,
+                                          step_size: float,
+                                          frag_idx: int) \
+            -> tuple[jnp.ndarray, float]:
+        """Fragment-level 180-degree rotation about x-axis proposal.
+
+        Rotates all electrons within frag_idx's inradius by 180 degrees
+        about the fragment's first principal axis. `rng_key` and
+        `step_size` unused (present for lax.switch signature compat).
+        """
+        Vh = frag_Vh[frag_idx]               # (3, 3)
+        centroid = frag_centroids[frag_idx]   # (3,)
+        inradius = frag_inradii[frag_idx]     # scalar
+        is_planar = frag_is_planar[frag_idx]  # bool
+
+        elec_centered = elec_crds - centroid
+        elec_rotated = elec_centered @ Vh.T
+        elec_operated = apply_rotation_x180(elec_rotated)
+        elec_proposed = elec_operated @ Vh + centroid
+
+        dist_from_centroid = jnp.linalg.norm(elec_centered, axis=-1)
+        mask = is_planar & (dist_from_centroid <= inradius)
+        proposed_crds = jnp.where(mask[:, None],
+                                  elec_proposed, elec_crds)
+
+        return proposed_crds, 1.0
+
+    def metropolis_fragment_rotation_y180(rng_key: jax.Array,
+                                          elec_crds: jnp.ndarray,
+                                          step_size: float,
+                                          frag_idx: int) \
+            -> tuple[jnp.ndarray, float]:
+        """Fragment-level 180-degree rotation about y-axis proposal.
+
+        Rotates all electrons within frag_idx's inradius by 180 degrees
+        about the fragment's second principal axis. `rng_key` and
+        `step_size` unused (present for lax.switch signature compat).
+        """
+        Vh = frag_Vh[frag_idx]               # (3, 3)
+        centroid = frag_centroids[frag_idx]   # (3,)
+        inradius = frag_inradii[frag_idx]     # scalar
+        is_planar = frag_is_planar[frag_idx]  # bool
+
+        elec_centered = elec_crds - centroid
+        elec_rotated = elec_centered @ Vh.T
+        elec_operated = apply_rotation_y180(elec_rotated)
+        elec_proposed = elec_operated @ Vh + centroid
+
+        dist_from_centroid = jnp.linalg.norm(elec_centered, axis=-1)
+        mask = is_planar & (dist_from_centroid <= inradius)
+        proposed_crds = jnp.where(mask[:, None],
+                                  elec_proposed, elec_crds)
+
+        return proposed_crds, 1.0
+
+    def metropolis_fragment_rotation_z180(rng_key: jax.Array,
+                                          elec_crds: jnp.ndarray,
+                                          step_size: float,
+                                          frag_idx: int) \
+            -> tuple[jnp.ndarray, float]:
+        """Fragment-level 180-degree rotation about z-axis proposal.
+
+        Rotates all electrons within frag_idx's inradius by 180 degrees
+        about the fragment's normal axis. `rng_key` and `step_size`
+        unused (present for lax.switch signature compat).
+        """
+        Vh = frag_Vh[frag_idx]               # (3, 3)
+        centroid = frag_centroids[frag_idx]   # (3,)
+        inradius = frag_inradii[frag_idx]     # scalar
+        is_planar = frag_is_planar[frag_idx]  # bool
+
+        elec_centered = elec_crds - centroid
+        elec_rotated = elec_centered @ Vh.T
+        elec_operated = apply_rotation_z180(elec_rotated)
+        elec_proposed = elec_operated @ Vh + centroid
+
+        dist_from_centroid = jnp.linalg.norm(elec_centered, axis=-1)
+        mask = is_planar & (dist_from_centroid <= inradius)
+        proposed_crds = jnp.where(mask[:, None],
+                                  elec_proposed, elec_crds)
+
+        return proposed_crds, 1.0
+
     def metropolis_fragment_noop(rng_key: jax.Array,
                                  elec_crds: jnp.ndarray,
                                  step_size: float,
@@ -510,11 +597,12 @@ def get_vmc_func(mf,
 
         1. Pick a random electron and find its fragment (Voronoi).
         2. Per-fragment alternation:
-             planar    -> deterministic (step_count % 4)
+             planar    -> deterministic (step_count % 7)
              non-planar -> random
-        3. Five-way dispatch:
+        3. Eight-way dispatch:
              0 = Gaussian, 1 = z-reflection, 2 = x-reflection,
-             3 = y-reflection, 4 = no-op
+             3 = y-reflection, 4 = C2x rotation, 5 = C2y rotation,
+             6 = C2z rotation, 7 = no-op
         """
         key_elec, key_disp, key_prop, key_accept \
             = jax.random.split(rng_key, 4)
@@ -530,14 +618,14 @@ def get_vmc_func(mf,
         # 2. Per-fragment alternation type
         displacement_idx = jnp.where(
             is_planar,
-            step_count % 4,
+            step_count % 7,
             jax.random.randint(key_disp, (), 0, 2))
 
-        # 3. Five-way dispatch
+        # 3. Eight-way dispatch
         switch_idx = jnp.where(
             displacement_idx == 0, 0,
-            jnp.where(~is_planar, 4,         # noop for non-planar
-                      displacement_idx))      # 1=z, 2=x, 3=y for planar
+            jnp.where(~is_planar, 7,         # noop for non-planar
+                      displacement_idx))      # 1-6 for planar
 
         proposed_crds, proposal_ratio = jax.lax.switch(
             switch_idx,
@@ -545,7 +633,10 @@ def get_vmc_func(mf,
              metropolis_fragment_reflection_z,       # 1: z-reflection
              metropolis_fragment_reflection_x,       # 2: x-reflection
              metropolis_fragment_reflection_y,       # 3: y-reflection
-             metropolis_fragment_noop],              # 4: no-op
+             metropolis_fragment_rotation_x180,      # 4: C2x rotation
+             metropolis_fragment_rotation_y180,      # 5: C2y rotation
+             metropolis_fragment_rotation_z180,      # 6: C2z rotation
+             metropolis_fragment_noop],              # 7: no-op
             key_prop, elec_crds, _step_size, frag_idx)
 
         # 4. Metropolis accept/reject
