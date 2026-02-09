@@ -49,9 +49,9 @@ vmc_run = get_vmc_func(
     modrv,
     params_jastrow,
     prefix=data_prefix,
-    symmop_list=symmetry_ops,
     cluster_idx=None   # or [[0,1,2], [3,4,5]]
 )
+# symmop_list=symmetry_ops,
 
 l_grad = True
 vmc_run(

@@ -25,17 +25,17 @@ modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
 
 chkfile_prefix = 'LiH_vmc_aVTZ'
 
-# reflection_op_list = ['E', 'x', 'y', 'Rz180']
-# reflection_op_list = ['E', 'Rz90', 'Rz270', 'Rz180']
-reflection_op_list = ['E', 'Rz180']
+# symmetry_ops = ['E', 'x', 'y', 'Rz180']
+# symmetry_ops = ['E', 'Rz90', 'Rz270', 'Rz180']
+symmetry_ops = ['E', 'Rz180']
 # 'Rz180' here means 180-degree rotation
 #                 ... or negate both x and y coordinates
 
 vmc_run = get_vmc_func(modrv, params_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
-                       prefix=chkfile_prefix,
-                       symmop_list=reflection_op_list)
+                       prefix=chkfile_prefix)
+# symmop_list=symmetry_ops
 
 l_grad = True
 vmc_run(rng_key,
