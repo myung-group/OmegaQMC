@@ -31,6 +31,7 @@ from .constants import MIN_DIST_THRESHOLD
 # VMC hyperparameters
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
+PSI2_RATIO_THRESHOLD = 1e-4  # screen symmetrized gradient samples
 
 
 def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
@@ -249,17 +250,73 @@ def get_vmc_func(mf,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  prefix='vmc',
-                 symmop_list: list[str] | None = None,
+                 symmop_list: list[str] | dict[int, list[str]] | None = None,
                  cluster_idx: Collection[int] = None):
-    # Auto-derive symmetry operations if not provided
+    # Build per-fragment symmetry operations dict
+    if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
+        frag_ids = sorted(mf.mol.map_frag_ctr.keys())
+    else:
+        frag_ids = [0]
+
     if symmop_list is None:
-        symmop_list = get_global_symmops(mf.mol)
+        # Auto-derive: use all allowed operations for each fragment
+        if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
+            frag_symmops = {fid: list(mf.mol.map_frag_symmops.get(fid, ['E']))
+                           for fid in frag_ids}
+        else:
+            frag_symmops = {fid: ['E'] for fid in frag_ids}
         if mf.mol.verbose >= 2:
-            print(f"Auto-derived symmetry operations: {symmop_list}")
+            print(f"Auto-derived symmetry operations: {frag_symmops}")
+    elif isinstance(symmop_list, list):
+        # List of strings: intersect with each fragment's allowed operations
+        frag_symmops = {}
+        for fid in frag_ids:
+            allowed = set(mf.mol.map_frag_symmops.get(fid, ['E'])
+                          if hasattr(mf.mol, 'map_frag_symmops') else ['E'])
+            requested = set(symmop_list)
+            invalid = requested - allowed - {'E'}
+            if invalid:
+                warnings.warn(
+                    f"Fragment {fid}: operations {invalid} are not "
+                    "valid symmetry operations and will be removed",
+                    stacklevel=2)
+            frag_symmops[fid] = sorted(requested & allowed)
+            if 'E' not in frag_symmops[fid]:
+                frag_symmops[fid].insert(0, 'E')
+    elif isinstance(symmop_list, dict):
+        # Dict: per-fragment specification
+        frag_symmops = {}
+        for fid in frag_ids:
+            if fid in symmop_list:
+                allowed = set(mf.mol.map_frag_symmops.get(fid, ['E'])
+                              if hasattr(mf.mol, 'map_frag_symmops')
+                              else ['E'])
+                requested = set(symmop_list[fid])
+                invalid = requested - allowed - {'E'}
+                if invalid:
+                    warnings.warn(
+                        f"Fragment {fid}: operations {invalid} are not "
+                        "valid symmetry operations and will be removed",
+                        stacklevel=2)
+                frag_symmops[fid] = sorted(requested & allowed)
+            else:
+                frag_symmops[fid] = ['E']
+            if 'E' not in frag_symmops[fid]:
+                frag_symmops[fid].insert(0, 'E')
+    else:
+        raise TypeError(
+            f"symmop_list must be None, list[str], or dict[int, list[str]], "
+            f"got {type(symmop_list)}")
 
-    assert symmop_list != []
+    # Derived data structures for gradient computation
+    frag_ops_sets = [set(frag_symmops[fid]) for fid in frag_ids]
+    all_symmops = sorted(set(op for ops in frag_symmops.values()
+                             for op in ops))
 
-    if mf.mol.groupname == 'C1' and len(symmop_list) > 1:
+    assert all_symmops != []
+
+    if mf.mol.groupname == 'C1' \
+            and any(len(ops) > 1 for ops in frag_symmops.values()):
         warnings.warn(
             "Calculating symmetry-adapted forces "
             "on a system with no symmetry (C1)",
@@ -377,6 +434,13 @@ def get_vmc_func(mf,
     def grad_fn_logpsi(e_pos: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         return jax.grad(log_trial_wavefunction,
                         argnums=(0, 1))(e_pos, nuc_crds, params_corr)
+
+    @jax.jit
+    def _log_psi_batch(batch):
+        """Evaluate log|ψ| for a batch of walker configurations."""
+        return jax.vmap(
+            lambda x: log_trial_wavefunction(x, nuc_crds, params_corr)
+        )(batch)
 
     # @jax.jit
     # def total_local_energy_fn(elec_crds):
@@ -681,23 +745,31 @@ def get_vmc_func(mf,
         return grd_ee, grd_en, grd_ke, grd_logpsi
 
     # --- Per-fragment symmetry operation for gradient batches ---
-    def _apply_frag_symmop(batch_samples, s_op_fn):
+    def _apply_frag_symmop(batch_samples, s_op_fn, s_op_name):
         """Apply symmetry operation per-fragment.
 
-        For each fragment: translate to centroid, rotate to principal
-        axes, apply operation, rotate back, translate back. Only
-        electrons within the fragment's inradius are transformed.
+        For each fragment that has `s_op_name` in its allowed operations:
+        translate to centroid, rotate to principal axes, apply operation,
+        rotate back, translate back. Only electrons within the fragment's
+        inradius are transformed.
+
+        Uses the original (unmodified) electron positions for all
+        fragments to avoid cross-fragment contamination when a
+        reflection moves an electron near another fragment's in-sphere.
         """
         num_frags = frag_centroids.shape[0]
         result = batch_samples  # (batch_size, nelec, 3)
 
         for fid in range(num_frags):
+            if s_op_name not in frag_ops_sets[fid]:
+                continue
+
             centroid = frag_centroids[fid]       # (3,)
             Vh = frag_Vh[fid]                    # (3, 3)
             inradius = frag_inradii[fid]         # scalar
             is_planar = frag_is_planar[fid]      # bool
 
-            centered = result - centroid         # (batch, nelec, 3)
+            centered = batch_samples - centroid  # (batch, nelec, 3)
             rotated = centered @ Vh.T            # (batch, nelec, 3)
             operated = s_op_fn(rotated)          # (batch, nelec, 3)
             proposed = operated @ Vh + centroid   # (batch, nelec, 3)
@@ -726,16 +798,29 @@ def get_vmc_func(mf,
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, num_samples_per_block)
+            batch_orig = sampled_walkers[start_idx:end_idx, :, :]
 
-            # batch_samples = sampled_walkers[start_idx:end_idx, :, :]
+            # Evaluate log|ψ| at original positions (once per batch)
+            log_psi_orig = _log_psi_batch(batch_orig)  # (batch_size,)
+
             grd_ee_en = []
             grd_logpsi = []
             grd_ke = []
-            for s_op in symmop_list:
+            for s_op in all_symmops:
                 batch_samples = _apply_frag_symmop(
-                    sampled_walkers[start_idx:end_idx, :, :],
-                    symmetry_operations_map[s_op]
-                    )
+                    batch_orig,
+                    symmetry_operations_map[s_op],
+                    s_op)
+
+                if s_op != 'E':
+                    # Screen: fall back to original where |ψ|² drops
+                    log_psi_trans = _log_psi_batch(batch_samples)
+                    psi2_ratio = jnp.exp(
+                        2.0 * (log_psi_trans - log_psi_orig))
+                    safe = psi2_ratio > PSI2_RATIO_THRESHOLD
+                    batch_samples = jnp.where(
+                        safe[:, None, None], batch_samples, batch_orig)
+
                 g_ee, g_en, g_ke, g_logpsi = vmc_gradient_batch(batch_samples)
                 grd_ee_en.append(g_ee + g_en)
                 grd_ke.append(g_ke)
