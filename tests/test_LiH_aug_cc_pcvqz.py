@@ -38,8 +38,7 @@ grad = mf_grad.kernel()
 
 # No Jastrow parameters
 params_jastrow = {
-    "J1_params" : jnp.array([]),
-    "J2_params" : jnp.array([]) 
+    "J2_params" : jnp.array([])
 }
 
 # Load cusp coefficients for the aug-cc-pCVQZ basis set

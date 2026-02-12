@@ -338,15 +338,21 @@ def get_vmc_func(mf,
         kList = []
         for k, v in params_corr.items():
             assert isinstance(k, str)
-            assert isinstance(v, jnp.ndarray)
-            if (k == "J1_params" or k == "J2_params") \
-                    and params_corr[k].shape[0] < 2:
-                jax.debug.print(
-                    f"⚠️ WARNING! Correlation parameter set \"{k}\" "
-                    "requires 2 elements, but the user provided fewer.  "
-                    "Deleting..."
-                    )
-                kList.append(k)
+            if isinstance(v, dict):
+                # J1_params: per-element dict
+                for sk in v:
+                    assert isinstance(sk, str)
+                if len(v) == 0:
+                    kList.append(k)
+            else:
+                assert isinstance(v, jnp.ndarray)
+                if k == "J2_params" and params_corr[k].shape[0] < 2:
+                    jax.debug.print(
+                        f"⚠️ WARNING! Correlation parameter set \"{k}\" "
+                        "requires 2 elements, but the user provided fewer.  "
+                        "Deleting..."
+                        )
+                    kList.append(k)
         for k in kList:
             del params_corr[k]
 

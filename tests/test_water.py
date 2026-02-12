@@ -11,7 +11,6 @@ bset_name = "cc-pVDZ"
 
 # No optimizable Jastrow parameters:
 params_vmc_no_jastrow = {
-    "J1_params": jnp.array([]),
     "J2_params": jnp.array([])
 }
 

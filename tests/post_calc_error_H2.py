@@ -29,7 +29,7 @@ grad = mf_grad.kernel()
 
 # Optimized Jastrow parameters
 params_jastrow = {
-    "J1_params" : jnp.array([4.2, 4.2]),  # H_1, H_2
+    "J1_params" : {"H": 4.2},
     "J2_params" : jnp.array([0.6046799, 0.6046799])
 }
 

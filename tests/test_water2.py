@@ -11,7 +11,6 @@ bset_name = '6-31G'
 
 # No optimizable Jastrow parameters:
 params_jastrow = {
-    "J1_params": jnp.array([]),
     "J2_params": jnp.array([])
 }
 

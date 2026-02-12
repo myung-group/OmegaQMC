@@ -55,6 +55,16 @@ def get_psi_fun(mf, params_cusp=None):
                 ncgs = ncgs + shell.ncgs
                 shell_list.append(shell)
 
+    # Build per-element → per-atom mapping for J1
+    unique_elements = []
+    atom_to_elem_idx = []
+    for ia in range(mol.natm):
+        sym = mol.atom_symbol(ia)
+        if sym not in unique_elements:
+            unique_elements.append(sym)
+        atom_to_elem_idx.append(unique_elements.index(sym))
+    atom_to_elem_idx = jnp.array(atom_to_elem_idx)
+
     @jax.jit
     def cgs_sph_get(elec_crds, nuc_crds):
         """
@@ -252,9 +262,12 @@ def get_psi_fun(mf, params_cusp=None):
 
     @jax.jit
     def J1(elec_crds, nuc_crds, curr_params):
+        # curr_params is dict {"Li": scalar, "H": scalar, ...}
+        param_arr = jnp.array([curr_params[sym] for sym in unique_elements])
+        per_atom = param_arr[atom_to_elem_idx]          # (natm,)
         diffs = elec_crds[None, :, :] - nuc_crds[:, None, :]
         r = jnp.linalg.norm(diffs, axis=-1)
-        u_vals = -Z_charges[:, None] * r / (1.0 + curr_params[:, None] * r)
+        u_vals = -Z_charges[:, None] * r / (1.0 + per_atom[:, None] * r)
         return jnp.sum(u_vals)
 
     @jax.jit

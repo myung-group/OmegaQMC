@@ -229,16 +229,27 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
         if params_corr_init is None:
             params_corr = dict()
         else:
-            params_corr = {k: jnp.array(v, dtype=jnp.float64)
-                           for k, v in params_corr_init.items()}
+            params_corr = {}
+            for k, v in params_corr_init.items():
+                if isinstance(v, dict):
+                    params_corr[k] = {k2: jnp.asarray(v2, dtype=jnp.float64)
+                                      for k2, v2 in v.items()}
+                else:
+                    params_corr[k] = jnp.array(v, dtype=jnp.float64)
 
         # Initialize optimizer (multi_transform freezes selected keys)
         base_optimizer = optax.adam(learning_rate=lr) \
             if "adam" in optimizer.lower() \
             else optax.sgd(learning_rate=lr)
         if frozen_keys:
-            param_labels = {k: ('freeze' if k in frozen_keys else 'opt')
-                            for k in params_corr}
+            param_labels = {}
+            for k in params_corr:
+                lbl = 'freeze' if k in frozen_keys else 'opt'
+                v = params_corr[k]
+                if isinstance(v, dict):
+                    param_labels[k] = {k2: lbl for k2 in v}
+                else:
+                    param_labels[k] = lbl
             optimizer_chosen = optax.multi_transform(
                 {'opt': base_optimizer, 'freeze': optax.set_to_zero()},
                 param_labels)
