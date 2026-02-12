@@ -7,7 +7,7 @@ from .psi_gto import get_psi_fun
 from .constants import MIN_DIST_THRESHOLD
 
 
-def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
+def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
     """Create VMC optimization function with improved efficiency."""
 
     # Precompute static quantities
@@ -195,7 +195,8 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
 
     def vmcopt_run(rng_key,
                    num_walkers=1000,
-                   params_corr_init=None, num_epochs=20,
+                   params_corr_init: dict = None,
+                   num_epochs=20,
                    num_steps_per_block=1000, num_steps_decorr=1,
                    num_blocks=10, num_blocks_equil=10,
                    mc_timestep=0.1,
@@ -203,6 +204,7 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
                    optimizer="sgd",
                    train_split=0.8,
                    batch_size=1000,
+                   frozen_keys: list[str] | None = None,
                    verbose=True):
         """
         VMC optimization run with improved efficiency.
@@ -224,14 +226,25 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
             verbose: Print progress
         """
 
-        # Initialize parameters
-        params_corr = params_corr_preset if params_corr_init is None \
-            else jnp.array(params_corr_init, dtype=jnp.float64)
+        # Initialize parameters (dict of jnp arrays, same form as vmc_run)
+        if params_corr_init is None:
+            params_corr = dict()
+        else:
+            params_corr = {k: jnp.array(v, dtype=jnp.float64)
+                           for k, v in params_corr_init.items()}
 
-        # Initialize optimizer
-        optimizer_chosen = optax.adam(learning_rate=lr) \
+        # Initialize optimizer (multi_transform freezes selected keys)
+        base_optimizer = optax.adam(learning_rate=lr) \
             if "adam" in optimizer.lower() \
             else optax.sgd(learning_rate=lr)
+        if frozen_keys:
+            param_labels = {k: ('freeze' if k in frozen_keys else 'opt')
+                            for k in params_corr}
+            optimizer_chosen = optax.multi_transform(
+                {'opt': base_optimizer, 'freeze': optax.set_to_zero()},
+                param_labels)
+        else:
+            optimizer_chosen = base_optimizer
         opt_state = optimizer_chosen.init(params_corr)
 
         # Initialize walkers
@@ -284,6 +297,8 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
         if verbose:
             print(f"\nTraining on {n_train} samples, "
                   f"validating on {n_samples-n_train} samples")
+            if frozen_keys:
+                print(f"Frozen parameters: {frozen_keys}")
             print(f"\nStarting optimization for {num_epochs} epochs...\n")
 
         # Training loop
