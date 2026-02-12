@@ -194,9 +194,9 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
         return jnp.array(energies).mean()
 
     def vmcopt_run(rng_key,
-                   num_walkers=1000,
                    params_corr_init: dict = None,
-                   num_epochs=20,
+                   frozen_keys: list[str] | None = None,
+                   num_epochs=20, num_walkers=1000,
                    num_steps_per_block=1000, num_steps_decorr=1,
                    num_blocks=10, num_blocks_equil=10,
                    mc_timestep=0.1,
@@ -204,7 +204,6 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
                    optimizer="sgd",
                    train_split=0.8,
                    batch_size=1000,
-                   frozen_keys: list[str] | None = None,
                    verbose=True):
         """
         VMC optimization run with improved efficiency.

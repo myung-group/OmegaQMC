@@ -8,7 +8,7 @@ from .cusp import get_cusp_params
 from .constants import MIN_DIST_THRESHOLD
 
 
-def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
+def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
     nelec = mf.mol.tot_electrons()
     num_nuc = mf.mol.natm
@@ -76,23 +76,37 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
                 + enr_nn)
 
     def vmcopt_run(rng_key,
-                   num_walkers=1000,
-                   params_corr_init=None, num_epochs=20,
+                   params_corr_init: dict = None,
+                   frozen_keys: list[str] | None = None,
+                   num_epochs=20, num_walkers=1000,
                    num_steps_per_block=1000, num_steps_decorr=1,
                    num_blocks=10, num_blocks_equil=10,
                    mc_timestep=0.1,
                    fname_log: str = None,
-                   lr=0.1,
+                   lr=0.02,
                    optimizer="sgd",
                    verbose=False):
         """VMC optimization run"""
 
-        params_corr = params_corr_preset if params_corr_init is None \
-            else jnp.array(params_corr_init, dtype=jnp.float64)
+        # Initialize parameters (dict of jnp arrays, same form as vmc_run)
+        if params_corr_init is None:
+            params_corr = dict()
+        else:
+            params_corr = {k: jnp.array(v, dtype=jnp.float64)
+                           for k, v in params_corr_init.items()}
 
-        optimizer_chosen = optax.adam(learning_rate=lr) \
+        # Initialize optimizer (multi_transform freezes selected keys)
+        base_optimizer = optax.adam(learning_rate=lr) \
             if "adam" in optimizer.lower() \
             else optax.sgd(learning_rate=lr)
+        if frozen_keys:
+            param_labels = {k: ('freeze' if k in frozen_keys else 'opt')
+                            for k in params_corr}
+            optimizer_chosen = optax.multi_transform(
+                {'opt': base_optimizer, 'freeze': optax.set_to_zero()},
+                param_labels)
+        else:
+            optimizer_chosen = base_optimizer
         opt_state = optimizer_chosen.init(params_corr)
 
         # Initialize electron positions more efficiently
@@ -228,7 +242,8 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
                 for block_cnt in range(1, num_blocks+1):
                     carry_in_prod = (rng_key, walkers, mc_stepsize, p)
                     carried_out_prod, (acc_ratios, energies_sw) \
-                        = jax.lax.scan(production_step, carry_in_prod,
+                        = jax.lax.scan(jax.checkpoint(production_step),
+                                       carry_in_prod,
                                        jnp.arange(num_steps_per_block))
                     rng_key, walkers, _, _ = carried_out_prod
 
@@ -265,14 +280,15 @@ def get_vmcopt_func(mf, params_corr_preset, cusp_scheme="Quady2025"):
                          params_corr_epoch, opt_state)
             return carry_out, final_energies
 
-        carry_in_outer = (rng_key, walkers,
-                          params_corr, opt_state)
-        carried_out_outer, energies_opthist \
-            = jax.lax.scan(update_epoch, carry_in_outer,
-                           jnp.arange(num_epochs))
-        energies_opthist.block_until_ready()
+        carry_epoch = (rng_key, walkers, params_corr, opt_state)
+        energies_list = []
+        for epoch in range(num_epochs):
+            carry_epoch, final_energies = update_epoch(carry_epoch, epoch)
+            final_energies.block_until_ready()
+            energies_list.append(final_energies)
+        energies_opthist = jnp.stack(energies_list)
 
-        rng_key, walkers, params_corr, opt_state = carried_out_outer
+        rng_key, walkers, params_corr, opt_state = carry_epoch
 
         energies_sw = energies_opthist[-1]
 
