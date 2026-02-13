@@ -10,9 +10,12 @@ bset_name = "aug-cc-pVTZ"
 
 # No optimizable Jastrow parameters:
 params_jastrow = {
-    "J1_params": {"Li": 48.89, "H": 8.93},
-    "J2_params": jnp.array([1.78,  0.917])
+    "J1_params": {'H': jnp.array([-0.03418183,  0.01573882]),
+                  'Li': jnp.array([-0.06470724, -0.06746011])},
+    "J2_params": jnp.array([1.57726814, 0.86735879])
 }
+#     "J1_params": {"Li": 48.89, "H": 8.93},
+#     "J2_params": jnp.array([1.78,  0.917])
 
 atoms_string = '''
     Li       0.000000    0.00    0.00

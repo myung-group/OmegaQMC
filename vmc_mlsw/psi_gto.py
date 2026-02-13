@@ -2,7 +2,8 @@ import jax
 import jax.numpy as jnp
 # from functools import partial
 from vmc_mlsw.shell import read_shell, evaluate_cusp_s
-from vmc_mlsw.constants import JASTROW_EE_L_CUT, JASTROW_EE_M_POWER, EE_CUSP_VALUE
+from vmc_mlsw.constants import EE_CUSP_VALUE
+# JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
 
 def get_psi_fun(mf, params_cusp=None):
@@ -262,12 +263,22 @@ def get_psi_fun(mf, params_cusp=None):
 
     @jax.jit
     def J1(elec_crds, nuc_crds, curr_params):
-        # curr_params is dict {"Li": scalar, "H": scalar, ...}
-        param_arr = jnp.array([curr_params[sym] for sym in unique_elements])
-        per_atom = param_arr[atom_to_elem_idx]          # (natm,)
+        if l_cgto:
+            # Cusp handled by orbitals → both a and b from params
+            ab_arr = jnp.stack([curr_params[sym]
+                                for sym in unique_elements])
+            a_per_atom = ab_arr[atom_to_elem_idx, 0]
+            b_per_atom = ab_arr[atom_to_elem_idx, 1]
+        else:
+            # No cusp scheme → a = -Z (frozen), b from params
+            b_arr = jnp.array([curr_params[sym]
+                               for sym in unique_elements])
+            b_per_atom = b_arr[atom_to_elem_idx]
+            a_per_atom = -Z_charges
         diffs = elec_crds[None, :, :] - nuc_crds[:, None, :]
         r = jnp.linalg.norm(diffs, axis=-1)
-        u_vals = -Z_charges[:, None] * r / (1.0 + per_atom[:, None] * r)
+        u_vals = a_per_atom[:, None] * r \
+            / (1.0 + b_per_atom[:, None] * r)
         return jnp.sum(u_vals)
 
     @jax.jit

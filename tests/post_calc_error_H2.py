@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 
 import json
@@ -8,7 +7,6 @@ from importlib import resources
 
 from vmc_mlsw import get_vmc_func
 from vmc_mlsw.vmc_utils import (
-    compute_torque_with_error,
     compute_energy_with_error
 )
 
@@ -29,8 +27,8 @@ grad = mf_grad.kernel()
 
 # Optimized Jastrow parameters
 params_jastrow = {
-    "J1_params" : {"H": 4.2},
-    "J2_params" : jnp.array([0.6046799, 0.6046799])
+    "J1_params": {"H": jnp.array([-0.15486924,  0.08576524])},
+    "J2_params": jnp.array([0.6046799, 0.46045336])
 }
 
 # Load cusp coefficients for the 6-31G basis set
@@ -55,7 +53,7 @@ rng_key = 888
 l_cusp = True
 l_grad = True
 
-# Load VMC functions 
+# Load VMC functions
 vmc_run, vmc_grad = get_vmc_func(
     mf=mf,
     params_vmc=params_jastrow,
@@ -75,7 +73,7 @@ if l_grad:
     grd, grd_err = vmc_grad(
         fname_log='vmc_H2_grd.log',
         compute_error=True,
-        walker_based_batch_size=10  # Walker-based Batch size for error calc. 
-    ) 
+        walker_based_batch_size=10  # Walker-based Batch size for error calc.
+    )
     # Compute torque and error
     # torque, dtau = compute_torque_with_error(mol, grd, grd_err)
