@@ -458,7 +458,7 @@ def get_vmc_func(mf,
     def metropolis_move_alle(rng_key: jax.Array,
                              elec_crds: jnp.ndarray,
                              step_size: float,
-                             frag_idx: int) \
+                             frag_idx: int = -1) \
             -> tuple[jnp.ndarray, float]:
         """Gaussian proposal. Returns (proposed_crds, proposal_ratio).
         `frag_idx` unused (present for lax.switch signature compat)."""
@@ -677,37 +677,41 @@ def get_vmc_func(mf,
         key_elec, key_disp, key_prop, key_accept \
             = jax.random.split(rng_key, 4)
 
-        # 1. Pick random electron, find its fragment
-        elec_idx = jax.random.randint(key_elec, (), 0, nelec)
-        elec_pos = elec_crds[elec_idx]  # (3,)
-        dists = jnp.linalg.norm(
-            frag_centroids - elec_pos[None, :], axis=-1)
-        frag_idx = jnp.argmin(dists)
-        is_planar = frag_is_planar[frag_idx]
+        # # 1. Pick random electron, find its fragment
+        # elec_idx = jax.random.randint(key_elec, (), 0, nelec)
+        # elec_pos = elec_crds[elec_idx]  # (3,)
+        # dists = jnp.linalg.norm(
+        #     frag_centroids - elec_pos[None, :], axis=-1)
+        # frag_idx = jnp.argmin(dists)
+        # is_planar = frag_is_planar[frag_idx]
 
-        # 2. Per-fragment alternation type
-        displacement_idx = jnp.where(
-            is_planar,
-            step_count % 7,
-            jax.random.randint(key_disp, (), 0, 2))
+        # # 2. Per-fragment alternation type
+        # displacement_idx = jnp.where(
+        #     is_planar,
+        #     step_count % 7,
+        #     jax.random.randint(key_disp, (), 0, 2))
 
-        # 3. Eight-way dispatch
-        switch_idx = jnp.where(
-            displacement_idx == 0, 0,
-            jnp.where(~is_planar, 7,         # noop for non-planar
-                      displacement_idx))      # 1-6 for planar
+        # # 3. Eight-way dispatch
+        # switch_idx = jnp.where(
+        #     displacement_idx == 0, 0,
+        #     jnp.where(~is_planar, 7,         # noop for non-planar
+        #               displacement_idx))      # 1-6 for planar
 
-        proposed_crds, proposal_ratio = jax.lax.switch(
-            switch_idx,
-            [metropolis_move_alle,                  # 0: Gaussian
-             metropolis_fragment_reflection_z,       # 1: z-reflection
-             metropolis_fragment_reflection_x,       # 2: x-reflection
-             metropolis_fragment_reflection_y,       # 3: y-reflection
-             metropolis_fragment_rotation_x180,      # 4: C2x rotation
-             metropolis_fragment_rotation_y180,      # 5: C2y rotation
-             metropolis_fragment_rotation_z180,      # 6: C2z rotation
-             metropolis_fragment_noop],              # 7: no-op
-            key_prop, elec_crds, _step_size, frag_idx)
+        # proposed_crds, proposal_ratio = jax.lax.switch(
+        #     switch_idx,
+        #     [metropolis_move_alle,                  # 0: Gaussian
+        #      metropolis_fragment_reflection_z,       # 1: z-reflection
+        #      metropolis_fragment_reflection_x,       # 2: x-reflection
+        #      metropolis_fragment_reflection_y,       # 3: y-reflection
+        #      metropolis_fragment_rotation_x180,      # 4: C2x rotation
+        #      metropolis_fragment_rotation_y180,      # 5: C2y rotation
+        #      metropolis_fragment_rotation_z180,      # 6: C2z rotation
+        #      metropolis_fragment_noop],              # 7: no-op
+        #     key_prop, elec_crds, _step_size, frag_idx)
+        # 1.-3. XXX: Disable per-fragment displacements for now.
+        displacement_idx = 0
+        proposed_crds, proposal_ratio \
+            = metropolis_move_alle(key_prop, elec_crds, _step_size)
 
         # 4. Metropolis accept/reject
         log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
@@ -773,15 +777,14 @@ def get_vmc_func(mf,
             centroid = frag_centroids[fid]       # (3,)
             Vh = frag_Vh[fid]                    # (3, 3)
             inradius = frag_inradii[fid]         # scalar
-            is_planar = frag_is_planar[fid]      # bool
 
             centered = batch_samples - centroid  # (batch, nelec, 3)
             rotated = centered @ Vh.T            # (batch, nelec, 3)
             operated = s_op_fn(rotated)          # (batch, nelec, 3)
             proposed = operated @ Vh + centroid   # (batch, nelec, 3)
 
-            dist = jnp.linalg.norm(centered, axis=-1)  # (batch, nelec)
-            mask = is_planar & (dist <= inradius)       # (batch, nelec)
+            dist = jnp.linalg.norm(centered, axis=-1)   # (batch, nelec)
+            mask = dist <= inradius                     # (batch, nelec)
             result = jnp.where(mask[:, :, None], proposed, result)
 
         return result
