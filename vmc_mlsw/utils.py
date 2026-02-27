@@ -487,7 +487,16 @@ def vmc_forces_with_space_warping(
             if isinstance(val, h5py.Group):
                 dict_grd_samples[key] = {}
                 for key2, val2 in val.items():
-                    if not val2.shape:
+                    if isinstance(val2, h5py.Group):
+                        dict_grd_samples[key][key2] = {}
+                        for key3, val3 in val2.items():
+                            if not val3.shape:
+                                dict_grd_samples[key][key2][key3] \
+                                    = val3[()].decode()
+                            else:
+                                dict_grd_samples[key][key2][key3] \
+                                    = jnp.array(val3)
+                    elif not val2.shape:
                         dict_grd_samples[key][key2] = val2[()].decode()
                     else:
                         dict_grd_samples[key][key2] = jnp.array(val2)
@@ -512,122 +521,155 @@ def vmc_forces_with_space_warping(
         # enr_std = dict_grd_samples['enr_std']
         grd_nn = dict_grd_samples['grd_nn']
 
-        valid_samples_count = 0
-        grd_ke_sum = 0.0
-        grd_ee_en_sum = 0.0
-        grd_pulay_sum = 0.0
+        # Identify combo labels from fragment_weights
+        combo_labels = []
+        if 'fragment_weights' in dict_grd_samples:
+            combo_labels = sorted(
+                k for k in dict_grd_samples['fragment_weights']
+                if isinstance(dict_grd_samples['fragment_weights'][k],
+                              dict))
+        states = [None] + combo_labels   # None = reference
 
-        grd_tot_list = []
-        grd_err_list = []
-
-        for block_cnt in block_nums:
-            grd_ee_en = dict_grd_samples['grd_ee_en'][f'{block_cnt}']
-            grd_ke = dict_grd_samples['grd_ke'][f'{block_cnt}']
-            grd_logpsi = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
-            local_energies \
-                = jnp.array(dict_grd_samples['local_energies'][f'{block_cnt}'])
-
-            # Pulay force contribution
-            d_enr = local_energies - enr_mean
-
-            _, num_nuc, _ = grd_ee_en.shape
-            num_steps_per_block, num_walkers = local_energies.shape
-
-            # Regroup
-            grd_ee_en = grd_ee_en.reshape(num_steps_per_block,
-                                          num_walkers, num_nuc, 3)
-            grd_ke = grd_ke.reshape(num_steps_per_block,
-                                    num_walkers, num_nuc, 3)
-            grd_logpsi = grd_logpsi.reshape(num_steps_per_block,
-                                            num_walkers, num_nuc, 3)
-            grd_pulay = 2.0 * jnp.einsum('sw,swnK->swnK',
-                                         d_enr, grd_logpsi)
-
-            grd_nn_sw = jnp.broadcast_to(
-                grd_nn[jnp.newaxis, jnp.newaxis, :, :],
-                (num_steps_per_block, num_walkers, num_nuc, 3)
-                )
-            grd_arrays = [grd_nn_sw,
-                          grd_ee_en, grd_ke,
-                          grd_pulay]
-            grd_tot_sw = jnp.stack(grd_arrays, axis=0).sum(axis=0)
-
-            # Compute forces and error
-            xbar, serr, sdev, kappa = batched_binning_analysis_grds(
-                grd_tot_sw, walker_based_batch_size
-            )
-            grd_tot_list.append(xbar[None, :, :, :])
-            grd_err_list.append(serr[None, :, :, :])
-
-            grd_ee_en_sum += grd_ee_en.sum(axis=0)
-            grd_ke_sum += grd_ke.sum(axis=0)
-            grd_pulay_sum += grd_pulay.sum(axis=0)
-
-            valid_samples_count += local_energies.shape[0]
-            # do not include num_walkers factor
-
-        # Compute averages
-        if valid_samples_count > 0:
-            grd_ee_en = grd_ee_en_sum / valid_samples_count
-            grd_ke = grd_ke_sum / valid_samples_count
-            grd_pulay = grd_pulay_sum / valid_samples_count
-
-            grd_tot_bw = jnp.concatenate(grd_tot_list, axis=0)
-            grd_err_bw = jnp.concatenate(grd_err_list, axis=0)
-
-            # mean over blocks, then walkers
-            grd_tot = grd_tot_bw.mean(axis=0).squeeze()
-            grd_tot = grd_tot.mean(axis=0)
-
-            grd_err = jnp.linalg.norm(grd_err_bw, axis=0).squeeze() \
-                / grd_err_bw.shape[0]
-            grd_err = jnp.linalg.norm(grd_err, axis=0) \
-                / grd_err.shape[0]
-
-            # Compute torques and error
-            torque, dtau \
-                = compute_torque_with_error(myMol, grd_tot, grd_err)
-
-            grd_ee_en = jnp.mean(grd_ee_en, axis=0)
-            grd_ke = jnp.mean(grd_ke, axis=0)
-            grd_pulay = jnp.mean(grd_pulay, axis=0)
+        if ofname_log is None:
+            fout = sys.stdout
         else:
-            grd_ee_en = jnp.zeros_like(grd_nn)
-            grd_ke = jnp.zeros_like(grd_nn)
-            grd_pulay = jnp.zeros_like(grd_nn)
+            fout = open(ofname_log, 'w', 1)
 
-        # Write results
-        with jnp.printoptions(precision=12, suppress=True):
-            if ofname_log is None:
-                fout = sys.stdout
+        ref_grd_tot = None
+        ref_grd_err = None
+
+        for state_label in states:
+            valid_samples_count = 0
+            grd_ke_sum = 0.0
+            grd_ee_en_sum = 0.0
+            grd_pulay_sum = 0.0
+
+            grd_tot_list = []
+            grd_err_list = []
+
+            for block_cnt in block_nums:
+                if state_label is None:
+                    grd_ee_en \
+                        = dict_grd_samples['grd_ee_en'][f'{block_cnt}']
+                    grd_ke \
+                        = dict_grd_samples['grd_ke'][f'{block_cnt}']
+                    grd_logpsi \
+                        = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
+                else:
+                    grd_ee_en \
+                        = dict_grd_samples['grd_ee_en'][state_label][f'{block_cnt}']
+                    grd_ke \
+                        = dict_grd_samples['grd_ke'][state_label][f'{block_cnt}']
+                    grd_logpsi \
+                        = dict_grd_samples['grd_logpsi'][state_label][f'{block_cnt}']
+                local_energies = jnp.array(
+                    dict_grd_samples['local_energies'][f'{block_cnt}'])
+
+                # Pulay force contribution
+                d_enr = local_energies - enr_mean
+
+                _, num_nuc, _ = grd_ee_en.shape
+                num_steps_per_block, num_walkers = local_energies.shape
+
+                # Regroup
+                grd_ee_en = grd_ee_en.reshape(num_steps_per_block,
+                                              num_walkers, num_nuc, 3)
+                grd_ke = grd_ke.reshape(num_steps_per_block,
+                                        num_walkers, num_nuc, 3)
+                grd_logpsi = grd_logpsi.reshape(num_steps_per_block,
+                                                num_walkers, num_nuc, 3)
+                grd_pulay = 2.0 * jnp.einsum('sw,swnK->swnK',
+                                             d_enr, grd_logpsi)
+
+                grd_nn_sw = jnp.broadcast_to(
+                    grd_nn[jnp.newaxis, jnp.newaxis, :, :],
+                    (num_steps_per_block, num_walkers, num_nuc, 3)
+                    )
+                grd_arrays = [grd_nn_sw,
+                              grd_ee_en, grd_ke,
+                              grd_pulay]
+                grd_tot_sw = jnp.stack(grd_arrays, axis=0).sum(axis=0)
+
+                # Compute forces and error
+                xbar, serr, sdev, kappa = batched_binning_analysis_grds(
+                    grd_tot_sw, walker_based_batch_size
+                )
+                grd_tot_list.append(xbar[None, :, :, :])
+                grd_err_list.append(serr[None, :, :, :])
+
+                grd_ee_en_sum += grd_ee_en.sum(axis=0)
+                grd_ke_sum += grd_ke.sum(axis=0)
+                grd_pulay_sum += grd_pulay.sum(axis=0)
+
+                valid_samples_count += local_energies.shape[0]
+                # do not include num_walkers factor
+
+            # Compute averages
+            if valid_samples_count > 0:
+                grd_ee_en = grd_ee_en_sum / valid_samples_count
+                grd_ke = grd_ke_sum / valid_samples_count
+                grd_pulay = grd_pulay_sum / valid_samples_count
+
+                grd_tot_bw = jnp.concatenate(grd_tot_list, axis=0)
+                grd_err_bw = jnp.concatenate(grd_err_list, axis=0)
+
+                # mean over blocks, then walkers
+                grd_tot = grd_tot_bw.mean(axis=0).squeeze()
+                grd_tot = grd_tot.mean(axis=0)
+
+                grd_err = jnp.linalg.norm(grd_err_bw, axis=0).squeeze() \
+                    / grd_err_bw.shape[0]
+                grd_err = jnp.linalg.norm(grd_err, axis=0) \
+                    / grd_err.shape[0]
+
+                # Compute torques and error
+                torque, dtau \
+                    = compute_torque_with_error(myMol, grd_tot, grd_err)
+
+                grd_ee_en = jnp.mean(grd_ee_en, axis=0)
+                grd_ke = jnp.mean(grd_ke, axis=0)
+                grd_pulay = jnp.mean(grd_pulay, axis=0)
             else:
-                fout = open(ofname_log, 'w', 1)
+                grd_ee_en = jnp.zeros_like(grd_nn)
+                grd_ke = jnp.zeros_like(grd_nn)
+                grd_pulay = jnp.zeros_like(grd_nn)
 
-            print('NN gradients\n', grd_nn, file=fout)
-            print('ee+eN gradients\n', grd_ee_en, file=fout)
-            print('KE gradients\n', grd_ke, file=fout)
-            print('Pulay gradients\n', grd_pulay, file=fout)
-            print('Total gradients\n', grd_tot, file=fout)
+            # Save reference results for return value
+            if state_label is None:
+                ref_grd_tot = grd_tot
+                ref_grd_err = grd_err
 
-            fout.write("Total forces (-gradients)\n")
-            for i in range(num_nuc):
-                fout.write("{:4s}{:>16.6g} ± {:>12.6g}"
+            # Write results
+            with jnp.printoptions(precision=12, suppress=True):
+                if state_label is not None:
+                    print(f'\n--- Secondary state: {state_label} ---',
+                          file=fout)
+
+                print('NN gradients\n', grd_nn, file=fout)
+                print('ee+eN gradients\n', grd_ee_en, file=fout)
+                print('KE gradients\n', grd_ke, file=fout)
+                print('Pulay gradients\n', grd_pulay, file=fout)
+                print('Total gradients\n', grd_tot, file=fout)
+
+                fout.write("Total forces (-gradients)\n")
+                for i in range(num_nuc):
+                    fout.write("{:4s}{:>16.6g} ± {:>12.6g}"
+                               "{:>16.6g} ± {:>12.6g}"
+                               "{:>16.6g} ± {:>12.6g}\n"
+                               .format(myMol.atom_symbol(i),
+                                       -grd_tot[i, 0], grd_err[i, 0],
+                                       -grd_tot[i, 1], grd_err[i, 1],
+                                       -grd_tot[i, 2], grd_err[i, 2]))
+                fout.write("Total torque\n")
+                fout.write("    {:>16.6g} ± {:>12.6g}"
                            "{:>16.6g} ± {:>12.6g}"
                            "{:>16.6g} ± {:>12.6g}\n"
-                           .format(myMol.atom_symbol(i),
-                                   -grd_tot[i, 0], grd_err[i, 0],
-                                   -grd_tot[i, 1], grd_err[i, 1],
-                                   -grd_tot[i, 2], grd_err[i, 2]))
-            fout.write("Total torque\n")
-            fout.write("    {:>16.6g} ± {:>12.6g}"
-                       "{:>16.6g} ± {:>12.6g}"
-                       "{:>16.6g} ± {:>12.6g}\n"
-                       .format(torque[0], dtau[0],
-                               torque[1], dtau[1],
-                               torque[2], dtau[2]))
-            fout.write("\n")
+                           .format(torque[0], dtau[0],
+                                   torque[1], dtau[1],
+                                   torque[2], dtau[2]))
+                fout.write("\n")
 
-            if ofname_log is not None:
-                fout.close()
+        if ofname_log is not None:
+            fout.close()
 
-        return -grd_tot, grd_err
+        return -ref_grd_tot, ref_grd_err

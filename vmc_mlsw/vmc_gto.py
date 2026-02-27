@@ -315,6 +315,17 @@ def get_vmc_func(mf,
 
     assert all_symmops != []
 
+    # Enumerate single-fragment operation combos for correlated sampling
+    single_frag_combos = []
+    for frag_pos, fid in enumerate(frag_ids):
+        for op in frag_symmops[fid]:
+            if op == 'E':
+                continue
+            parts = [f"{fid2}:{op if fid2 == fid else 'E'}"
+                     for fid2 in frag_ids]
+            label = ",".join(parts)
+            single_frag_combos.append((frag_pos, op, label))
+
     if mf.mol.groupname == 'C1' \
             and any(len(ops) > 1 for ops in frag_symmops.values()):
         warnings.warn(
@@ -789,6 +800,30 @@ def get_vmc_func(mf,
 
         return result
 
+    def _apply_single_frag_symmop(batch_samples, frag_pos, s_op_fn):
+        """Apply a symmetry operation to a single fragment only.
+
+        Args:
+            batch_samples: (batch_size, nelec, 3)
+            frag_pos: fragment array index (position in frag_ids)
+            s_op_fn: JAX function implementing the symmetry operation
+
+        Returns:
+            Transformed coordinates with only the target fragment modified.
+        """
+        centroid = frag_centroids[frag_pos]
+        Vh = frag_Vh[frag_pos]
+        inradius = frag_inradii[frag_pos]
+
+        centered = batch_samples - centroid
+        rotated = centered @ Vh.T
+        operated = s_op_fn(rotated)
+        proposed = operated @ Vh + centroid
+
+        dist = jnp.linalg.norm(centered, axis=-1)
+        mask = dist <= inradius
+        return jnp.where(mask[:, :, None], proposed, batch_samples)
+
     # --- Gradient saving ---
     def vmc_gradient_save(block_cnt: int,
                           sampled_walkers: jnp.ndarray,
@@ -800,48 +835,56 @@ def get_vmc_func(mf,
         #   == (num_steps_per_block * num_walkers, nelec, 3)
         # local_energies.shape == (num_steps_per_block, num_walkers)
         num_samples_per_block = sampled_walkers.shape[0]
+
+        # Reference gradient accumulators
         w_grd_ee_en = []
         w_grd_ke = []
         w_grd_logpsi = []
+
+        # Per-combo accumulators
+        combo_grd_ee_en = {label: [] for _, _, label in single_frag_combos}
+        combo_grd_ke = {label: [] for _, _, label in single_frag_combos}
+        combo_grd_logpsi = {label: [] for _, _, label in single_frag_combos}
+        combo_weights = {label: [] for _, _, label in single_frag_combos}
 
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, num_samples_per_block)
             batch_orig = sampled_walkers[start_idx:end_idx, :, :]
 
+            # Reference: gradients at original (untransformed) positions
+            g_ee, g_en, g_ke, g_logpsi = vmc_gradient_batch(batch_orig)
+            w_grd_ee_en.append(g_ee + g_en)
+            w_grd_ke.append(g_ke)
+            w_grd_logpsi.append(g_logpsi)
+
             # Evaluate log|ψ| at original positions (once per batch)
             log_psi_orig = _log_psi_batch(batch_orig)  # (batch_size,)
 
-            grd_ee_en = []
-            grd_logpsi = []
-            grd_ke = []
-            for s_op in all_symmops:
-                batch_samples = _apply_frag_symmop(
-                    batch_orig,
-                    symmetry_operations_map[s_op],
-                    s_op)
+            # Single-fragment operation combos
+            for frag_pos, op, label in single_frag_combos:
+                batch_trans = _apply_single_frag_symmop(
+                    batch_orig, frag_pos,
+                    symmetry_operations_map[op])
 
-                if s_op != 'E':
-                    # Screen: fall back to original where |ψ|² drops
-                    log_psi_trans = _log_psi_batch(batch_samples)
-                    psi2_ratio = jnp.exp(
-                        2.0 * (log_psi_trans - log_psi_orig))
-                    safe = psi2_ratio > PSI2_RATIO_THRESHOLD
-                    batch_samples = jnp.where(
-                        safe[:, None, None], batch_samples, batch_orig)
+                # Screen: fall back to original where |ψ|² drops
+                log_psi_trans = _log_psi_batch(batch_trans)
+                psi2_ratio = jnp.exp(
+                    2.0 * (log_psi_trans - log_psi_orig))
+                safe = psi2_ratio > PSI2_RATIO_THRESHOLD
+                batch_trans = jnp.where(
+                    safe[:, None, None], batch_trans, batch_orig)
 
-                g_ee, g_en, g_ke, g_logpsi = vmc_gradient_batch(batch_samples)
-                grd_ee_en.append(g_ee + g_en)
-                grd_ke.append(g_ke)
-                grd_logpsi.append(g_logpsi)
+                # Weight: J * |ψ(r')|² / |ψ(r)|²
+                # J = 1 for orthogonal point group operations
+                weight = jnp.where(safe, psi2_ratio, 1.0)
 
-            grd_ee_en = jnp.stack(grd_ee_en, axis=0).mean(axis=0)
-            grd_ke = jnp.stack(grd_ke, axis=0).mean(axis=0)
-            grd_logpsi = jnp.stack(grd_logpsi, axis=0).mean(axis=0)
-
-            w_grd_ee_en.append(grd_ee_en)
-            w_grd_ke.append(grd_ke)
-            w_grd_logpsi.append(grd_logpsi)
+                g_ee, g_en, g_ke, g_logpsi \
+                    = vmc_gradient_batch(batch_trans)
+                combo_grd_ee_en[label].append(g_ee + g_en)
+                combo_grd_ke[label].append(g_ke)
+                combo_grd_logpsi[label].append(g_logpsi)
+                combo_weights[label].append(weight)
 
         # Stack all batches
         w_grd_ee_en = jnp.vstack(w_grd_ee_en)
@@ -851,16 +894,58 @@ def get_vmc_func(mf,
         # Save to HDF5
         with h5py.File(ofname_grd, "a") as f:
             block_cnt_str = f'{block_cnt}'
-            for k in ['grd_ee_en', 'grd_ke', 'grd_logpsi', 'local_energies']:
+
+            # Ensure top-level groups exist
+            grp_names = ['grd_ee_en', 'grd_ke', 'grd_logpsi',
+                         'local_energies']
+            if single_frag_combos:
+                grp_names.append('fragment_weights')
+            for k in grp_names:
                 if k not in f.keys():
                     f.create_group(k)
-                if block_cnt_str in f['grd_ee_en'].keys():
-                    del f['grd_ee_en'][block_cnt_str]
-            f['grd_ee_en'].create_dataset(block_cnt_str, data=w_grd_ee_en)
+
+            # Clean up existing block data (restart case)
+            if block_cnt_str in f['grd_ee_en'].keys():
+                del f['grd_ee_en'][block_cnt_str]
+                del f['grd_ke'][block_cnt_str]
+                del f['grd_logpsi'][block_cnt_str]
+                del f['local_energies'][block_cnt_str]
+                for _, _, label in single_frag_combos:
+                    if label in f['grd_ee_en'] \
+                            and block_cnt_str in f['grd_ee_en'][label]:
+                        del f['grd_ee_en'][label][block_cnt_str]
+                        del f['grd_ke'][label][block_cnt_str]
+                        del f['grd_logpsi'][label][block_cnt_str]
+                        del f['fragment_weights'][label][block_cnt_str]
+
+            # A. Reference gradients
+            f['grd_ee_en'].create_dataset(block_cnt_str,
+                                          data=w_grd_ee_en)
             f['grd_ke'].create_dataset(block_cnt_str, data=w_grd_ke)
-            f['grd_logpsi'].create_dataset(block_cnt_str, data=w_grd_logpsi)
+            f['grd_logpsi'].create_dataset(block_cnt_str,
+                                           data=w_grd_logpsi)
             f['local_energies'].create_dataset(block_cnt_str,
                                                data=local_energies)
+
+            # B. Per-combo secondary gradients and weights
+            for _, _, label in single_frag_combos:
+                c_ee_en = jnp.vstack(combo_grd_ee_en[label])
+                c_ke = jnp.vstack(combo_grd_ke[label])
+                c_logpsi = jnp.vstack(combo_grd_logpsi[label])
+                c_w = jnp.concatenate(combo_weights[label])
+
+                for grp, data in [('grd_ee_en', c_ee_en),
+                                  ('grd_ke', c_ke),
+                                  ('grd_logpsi', c_logpsi)]:
+                    if label not in f[grp]:
+                        f[grp].create_group(label)
+                    f[grp][label].create_dataset(block_cnt_str,
+                                                 data=data)
+
+                if label not in f['fragment_weights']:
+                    f['fragment_weights'].create_group(label)
+                f['fragment_weights'][label].create_dataset(
+                    block_cnt_str, data=c_w)
 
     # --- Main VMC run ---
     def vmc_run(rng_key: int | jnp.ndarray,
