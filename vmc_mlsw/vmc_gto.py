@@ -16,7 +16,6 @@ from .utils import parse_molecular_inspheres, Mole_custom, _length_in_au
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import (symmetry_operations_map,
                               populate_fragment_symmops,
-                              get_global_symmops,
                               apply_reflection_x,
                               apply_reflection_y,
                               apply_reflection_z,
@@ -262,7 +261,7 @@ def get_vmc_func(mf,
         # Auto-derive: use all allowed operations for each fragment
         if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
             frag_symmops = {fid: list(mf.mol.map_frag_symmops.get(fid, ['E']))
-                           for fid in frag_ids}
+                            for fid in frag_ids}
         else:
             frag_symmops = {fid: ['E'] for fid in frag_ids}
         if mf.mol.verbose >= 2:
@@ -283,6 +282,8 @@ def get_vmc_func(mf,
             frag_symmops[fid] = sorted(requested & allowed)
             if 'E' not in frag_symmops[fid]:
                 frag_symmops[fid].insert(0, 'E')
+        if mf.mol.verbose >= 2:
+            print(f"Input-processed symmetry operations: {frag_symmops}")
     elif isinstance(symmop_list, dict):
         # Dict: per-fragment specification
         frag_symmops = {}
@@ -303,6 +304,8 @@ def get_vmc_func(mf,
                 frag_symmops[fid] = ['E']
             if 'E' not in frag_symmops[fid]:
                 frag_symmops[fid].insert(0, 'E')
+        if mf.mol.verbose >= 2:
+            print(f"Symmetry operations corrected from input: {frag_symmops}")
     else:
         raise TypeError(
             f"symmop_list must be None, list[str], or dict[int, list[str]], "

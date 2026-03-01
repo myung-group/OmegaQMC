@@ -30,15 +30,15 @@ chkfile_prefix = 'LiH_vmc_aVTZ'
 
 # symmetry_ops = ['E', 'x', 'y', 'Rz180']
 # symmetry_ops = ['E', 'Rz90', 'Rz270', 'Rz180']
-symmetry_ops = ['E', 'Rz180']
+symmetry_ops = ['E', 'C2z']
 # 'Rz180' here means 180-degree rotation
 #                 ... or negate both x and y coordinates
 
 vmc_run = get_vmc_func(modrv, params_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
+                       symmop_list=symmetry_ops,
                        prefix=chkfile_prefix)
-# symmop_list=symmetry_ops
 
 l_grad = True
 vmc_run(rng_key,

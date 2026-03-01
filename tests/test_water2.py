@@ -40,14 +40,16 @@ modrv = generate_molecular_orbitals(atoms_string, units=myUnits,
 
 data_prefix = 'water2_vmc_{}'.format(format_basis_name(bset_name))
 # symmetry_ops = ['E', 'x', 'y', 'Rz180']
-symmetry_ops = ['E', 'z']
+# symmetry_ops = ['E', 'z']
 # symmetry_ops = ['E']
+symmetry_ops = {1: ['E', 'z'], 2: ['E', 'z']}
 
 # Load VMC functions
 vmc_run = get_vmc_func(
     modrv,
     params_jastrow,
     prefix=data_prefix,
+    symmop_list=symmetry_ops,
     cluster_idx=None   # or [[0,1,2], [3,4,5]]
 )
 # symmop_list=symmetry_ops,

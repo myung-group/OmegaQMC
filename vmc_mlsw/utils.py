@@ -88,7 +88,7 @@ def batched_binning_analysis(x, batch_size=100):
     return xbar_all, serr_all, s_all, kappa_all
 
 
-def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
+def batched_binning_analysis_grds(grd_tot_ls, batch_size=100, weights=None):
     # grd_tot_ls.shape == (num_steps_per_block, num_walkers, num_nuc, xyz)
     n_walkers = grd_tot_ls.shape[1]
     results = []
@@ -100,6 +100,13 @@ def batched_binning_analysis_grds(grd_tot_ls, batch_size=100):
     serr_all = jnp.concatenate([r[1] for r in results], axis=0)
     s_all = jnp.concatenate([r[2] for r in results], axis=0)
     kappa_all = jnp.concatenate([r[3] for r in results], axis=0)
+
+    if weights is not None:
+        # Weighted mean per walker: (S, W, N, 3) weighted by (S, W)
+        w_sum = weights.sum(axis=0)                       # (W,)
+        xbar_all = jnp.einsum('sw,swnk->wnk', weights, grd_tot_ls) \
+            / w_sum[:, None, None]
+
     return xbar_all, serr_all, s_all, kappa_all
 
 
@@ -590,9 +597,17 @@ def vmc_forces_with_space_warping(
                               grd_pulay]
                 grd_tot_sw = jnp.stack(grd_arrays, axis=0).sum(axis=0)
 
+                # Load fragment weights for secondary states
+                if state_label is not None:
+                    frag_w = dict_grd_samples[
+                        'fragment_weights'][state_label][f'{block_cnt}']
+                    frag_w = frag_w.reshape(num_steps_per_block, num_walkers)
+                else:
+                    frag_w = None
+
                 # Compute forces and error
                 xbar, serr, sdev, kappa = batched_binning_analysis_grds(
-                    grd_tot_sw, walker_based_batch_size
+                    grd_tot_sw, walker_based_batch_size, weights=frag_w
                 )
                 grd_tot_list.append(xbar[None, :, :, :])
                 grd_err_list.append(serr[None, :, :, :])
