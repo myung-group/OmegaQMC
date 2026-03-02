@@ -283,7 +283,7 @@ def get_vmc_func(mf,
             if 'E' not in frag_symmops[fid]:
                 frag_symmops[fid].insert(0, 'E')
         if mf.mol.verbose >= 2:
-            print(f"Input-processed symmetry operations: {frag_symmops}")
+            print(f"Symmetry operations filtered from input: {frag_symmops}")
     elif isinstance(symmop_list, dict):
         # Dict: per-fragment specification
         frag_symmops = {}
@@ -305,7 +305,7 @@ def get_vmc_func(mf,
             if 'E' not in frag_symmops[fid]:
                 frag_symmops[fid].insert(0, 'E')
         if mf.mol.verbose >= 2:
-            print(f"Symmetry operations corrected from input: {frag_symmops}")
+            print(f"Input-specified symmetry operations: {frag_symmops}")
     else:
         raise TypeError(
             f"symmop_list must be None, list[str], or dict[int, list[str]], "
@@ -353,7 +353,7 @@ def get_vmc_func(mf,
         for k, v in params_corr.items():
             assert isinstance(k, str)
             if isinstance(v, dict):
-                # J1_params: per-element dict
+                # J1_params: per-element dict; J2_params: "like"/"unlike" dict
                 for sk in v:
                     assert isinstance(sk, str)
                 if len(v) == 0:

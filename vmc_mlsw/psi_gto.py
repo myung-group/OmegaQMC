@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 # from functools import partial
 from vmc_mlsw.shell import read_shell, evaluate_cusp_s
-from vmc_mlsw.constants import EE_CUSP_VALUE
+# from vmc_mlsw.constants import EE_CUSP_VALUE
 # JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
 
@@ -194,10 +194,10 @@ def get_psi_fun(mf, params_cusp=None):
         """
         Two-body Jastrow for like-spin electron pairs.
 
-        Uses a polynomial form that satisfies the electron-electron
-        cusp condition for same-spin pairs:
+        Uses a Padé form:
             u_aa(r) = a * r / (1 + b * r)
-        where a = 1/4 for like-spin and b is a variational constant.
+        where a, b = curr_params["like"].
+        To satisfy the e-e cusp condition, set a = 1/4.
         """
         # Pairwise distances between electrons
         # Upper-triangular pairs (i < j)
@@ -212,16 +212,8 @@ def get_psi_fun(mf, params_cusp=None):
         # (causes NonConcreteBooleanIndexError)
         same_spin_mask_f = same_spin_mask.astype(r_ij.dtype)
 
-        # Jastrow parameters
-        a_cusp = EE_CUSP_VALUE  # 1/4 for like-spin electrons
-        # L_cut = JASTROW_EE_L_CUT
-        # m_pow = JASTROW_EE_M_POWER
-
-        # Cutoff polynomial (C^M-1 continuous at r = L_cut)
-        # one_minus = 1.0 - r_ij / L_cut
-        # cutoff = jnp.clip(one_minus, a_min=0.0)  # max(1 - r/L, 0)
-        # u_pairs = a_cusp * r_ij * cutoff**m_pow
-        u_pairs = a_cusp * r_ij / (1. + curr_params[0]*r_ij)
+        u_pairs = curr_params["like"][0] * r_ij \
+            / (1. + curr_params["like"][1] * r_ij)
 
         # Sum only same-spin contributions via masking
         return jnp.sum(u_pairs * same_spin_mask_f)
@@ -231,10 +223,10 @@ def get_psi_fun(mf, params_cusp=None):
         """
         Two-body Jastrow for opposite-spin electron pairs.
 
-        Uses a polynomial form that satisfies the electron-electron
-        cusp condition for opposite-spin pairs:
+        Uses a Padé form:
             u_ab(r) = a * r / (1 + b * r)
-        where a = 1/2 for unlike-spin and b is a variational constant.
+        where a, b = curr_params["unlike"].
+        To satisfy the e-e cusp condition, set a = 1/2.
         """
         # Pairwise distances between electrons
         # Upper-triangular pairs (i < j)
@@ -247,17 +239,9 @@ def get_psi_fun(mf, params_cusp=None):
         # Avoid boolean indexing; use mask multiplication
         opp_spin_mask_f = opp_spin_mask.astype(r_ij.dtype)
 
-        # Jastrow parameters
-        a_cusp = 2.0 * EE_CUSP_VALUE  # 1/2 for unlike-spin electrons
-        # L_cut = JASTROW_EE_L_CUT
-        # m_pow = JASTROW_EE_M_POWER
+        u_pairs = curr_params["unlike"][0] * r_ij \
+            / (1. + curr_params["unlike"][1] * r_ij)
 
-        # Cutoff polynomial
-        # one_minus = 1.0 - r_ij / L_cut
-        # cutoff = jnp.clip(one_minus, a_min=0.0)
-        # u_pairs = a_cusp * r_ij * cutoff**m_pow
-        u_pairs = a_cusp * r_ij / (1. + curr_params[1]*r_ij)
-        # jax.debug.print("-- J2: {}", u_pairs)
         # Sum only opposite-spin contributions via masking
         return jnp.sum(u_pairs * opp_spin_mask_f)
 
