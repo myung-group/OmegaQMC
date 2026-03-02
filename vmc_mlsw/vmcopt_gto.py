@@ -1,3 +1,4 @@
+import warnings
 import jax
 import jax.numpy as jnp
 import optax
@@ -12,6 +13,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
 
     # Precompute static quantities
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
+    eps = jnp.finfo(nuc_crds.dtype).eps     # softwired epsilon
     nelec = mf.mol.tot_electrons()
     num_nuc = mf.mol.natm
     Z_charges = mf.mol.atom_charges()
@@ -193,9 +195,54 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
 
         return jnp.array(energies).mean()
 
+    def _build_opt_mask(params_corr, frozen_keys):
+        """Build boolean pytree: True = optimize, False = freeze."""
+        if frozen_keys is None:
+            return None
+        if isinstance(frozen_keys, list):
+            frozen_keys = {k: True for k in frozen_keys}
+
+        mask = {}
+        for k, v in params_corr.items():
+            if k not in frozen_keys:
+                if isinstance(v, dict):
+                    mask[k] = {k2: jnp.ones_like(v2, dtype=bool)
+                               for k2, v2 in v.items()}
+                else:
+                    mask[k] = jnp.ones_like(v, dtype=bool)
+            elif frozen_keys[k] is True:
+                if isinstance(v, dict):
+                    mask[k] = {k2: jnp.zeros_like(v2, dtype=bool)
+                               for k2, v2 in v.items()}
+                else:
+                    mask[k] = jnp.zeros_like(v, dtype=bool)
+            elif isinstance(frozen_keys[k], dict):
+                mask[k] = {}
+                for k2, v2 in v.items():
+                    if k2 not in frozen_keys[k]:
+                        mask[k][k2] = jnp.ones_like(v2, dtype=bool)
+                    else:
+                        m = jnp.ones_like(v2, dtype=bool)
+                        for idx in frozen_keys[k][k2]:
+                            m = m.at[idx].set(False)
+                        mask[k][k2] = m
+        return mask
+
+    def _zero_frozen_grads(mask):
+        """Optax transformation that zeros gradients for frozen elements."""
+        def init_fn(params):
+            return optax.EmptyState()
+
+        def update_fn(updates, state, params=None):
+            return jax.tree.map(
+                lambda u, m: jnp.where(m, u, jnp.zeros_like(u)),
+                updates, mask), state
+
+        return optax.GradientTransformation(init_fn, update_fn)
+
     def vmcopt_run(rng_key,
                    params_corr_init: dict = None,
-                   frozen_keys: list[str] | None = None,
+                   frozen_keys: dict | list[str] | None = None,
                    num_epochs=20, num_walkers=1000,
                    num_steps_per_block=1000, num_steps_decorr=1,
                    num_blocks=10, num_blocks_equil=10,
@@ -237,22 +284,26 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
                 else:
                     params_corr[k] = jnp.array(v, dtype=jnp.float64)
 
-        # Initialize optimizer (multi_transform freezes selected keys)
+        # Check J2 cusp coefficients
+        if "J2_params" in params_corr:
+            j2 = params_corr["J2_params"]
+            if "like" in j2 and abs(float(j2["like"][0]) - 0.25) > eps:
+                warnings.warn(
+                    f"J2_params['like'][0] = {float(j2['like'][0]):.8f}, "
+                    "expected 0.25 (same-spin cusp condition)")
+            if "unlike" in j2 and abs(float(j2["unlike"][0]) - 0.5) > eps:
+                warnings.warn(
+                    f"J2_params['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
+                    "expected 0.5 (opposite-spin cusp condition)")
+
+        # Initialize optimizer (zero frozen gradients via mask)
         base_optimizer = optax.adam(learning_rate=lr) \
             if "adam" in optimizer.lower() \
             else optax.sgd(learning_rate=lr)
-        if frozen_keys:
-            param_labels = {}
-            for k in params_corr:
-                lbl = 'freeze' if k in frozen_keys else 'opt'
-                v = params_corr[k]
-                if isinstance(v, dict):
-                    param_labels[k] = {k2: lbl for k2 in v}
-                else:
-                    param_labels[k] = lbl
-            optimizer_chosen = optax.multi_transform(
-                {'opt': base_optimizer, 'freeze': optax.set_to_zero()},
-                param_labels)
+        mask = _build_opt_mask(params_corr, frozen_keys)
+        if mask is not None:
+            optimizer_chosen = optax.chain(
+                _zero_frozen_grads(mask), base_optimizer)
         else:
             optimizer_chosen = base_optimizer
         opt_state = optimizer_chosen.init(params_corr)

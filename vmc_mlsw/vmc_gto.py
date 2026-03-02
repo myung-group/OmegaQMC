@@ -345,6 +345,13 @@ def get_vmc_func(mf,
     ofname_chkpt = prefix + ".chk.h5"
     ofname_grd = prefix + ".grd.h5"
 
+    nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
+    eps = jnp.finfo(nuc_crds.dtype).eps     # softwired epsilon
+    nelec = mf.mol.tot_electrons()
+    num_nuc = mf.mol.natm
+    Z_charges = mf.mol.atom_charges()
+    mol_charge = mf.mol.charge
+
     # check params_corr
     if params_corr is None:
         params_corr = dict()
@@ -370,12 +377,18 @@ def get_vmc_func(mf,
         for k in kList:
             del params_corr[k]
 
-    nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
-    eps = jnp.finfo(nuc_crds.dtype).eps     # softwired epsilon
-    nelec = mf.mol.tot_electrons()
-    num_nuc = mf.mol.natm
-    Z_charges = mf.mol.atom_charges()
-    mol_charge = mf.mol.charge
+    # Check J2 cusp coefficients
+    if "J2_params" in params_corr:
+        j2 = params_corr["J2_params"]
+        if isinstance(j2, dict):
+            if "like" in j2 and abs(float(j2["like"][0]) - 0.25) > eps:
+                warnings.warn(
+                    f"J2_params['like'][0] = {float(j2['like'][0]):.8f}, "
+                    "expected 0.25 (same-spin cusp condition)")
+            if "unlike" in j2 and abs(float(j2["unlike"][0]) - 0.5) > eps:
+                warnings.warn(
+                    f"J2_params['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
+                    "expected 0.5 (opposite-spin cusp condition)")
 
     # Precompute electron pair indices for distance calculations
     i_e, j_e = jnp.triu_indices(nelec, k=1)

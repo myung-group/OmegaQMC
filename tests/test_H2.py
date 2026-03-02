@@ -19,8 +19,8 @@ params_jastrow = {
 }
 
 atoms_string = '''
-H       0.0000    0.0000    {:.4f}
-H       0.0000    0.0000    {:.4f}
+H       0.0000    0.0000    {:.6f}      1
+H       0.0000    0.0000    {:.6f}      1
 '''.format(-L/2, L/2)
 
 modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
