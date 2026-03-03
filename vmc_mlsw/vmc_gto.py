@@ -251,7 +251,8 @@ def get_vmc_func(mf,
                  gr_scheme='scheme1',
                  prefix='vmc',
                  symmop_list: list[str] | dict[int, list[str]] | None = None,
-                 cluster_idx: Collection[int] = None):
+                 cluster_idx: Collection[int] = None,
+                 mo_relaxation: bool = True):
     # Build per-fragment symmetry operations dict
     if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
         frag_ids = sorted(mf.mol.map_frag_ctr.keys())
@@ -424,12 +425,13 @@ def get_vmc_func(mf,
     # Get wavefunction and energy functions
     log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
         = get_psi_fun(mf, params_cusp=params_cusp)
-    log_trial_wavefunction_C, local_energy_ke_C = C_fns
 
-    # Compute CPHF orbital response
-    nocc = jnp.count_nonzero(jnp.array(mf.mo_occ) > 0)
-    mo1s = compute_orbital_response(mf)  # (natm, 3, nao, nocc)
-    C0 = jnp.array(mf.mo_coeff[:, :nocc])
+    # Compute CPHF orbital response (if enabled)
+    if mo_relaxation:
+        log_trial_wavefunction_C, local_energy_ke_C = C_fns
+        nocc = jnp.count_nonzero(jnp.array(mf.mo_occ) > 0)
+        mo1s = compute_orbital_response(mf)  # (natm, 3, nao, nocc)
+        C0 = jnp.array(mf.mo_coeff[:, :nocc])
 
     # Precompute nuclear-nuclear energy and gradient
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
@@ -475,29 +477,30 @@ def get_vmc_func(mf,
         return jax.grad(log_trial_wavefunction,
                         argnums=(0, 1))(e_pos, nuc_crds, params_corr)
 
-    @jax.jit
-    def grad_fn_ke_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
-        """dE_ke/dC · dC/dR via JVP for each atom and direction."""
-        def ke_of_C(C):
-            return local_energy_ke_C(e_pos, nuc_crds, params_corr, C)
-        results = jnp.zeros((num_nuc, 3))
-        for ia in range(num_nuc):
-            for K in range(3):
-                _, dke = jax.jvp(ke_of_C, (C0,), (mo1s[ia, K],))
-                results = results.at[ia, K].set(dke)
-        return results  # (num_nuc, 3)
+    if mo_relaxation:
+        @jax.jit
+        def grad_fn_ke_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
+            """dE_ke/dC · dC/dR via JVP for each atom and direction."""
+            def ke_of_C(C):
+                return local_energy_ke_C(e_pos, nuc_crds, params_corr, C)
+            results = jnp.zeros((num_nuc, 3))
+            for ia in range(num_nuc):
+                for K in range(3):
+                    _, dke = jax.jvp(ke_of_C, (C0,), (mo1s[ia, K],))
+                    results = results.at[ia, K].set(dke)
+            return results  # (num_nuc, 3)
 
-    @jax.jit
-    def grad_fn_logpsi_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
-        """dlog|psi|/dC · dC/dR via JVP for each atom and direction."""
-        def logpsi_of_C(C):
-            return log_trial_wavefunction_C(e_pos, nuc_crds, params_corr, C)
-        results = jnp.zeros((num_nuc, 3))
-        for ia in range(num_nuc):
-            for K in range(3):
-                _, dlp = jax.jvp(logpsi_of_C, (C0,), (mo1s[ia, K],))
-                results = results.at[ia, K].set(dlp)
-        return results  # (num_nuc, 3)
+        @jax.jit
+        def grad_fn_logpsi_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
+            """dlog|psi|/dC · dC/dR via JVP for each atom and direction."""
+            def logpsi_of_C(C):
+                return log_trial_wavefunction_C(e_pos, nuc_crds, params_corr, C)
+            results = jnp.zeros((num_nuc, 3))
+            for ia in range(num_nuc):
+                for K in range(3):
+                    _, dlp = jax.jvp(logpsi_of_C, (C0,), (mo1s[ia, K],))
+                    results = results.at[ia, K].set(dlp)
+            return results  # (num_nuc, 3)
 
     @jax.jit
     def _log_psi_batch(batch):
@@ -810,12 +813,13 @@ def get_vmc_func(mf,
                                                  grd_logpsi_elc, rescale)
         grd_logpsi += novel_correction
 
-        # MO relaxation correction (CPHF)
-        grd_ke_mo_batch = jax.vmap(grad_fn_ke_mo)(batch_samples)
-        grd_logpsi_mo_batch = jax.vmap(grad_fn_logpsi_mo)(batch_samples)
+        if mo_relaxation:
+            # MO relaxation correction (CPHF)
+            grd_ke_mo_batch = jax.vmap(grad_fn_ke_mo)(batch_samples)
+            grd_logpsi_mo_batch = jax.vmap(grad_fn_logpsi_mo)(batch_samples)
 
-        grd_ke = grd_ke + grd_ke_mo_batch
-        grd_logpsi = grd_logpsi + grd_logpsi_mo_batch
+            grd_ke = grd_ke + grd_ke_mo_batch
+            grd_logpsi = grd_logpsi + grd_logpsi_mo_batch
 
         return grd_ee, grd_en, grd_ke, grd_logpsi
 
