@@ -10,13 +10,14 @@ bset_name = "6-31G"
 
 # optimizable Jastrow parameters:
 params_jastrow = {
-    "J1_params": {'H': jnp.array([-0.03418183,  0.01573882]),
-                  'Li': jnp.array([-0.06470724, -0.06746011])},
-    "J2_params": {"like": jnp.array([0.25, 1.57726814]),
-                  "unlike": jnp.array([0.5, 0.86735879])}
+    "J1_params": {'H': jnp.array([-0.01586607,  0.06306258]),
+                  'Li': jnp.array([-0.06306050, -0.05937204])},
+    "J2_params": {"like": jnp.array([0.25, 1.56329176]),
+                  "unlike": jnp.array([0.5, 0.84623194])}
 }
 #     "J1_params": jnp.array([41.0714, 7.7096]),
-#     "J2_params": {"like": jnp.array([0.25, 1.5846]), "unlike": jnp.array([0.5, 0.9614])}
+#     "J2_params": {"like": jnp.array([0.25, 1.78]),
+#                   "unlike": jnp.array([0.5, 0.917])}
 
 atoms_string = '''
     Li       0.000000    0.00    0.00
@@ -30,6 +31,7 @@ modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
 
 vmcopt_run = get_vmcopt_func(modrv)
 params_jastrow_final, E_data \
-    = vmcopt_run(rng_key, params_corr_init=params_jastrow)
+    = vmcopt_run(rng_key, params_corr_init=params_jastrow,
+                 frozen_keys={"J2_params": {"like": [0], "unlike": [0]}})
 print(params_jastrow_final)
 print(E_data)

@@ -175,6 +175,52 @@ def get_psi_fun(mf, params_cusp=None):
         return mo_val, mo_val_s
 
     @jax.jit
+    def get_ao_val(elec_crds, nuc_crds):
+        """AO evaluation only (no MO contraction)."""
+        ao_val, _ = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds,
+                                                              nuc_crds)
+        return ao_val   # (nelec, natm, nao_total)
+
+    @jax.jit
+    def log_slater_determinant_C(elec_crds, nuc_crds, C):
+        """Slater determinant with explicit MO coefficients C."""
+        ao_val, _ = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds,
+                                                              nuc_crds)
+        mo_val = jnp.einsum('ena,am->em', ao_val, C)
+        alpha_matrix = mo_val[::2, :]
+        beta_matrix = mo_val[1::2, :]
+        _, log_det_alpha = jnp.linalg.slogdet(alpha_matrix)
+        _, log_det_beta = jnp.linalg.slogdet(beta_matrix)
+        return log_det_alpha + log_det_beta
+
+    @jax.jit
+    def log_trial_wavefunction_C(elec_crds, nuc_crds, curr_params, C):
+        """Trial wavefunction with explicit MO coefficients C."""
+        ln_slater = log_slater_determinant_C(elec_crds, nuc_crds, C)
+        jastrow_term = 0.0
+        if "J1_params" in curr_params:
+            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"])
+        if "J2_params" in curr_params:
+            jastrow_term += J2_aa(elec_crds, curr_params["J2_params"]) \
+                + J2_ab(elec_crds, curr_params["J2_params"])
+        return ln_slater + jastrow_term
+
+    @jax.jit
+    def local_energy_ke_C(elec_crds, nuc_crds, curr_params, C):
+        """Kinetic energy with explicit MO coefficients C."""
+        def _log_psi_flat(p_flat):
+            return log_trial_wavefunction_C(p_flat.reshape(-1, 3),
+                                            nuc_crds, curr_params, C)
+        grad_fn = jax.grad(_log_psi_flat)
+        hess_fn = jax.hessian(_log_psi_flat)
+        p_flat = elec_crds.flatten()
+        grad_log_psi = grad_fn(p_flat)
+        hess_log_psi = hess_fn(p_flat)
+        lap_term = jnp.trace(hess_log_psi)
+        grad_term_sq = jnp.sum(grad_log_psi**2)
+        return -0.5 * (lap_term + grad_term_sq)
+
+    @jax.jit
     def log_slater_determinant(elec_crds, nuc_crds):
         """Slater determinant calculation."""
         mo_val, _ = get_psi_mo(elec_crds, nuc_crds)
@@ -336,4 +382,5 @@ def get_psi_fun(mf, params_cusp=None):
     return (log_trial_wavefunction,
             (local_energy_ee, local_energy_nn,
              local_energy_en, local_energy_ke),
-            get_psi_mo)
+            get_psi_mo,
+            (log_trial_wavefunction_C, local_energy_ke_C))

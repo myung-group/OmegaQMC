@@ -34,7 +34,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
     else:
         params_cusp = None
 
-    log_trial_wavefunction, local_energy, get_psi_mo \
+    log_trial_wavefunction, local_energy, get_psi_mo, _ \
         = get_psi_fun(mf, params_cusp=params_cusp)
 
     local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \

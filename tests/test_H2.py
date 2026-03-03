@@ -13,9 +13,9 @@ bset_name = "6-31G"
 
 # optimizable Jastrow parameters:
 params_jastrow = {
-    "J1_params": {"H": jnp.array([-0.15486924,  0.08576524])},
+    "J1_params": {"H": jnp.array([-0.05574627,  0.08272289])},
     "J2_params": {"like": jnp.array([0.25, 0.6046799]),
-                  "unlike": jnp.array([0.5, 0.46045336])}
+                  "unlike": jnp.array([0.5, 0.38077791])}
 }
 
 atoms_string = '''
@@ -55,4 +55,4 @@ if l_grad:
 
 
 def test_force():
-    assert forces[0, 2] == approx(-0.000344851447, abs=1e-6)
+    assert forces[0, 2] == approx(0.00356017, abs=1e-6)
