@@ -1,17 +1,16 @@
 import os
 import sys
+import warnings
 import h5py
 import numpy as np
 from pyscf import __config__, gto
 from pyscf.lib import logger, param
 from pyscf.gto.basis import _format_basis_name
-from pyscf.data.elements import MASSES, ELEMENTS_PROTON, \
-        is_ghost_atom, _atom_symbol
+from pyscf.data.elements import MASSES, ELEMENTS_PROTON, _atom_symbol
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
 # from jax import lax
-
 
 
 @jax.jit
@@ -154,11 +153,11 @@ def parse_molecular_inspheres(mol: gto.Mole):
             with open(mol._atom, 'r') as f:
                 Z = f.readlines()
             if "molecule:I:1" not in Z[1]:
-                print("⚠️ WARNING! Line 2 of {} should have a properties "
-                      "block indicating a column with molecular "
-                      "fragment indices "
-                      "e.g. 'Properties=species:S:1:pos:R:3:molecule:I:1'"
-                      .format(mol._atom))
+                warnings.warn("Line 2 of {} should have a properties "
+                              "block indicating a column with molecular "
+                              "fragment indices e.g. "
+                              "'Properties=species:S:1:pos:R:3:molecule:I:1'"
+                              .format(mol._atom))
             Z = list(filter(lambda x: x.strip() != "", Z[2:]))
         else:
             Z = mol._atom.strip().split('\n')
@@ -571,11 +570,17 @@ def vmc_forces_with_pgcs(
                         = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
                 else:
                     grd_ee_en \
-                        = dict_grd_samples['grd_ee_en'][state_label][f'{block_cnt}']
+                        = dict_grd_samples['grd_ee_en'][
+                            state_label
+                            ][f'{block_cnt}']
                     grd_ke \
-                        = dict_grd_samples['grd_ke'][state_label][f'{block_cnt}']
+                        = dict_grd_samples['grd_ke'][
+                            state_label
+                            ][f'{block_cnt}']
                     grd_logpsi \
-                        = dict_grd_samples['grd_logpsi'][state_label][f'{block_cnt}']
+                        = dict_grd_samples['grd_logpsi'][
+                            state_label
+                            ][f'{block_cnt}']
                 local_energies = jnp.array(
                     dict_grd_samples['local_energies'][f'{block_cnt}'])
 

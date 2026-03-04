@@ -13,7 +13,10 @@ import h5py
 from .psi_gto import get_psi_fun
 from .mo_relaxation import compute_orbital_response
 from .cusp import get_cusp_params
-from .utils import parse_molecular_inspheres, Mole_custom, _length_in_au
+from .utils import (parse_molecular_inspheres,
+                    Mole_custom,
+                    _length_in_au,
+                    do_binning_analysis)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import (symmetry_operations_map,
                               populate_fragment_symmops,
@@ -137,8 +140,9 @@ def generate_molecular_orbitals(astr: str,
 
     if astr.endswith(".xyz"):
         if units.upper().startswith("B") or units.upper().startswith("AU"):
-            print("⚠️ WARNING! XYZ input uses Å units by default, "
-                  "but the user has specified Bohrs.")
+            warnings.warn("XYZ input uses Å units by default, "
+                          "but the user has specified Bohrs.")
+
         elif units is None or units == "":
             units = "angstroms"
 
@@ -370,11 +374,9 @@ def get_vmc_func(mf,
             else:
                 assert isinstance(v, jnp.ndarray)
                 if k == "J2_params" and params_corr[k].shape[0] < 2:
-                    jax.debug.print(
-                        f"⚠️ WARNING! Correlation parameter set \"{k}\" "
-                        "requires 2 elements, but the user provided fewer.  "
-                        "Deleting..."
-                        )
+                    warnings.warn(f"Correlation parameter set \"{k}\" "
+                                  "requires 2 elements, "
+                                  "but the user provided fewer.  Deleting...")
                     kList.append(k)
         for k in kList:
             del params_corr[k]
@@ -1083,8 +1085,8 @@ def get_vmc_func(mf,
 
         ratio = ratios[-1]
 
-        print(f"ℹ️ Equilibration acceptance rate: {ratio:.2f}")
-        print(f"ℹ️ Adjusted step size: {mc_stepsize:.4f} bohr "
+        print(f"ℹ️\tEquilibration acceptance rate: {ratio:.2f}")
+        print(f"ℹ️\tAdjusted step size: {mc_stepsize:.4f} bohr "
               f"~ {mc_timestep:.4f} Ha⁻¹ in Brownian time")
 
         # Production phase
@@ -1170,7 +1172,7 @@ def get_vmc_func(mf,
         num_batches = (num_steps_per_block * num_walkers + batch_size - 1) \
             // batch_size
         # mark_samples = ((jnp.arange(num_steps_per_block)+1) == 0)
-        print("ℹ️ Adjusted batch size, number of batches: "
+        print("ℹ️\tAdjusted batch size, number of batches: "
               f"{batch_size}, {num_batches}")
         print("# block_cnt        E_loc_mean      E_loc_std"
               "       eePotential     enPotential     Kinetic"
@@ -1237,6 +1239,10 @@ def get_vmc_func(mf,
         print("End time: {}\t({:.6f} seconds total)"
               .format(timestamp_fin,
                       (timestamp_fin-timestamp_init).total_seconds()))
+
+        E_blocks = jnp.array(E_b)
+        e_mean, e_serr, _, _ = do_binning_analysis(E_blocks)
+        print(f"ℹ️\tVMC energy: {e_mean:.8f} ± {e_serr:.8f} Ha")
 
         with h5py.File(ofname_chkpt, 'a') as f:
             f.create_dataset('E_blocks', data=E_b)

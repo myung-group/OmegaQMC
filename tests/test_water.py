@@ -10,8 +10,11 @@ bset_name = "cc-pVDZ"
 # other choices: 6-31G, cc-pVDZ, etc.
 
 # No optimizable Jastrow parameters:
-params_vmc_no_jastrow = {
-    "J2_params": jnp.array([])
+params_jastrow = {
+    "J1_params": {"H": jnp.array([-0.14351574,  0.40882649]),
+                  "O": jnp.array([-0.03921187, 13.46851739])},
+    "J2_params": {"like": jnp.array([0.25, 1.71181446]),
+                  "unlike": jnp.array([0.5, 2.66981181])}
 }
 
 # myUnits = "ang"
@@ -42,7 +45,7 @@ modrv = generate_molecular_orbitals(atoms_string, units=myUnits,
 
 chkfile_prefix = 'H2O_vmc_{}'.format(format_basis_name(bset_name))
 
-vmc_run = get_vmc_func(modrv, params_vmc_no_jastrow,
+vmc_run = get_vmc_func(modrv, params_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
                        prefix=chkfile_prefix)
