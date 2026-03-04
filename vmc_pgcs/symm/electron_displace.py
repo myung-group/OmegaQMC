@@ -70,7 +70,7 @@ def _apply_symmetry_operation(
         Transformed electron positions with shape (nelec, 3)
     """
     # Use JAX control flow to select the appropriate symmetry function,
-    # which is implemented in `vmc_mlsw/symm/operations.py`.
+    # which is implemented in `vmc_pgcs/symm/operations.py`.
     return jax.lax.switch(symm_op_id, _SYMM_OP_FUNCS, r_electrons)
 
 
