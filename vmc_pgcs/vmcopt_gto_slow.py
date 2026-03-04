@@ -10,6 +10,7 @@ from .vmcopt_gto import (
     _init_params_corr,
     _check_j2_cusps,
 )
+from .utils import _make_sharding
 
 
 def _acf_fft_jnp(x: jnp.ndarray) -> jnp.ndarray:
@@ -151,8 +152,12 @@ class _VMCOptSlowDriver:
             optimizer_chosen = base_optimizer
         opt_state = optimizer_chosen.init(params_corr)
 
+        walkers_sharding, walker_keys_sharding = _make_sharding(num_walkers)
+
         rng_key, rng = jax.random.split(rng_key)
         walkers = self.initialize_walkers(rng, num_walkers)
+        if walkers_sharding is not None:
+            walkers = jax.device_put(walkers, walkers_sharding)
         mc_stepsize = (3 * mc_timestep)**0.5
 
         @jax.jit
@@ -162,6 +167,9 @@ class _VMCOptSlowDriver:
             keys = jax.random.split(rkey1, num_walkers + 1)
             rkey1 = keys[0]
             keys = keys[1:]
+            if walker_keys_sharding is not None:
+                keys = jax.lax.with_sharding_constraint(
+                    keys, walker_keys_sharding)
 
             new_w, accepted \
                 = jax.vmap(self.metropolis_move,
@@ -195,6 +203,9 @@ class _VMCOptSlowDriver:
                 keys = jax.random.split(rkey1, num_walkers + 1)
                 rkey1 = keys[0]
                 keys = keys[1:]
+                if walker_keys_sharding is not None:
+                    keys = jax.lax.with_sharding_constraint(
+                        keys, walker_keys_sharding)
                 new_w, accepted \
                     = jax.vmap(self.metropolis_move,
                                in_axes=(0, 0, None, None))(keys, w, s,

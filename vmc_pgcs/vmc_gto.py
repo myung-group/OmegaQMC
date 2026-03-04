@@ -9,8 +9,7 @@ import jax
 import jax.numpy as jnp
 # from functools import partial
 import h5py
-import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import NamedSharding, PartitionSpec
 
 from .psi_gto import get_psi_fun
 from .mo_relax import compute_orbital_response
@@ -18,7 +17,8 @@ from .cusp import get_cusp_params
 from .utils import (parse_molecular_inspheres,
                     Mole_custom,
                     _length_in_au,
-                    do_binning_analysis)
+                    do_binning_analysis,
+                    _make_sharding)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import (symmetry_operations_map,
                               populate_fragment_symmops)
@@ -120,20 +120,6 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
         acceptance_ratio - TARGET_ACCEPTANCE_RATE
     )
     return jnp.exp(log_step)
-
-
-def _make_sharding(num_walkers: int):
-    """Return (walkers_sharding, walker_keys_sharding) or (None, None)."""
-    devices = jax.devices()
-    n = len(devices)
-    if n == 1:
-        return None, None
-    assert num_walkers % n == 0, (
-        f"num_walkers ({num_walkers}) must be divisible by device count ({n})")
-    mesh = Mesh(np.array(devices), ('w',))
-    ws  = NamedSharding(mesh, PartitionSpec('w', None, None))  # (w, nelec, 3)
-    wks = NamedSharding(mesh, PartitionSpec('w', None))        # (w, key_size)
-    return ws, wks
 
 
 def generate_molecular_orbitals(astr: str,

@@ -10,6 +10,7 @@ from pyscf.data.elements import MASSES, ELEMENTS_PROTON, _atom_symbol
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import fftconvolve
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 # from jax import lax
 
 
@@ -762,3 +763,17 @@ def vmc_forces_with_pgcs(
             fout.close()
 
         return -ref_grd_tot, ref_grd_err
+
+
+def _make_sharding(num_walkers: int):
+    """Return (walkers_sharding, walker_keys_sharding) or (None, None)."""
+    devices = jax.devices()
+    n = len(devices)
+    if n == 1:
+        return None, None
+    assert num_walkers % n == 0, (
+        f"num_walkers ({num_walkers}) must be divisible by device count ({n})")
+    mesh = Mesh(np.array(devices), ('w',))
+    ws  = NamedSharding(mesh, PartitionSpec('w', None, None))  # (w, nelec, 3)
+    wks = NamedSharding(mesh, PartitionSpec('w', None))        # (w, key_size)
+    return ws, wks
