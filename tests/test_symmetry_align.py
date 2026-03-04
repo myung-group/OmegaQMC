@@ -6,7 +6,7 @@ Checks that:
 2. Water molecule C2v axis is aligned along z-axis
 """
 import numpy as np
-from vmc_mlsw import generate_molecular_orbitals
+from vmc_pgcs import generate_molecular_orbitals
 
 print("=" * 70)
 print("Testing Symmetry-Based Molecular Alignment")

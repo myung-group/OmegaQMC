@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
-from vmc_mlsw import generate_molecular_orbitals
-from vmc_mlsw.vmcopt_gto import get_vmcopt_func
+from vmc_pgcs import generate_molecular_orbitals
+from vmc_pgcs.vmcopt_gto import get_vmcopt_func
 
 rng_key = jax.random.key(888)
 

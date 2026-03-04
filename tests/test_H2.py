@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
-from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
-from vmc_mlsw.utils import vmc_forces_with_pgcs as vmc_forces
-from vmc_mlsw.utils import format_basis_name
-# from vmc_mlsw.vmc_gto_symm import process_symmetric_diatomic_molecule
+from vmc_pgcs import generate_molecular_orbitals, get_vmc_func
+from vmc_pgcs.utils import vmc_forces_with_pgcs as vmc_forces
+from vmc_pgcs.utils import format_basis_name
+# from vmc_pgcs.vmc_gto_symm import process_symmetric_diatomic_molecule
 from pytest import approx
 
 rng_key = jax.random.key(888)

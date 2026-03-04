@@ -8,7 +8,7 @@ This test specifically addresses the issue mentioned in the problem:
 (up to a sign) by about 0.00001 Bohr" and shows the improvement.
 """
 
-from vmc_mlsw import generate_molecular_orbitals
+from vmc_pgcs import generate_molecular_orbitals
 
 
 def test_numerical_precision_improvement():
