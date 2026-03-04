@@ -463,11 +463,12 @@ def format_basis_name(basisname: str | dict):
 
 
 # --- Gradient post-processing ---
-def vmc_forces_with_space_warping(
+def vmc_forces_with_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
         walker_based_batch_size: int = 10
         ) -> jnp.ndarray:
+    """ PGCS = point group correlated sampling """
     suffixes_checked = [".chk.h5", ".grd.h5"]
     for s in suffixes_checked:
         if prefix.endswith(s):

@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from vmc_mlsw import generate_molecular_orbitals, get_vmc_func
-from vmc_mlsw.utils import vmc_forces_with_space_warping as vmc_forces
+from vmc_mlsw.utils import vmc_forces_with_pgcs as vmc_forces
 
 rng_key = jax.random.key(888)
 
