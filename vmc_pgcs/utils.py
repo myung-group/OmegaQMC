@@ -397,6 +397,50 @@ class Mole_custom(gto.Mole):
                             ia+1, mol.atom_symbol(ia), *coords)
         return mol
 
+    def dumps(self):
+        import numpy as np
+
+        def _json_safe(d):
+            out = {}
+            for k, v in d.items():
+                if isinstance(v, np.ndarray):
+                    out[str(k)] = v.tolist()
+                elif isinstance(v, float) and np.isinf(v):
+                    out[str(k)] = None
+                else:
+                    out[str(k)] = v
+            return out
+
+        saved = {}
+        for attr in ('map_frag_ctr', 'inradii', 'map_frag_symmops'):
+            d = getattr(self, attr, None)
+            if isinstance(d, dict):
+                saved[attr] = d
+                setattr(self, attr, _json_safe(d))
+        try:
+            return super().dumps()
+        finally:
+            for attr, d in saved.items():
+                setattr(self, attr, d)
+
+    def loads_(self, molstr):
+        import numpy as np
+        super().loads_(molstr)
+        if hasattr(self, 'map_frag_ctr') and isinstance(self.map_frag_ctr, dict):
+            self.map_frag_ctr = {
+                int(k): np.array(v) for k, v in self.map_frag_ctr.items()
+            }
+        if hasattr(self, 'inradii') and isinstance(self.inradii, dict):
+            self.inradii = {
+                int(k): (np.inf if v is None else float(v))
+                for k, v in self.inradii.items()
+            }
+        if hasattr(self, 'map_frag_symmops') and isinstance(self.map_frag_symmops, dict):
+            self.map_frag_symmops = {
+                int(k): v for k, v in self.map_frag_symmops.items()
+            }
+        return self
+
 
 def compute_torque(mol, grd):
     coords = jnp.array(mol.atom_coords())
