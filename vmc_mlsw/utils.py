@@ -490,6 +490,11 @@ def vmc_forces_with_pgcs(
                      for i in range(len(atom_symbols))]
         myMol = gto.M(atom=mole_data, basis="mini", unit=myUnits)
 
+        if "atom_fragment_map" in f["system"]:
+            atom_frag_map = list(f["system"]["atom_fragment_map"][:])
+        else:
+            atom_frag_map = None
+
         dict_grd_samples = {}
         for key, val in f.items():
             if isinstance(val, h5py.Group):
@@ -545,6 +550,7 @@ def vmc_forces_with_pgcs(
 
         ref_grd_tot = None
         ref_grd_err = None
+        all_state_results = {}
 
         for state_label in states:
             valid_samples_count = 0
@@ -655,6 +661,8 @@ def vmc_forces_with_pgcs(
                 ref_grd_tot = grd_tot
                 ref_grd_err = grd_err
 
+            all_state_results[state_label] = (grd_tot, grd_err)
+
             # Write results
             with jnp.printoptions(precision=12, suppress=True):
                 if state_label is not None:
@@ -684,6 +692,66 @@ def vmc_forces_with_pgcs(
                                    torque[1], dtau[1],
                                    torque[2], dtau[2]))
                 fout.write("\n")
+
+        # --- Fragment-wise averaging of PGCS force estimates ---
+        if atom_frag_map is not None and combo_labels:
+            frag_to_states = {}
+            for fid in set(atom_frag_map):
+                frag_to_states[fid] = [None]  # all include reference
+
+            for label in combo_labels:
+                for part in label.split(','):
+                    fid_str, op = part.split(':')
+                    if op != 'E':
+                        frag_to_states[int(fid_str)].append(label)
+                        break
+
+            avg_grd_tot = jnp.zeros((num_nuc, 3))
+            avg_grd_err = jnp.zeros((num_nuc, 3))
+
+            for i in range(num_nuc):
+                fid = atom_frag_map[i]
+                relevant_states = frag_to_states.get(fid, [None])
+                forces = jnp.stack(
+                    [all_state_results[s][0][i] for s in relevant_states])
+                errors = jnp.stack(
+                    [all_state_results[s][1][i] for s in relevant_states])
+                N = len(relevant_states)
+                avg_grd_tot = avg_grd_tot.at[i].set(forces.mean(axis=0))
+                avg_grd_err = avg_grd_err.at[i].set(
+                    jnp.sqrt(jnp.sum(errors**2, axis=0)) / N)
+
+            avg_torque, avg_dtau \
+                = compute_torque_with_error(myMol, avg_grd_tot, avg_grd_err)
+
+            with jnp.printoptions(precision=12, suppress=True):
+                fout.write("\n=== Fragment-wise averaged forces ===\n")
+                fout.write("Total gradients (averaged)\n")
+                fout.write(f" {avg_grd_tot}\n")
+                fout.write("Total forces (-gradients, averaged)\n")
+                for i in range(num_nuc):
+                    fid = atom_frag_map[i]
+                    n_states = len(frag_to_states.get(fid, [None]))
+                    fout.write("{:4s}{:>16.6g} ± {:>12.6g}"
+                               "{:>16.6g} ± {:>12.6g}"
+                               "{:>16.6g} ± {:>12.6g}"
+                               "  (fragment {}, over {} states)\n"
+                               .format(myMol.atom_symbol(i),
+                                       -avg_grd_tot[i, 0], avg_grd_err[i, 0],
+                                       -avg_grd_tot[i, 1], avg_grd_err[i, 1],
+                                       -avg_grd_tot[i, 2], avg_grd_err[i, 2],
+                                       fid, n_states))
+                fout.write("Total torque (averaged)\n")
+                fout.write("    {:>16.6g} ± {:>12.6g}"
+                           "{:>16.6g} ± {:>12.6g}"
+                           "{:>16.6g} ± {:>12.6g}\n"
+                           .format(avg_torque[0], avg_dtau[0],
+                                   avg_torque[1], avg_dtau[1],
+                                   avg_torque[2], avg_dtau[2]))
+                fout.write("\n")
+
+            ref_grd_tot = avg_grd_tot
+            ref_grd_err = avg_grd_err
 
         if ofname_log is not None:
             fout.close()

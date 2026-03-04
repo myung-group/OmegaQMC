@@ -1161,6 +1161,8 @@ def get_vmc_func(mf,
                 g.create_dataset("atom_symbols", data=" ".join(asym))
                 g.create_dataset("atom_coords", data=mf.mol.atom_coords())
                 g.create_dataset("units", data=mf.mol.unit.upper())
+                g.create_dataset("atom_fragment_map",
+                                  data=mf.mol.map_nuc_frag)
 
         base_batch_size = 500
         memory_factor = max(1, nelec * num_nuc // 1000)
