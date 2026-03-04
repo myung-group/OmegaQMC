@@ -71,8 +71,11 @@ def get_cusp_params(elem, basis_name):
     Z = mol.atom_charges()[0]
     rc = 0.1 if Z == 1 else 0.2
     basis = mol._basis[symb]
+    # Find the s-shell (l=0) with the most primitives — this is the contracted 1s
+    s_shells = [sh for sh in basis if sh[0] == 0]
+    basis_1s = max(s_shells, key=lambda sh: len(sh) - 1)
 
-    g_alpha, g_norm = gto_1s_alpha_norm(basis)
+    g_alpha, g_norm = gto_1s_alpha_norm([basis_1s])
     coeff_vec = cusp_coeff_vec(g_alpha, g_norm, Z, rc)
     q0_min = minimize_q0(g_alpha, g_norm, Z, rc, coeff_vec)
 
