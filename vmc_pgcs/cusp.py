@@ -71,7 +71,8 @@ def get_cusp_params(elem, basis_name):
     Z = mol.atom_charges()[0]
     rc = 0.1 if Z == 1 else 0.2
     basis = mol._basis[symb]
-    # Find the s-shell (l=0) with the most primitives — this is the contracted 1s
+    # Find the s-shell (l=0) with the most primitives
+    # — this is the contracted 1s
     s_shells = [sh for sh in basis if sh[0] == 0]
     basis_1s = max(s_shells, key=lambda sh: len(sh) - 1)
 

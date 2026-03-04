@@ -395,7 +395,29 @@ class _VMCOptDriver:
 
 
 def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
-    """Create VMC optimization function."""
+    """Construct a callable VMC wave-function optimizer for the given system.
+
+    Builds cusp-corrected trial wave-function parameters and returns a
+    :class:`_VMCOptDriver` that optimizes the Jastrow-factor coefficients by
+    minimizing the energy variance using the linear method (stochastic
+    reconfiguration).
+
+    Parameters
+    ----------
+    mf : pyscf.scf.RHF
+        Converged mean-field object as returned by
+        :func:`generate_molecular_orbitals`.
+    cusp_scheme : str, optional
+        Cusp-correction scheme used to initialize nuclear-region parameters.
+        ``"Quady2025"`` (default) applies the scheme from Quady *et al.*
+        (2025).  Pass ``None`` to skip cusp corrections.
+
+    Returns
+    -------
+    driver : _VMCOptDriver
+        A callable optimizer.  Call it with ``driver(rng_key, ...)`` to run
+        the optimization loop and obtain optimized Jastrow parameters.
+    """
     num_nuc = mf.mol.natm
     if cusp_scheme == "Quady2025":
         params_cusp = {}

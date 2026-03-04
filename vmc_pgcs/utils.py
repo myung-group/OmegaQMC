@@ -16,6 +16,32 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 @jax.jit
 def do_binning_analysis(a):
+    """Compute mean, standard error, standard deviation, and autocorrelation length.
+
+    Estimates the statistical error of a correlated time series using the
+    integrated autocorrelation time (binning / blocking analysis).  The
+    autocorrelation function is computed via FFT convolution for efficiency.
+
+    Parameters
+    ----------
+    a : jnp.ndarray, shape (N,)
+        One-dimensional array of sequential Monte Carlo samples (e.g.
+        local-energy values from a VMC run).
+
+    Returns
+    -------
+    xbar : jnp.ndarray, scalar
+        Sample mean.
+    serr : jnp.ndarray, scalar
+        Standard error of the mean, corrected for autocorrelation:
+        ``serr = std(a) * sqrt(kappa / N)`` where *kappa* is the integrated
+        autocorrelation time.
+    sdev : jnp.ndarray, scalar
+        Uncorrected sample standard deviation.
+    kappa : jnp.ndarray, scalar
+        Integrated autocorrelation time (dimensionless).  Values close to
+        1.0 indicate nearly uncorrelated samples.
+    """
     num_steps = a.shape[0]
     xbar = jnp.mean(a)
     sdev = jnp.std(a)
@@ -494,6 +520,32 @@ def compute_energy_with_error(chkfile):
 
 
 def format_basis_name(basisname: str | dict):
+    """Return a filesystem-safe representation of a basis-set name.
+
+    Delegates to PySCF's internal ``_format_basis_name`` and additionally
+    replaces ``*`` characters (which appear in names like ``6-31G**``) with
+    the letter ``s`` so that the result can be used safely in file names.
+
+    Parameters
+    ----------
+    basisname : str or dict
+        Basis-set name (e.g. ``"aug-cc-pVTZ"``, ``"6-31G**"``) or an
+        element-keyed dict of basis names.  When a dict is supplied the
+        longest string value is formatted; if no string values are present
+        the literal string ``"gen"`` is returned.
+
+    Returns
+    -------
+    str
+        Formatted basis name suitable for use in file-name prefixes.
+
+    Examples
+    --------
+    >>> format_basis_name("6-31G**")
+    '6-31gss'
+    >>> format_basis_name({"O": "aug-cc-pVTZ", "H": "cc-pVDZ"})
+    'aug-cc-pvtz'
+    """
     if isinstance(basisname, dict):
         # Get all string values and find the longest one
         string_values = [v for v in basisname.values() if isinstance(v, str)]
@@ -512,7 +564,37 @@ def vmc_forces_with_pgcs(
         logfile: bool | str = False,
         walker_based_batch_size: int = 10
         ) -> jnp.ndarray:
-    """ PGCS = point group correlated sampling """
+    """Post-process VMC gradient data to obtain nuclear forces using PGCS.
+
+    Reads the gradient HDF5 file written by :meth:`_VMCDriver.__call__`
+    and applies Point Group Correlated Sampling (PGCS) to obtain
+    symmetry-averaged estimates of the nuclear forces and their statistical
+    errors.
+
+    Parameters
+    ----------
+    prefix : str, optional
+        File-name stem used when the VMC run was set up (the ``prefix``
+        argument of :func:`get_vmc_func`).  The function looks for
+        ``<prefix>.grd.h5``; trailing ``.chk.h5`` or ``.grd.h5`` suffixes
+        are stripped automatically.  Default is ``"vmc"``.
+    logfile : bool or str, optional
+        Controls logging output.  ``False`` (default) suppresses logging.
+        ``True`` writes to ``<prefix>.log``.  A string is used as the log
+        file path directly (a ``.log`` extension is appended if absent).
+    walker_based_batch_size : int, optional
+        Number of walker blocks to load into memory at once when summing
+        gradient contributions.  Reduce this value if GPU memory is tight.
+        Default is 10.
+
+    Returns
+    -------
+    grd : jnp.ndarray, shape (num_atoms, 3)
+        Mean nuclear forces (negative energy gradient) in Hartree/Bohr.
+    grd_err : jnp.ndarray, shape (num_atoms, 3)
+        Statistical error (standard error of the mean) of each force
+        component.
+    """
     suffixes_checked = [".chk.h5", ".grd.h5"]
     for s in suffixes_checked:
         if prefix.endswith(s):

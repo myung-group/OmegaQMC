@@ -129,7 +129,47 @@ def generate_molecular_orbitals(astr: str,
                                 postHF: str = None,
                                 ignore_hydrogen_mass: bool = False,
                                 symmetrization_level: int = 1):
-    """ PySCF wrapper """
+    """Run a PySCF mean-field calculation and return the result object.
+
+    Wraps PySCF to build a molecule, detect its point-group symmetry,
+    run a restricted Hartree-Fock (or post-HF) calculation, and symmetrize
+    the resulting molecular orbitals.  The returned object is passed directly
+    to :func:`get_vmc_func` and :func:`get_vmcopt_func`.
+
+    Parameters
+    ----------
+    astr : str
+        Atom specification accepted by PySCF: an inline string such as
+        ``"H 0 0 0; H 0 0 1.4"`` **or** a path to an ``.xyz`` file.
+    unit : str, optional
+        Deprecated alias for *units*.  If provided it takes precedence.
+    units : str, optional
+        Length unit of *astr* coordinates.  Accepts ``"Bohr"`` / ``"au"``
+        (default) or ``"angstrom"`` / ``"ang"``.  ``.xyz`` files are always
+        in ångströms regardless of this setting.
+    spin : int, optional
+        Number of unpaired electrons (2S).  Default is 0 (singlet).
+    basis : str or dict, optional
+        Basis-set name (e.g. ``"aug-cc-pVTZ"``) or an element-keyed dict for
+        mixed basis sets.  Default is ``"aug-cc-pVTZ"``.
+    postHF : str, optional
+        Post-HF method to run on top of the RHF reference, e.g. ``"MP2"``,
+        ``"CCSD"``.  If *None* (default) only RHF natural orbitals are used.
+    ignore_hydrogen_mass : bool, optional
+        Replace hydrogen masses with a small value so that H nuclei do not
+        dominate center-of-mass translations.  Default is ``False``.
+    symmetrization_level : int, optional
+        How aggressively to symmetrize the MOs.  ``0`` = no symmetrization,
+        ``1`` = symmetrize degenerate blocks (default), ``2`` = full
+        projection onto irreducible representations.
+
+    Returns
+    -------
+    mf : pyscf.scf.RHF
+        Converged mean-field object with the molecule (``mf.mol``) and MO
+        coefficients (``mf.mo_coeff``) attached.  Point-group information is
+        stored on ``mf.mol`` via custom attributes set by this function.
+    """
     if unit is not None:
         units = unit
         # "unit" (sic) takes precedence
@@ -836,7 +876,53 @@ class _VMCDriver:
                  fname_log: str = None,
                  mode_restart: bool = False,
                  compute_gradients: bool = False) -> None:
-        """VMC run with better memory management."""
+        """Execute a VMC run and write results to HDF5 checkpoint files.
+
+        Runs Metropolis-Hastings Monte Carlo sampling of the trial wave
+        function, accumulating the local energy (and optionally nuclear-force
+        gradients) block by block.  Results are written to ``<prefix>.chk.h5``
+        (energies / walker snapshots) and, when *compute_gradients* is
+        ``True``, ``<prefix>.grd.h5`` (gradient data).
+
+        Parameters
+        ----------
+        rng_key : int or jnp.ndarray
+            JAX PRNG key used to initialise the walkers and Monte Carlo moves.
+            Pass an integer to use ``jax.random.key(rng_key)``.
+        num_walkers : int, optional
+            Number of independent electron-position walkers.  Default 1000.
+        num_steps_per_block : int, optional
+            Monte Carlo steps between successive energy measurements.
+            Default 100.
+        num_steps_decorr : int, optional
+            Additional decorrelation steps taken *within* each block.
+            Default 1.
+        num_blocks : int, optional
+            Total number of measurement blocks (including equilibration).
+            Default 1000.
+        num_blocks_equil : int, optional
+            Number of leading blocks discarded as equilibration.  Default 100.
+        mc_timestep : float, optional
+            Gaussian proposal width for Metropolis moves (in Bohr).
+            Adjusted adaptively to reach ~50 % acceptance.  Default 0.1.
+        fname_log : str, optional
+            Path for the plain-text log file.  Defaults to
+            ``<prefix>.log`` when *None*.
+        mode_restart : bool, optional
+            If ``True``, attempt to resume from an existing checkpoint file
+            and continue accumulating blocks.  Default ``False``.
+        compute_gradients : bool, optional
+            If ``True``, accumulate and save nuclear-force gradient data
+            needed by :func:`~vmc_pgcs.utils.vmc_forces_with_pgcs`.
+            Default ``False``.
+
+        Returns
+        -------
+        None
+            All output is written to disk.  Use
+            :func:`~vmc_pgcs.utils.vmc_forces_with_pgcs` to post-process
+            the gradient file.
+        """
         # tolerance_enr_std_per_elec=CHEMICAL_ACCURACY,
         mf = self.mf
         nuc_crds = self.nuc_crds
@@ -1115,6 +1201,49 @@ def get_vmc_func(mf,
                  symmop_list: list[str] | dict[int, list[str]] | None = None,
                  cluster_idx: Collection[int] = None,
                  mo_relax: bool = True):
+    """Construct a callable VMC driver for the given mean-field object.
+
+    Assembles the trial wave function (Slater determinant + Jastrow factor
+    with optional cusp corrections) and returns a :class:`_VMCDriver`
+    instance that can be called directly to run a VMC simulation.
+
+    Parameters
+    ----------
+    mf : pyscf.scf.RHF
+        Converged mean-field object as returned by
+        :func:`generate_molecular_orbitals`.
+    params_corr : dict or None
+        Jastrow-factor parameters.  Pass a dict with key ``"J2_params"``
+        containing a 1-D array of optimizable coefficients, or ``None`` /
+        ``{"J2_params": jnp.array([])}`` to use no Jastrow factor.
+    cusp_scheme : str, optional
+        Cusp-correction scheme to apply near nuclei.  ``"Quady2025"``
+        (default) uses the scheme described in Quady *et al.* (2025).
+        Pass ``None`` to disable cusp corrections.
+    gr_scheme : str, optional
+        Gradient estimator scheme.  Default is ``"scheme1"``.
+    prefix : str, optional
+        Stem used for output file names (``<prefix>.chk.h5``,
+        ``<prefix>.grd.h5``, ``<prefix>.log``).  Default is ``"vmc"``.
+    symmop_list : list of str, or dict mapping int to list of str, optional
+        Point-group symmetry operations to use for correlated sampling.
+        A plain list applies the same operations to every fragment.  A dict
+        maps fragment indices (as defined in the atom string by trailing
+        integer labels) to their own operation lists.  ``None`` (default)
+        applies only the identity ``"E"``.
+    cluster_idx : collection of int, optional
+        Indices of atoms forming a sub-cluster for gradient calculations.
+        ``None`` (default) treats all atoms as one cluster.
+    mo_relax : bool, optional
+        If ``True`` (default), relax the MO coefficients to minimise the
+        energy variance during the cusp-correction step.
+
+    Returns
+    -------
+    driver : _VMCDriver
+        A callable object.  Call it with ``driver(rng_key, ...)`` to run the
+        VMC simulation; see :meth:`_VMCDriver.__call__` for parameters.
+    """
     # Build per-fragment symmetry operations dict
     if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
         frag_ids = sorted(mf.mol.map_frag_ctr.keys())
