@@ -1,4 +1,4 @@
-# vmc_mlsw/constants.py
+# vmc_pgcs/constants.py
 
 # Jastrow and other global constants
 

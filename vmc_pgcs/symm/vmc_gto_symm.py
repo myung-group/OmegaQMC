@@ -2,8 +2,8 @@ import jax.numpy as jnp
 import jax
 import h5py
 from functools import partial
-from vmc_mlsw.diatomic_rotation_matrix import rotate_vector_to_z_axis
-from vmc_mlsw.water_rotation_matrix import symmetrize_water_molecule
+from vmc_pgcs.diatomic_rotation_matrix import rotate_vector_to_z_axis
+from vmc_pgcs.water_rotation_matrix import symmetrize_water_molecule
 
 
 @jax.jit
@@ -167,12 +167,12 @@ def process_symmetric_water_molecule(chkfile_mc,
     # Step 5: Apply reflection operations
     reflection_map = {
         'x': apply_reflection_x,
-        'y': apply_reflection_y, 
+        'y': apply_reflection_y,
         'xy': apply_reflection_xy
     }
 
     results = {}
-    results[f'reflection_E'] = elc_samples 
+    results[f'reflection_E'] = elc_samples
 
     for reflection_op in reflection_ops:
         if reflection_op not in reflection_map:
@@ -187,8 +187,8 @@ def process_symmetric_water_molecule(chkfile_mc,
         # Step 6: Transform back to original frame
         # First, reverse the space warping
         elc_samples_unwarped = jax.vmap(
-            lambda coords, weights_i: coords - jnp.einsum('nk,en->ek', 
-                                                        nuc_crds_sym_trans_rot_reflected - nuc_crds_trans_rot_reflected, 
+            lambda coords, weights_i: coords - jnp.einsum('nk,en->ek',
+                                                        nuc_crds_sym_trans_rot_reflected - nuc_crds_trans_rot_reflected,
                                                         weights_i)
         )(elc_samples_reflected, weights)
 
@@ -232,7 +232,7 @@ def process_symmetric_diatomic_molecule(chkfile_mc,
     # Step 1: Symmetrize the water molecule
     vector = nuc_crds[1] - center
     rot_mat = rotate_vector_to_z_axis(vector)
-    rot_mat = rot_mat.T 
+    rot_mat = rot_mat.T
 
     # Step 2: Transform coordinates to symmetric frame
     elc_samples_trans_rot = apply_coordinate_transformation(elc_samples, center, rot_mat)
@@ -240,12 +240,12 @@ def process_symmetric_diatomic_molecule(chkfile_mc,
     # Step 5: Apply reflection operations
     reflection_map = {
         'x': apply_reflection_x,
-        'y': apply_reflection_y, 
+        'y': apply_reflection_y,
         'xy': apply_reflection_xy
     }
 
     results = {}
-    results[f'reflection_E'] = elc_samples 
+    results[f'reflection_E'] = elc_samples
 
     for reflection_op in reflection_ops:
         if reflection_op not in reflection_map:
@@ -269,7 +269,7 @@ def process_symmetric_diatomic_molecule(chkfile_mc,
 
 if __name__ == "__main__":
     from pyscf import gto, scf
-    from vmc_mlsw import get_vmc_func 
+    from vmc_pgcs import get_vmc_func
     import h5py
 
     mol = gto.M(
@@ -305,7 +305,7 @@ H        1.000000   -0.807216   -0.469229
     }
 
     vmc_run, vmc_energy, vmc_gradient_prep, vmc_grad =\
-        get_vmc_func (mf, 
+        get_vmc_func (mf,
                       params_vmc_no_jastrow,
                       chkfile_mc=chkfile_mc,
                       chkfile_enr=chkfile_enr,
@@ -313,18 +313,18 @@ H        1.000000   -0.807216   -0.469229
                       cgto_coeff=None)
 
 
-    vmc_run (rng_key, 
+    vmc_run (rng_key,
              num_steps=100000,
              num_equilibration=500000,
              step_size=0.05)
 
-    vmc_energy () 
+    vmc_energy ()
 
     with h5py.File(chkfile_mc, 'r') as f:
         sampled_elc_crds = jnp.array(f['stacked_samples'][:])
 
     results = process_symmetric_water_molecule(
-        nuc_crds, sampled_elc_crds, 
+        nuc_crds, sampled_elc_crds,
         sigma=0.5,
         reflection_ops=['x','y', 'xy']
     )

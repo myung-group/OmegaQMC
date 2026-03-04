@@ -1,13 +1,6 @@
-# VMC with MLSW
+# VMC with PGCS
 
-Variational Monte Carlo with machine-learned space warping (for force estimators)
-
-## Update list
-- Added restart capability
-- Added N H2O reflection (N = 1, 2, ...)
-- Added torque computation
-- Added error computation of energy, gradients, torques.
-- Added aug-cc-pCVQZ basis set informations
+Variational Monte Carlo with point group correlated sampling (for force estimators)
 
 ## Installation
 Install directly from the repository:
