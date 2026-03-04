@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import h5py
 
 from .psi_gto import get_psi_fun
-from .mo_relaxation import compute_orbital_response
+from .mo_relax import compute_orbital_response
 from .cusp import get_cusp_params
 from .utils import (parse_molecular_inspheres,
                     Mole_custom,
@@ -256,7 +256,7 @@ def get_vmc_func(mf,
                  prefix='vmc',
                  symmop_list: list[str] | dict[int, list[str]] | None = None,
                  cluster_idx: Collection[int] = None,
-                 mo_relaxation: bool = True):
+                 mo_relax: bool = True):
     # Build per-fragment symmetry operations dict
     if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
         frag_ids = sorted(mf.mol.map_frag_ctr.keys())
@@ -429,7 +429,7 @@ def get_vmc_func(mf,
         = get_psi_fun(mf, params_cusp=params_cusp)
 
     # Compute CPHF orbital response (if enabled)
-    if mo_relaxation:
+    if mo_relax:
         log_trial_wavefunction_C, local_energy_ke_C = C_fns
         nocc = jnp.count_nonzero(jnp.array(mf.mo_occ) > 0)
         mo1s = compute_orbital_response(mf)  # (natm, 3, nao, nocc)
@@ -479,7 +479,7 @@ def get_vmc_func(mf,
         return jax.grad(log_trial_wavefunction,
                         argnums=(0, 1))(e_pos, nuc_crds, params_corr)
 
-    if mo_relaxation:
+    if mo_relax:
         @jax.jit
         def grad_fn_ke_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
             """dE_ke/dC · dC/dR via JVP for each atom and direction."""
@@ -815,7 +815,7 @@ def get_vmc_func(mf,
                                                  grd_logpsi_elc, rescale)
         grd_logpsi += novel_correction
 
-        if mo_relaxation:
+        if mo_relax:
             # MO relaxation correction (CPHF)
             grd_ke_mo_batch = jax.vmap(grad_fn_ke_mo)(batch_samples)
             grd_logpsi_mo_batch = jax.vmap(grad_fn_logpsi_mo)(batch_samples)

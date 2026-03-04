@@ -730,7 +730,7 @@ def vmc_forces_with_pgcs(
                 = compute_torque_with_error(myMol, avg_grd_tot, avg_grd_err)
 
             with jnp.printoptions(precision=12, suppress=True):
-                fout.write("\n=== Fragment-wise averaged forces ===\n")
+                fout.write("\nℹ️\tFragment-wise averaged forces\n")
                 fout.write("Total gradients (averaged)\n")
                 fout.write(f" {avg_grd_tot}\n")
                 fout.write("Total forces (-gradients, averaged)\n")
