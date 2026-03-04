@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 # from functools import partial
 import h5py
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from .psi_gto import get_psi_fun
 from .mo_relax import compute_orbital_response
@@ -118,6 +120,20 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
         acceptance_ratio - TARGET_ACCEPTANCE_RATE
     )
     return jnp.exp(log_step)
+
+
+def _make_sharding(num_walkers: int):
+    """Return (walkers_sharding, walker_keys_sharding) or (None, None)."""
+    devices = jax.devices()
+    n = len(devices)
+    if n == 1:
+        return None, None
+    assert num_walkers % n == 0, (
+        f"num_walkers ({num_walkers}) must be divisible by device count ({n})")
+    mesh = Mesh(np.array(devices), ('w',))
+    ws  = NamedSharding(mesh, PartitionSpec('w', None, None))  # (w, nelec, 3)
+    wks = NamedSharding(mesh, PartitionSpec('w', None))        # (w, key_size)
+    return ws, wks
 
 
 def generate_molecular_orbitals(astr: str,
@@ -862,6 +878,9 @@ class _VMCDriver:
         walkers = _initialize_walkers(init_key,
                                       num_walkers, nelec,
                                       Z_charges, nuc_crds, mol_charge)
+        walkers_sharding, walker_keys_sharding = _make_sharding(num_walkers)
+        if walkers_sharding is not None:
+            walkers = jax.device_put(walkers, walkers_sharding)
         mc_stepsize = (3 * mc_timestep)**0.5
 
         # Equilibration phase
@@ -870,6 +889,9 @@ class _VMCDriver:
             rng_key, walkers, step_size = state
             rng_key, key = jax.random.split(rng_key)
             walker_keys = jax.random.split(key, num_walkers)
+            if walker_keys_sharding is not None:
+                walker_keys = jax.lax.with_sharding_constraint(
+                    walker_keys, walker_keys_sharding)
             new_walkers, accepted, is_gaussian \
                 = metropolis_move_allw(walker_keys, walkers, step_size,
                                        step_idx)
@@ -896,6 +918,8 @@ class _VMCDriver:
                 rng_key_to_restart = rng_key.copy()
                 rng_key, init_key = jax.random.split(rng_key)
                 walkers = jnp.array(f['walkers'][:])
+                if walkers_sharding is not None:
+                    walkers = jax.device_put(walkers, walkers_sharding)
                 E_b = list(f['E_blocks'][:])
                 print("Restarting ...")
 
@@ -932,6 +956,9 @@ class _VMCDriver:
             for d in range(num_steps_decorr):
                 rng_key, key_displace = jax.random.split(rng_key)
                 walker_keys = jax.random.split(key_displace, num_walkers)
+                if walker_keys_sharding is not None:
+                    walker_keys = jax.lax.with_sharding_constraint(
+                        walker_keys, walker_keys_sharding)
                 step_count = step_number * num_steps_decorr + d
                 new_walkers, accepted, _is_gaussian \
                     = metropolis_move_allw(walker_keys, walkers, step_size,
@@ -1056,6 +1083,11 @@ class _VMCDriver:
                   file=fout)
 
             if compute_gradients:
+                if walkers_sharding is not None:
+                    sampled_walkers = jax.device_put(
+                        sampled_walkers,
+                        NamedSharding(walkers_sharding.mesh,
+                                      PartitionSpec(None, None, None, None)))
                 self._gradient_save(block_cnt,
                                     sampled_walkers.reshape(-1, nelec, 3),
                                     E_loc_sw,
