@@ -10,10 +10,18 @@ Top-level functions
 
 .. autofunction:: vmc_pgcs.get_vmcopt_func
 
+.. autofunction:: vmc_pgcs.get_afqmc_func
+
 VMC driver
 -----------
 
 .. autoclass:: vmc_pgcs.vmc_gto._VMCDriver
+   :members: __call__
+
+AFQMC driver
+-------------
+
+.. autoclass:: vmc_pgcs.afqmc_gto._AFQMCDriver
    :members: __call__
 
 Utilities
