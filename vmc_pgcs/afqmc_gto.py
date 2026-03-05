@@ -17,6 +17,8 @@ import jax.numpy as jnp
 from jax.scipy.linalg import expm
 from functools import partial
 
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
 from vmc_pgcs.utils import do_binning_analysis
 
 # ---------------------------------------------------------------------------
@@ -24,6 +26,24 @@ from vmc_pgcs.utils import do_binning_analysis
 # ---------------------------------------------------------------------------
 WEIGHT_CLIP_FRACTION = 0.10
 FBBOUND_DEFAULT = 1.0
+
+
+def _make_afqmc_sharding(num_walkers):
+    """Return (phi_sharding, scalar_sharding) or (None, None).
+
+    phi_sharding:    PartitionSpec('w', None, None)  for (nwalkers, nbasis, nocc)
+    scalar_sharding: PartitionSpec('w',)             for (nwalkers,)
+    """
+    devices = jax.devices()
+    n = len(devices)
+    if n == 1:
+        return None, None
+    assert num_walkers % n == 0, (
+        f"num_walkers ({num_walkers}) must be divisible by device count ({n})")
+    mesh = Mesh(np.array(devices), ('w',))
+    phi_sharding = NamedSharding(mesh, PartitionSpec('w', None, None))
+    scalar_sharding = NamedSharding(mesh, PartitionSpec('w',))
+    return phi_sharding, scalar_sharding
 
 
 # ===================================================================
@@ -840,6 +860,16 @@ class _AFQMCDriver:
         overlap = walkers.overlap
         e_hybrid = jnp.zeros(num_walkers, dtype=jnp.complex128)
 
+        phi_sharding, scalar_sharding = _make_afqmc_sharding(num_walkers)
+        if phi_sharding is not None:
+            phia = jax.device_put(phia, phi_sharding)
+            phib = jax.device_put(phib, phi_sharding)
+            weights = jax.device_put(weights, scalar_sharding)
+            overlap = jax.device_put(overlap, scalar_sharding)
+            e_hybrid = jax.device_put(e_hybrid, scalar_sharding)
+        if verbose and phi_sharding is not None:
+            print(f"  Sharding {num_walkers} walkers across {len(jax.devices())} devices")
+
         # Main QMC loop
         total_blocks = num_eqlb_blocks + num_blocks
         energy_blocks = []
@@ -890,6 +920,10 @@ class _AFQMCDriver:
                     rng_key, pc_key = jax.random.split(rng_key)
                     weights, phia, phib = population_control_comb(
                         weights, phia, phib, pc_key)
+                    if phi_sharding is not None:
+                        phia = jax.device_put(phia, phi_sharding)
+                        phib = jax.device_put(phib, phi_sharding)
+                        weights = jax.device_put(weights, scalar_sharding)
 
                 # Accumulate weighted hybrid energy for eshift
                 w_step = jnp.sum(jnp.abs(weights))
