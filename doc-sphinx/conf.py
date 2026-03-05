@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.abspath('..'))
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'QMC with PGCS'
-copyright = '2026, Soohaeng Yoo Willow, Chang Woo Myung, David ChangMo Yang'
-author = 'Soohaeng Yoo Willow, Chang Woo Myung, David ChangMo Yang'
+copyright = '2026, SYW, CWM, DCY'
+author = 'Myung Group @ SKKU'
 release = '0.1.0'
 
 # -- General configuration ---------------------------------------------------
