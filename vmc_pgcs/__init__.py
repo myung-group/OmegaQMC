@@ -5,6 +5,7 @@ import vmc_pgcs.config
 from vmc_pgcs.vmc_gto import generate_molecular_orbitals, get_vmc_func
 from vmc_pgcs.vmcopt_gto import get_vmcopt_func
 from vmc_pgcs.afqmc_gto import get_afqmc_func
+from vmc_pgcs.qed_afqmc_gto import get_qed_afqmc_func
 # from vmc_pgcs import psi_gto
 # from vmc_pgcs import psi_gto_cusp
 # from vmc_pgcs import vmc_gto

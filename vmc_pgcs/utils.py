@@ -542,9 +542,9 @@ def format_basis_name(basisname: str | dict):
     Examples
     --------
     >>> format_basis_name("6-31G**")
-    '6-31gss'
+    '631gss'
     >>> format_basis_name({"O": "aug-cc-pVTZ", "H": "cc-pVDZ"})
-    'aug-cc-pvtz'
+    'augccpvtz'
     """
     if isinstance(basisname, dict):
         # Get all string values and find the longest one
