@@ -35,3 +35,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 html_theme = 'furo'
 html_static_path = ['_static']
+
+# Use LuaLaTeX so Unicode characters in docstrings (ε, λ, Ω, …) render correctly.
+latex_engine = 'lualatex'
+latex_use_xindy = False  # xindy not available; use makeindex

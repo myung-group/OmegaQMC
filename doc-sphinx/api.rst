@@ -12,6 +12,8 @@ Top-level functions
 
 .. autofunction:: vmc_pgcs.get_afqmc_func
 
+.. autofunction:: vmc_pgcs.get_qed_afqmc_func
+
 VMC driver
 -----------
 
@@ -23,6 +25,17 @@ AFQMC driver
 
 .. autoclass:: vmc_pgcs.afqmc_gto._AFQMCDriver
    :members: __call__
+
+QED-AFQMC driver
+-----------------
+
+.. autoclass:: vmc_pgcs.qed_afqmc_gto._QEDAFQMCDriver
+   :members: __call__
+
+QED-FCI
+--------
+
+.. autofunction:: vmc_pgcs.qed_fci.qed_fci
 
 Utilities
 ----------

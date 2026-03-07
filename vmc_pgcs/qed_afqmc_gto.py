@@ -75,7 +75,7 @@ def prepare_qed_integrals(mf, omega, coupling_vec, chol_cut=1e-5):
     h1e = mo_coeff.T @ hcore_ao @ mo_coeff
 
     chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)
-    naux = chol_ao.shape[0]
+    # naux = chol_ao.shape[0]
     chol_mo = np.einsum('ab,gbc,cd->gad', mo_coeff.T, chol_ao, mo_coeff)
 
     # --- QED: dipole matrix elements ---
@@ -250,7 +250,8 @@ def build_qed_propagator(h1e_mod_0, chol_qed, trial_up, trial_dn, dt):
     via Taylor expansion during propagation.
 
     Args:
-        h1e_mod_0: q-independent modified one-body Hamiltonian (nbasis, nbasis).
+        h1e_mod_0: q-independent modified one-body Hamiltonian
+            (nbasis, nbasis).
         chol_qed: augmented Cholesky vectors (naux+1, nbasis, nbasis).
         trial_up, trial_dn: trial orbitals.
         dt: imaginary time step.
@@ -445,7 +446,7 @@ class _QEDAFQMCDriver:
     """Phaseless QED-AFQMC driver for cavity QED problems.
 
     Implements the dipole gauge Pauli-Fierz Hamiltonian coupled to
-    a single photon mode with frequency omega and coupling vector lambda*epsilon.
+    a single photon mode (frequency omega, coupling vector lambda*epsilon).
     """
 
     def __init__(self, mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
@@ -693,7 +694,7 @@ class _QEDAFQMCDriver:
 
 
 def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
-                        s=1.0, q0=0.0, verbose=True):
+                       s=1.0, q0=0.0, verbose=True):
     """Create a reusable QED-AFQMC driver.
 
     Args:

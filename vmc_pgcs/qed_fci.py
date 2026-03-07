@@ -23,11 +23,12 @@ from pyscf.fci import direct_spin1, cistring
 
 
 def _build_fci_matrices(h1e, eri, dip_mo, norb, nelec, enuc):
-    """Build the electronic Hamiltonian and dipole operator matrices in FCI basis.
+    """Build electronic H and dipole operator matrices in the FCI basis.
 
     Args:
         h1e: one-body integrals (norb, norb).
-        eri: two-electron integrals with DSE, chemist notation (norb,norb,norb,norb).
+        eri: two-electron integrals with DSE, chemist notation
+            (norb, norb, norb, norb).
         dip_mo: dipole matrix in MO basis (norb, norb).
         norb: number of orbitals.
         nelec: (nalpha, nbeta).
