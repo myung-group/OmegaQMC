@@ -10,8 +10,14 @@ rng_key = jax.random.key(888)
 bset_name = '6-31G'
 
 # No optimizable Jastrow parameters:
+# params_jastrow = {
+#     "J2_params": jnp.array([])
+# }
 params_jastrow = {
-    "J2_params": jnp.array([])
+    "J1_params": {"H": jnp.array([-0.14351574,  0.40882649]),
+                  "O": jnp.array([-0.03921187, 13.46851739])},
+    "J2_params": {"like": jnp.array([0.25, 1.71181446]),
+                  "unlike": jnp.array([0.5, 2.66981181])}
 }
 
 myUnits = "ang"
@@ -41,7 +47,7 @@ modrv = generate_molecular_orbitals(atoms_string, units=myUnits,
 data_prefix = 'water2_vmc_{}'.format(format_basis_name(bset_name))
 # symmetry_ops = ['E', 'x', 'y', 'C2']
 # symmetry_ops = {1: ['E', 'z'], 2: ['E', 'z']}
-symmetry_ops = {1: ['E', 'z'], 2: ['E', 'z']}
+symmetry_ops = None
 
 # Load VMC functions
 vmc_run = get_vmc_func(

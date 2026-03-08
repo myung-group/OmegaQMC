@@ -290,8 +290,11 @@ def generate_molecular_orbitals(astr: str,
 # ---------------------------------------------------------------------------
 
 def _build_frag_symmops(mf, symmop_list, frag_ids) -> dict:
-    """Process symmop_list (None / list / dict) into per-fragment dict."""
+    """Process symmop_list (None / "auto" / list / dict) into per-fragment dict."""
     if symmop_list is None:
+        # Default: identity only (no correlated sampling overhead)
+        frag_symmops = {fid: ['E'] for fid in frag_ids}
+    elif symmop_list == "auto":
         # Auto-derive: use all allowed operations for each fragment
         if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
             frag_symmops = {fid: list(mf.mol.map_frag_symmops.get(fid, ['E']))
@@ -342,8 +345,8 @@ def _build_frag_symmops(mf, symmop_list, frag_ids) -> dict:
             print(f"Input-specified symmetry operations: {frag_symmops}")
     else:
         raise TypeError(
-            f"symmop_list must be None, list[str], or dict[int, list[str]], "
-            f"got {type(symmop_list)}")
+            f"symmop_list must be None, \"auto\", list[str], or "
+            f"dict[int, list[str]], got {type(symmop_list)}")
     return frag_symmops
 
 
@@ -580,6 +583,21 @@ class _VMCDriver:
 
         self._log_psi_batch = _log_psi_batch
 
+        enr_nn_val = self.enr_nn
+
+        @jax.jit
+        def _local_energy_batch(batch):
+            """Total local energy for a batch of walker configurations."""
+            ee = jax.vmap(local_energy_ee)(batch)
+            en = jax.vmap(local_energy_en,
+                          in_axes=(0, None))(batch, nuc_crds)
+            ke = jax.vmap(local_energy_ke,
+                          in_axes=(0, None, None))(
+                batch, nuc_crds, params_corr)
+            return ee + en + ke + enr_nn_val
+
+        self._local_energy_batch = _local_energy_batch
+
         # --- Metropolis moves ---
         def metropolis_move_alle(rng_key: jax.Array,
                                  elec_crds: jnp.ndarray,
@@ -755,6 +773,7 @@ class _VMCDriver:
         ofname_grd = self.ofname_grd
         vmc_gradient_batch = self.vmc_gradient_batch
         _log_psi_batch = self._log_psi_batch
+        _local_energy_batch = self._local_energy_batch
         _apply_single_frag_symmop = self._apply_single_frag_symmop
 
         # Reference gradient accumulators
@@ -767,6 +786,7 @@ class _VMCDriver:
         combo_grd_ke = {label: [] for _, _, label in single_frag_combos}
         combo_grd_logpsi = {label: [] for _, _, label in single_frag_combos}
         combo_weights = {label: [] for _, _, label in single_frag_combos}
+        combo_E_local = {label: [] for _, _, label in single_frag_combos}
 
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
@@ -807,6 +827,9 @@ class _VMCDriver:
                 combo_grd_logpsi[label].append(g_logpsi)
                 combo_weights[label].append(weight)
 
+                E_trans = _local_energy_batch(batch_trans)
+                combo_E_local[label].append(E_trans)
+
         # Stack all batches
         w_grd_ee_en = jnp.vstack(w_grd_ee_en)
         w_grd_ke = jnp.vstack(w_grd_ke)
@@ -838,6 +861,9 @@ class _VMCDriver:
                         del f['grd_ke'][label][block_cnt_str]
                         del f['grd_logpsi'][label][block_cnt_str]
                         del f['fragment_weights'][label][block_cnt_str]
+                    if label in f['local_energies'] \
+                            and block_cnt_str in f['local_energies'][label]:
+                        del f['local_energies'][label][block_cnt_str]
 
             # A. Reference gradients
             f['grd_ee_en'].create_dataset(block_cnt_str,
@@ -867,6 +893,24 @@ class _VMCDriver:
                     f['fragment_weights'].create_group(label)
                 f['fragment_weights'][label].create_dataset(
                     block_cnt_str, data=c_w)
+
+                c_E = jnp.concatenate(combo_E_local[label])
+                if label not in f['local_energies']:
+                    f['local_energies'].create_group(label)
+                f['local_energies'][label].create_dataset(
+                    block_cnt_str, data=c_E)
+
+        # Return per-combo weighted-mean block energies
+        combo_weights_all = {
+            label: jnp.concatenate(combo_weights[label])
+            for _, _, label in single_frag_combos
+        }
+        combo_block_E = {}
+        for _, _, label in single_frag_combos:
+            c_E = jnp.concatenate(combo_E_local[label])
+            w = combo_weights_all[label]
+            combo_block_E[label] = float(jnp.sum(w * c_E) / jnp.sum(w))
+        return combo_block_E
 
     def __call__(self, rng_key: int | jnp.ndarray,
                  num_walkers: int = 1000,
@@ -1012,6 +1056,7 @@ class _VMCDriver:
             block_cnt_start = 1
             mc_timestep = mc_stepsize * mc_stepsize / 3
             E_b = []
+            E_cs_b = []    # CS-averaged block energies
             # std_E_b = []
 
         ratio = ratios[-1]
@@ -1160,10 +1205,14 @@ class _VMCDriver:
                         sampled_walkers,
                         NamedSharding(walkers_sharding.mesh,
                                       PartitionSpec(None, None, None, None)))
-                self._gradient_save(block_cnt,
-                                    sampled_walkers.reshape(-1, nelec, 3),
-                                    E_loc_sw,
-                                    batch_size, num_batches)
+                combo_E = self._gradient_save(
+                    block_cnt,
+                    sampled_walkers.reshape(-1, nelec, 3),
+                    E_loc_sw,
+                    batch_size, num_batches)
+                if combo_E:
+                    all_E = [float(E_mean)] + list(combo_E.values())
+                    E_cs_b.append(sum(all_E) / len(all_E))
 
             # if std_E_s < tolerance_enr_std_per_elec * nelec:
             #     break
@@ -1183,6 +1232,12 @@ class _VMCDriver:
         e_mean, e_serr, _, _ = do_binning_analysis(E_blocks)
         print(f"ℹ️\tVMC energy: {e_mean:.8f} ± {e_serr:.8f} Ha")
 
+        if compute_gradients and E_cs_b:
+            E_cs_blocks = jnp.array(E_cs_b)
+            ecs_mean, ecs_serr, _, _ = do_binning_analysis(E_cs_blocks)
+            print(f"ℹ️\tCS-averaged VMC energy: {ecs_mean:.8f} "
+                  f"± {ecs_serr:.8f} Ha")
+
         with h5py.File(ofname_chkpt, 'a') as f:
             f.create_dataset('E_blocks', data=E_b)
             f.create_dataset('rng_key',
@@ -1198,7 +1253,7 @@ def get_vmc_func(mf,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',
                  prefix='vmc',
-                 symmop_list: list[str] | dict[int, list[str]] | None = None,
+                 symmop_list: str | list[str] | dict[int, list[str]] | None = None,
                  cluster_idx: Collection[int] = None,
                  mo_relax: bool = True):
     """Construct a callable VMC driver for the given mean-field object.
@@ -1225,12 +1280,14 @@ def get_vmc_func(mf,
     prefix : str, optional
         Stem used for output file names (``<prefix>.chk.h5``,
         ``<prefix>.grd.h5``, ``<prefix>.log``).  Default is ``"vmc"``.
-    symmop_list : list of str, or dict mapping int to list of str, optional
+    symmop_list : str, list of str, dict mapping int to list of str, or None
         Point-group symmetry operations to use for correlated sampling.
-        A plain list applies the same operations to every fragment.  A dict
-        maps fragment indices (as defined in the atom string by trailing
-        integer labels) to their own operation lists.  ``None`` (default)
-        applies only the identity ``"E"``.
+        ``None`` (default) applies only the identity ``"E"`` (no correlated
+        sampling overhead).  ``"auto"`` auto-derives all allowed operations
+        from the molecule's fragment symmetry map.  A plain list applies the
+        same operations to every fragment.  A dict maps fragment indices (as
+        defined in the atom string by trailing integer labels) to their own
+        operation lists.
     cluster_idx : collection of int, optional
         Indices of atoms forming a sub-cluster for gradient calculations.
         ``None`` (default) treats all atoms as one cluster.

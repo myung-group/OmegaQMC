@@ -31,8 +31,10 @@ FBBOUND_DEFAULT = 1.0
 def _make_afqmc_sharding(num_walkers):
     """Return (phi_sharding, scalar_sharding) or (None, None).
 
-    phi_sharding:    PartitionSpec('w', None, None)  for (nwalkers, nbasis, nocc)
-    scalar_sharding: PartitionSpec('w',)             for (nwalkers,)
+    phi_sharding:       PartitionSpec('w', None, None)
+                            for (nwalkers, nbasis, nocc)
+    scalar_sharding:    PartitionSpec('w',)
+                            for (nwalkers,)
     """
     devices = jax.devices()
     n = len(devices)
@@ -71,7 +73,8 @@ def chunked_cholesky(mol, chol_cut=1e-5, max_vecs=None):
         max_vecs = 10 * nbasis
 
     # Compute full ERI tensor: (pq|rs)
-    eri = mol.intor('int2e', aosym='s1').reshape(nbasis, nbasis, nbasis, nbasis)
+    eri = mol.intor('int2e', aosym='s1') \
+        .reshape(nbasis, nbasis, nbasis, nbasis)
     # Reshape to 2D: ERI_matrix[pq, rs] = (pq|rs)
     eri_2d = eri.reshape(nao2, nao2)
 
@@ -146,7 +149,7 @@ def prepare_afqmc_integrals(mf, chol_cut=1e-5):
 
     # 2. Cholesky decomposition in AO basis
     chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)
-    naux = chol_ao.shape[0]
+    # naux = chol_ao.shape[0]
 
     # Transform to MO basis: L^γ_pq (MO) = C^T L^γ (AO) C
     chol_mo = np.einsum('ab,gbc,cd->gad', mo_coeff.T, chol_ao, mo_coeff)
@@ -416,20 +419,20 @@ def _greens_function_spin(phi, trial):
         ovlp: det(trial^dag phi), shape (nwalkers,).
         log_ovlp: log|det(trial^dag phi)|, shape (nwalkers,).
     """
-    # Overlap matrix: O = phi^T @ trial^* (ipie convention)
-    O = jnp.einsum('wpi,pj->wij', phi, trial.conj())
+    # Overlap matrix: overlap = phi^T @ trial^* (ipie convention)
+    ovlp = jnp.einsum('wpi,pj->wij', phi, trial.conj())
 
     # Inverse overlap
-    O_inv = jnp.linalg.inv(O)
+    ovlp_inv = jnp.linalg.inv(ovlp)
 
-    # Half-rotated Green's function: Ghalf = O^{-1} @ phi^T
-    Ghalf = jnp.einsum('wij,wqj->wiq', O_inv, phi)
+    # Half-rotated Green's function: Ghalf = ovlp^{-1} @ phi^T
+    Ghalf = jnp.einsum('wij,wqj->wiq', ovlp_inv, phi)
 
     # Full Green's function: G = trial.conj() @ Ghalf
     G = jnp.einsum('pi,wiq->wpq', trial.conj(), Ghalf)
 
     # Overlap determinant
-    sign, log_det = jnp.linalg.slogdet(O)
+    sign, log_det = jnp.linalg.slogdet(ovlp)
     ovlp = sign * jnp.exp(log_det)
     log_ovlp = log_det
 
@@ -577,7 +580,7 @@ def _apply_exp_vhs(VHS, phi, nmax=6):
 
 
 def _update_weights_phaseless(weights, ovlp_old, ovlp_new, cfb, cmf,
-                               e_hybrid_old, eshift, dt):
+                              e_hybrid_old, eshift, dt):
     """Update importance sampling weights with the phaseless approximation.
 
     Args:
@@ -602,7 +605,8 @@ def _update_weights_phaseless(weights, ovlp_old, ovlp_new, cfb, cmf,
 
     # Bound hybrid energy
     ebound = jnp.sqrt(2.0 / dt)
-    e_hybrid_real = jnp.clip(e_hybrid_new.real, eshift - ebound, eshift + ebound)
+    e_hybrid_real = jnp.clip(e_hybrid_new.real,
+                             eshift - ebound, eshift + ebound)
     e_hybrid_new = e_hybrid_real + 1j * e_hybrid_new.imag
 
     # Importance function: exp(-dt * (avg_hybrid - eshift))
@@ -868,7 +872,8 @@ class _AFQMCDriver:
             overlap = jax.device_put(overlap, scalar_sharding)
             e_hybrid = jax.device_put(e_hybrid, scalar_sharding)
         if verbose and phi_sharding is not None:
-            print(f"  Sharding {num_walkers} walkers across {len(jax.devices())} devices")
+            print(f"  Sharding {num_walkers} walkers "
+                  f"across {len(jax.devices())} devices")
 
         # Main QMC loop
         total_blocks = num_eqlb_blocks + num_blocks

@@ -645,7 +645,8 @@ def vmc_forces_with_pgcs(
                 dict_grd_samples[key] = jnp.array(val[:])
 
         block_nums = [int(k)
-                      for k in dict_grd_samples["local_energies"].keys()]
+                      for k in dict_grd_samples["local_energies"].keys()
+                      if k.isdigit()]
         block_nums.sort()
         # num_blocks = len(block_nums)
         # block_cnt_start = block_nums[0]
