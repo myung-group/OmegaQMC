@@ -1,13 +1,19 @@
 Getting Started
 ===============
 
-This page walks through a minimal VMC workflow using the ``vmc_pgcs`` package.
-The example is based on the water-dimer test script and runs a short VMC
-simulation that computes nuclear forces via point-group correlated sampling
-(PGCS).
+This page walks through minimal workflows for the two quantum Monte Carlo
+methods provided by the ``vmc_pgcs`` package: variational Monte Carlo (VMC)
+with point-group correlated sampling (PGCS) and auxiliary-field quantum Monte
+Carlo (AFQMC).
+
+VMC with PGCS
+-------------
+
+The example below is based on the water-dimer test script and runs a short VMC
+simulation that computes nuclear forces via point-group correlated sampling.
 
 Step 1 — Build the molecular system
-------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :func:`~vmc_pgcs.generate_molecular_orbitals` accepts an inline atom string or
 the path to an ``.xyz`` file, runs a PySCF mean-field calculation, and returns
@@ -32,7 +38,7 @@ The trailing integer on each atom line is a *fragment label*, used by the
 correlated-sampling machinery.
 
 Step 2 — Construct the VMC driver
------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Pass the mean-field object and Jastrow parameters to
 :func:`~vmc_pgcs.get_vmc_func`:
@@ -57,7 +63,7 @@ Pass the mean-field object and Jastrow parameters to
     )
 
 Step 3 — Run the VMC loop
---------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Call the driver to start the simulation:
 
@@ -81,7 +87,7 @@ Results are written to ``<prefix>.chk.h5`` (energies and walker snapshots)
 and ``<prefix>.grd.h5`` (gradient data).
 
 Step 4 — Post-process forces
-------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :func:`~vmc_pgcs.utils.vmc_forces_with_pgcs` reads the gradient file and
 returns symmetry-averaged nuclear forces with statistical error estimates:
@@ -95,7 +101,7 @@ returns symmetry-averaged nuclear forces with statistical error estimates:
     print("Errors:\n", forces_err)
 
 Optimizing Jastrow parameters
--------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Before a production VMC run you may want to optimize the Jastrow factor using
 :func:`~vmc_pgcs.get_vmcopt_func`:
@@ -109,3 +115,101 @@ Before a production VMC run you may want to optimize the Jastrow factor using
 
 Pass the returned *params_opt* as ``params_corr`` to :func:`~vmc_pgcs.get_vmc_func`
 for the production run.
+
+AFQMC
+-----
+
+Auxiliary-field quantum Monte Carlo (AFQMC) provides systematically improvable
+correlation energies at polynomial cost.  The ``vmc_pgcs`` package exposes a
+two-step API through :func:`~vmc_pgcs.get_afqmc_func`: first build the driver,
+then call it to run the simulation.
+
+Step 1 — Build the molecular system
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+AFQMC uses the standard PySCF interface directly.  Build and converge a
+Hartree-Fock mean-field object:
+
+.. code-block:: python
+
+    from pyscf import gto, scf
+
+    mol = gto.M(
+        atom='H 0 0 0; H 0 0 1.4',   # H2 at equilibrium, bond length in Bohr
+        basis='sto-6g',
+        unit='Bohr',
+        verbose=0,
+    )
+
+    mf = scf.RHF(mol)
+    mf.kernel()
+    print(f"E_HF = {mf.e_tot:.10f}")
+
+Step 2 — Construct the AFQMC driver
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pass the converged mean-field object to :func:`~vmc_pgcs.get_afqmc_func`.
+The key algorithmic parameters are the imaginary-time step ``dt`` and the
+Cholesky decomposition threshold ``chol_cut``:
+
+.. code-block:: python
+
+    import jax
+    from vmc_pgcs import get_afqmc_func
+
+    driver = get_afqmc_func(mf, dt=0.005, chol_cut=1e-6)
+
+Step 3 — Run the AFQMC simulation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Call the driver with a JAX random key and walker / block settings:
+
+.. code-block:: python
+
+    result = driver(
+        rng_key=jax.random.key(42),
+        num_walkers=100,
+        num_blocks=100,
+        num_steps_per_block=25,
+        stabilize_freq=5,
+        pop_control_freq=5,
+        num_eqlb_blocks=10,
+    )
+
+    e_afqmc = result['energy_mean']
+    e_err   = result['energy_err']
+    print(f"E_AFQMC = {e_afqmc:.10f} +/- {e_err:.10f}")
+
+The return value is a dict containing at minimum ``energy_mean`` and
+``energy_err`` (one-sigma statistical error from block averaging).
+
+Key parameters
+~~~~~~~~~~~~~~
+
+``num_eqlb_blocks``
+    Number of equilibration blocks discarded before statistics are
+    accumulated.  Set this to roughly 10 % of ``num_blocks``.
+
+``stabilize_freq``
+    Frequency (in steps) at which the walker overlap matrix is
+    re-orthonormalized to prevent numerical instability.
+
+``pop_control_freq``
+    Frequency (in steps) at which population control is applied to keep
+    the walker weights from diverging.
+
+Comparing with FCI
+~~~~~~~~~~~~~~~~~~~
+
+For small systems you can cross-check the AFQMC energy against the exact
+full-CI result:
+
+.. code-block:: python
+
+    from pyscf import fci
+
+    cisolver = fci.FCI(mf)
+    e_fci, _ = cisolver.kernel()
+    print(f"E_FCI   = {e_fci:.10f}")
+    print(f"E_corr (FCI)   = {e_fci   - mf.e_tot:.10f}")
+    print(f"E_corr (AFQMC) = {e_afqmc - mf.e_tot:.10f}")

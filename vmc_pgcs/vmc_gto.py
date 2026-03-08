@@ -290,7 +290,8 @@ def generate_molecular_orbitals(astr: str,
 # ---------------------------------------------------------------------------
 
 def _build_frag_symmops(mf, symmop_list, frag_ids) -> dict:
-    """Process symmop_list (None / "auto" / list / dict) into per-fragment dict."""
+    """Process symmop_list (None / "auto" / list / dict)
+    into per-fragment dict."""
     if symmop_list is None:
         # Default: identity only (no correlated sampling overhead)
         frag_symmops = {fid: ['E'] for fid in frag_ids}
