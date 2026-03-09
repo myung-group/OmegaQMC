@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from OmegaQMC.import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC import generate_molecular_orbitals, get_vmc_func
 from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
 from OmegaQMC.utils import format_basis_name
 # from OmegaQMC.vmc_gto_symm import process_symmetric_diatomic_molecule

@@ -6,9 +6,9 @@ from OmegaQMC.vmc_gto import generate_molecular_orbitals, get_vmc_func
 from OmegaQMC.vmcopt_gto import get_vmcopt_func
 from OmegaQMC.afqmc_gto import get_afqmc_func
 from OmegaQMC.qed_afqmc_gto import get_qed_afqmc_func
-# from OmegaQMC.import psi_gto
-# from OmegaQMC.import psi_gto_cusp
-# from OmegaQMC.import vmc_gto
+# from OmegaQMC import psi_gto
+# from OmegaQMC import psi_gto_cusp
+# from OmegaQMC import vmc_gto
 
 __version__ = "0.1.0"
 # __all__ = ["run"]

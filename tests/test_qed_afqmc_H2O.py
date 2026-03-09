@@ -8,7 +8,7 @@ statistical error.
 import jax
 from pyscf import gto, scf
 
-from OmegaQMC.import get_afqmc_func, get_qed_afqmc_func
+from OmegaQMC import get_afqmc_func, get_qed_afqmc_func
 from OmegaQMC.qed_fci import qed_fci
 
 

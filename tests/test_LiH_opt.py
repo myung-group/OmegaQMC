@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from OmegaQMC.import generate_molecular_orbitals
+from OmegaQMC import generate_molecular_orbitals
 from OmegaQMC.vmcopt_gto import get_vmcopt_func
 
 rng_key = jax.random.key(888)

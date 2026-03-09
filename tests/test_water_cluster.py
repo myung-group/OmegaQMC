@@ -6,7 +6,7 @@ import pprint
 from pyscf import gto, scf
 from importlib import resources
 
-from OmegaQMC.import get_vmc_func
+from OmegaQMC import get_vmc_func
 
 
 # Set (H2O) molecule

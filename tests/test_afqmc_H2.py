@@ -8,7 +8,7 @@ H2 at equilibrium bond length with STO-6G basis is a minimal test case.
 import jax
 from pyscf import gto, scf, fci
 
-from OmegaQMC.import get_afqmc_func
+from OmegaQMC import get_afqmc_func
 
 
 def test_h2_sto6g():

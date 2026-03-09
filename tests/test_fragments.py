@@ -6,7 +6,7 @@ is within the fragment's inradius.
 """
 import jax
 import jax.numpy as jnp
-from OmegaQMC.import generate_molecular_orbitals
+from OmegaQMC import generate_molecular_orbitals
 
 # Import _initialize_walkers from vmc_gto (it's a module-level function)
 from OmegaQMC.vmc_gto import _initialize_walkers

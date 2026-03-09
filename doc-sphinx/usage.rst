@@ -2,7 +2,7 @@ Getting Started
 ===============
 
 This page walks through minimal workflows for the two quantum Monte Carlo
-methods provided by the ``vmc_pgcs`` package: variational Monte Carlo (VMC)
+methods provided by the ``OmegaQMC.` package: variational Monte Carlo (VMC)
 with point-group correlated sampling (PGCS) and auxiliary-field quantum Monte
 Carlo (AFQMC).
 
@@ -15,13 +15,13 @@ simulation that computes nuclear forces via point-group correlated sampling.
 Step 1 — Build the molecular system
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:func:`~vmc_pgcs.generate_molecular_orbitals` accepts an inline atom string or
+:func:`~OmegaQMC.generate_molecular_orbitals` accepts an inline atom string or
 the path to an ``.xyz`` file, runs a PySCF mean-field calculation, and returns
 the converged mean-field object:
 
 .. code-block:: python
 
-    from vmc_pgcs import generate_molecular_orbitals
+    from OmegaQMC import generate_molecular_orbitals
 
     atoms_string = '''
     O       8.707172158e-01  -1.720661566e+00  -4.814067179e-01     1
@@ -41,13 +41,13 @@ Step 2 — Construct the VMC driver
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Pass the mean-field object and Jastrow parameters to
-:func:`~vmc_pgcs.get_vmc_func`:
+:func:`~OmegaQMC.get_vmc_func`:
 
 .. code-block:: python
 
     import jax.numpy as jnp
-    from vmc_pgcs import get_vmc_func
-    from vmc_pgcs.utils import format_basis_name
+    from OmegaQMC import get_vmc_func
+    from OmegaQMC.utils import format_basis_name
 
     params_jastrow = {"J2_params": jnp.array([])}   # no Jastrow factor
 
@@ -89,12 +89,12 @@ and ``<prefix>.grd.h5`` (gradient data).
 Step 4 — Post-process forces
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:func:`~vmc_pgcs.utils.vmc_forces_with_pgcs` reads the gradient file and
+:func:`~OmegaQMC.utils.vmc_forces_with_pgcs` reads the gradient file and
 returns symmetry-averaged nuclear forces with statistical error estimates:
 
 .. code-block:: python
 
-    from vmc_pgcs.utils import vmc_forces_with_pgcs
+    from OmegaQMC.utils import vmc_forces_with_pgcs
 
     forces, forces_err = vmc_forces_with_pgcs(prefix=data_prefix)
     print("Forces (Ha/Bohr):\n", forces)
@@ -104,24 +104,24 @@ Optimizing Jastrow parameters
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Before a production VMC run you may want to optimize the Jastrow factor using
-:func:`~vmc_pgcs.get_vmcopt_func`:
+:func:`~OmegaQMC.get_vmcopt_func`:
 
 .. code-block:: python
 
-    from vmc_pgcs import get_vmcopt_func
+    from OmegaQMC import get_vmcopt_func
 
     vmcopt_run = get_vmcopt_func(mf)
     params_opt, info = vmcopt_run(rng_key, num_walkers=500, num_steps=200)
 
-Pass the returned *params_opt* as ``params_corr`` to :func:`~vmc_pgcs.get_vmc_func`
+Pass the returned *params_opt* as ``params_corr`` to :func:`~OmegaQMC.get_vmc_func`
 for the production run.
 
 AFQMC
 -----
 
 Auxiliary-field quantum Monte Carlo (AFQMC) provides systematically improvable
-correlation energies at polynomial cost.  The ``vmc_pgcs`` package exposes a
-two-step API through :func:`~vmc_pgcs.get_afqmc_func`: first build the driver,
+correlation energies at polynomial cost.  The ``OmegaQMC.` package exposes a
+two-step API through :func:`~OmegaQMC.get_afqmc_func`: first build the driver,
 then call it to run the simulation.
 
 Step 1 — Build the molecular system
@@ -148,14 +148,14 @@ Hartree-Fock mean-field object:
 Step 2 — Construct the AFQMC driver
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pass the converged mean-field object to :func:`~vmc_pgcs.get_afqmc_func`.
+Pass the converged mean-field object to :func:`~OmegaQMC.get_afqmc_func`.
 The key algorithmic parameters are the imaginary-time step ``dt`` and the
 Cholesky decomposition threshold ``chol_cut``:
 
 .. code-block:: python
 
     import jax
-    from vmc_pgcs import get_afqmc_func
+    from OmegaQMC import get_afqmc_func
 
     driver = get_afqmc_func(mf, dt=0.005, chol_cut=1e-6)
 
