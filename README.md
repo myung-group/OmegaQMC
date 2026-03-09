@@ -7,9 +7,9 @@ Auxiliary field quantum Monte Carlo with cavity coupling
 ## Installation
 Install directly from the remote repository:
 ```bash
-pip install git+ssh://git@github.com:myung-group/vmc-pgcs.git
+pip install git+ssh://git@github.com:myung-group/OmegaQMC.git
 ```
-Install from the local repository (cloned with `git`):
+Or install from the local repository (cloned with `git`):
 ```bash
 pip install .
 ```
