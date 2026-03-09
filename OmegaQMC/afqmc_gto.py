@@ -19,7 +19,7 @@ from functools import partial
 
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from vmc_pgcs.utils import do_binning_analysis
+from OmegaQMC.utils import do_binning_analysis
 
 # ---------------------------------------------------------------------------
 # Constants

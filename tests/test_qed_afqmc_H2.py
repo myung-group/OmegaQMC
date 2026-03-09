@@ -10,7 +10,7 @@ Tests:
 import jax
 from pyscf import gto, scf, fci
 
-from vmc_pgcs import get_afqmc_func, get_qed_afqmc_func
+from OmegaQMC.import get_afqmc_func, get_qed_afqmc_func
 
 
 def test_h2_no_cavity():

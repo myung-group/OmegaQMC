@@ -8,8 +8,8 @@ statistical error.
 import jax
 from pyscf import gto, scf
 
-from vmc_pgcs import get_afqmc_func, get_qed_afqmc_func
-from vmc_pgcs.qed_fci import qed_fci
+from OmegaQMC.import get_afqmc_func, get_qed_afqmc_func
+from OmegaQMC.qed_fci import qed_fci
 
 
 def test_h2_qed_afqmc_vs_fci():

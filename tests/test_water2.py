@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
 
-from vmc_pgcs import generate_molecular_orbitals, get_vmc_func
-from vmc_pgcs.utils import vmc_forces_with_pgcs as vmc_forces
-from vmc_pgcs.utils import format_basis_name
+from OmegaQMC.import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
+from OmegaQMC.utils import format_basis_name
 
 
 rng_key = jax.random.key(888)

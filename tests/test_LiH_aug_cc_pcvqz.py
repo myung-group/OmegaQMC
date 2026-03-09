@@ -6,12 +6,12 @@ import pprint
 from pyscf import gto, scf
 from importlib import resources
 
-from vmc_pgcs import get_vmc_func
-from vmc_pgcs.basis import extract_basis_block
+from OmegaQMC.import get_vmc_func
+from OmegaQMC.basis import extract_basis_block
 
 
 # Load aug-cc-pCVQZ basis set
-with resources.open_text('vmc_pgcs.basis', 'aug-cc-pCVQZ.gbs') as f:
+with resources.open_text('OmegaQMC.basis', 'aug-cc-pCVQZ.gbs') as f:
     basis_data = f.read()
 
 Li_basis = gto.basis.parse(
@@ -42,7 +42,7 @@ params_jastrow = {
 }
 
 # Load cusp coefficients for the aug-cc-pCVQZ basis set
-with resources.open_text('vmc_pgcs.basis', 'cusp_coeff_aug_cc_pcvqz.json') as f:
+with resources.open_text('OmegaQMC.basis', 'cusp_coeff_aug_cc_pcvqz.json') as f:
     coeff_data = json.load(f)
 
 cgto_coeff = {

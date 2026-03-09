@@ -17,8 +17,8 @@ import jax.numpy as jnp
 from jax.scipy.linalg import expm
 from functools import partial
 
-from vmc_pgcs.utils import do_binning_analysis
-from vmc_pgcs.afqmc_gto import (
+from OmegaQMC.utils import do_binning_analysis
+from OmegaQMC.afqmc_gto import (
     chunked_cholesky,
     half_rotate_cholesky,
     _apply_exp_vhs,

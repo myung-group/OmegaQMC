@@ -958,14 +958,14 @@ class _VMCDriver:
             and continue accumulating blocks.  Default ``False``.
         compute_gradients : bool, optional
             If ``True``, accumulate and save nuclear-force gradient data
-            needed by :func:`~vmc_pgcs.utils.vmc_forces_with_pgcs`.
+            needed by :func:`~OmegaQMC.utils.vmc_forces_with_pgcs`.
             Default ``False``.
 
         Returns
         -------
         None
             All output is written to disk.  Use
-            :func:`~vmc_pgcs.utils.vmc_forces_with_pgcs` to post-process
+            :func:`~OmegaQMC.utils.vmc_forces_with_pgcs` to post-process
             the gradient file.
         """
         # tolerance_enr_std_per_elec=CHEMICAL_ACCURACY,

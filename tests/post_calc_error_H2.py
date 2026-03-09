@@ -5,8 +5,8 @@ import pprint
 from pyscf import gto, scf
 from importlib import resources
 
-from vmc_pgcs import get_vmc_func
-from vmc_pgcs.vmc_utils import (
+from OmegaQMC.import get_vmc_func
+from OmegaQMC.vmc_utils import (
     compute_energy_with_error
 )
 
@@ -33,7 +33,7 @@ params_jastrow = {
 }
 
 # Load cusp coefficients for the 6-31G basis set
-with resources.open_text('vmc_pgcs.basis', 'cusp_coeff_631g.json') as f:
+with resources.open_text('OmegaQMC.basis', 'cusp_coeff_631g.json') as f:
     coeff_data = json.load(f)
 
 cgto_coeff = {

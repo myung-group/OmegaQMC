@@ -6,10 +6,10 @@ is within the fragment's inradius.
 """
 import jax
 import jax.numpy as jnp
-from vmc_pgcs import generate_molecular_orbitals
+from OmegaQMC.import generate_molecular_orbitals
 
 # Import _initialize_walkers from vmc_gto (it's a module-level function)
-from vmc_pgcs.vmc_gto import _initialize_walkers
+from OmegaQMC.vmc_gto import _initialize_walkers
 
 rng_key = jax.random.key(42)
 bset_name = '6-31G'

@@ -1,4 +1,4 @@
-# vmc_pgcs/config.py
+# OmegaQMC.config.py
 
 import warnings
 

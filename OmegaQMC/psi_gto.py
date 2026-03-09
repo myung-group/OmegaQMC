@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
 # from functools import partial
-from vmc_pgcs.shell import read_shell, evaluate_cusp_s
-# from vmc_pgcs.constants import EE_CUSP_VALUE
+from OmegaQMC.shell import read_shell, evaluate_cusp_s
+# from OmegaQMC.constants import EE_CUSP_VALUE
 # JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
 

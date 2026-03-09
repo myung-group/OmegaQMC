@@ -9,7 +9,7 @@ Validates:
 
 from pyscf import gto, scf, fci
 
-from vmc_pgcs.qed_fci import qed_fci
+from OmegaQMC.qed_fci import qed_fci
 
 
 def test_h2_qed_fci():

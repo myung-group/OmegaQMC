@@ -1,4 +1,4 @@
-# vmc_pgcs/constants.py
+# OmegaQMC.constants.py
 
 # Jastrow and other global constants
 

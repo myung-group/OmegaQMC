@@ -1,20 +1,20 @@
 """VMC-PGCS"""
 
-import vmc_pgcs.config
+import OmegaQMC.config
 
-from vmc_pgcs.vmc_gto import generate_molecular_orbitals, get_vmc_func
-from vmc_pgcs.vmcopt_gto import get_vmcopt_func
-from vmc_pgcs.afqmc_gto import get_afqmc_func
-from vmc_pgcs.qed_afqmc_gto import get_qed_afqmc_func
-# from vmc_pgcs import psi_gto
-# from vmc_pgcs import psi_gto_cusp
-# from vmc_pgcs import vmc_gto
+from OmegaQMC.vmc_gto import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC.vmcopt_gto import get_vmcopt_func
+from OmegaQMC.afqmc_gto import get_afqmc_func
+from OmegaQMC.qed_afqmc_gto import get_qed_afqmc_func
+# from OmegaQMC.import psi_gto
+# from OmegaQMC.import psi_gto_cusp
+# from OmegaQMC.import vmc_gto
 
 __version__ = "0.1.0"
 # __all__ = ["run"]
 
 # Re-export constants from dedicated module
-from vmc_pgcs.constants import (
+from OmegaQMC.constants import (
     CHEMICAL_ACCURACY,
     JASTROW_EE_L_CUT,
     JASTROW_EE_M_POWER,

@@ -5,7 +5,7 @@ Final LiH AFQMC test with better statistics for comparison with ipie.
 import jax
 from pyscf import gto, scf, fci
 
-from vmc_pgcs import get_afqmc_func
+from OmegaQMC.import get_afqmc_func
 
 
 def test_LiH_sto6g():
