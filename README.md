@@ -1,6 +1,8 @@
-# VMC with PGCS
+# ΩQMC
 
 Variational Monte Carlo with point group correlated sampling (for force estimators)
+
+Auxiliary field quantum Monte Carlo with cavity coupling
 
 ## Installation
 Install directly from the remote repository:
