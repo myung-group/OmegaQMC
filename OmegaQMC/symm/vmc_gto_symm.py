@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import jax
 import h5py
-from functools import partial
+# from functools import partial
 from OmegaQMC.diatomic_rotation_matrix import rotate_vector_to_z_axis
 from OmegaQMC.water_rotation_matrix import symmetrize_water_molecule
 
@@ -266,11 +266,9 @@ def process_symmetric_diatomic_molecule(chkfile_mc,
             f.create_dataset (key, data=elc_samples)
 
 
-
 if __name__ == "__main__":
     from pyscf import gto, scf
-    from OmegaQMC.import get_vmc_func
-    import h5py
+    from OmegaQMC import get_vmc_func
 
     mol = gto.M(
               atom='''

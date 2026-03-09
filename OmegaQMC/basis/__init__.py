@@ -1,5 +1,5 @@
-"""VMC-MLSE BASIS"""
+"""OmegaQMC BASIS"""
 
-from vmc_pgcs.basis.basis_utils import extract_basis_block
+from OmegaQMC.basis.basis_utils import extract_basis_block
 
 

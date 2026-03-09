@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "OmegaQMC"
-version = "0.1.0"
-description = "Variational Monte Carlo with machine-learned space warping"
+version = "0.2.0"
+description = "QMC with fragment-wise correlated sampling and cavity coupling"
 authors = [
     {name = "Soohaeng Yoo Willow", email = "sy7willow@gmail.com"},
     {name = "Chang Woo Myung", email = "cwmyung@skku.edu"},
@@ -15,8 +15,9 @@ license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
-    "pyscf>=2.0.0",
+    "pyscf>=2.10.0",
     "jax>=0.6",
+    "pytest",
     "optax"
 ]
 classifiers = [
