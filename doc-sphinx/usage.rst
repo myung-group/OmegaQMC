@@ -116,6 +116,62 @@ Before a production VMC run you may want to optimize the Jastrow factor using
 Pass the returned *params_opt* as ``params_corr`` to :func:`~OmegaQMC.get_vmc_func`
 for the production run.
 
+Multi-determinant trial wavefunction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A CASSCF multi-determinant expansion can replace the single Slater
+determinant.  The helper
+:func:`~OmegaQMC.afqmc_gto.extract_casscf_trial` converts a converged
+CASSCF object into the ``trial`` dict accepted by
+:func:`~OmegaQMC.get_vmc_func`.
+
+Build the mean-field object with
+:func:`~OmegaQMC.generate_molecular_orbitals`, then run CASSCF on top:
+
+.. code-block:: python
+
+    from pyscf import mcscf
+    from OmegaQMC import generate_molecular_orbitals, get_vmc_func
+    from OmegaQMC.afqmc_gto import extract_casscf_trial
+
+    mf = generate_molecular_orbitals(
+        "O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692",
+        units="ang", basis="6-31G",
+    )
+
+    mc = mcscf.CASSCF(mf, ncas=4, nelecas=(2, 2))
+    mc.kernel()
+
+    trial = extract_casscf_trial(mc, coeff_threshold=1e-2)
+    print(f"Determinants retained: {trial['ndet']}")
+
+Pass the trial dict to :func:`~OmegaQMC.get_vmc_func` via the ``trial``
+keyword.  MO relaxation is automatically disabled with a warning:
+
+.. code-block:: python
+
+    params_jastrow = {"J1_params": {"O": 0.0, "H": 0.0}}
+
+    vmc_run = get_vmc_func(
+        mf, params_jastrow,
+        prefix="h2o_msd_vmc",
+        trial=trial,
+    )
+
+    vmc_run(
+        rng_key,
+        num_walkers=200,
+        num_steps_per_block=100,
+        num_blocks=50,
+        num_blocks_equil=10,
+        mc_timestep=0.001,
+        compute_gradients=False,
+    )
+
+The ``coeff_threshold`` argument controls how many determinants are kept
+from the CI expansion; smaller values include more determinants and
+improve accuracy at higher computational cost.
+
 AFQMC
 -----
 
@@ -213,3 +269,59 @@ full-CI result:
     print(f"E_FCI   = {e_fci:.10f}")
     print(f"E_corr (FCI)   = {e_fci   - mf.e_tot:.10f}")
     print(f"E_corr (AFQMC) = {e_afqmc - mf.e_tot:.10f}")
+
+Multi-determinant trial wavefunction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+AFQMC accuracy is sensitive to the trial wavefunction quality.
+Replacing the single-determinant Hartree-Fock trial with a CASSCF
+multi-determinant expansion reduces the phaseless approximation bias,
+which is particularly significant in strongly correlated systems.
+
+Run an RHF calculation followed by CASSCF, then extract the trial
+wavefunction using :func:`~OmegaQMC.afqmc_gto.extract_casscf_trial`:
+
+.. code-block:: python
+
+    from pyscf import gto, scf, mcscf
+    from OmegaQMC import get_afqmc_func
+    from OmegaQMC.afqmc_gto import extract_casscf_trial
+
+    mol = gto.M(
+        atom="O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692",
+        basis="6-31G", unit="angstrom", verbose=0,
+    )
+    mf = scf.RHF(mol)
+    mf.kernel()
+
+    mc = mcscf.CASSCF(mf, ncas=4, nelecas=(2, 2))
+    mc.kernel()
+
+    trial = extract_casscf_trial(mc, coeff_threshold=1e-2)
+    print(f"Determinants retained: {trial['ndet']}")
+
+Build and run the driver by passing the trial dict as the ``trial``
+keyword argument:
+
+.. code-block:: python
+
+    driver = get_afqmc_func(
+        mf, dt=0.005, chol_cut=1e-6, trial=trial
+    )
+
+    result = driver(
+        rng_key=jax.random.key(42),
+        num_walkers=100,
+        num_blocks=200,
+        num_steps_per_block=25,
+        stabilize_freq=5,
+        pop_control_freq=5,
+        num_eqlb_blocks=20,
+    )
+
+    print(f"E_AFQMC = {result['energy_mean']:.10f} "
+          f"+/- {result['energy_err']:.10f}")
+
+The ``trial`` dict is shared between the VMC and AFQMC drivers, so the
+same :func:`~OmegaQMC.afqmc_gto.extract_casscf_trial` call can feed
+either driver without modification.

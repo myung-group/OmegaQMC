@@ -187,6 +187,7 @@ def generate_molecular_orbitals(astr: str,
     mol.build(atom=astr, basis=basis, unit=units)
     # see pyscf.gto.mole.is_au(unit)
 
+    gpname = "C1"
     if symmetrization_level >= 1:
         # Detect symmetry and get principal axes transformation
         gpname, centroid, axes = symm.geom.detect_symm(mol._atom)
