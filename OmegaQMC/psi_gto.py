@@ -6,7 +6,7 @@ from OmegaQMC.shell import read_shell, evaluate_cusp_s
 # JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
 
-def get_psi_fun(mf, params_cusp=None):
+def get_psi_fun(mf, params_cusp=None, trial=None):
     """
     Creates functions for evaluating the wavefunction
     and local energy components from a PySCF mean-field calculation.
@@ -15,7 +15,18 @@ def get_psi_fun(mf, params_cusp=None):
     mol = mf.mol
     # l_spherical = not mol.cart
     nocc = jnp.count_nonzero(mf.mo_occ > 0)
-    mo_occ_coeff = mf.mo_coeff[:, :nocc]
+    if trial is not None:
+        import numpy as np
+        mo_coeff_full = jnp.array(
+            np.asarray(trial['mo_coeff'])
+        )
+        ci_coeffs = trial['ci_coeffs']
+        occ_up = trial['occ_up']
+        occ_dn = trial['occ_dn']
+        # Dominant det's occupied MOs for get_psi_mo
+        mo_occ_coeff = mo_coeff_full[:, occ_up[0]]
+    else:
+        mo_occ_coeff = mf.mo_coeff[:, :nocc]
 
     # Get nuclear and electronic charges
     Z_charges = mol.atom_charges()
@@ -235,6 +246,48 @@ def get_psi_fun(mf, params_cusp=None):
 
         return log_det_alpha + log_det_beta
 
+    if trial is not None:
+        @jax.jit
+        def log_slater_multidet(elec_crds, nuc_crds):
+            """Multi-determinant Slater using log-sum-exp."""
+            ao_val, _ = jax.vmap(
+                cgs_sph_get, in_axes=(0, None)
+            )(elec_crds, nuc_crds)
+            mo_val = jnp.einsum(
+                'ena,am->em', ao_val, mo_coeff_full
+            )
+            mo_alpha = mo_val[::2, :]
+            mo_beta = mo_val[1::2, :]
+
+            def eval_one_det(occ_a, occ_b):
+                sign_a, logdet_a = jnp.linalg.slogdet(
+                    mo_alpha[:, occ_a]
+                )
+                sign_b, logdet_b = jnp.linalg.slogdet(
+                    mo_beta[:, occ_b]
+                )
+                return sign_a, logdet_a, sign_b, logdet_b
+
+            signs_a, logdets_a, signs_b, logdets_b = \
+                jax.vmap(eval_one_det)(occ_up, occ_dn)
+
+            log_abs_dets = logdets_a + logdets_b
+            phase_signs = (
+                signs_a * signs_b * jnp.sign(ci_coeffs)
+            )
+            log_abs_ci = jnp.log(jnp.abs(ci_coeffs))
+            log_contributions = log_abs_ci + log_abs_dets
+            logmax = jnp.max(log_contributions)
+            sum_val = jnp.sum(
+                phase_signs
+                * jnp.exp(log_contributions - logmax)
+            )
+            return jnp.log(jnp.abs(sum_val)) + logmax
+
+    _log_slater = log_slater_multidet \
+        if trial is not None \
+        else log_slater_determinant
+
     @jax.jit
     def J2_aa(elec_crds, curr_params):
         """
@@ -314,7 +367,7 @@ def get_psi_fun(mf, params_cusp=None):
     @jax.jit
     def log_trial_wavefunction(elec_crds, nuc_crds, curr_params):
         """Trial wavefunction."""
-        ln_slater = log_slater_determinant(elec_crds, nuc_crds)
+        ln_slater = _log_slater(elec_crds, nuc_crds)
 
         jastrow_term = 0.0
         if "J1_params" in curr_params:

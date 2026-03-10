@@ -455,7 +455,7 @@ class _VMCDriver:
                  nuc_crds, frag_reflect_data, single_frag_combos,
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
-                 gr_scheme='scheme1'):
+                 gr_scheme='scheme1', trial=None):
         # --- Store state ---
         self.mf = mf
         self.params_corr = params_corr
@@ -491,7 +491,8 @@ class _VMCDriver:
 
         # Get wavefunction and energy functions
         log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
-            = get_psi_fun(mf, params_cusp=params_cusp)
+            = get_psi_fun(mf, params_cusp=params_cusp,
+                          trial=trial)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         self.local_energy_ee = local_energy_ee
@@ -1256,7 +1257,8 @@ def get_vmc_func(mf,
                  prefix='vmc',
                  symmop_list: str | list[str] | dict[int, list[str]] | None = None,
                  cluster_idx: Collection[int] = None,
-                 mo_relax: bool = True):
+                 mo_relax: bool = True,
+                 trial: dict | None = None):
     """Construct a callable VMC driver for the given mean-field object.
 
     Assembles the trial wave function (Slater determinant + Jastrow factor
@@ -1327,6 +1329,14 @@ def get_vmc_func(mf,
     ofname_chkpt = prefix + ".chk.h5"
     ofname_grd = prefix + ".grd.h5"
 
+    if trial is not None and mo_relax:
+        warnings.warn(
+            "MO relaxation is not supported with "
+            "multi-determinant trials. "
+            "Disabling mo_relax.",
+            stacklevel=2)
+        mo_relax = False
+
     params_corr = _validate_params_corr(params_corr, mf)
     params_cusp = _build_cusp_params(mf, cusp_scheme, mf.mol.natm)
 
@@ -1338,7 +1348,10 @@ def get_vmc_func(mf,
     print("Begin time: {}".format(timestamp_init))
 
     return _VMCDriver(mf, params_corr, params_cusp, mo_relax,
-                      nuc_crds, frag_reflect_data, single_frag_combos,
+                      nuc_crds, frag_reflect_data,
+                      single_frag_combos,
                       frag_symmops, frag_ops_sets, frag_ids,
-                      ofname_chkpt, ofname_grd, timestamp_init,
-                      gr_scheme=gr_scheme)
+                      ofname_chkpt, ofname_grd,
+                      timestamp_init,
+                      gr_scheme=gr_scheme,
+                      trial=trial)
