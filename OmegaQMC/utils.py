@@ -902,5 +902,5 @@ def _make_sharding(num_walkers: int):
         f"num_walkers ({num_walkers}) must be divisible by device count ({n})")
     mesh = Mesh(np.array(devices), ('w',))
     ws  = NamedSharding(mesh, PartitionSpec('w', None, None))  # (w, nelec, 3)
-    wks = NamedSharding(mesh, PartitionSpec('w', None))        # (w, key_size)
+    wks = NamedSharding(mesh, PartitionSpec('w',))             # (w,) typed keys
     return ws, wks
