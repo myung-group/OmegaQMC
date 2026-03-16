@@ -1232,14 +1232,18 @@ class _VMCDriver:
                       (timestamp_fin-timestamp_init).total_seconds()))
 
         E_blocks = jnp.array(E_b)
-        e_mean, e_serr, _, _ = do_binning_analysis(E_blocks)
-        print(f"ℹ️\tVMC energy: {e_mean:.8f} ± {e_serr:.8f} Ha")
+        e_mean, e_serr, _, e_kappa = do_binning_analysis(E_blocks)
+        e_neff = E_blocks.shape[0] / e_kappa
+        print(f"ℹ️\tVMC energy: {e_mean:.8f} ± {e_serr:.8f} Ha"
+              f" (N_eff = {e_neff:.1f})")
 
         if compute_gradients and E_cs_b:
             E_cs_blocks = jnp.array(E_cs_b)
-            ecs_mean, ecs_serr, _, _ = do_binning_analysis(E_cs_blocks)
+            ecs_mean, ecs_serr, _, ecs_kappa \
+                = do_binning_analysis(E_cs_blocks)
+            ecs_neff = E_cs_blocks.shape[0] / ecs_kappa
             print(f"ℹ️\tCS-averaged VMC energy: {ecs_mean:.8f} "
-                  f"± {ecs_serr:.8f} Ha")
+                  f"± {ecs_serr:.8f} Ha (N_eff = {ecs_neff:.1f})")
 
         with h5py.File(ofname_chkpt, 'a') as f:
             f.create_dataset('E_blocks', data=E_b)
