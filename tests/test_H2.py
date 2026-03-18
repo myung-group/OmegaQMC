@@ -13,8 +13,8 @@ bset_name = "6-31G"
 
 # optimizable Jastrow parameters:
 params_jastrow = {
-    "J1_params": {"H": jnp.array([-0.05574627,  0.08272289])},
-    "J2_params": {"like": jnp.array([0.25, 0.6046799]),
+    "J1_pade": {"H": jnp.array([-0.05574627,  0.08272289])},
+    "J2_pade": {"like": jnp.array([0.25, 0.6046799]),
                   "unlike": jnp.array([0.5, 0.38077791])}
 }
 

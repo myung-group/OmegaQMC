@@ -16,7 +16,7 @@ readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
     "pyscf>=2.10.0",
-    "jax>=0.8",
+    "jax>=0.6",
     "pytest",
     "optax"
 ]

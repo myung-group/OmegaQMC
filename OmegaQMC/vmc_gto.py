@@ -375,14 +375,14 @@ def _validate_params_corr(params_corr, mf) -> dict:
     for k, v in params_corr.items():
         assert isinstance(k, str)
         if isinstance(v, dict):
-            # J1_params: per-element dict; J2_params: "like"/"unlike" dict
+            # J1_pade: per-element dict; J2_pade: "like"/"unlike" dict
             for sk in v:
                 assert isinstance(sk, str)
             if len(v) == 0:
                 kList.append(k)
         else:
             assert isinstance(v, jnp.ndarray)
-            if k == "J2_params" and params_corr[k].shape[0] < 2:
+            if k == "J2_pade" and params_corr[k].shape[0] < 2:
                 warnings.warn(f"Correlation parameter set \"{k}\" "
                               "requires 2 elements, "
                               "but the user provided fewer.  Deleting...")
@@ -391,16 +391,16 @@ def _validate_params_corr(params_corr, mf) -> dict:
         del params_corr[k]
 
     # Check J2 cusp coefficients
-    if "J2_params" in params_corr:
-        j2 = params_corr["J2_params"]
+    if "J2_pade" in params_corr:
+        j2 = params_corr["J2_pade"]
         if isinstance(j2, dict):
             if "like" in j2 and abs(float(j2["like"][0]) - 0.25) > eps:
                 warnings.warn(
-                    f"J2_params['like'][0] = {float(j2['like'][0]):.8f}, "
+                    f"J2_pade['like'][0] = {float(j2['like'][0]):.8f}, "
                     "expected 0.25 (same-spin cusp condition)")
             if "unlike" in j2 and abs(float(j2["unlike"][0]) - 0.5) > eps:
                 warnings.warn(
-                    f"J2_params['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
+                    f"J2_pade['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
                     "expected 0.5 (opposite-spin cusp condition)")
     return params_corr
 
@@ -1276,9 +1276,9 @@ def get_vmc_func(mf,
         Converged mean-field object as returned by
         :func:`generate_molecular_orbitals`.
     params_corr : dict or None
-        Jastrow-factor parameters.  Pass a dict with key ``"J2_params"``
+        Jastrow-factor parameters.  Pass a dict with key ``"J2_pade"``
         containing a 1-D array of optimizable coefficients, or ``None`` /
-        ``{"J2_params": jnp.array([])}`` to use no Jastrow factor.
+        ``{"J2_pade": jnp.array([])}`` to use no Jastrow factor.
     cusp_scheme : str, optional
         Cusp-correction scheme to apply near nuclei.  ``"Quady2025"``
         (default) uses the scheme described in Quady *et al.* (2025).

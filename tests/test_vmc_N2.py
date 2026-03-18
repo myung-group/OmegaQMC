@@ -12,10 +12,10 @@ bset_name = "6-31G"
 
 # optimizable Jastrow parameters:
 params_jastrow = {
-    "J1_params": {"N": jnp.array([0.0, 0.0])},
+    "J1_pade": {"N": jnp.array([0.0, 0.0])},
 }
-#     "J1_params": {"N": jnp.array([-7.0, 4.2])},
-#     "J2_params": jnp.array([0.6046799, 0.6046799])
+#     "J1_pade": {"N": jnp.array([-7.0, 4.2])},
+#     "J2_pade": jnp.array([0.6046799, 0.6046799])
 
 atoms_string = '''
 N       0.00    0.00    {:.6f}

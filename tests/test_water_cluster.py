@@ -40,7 +40,7 @@ grad = mf_grad.kernel()
 
 # No optimizable Jastrow parameters:
 params_jastrow = {
-      "J2_params": jnp.array([]) # J2 params
+      "J2_pade": jnp.array([]) # J2 params
 }
 
 # Load cusp coefficients for the 6-31G basis set

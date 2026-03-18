@@ -71,16 +71,16 @@ def _init_params_corr(params_corr_init):
 
 def _check_j2_cusps(params_corr, eps):
     """Warn if J2 cusp coefficients violate cusp conditions."""
-    if "J2_params" not in params_corr:
+    if "J2_pade" not in params_corr:
         return
-    j2 = params_corr["J2_params"]
+    j2 = params_corr["J2_pade"]
     if "like" in j2 and abs(float(j2["like"][0]) - 0.25) > eps:
         warnings.warn(
-            f"J2_params['like'][0] = {float(j2['like'][0]):.8f}, "
+            f"J2_pade['like'][0] = {float(j2['like'][0]):.8f}, "
             "expected 0.25 (same-spin cusp condition)")
     if "unlike" in j2 and abs(float(j2["unlike"][0]) - 0.5) > eps:
         warnings.warn(
-            f"J2_params['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
+            f"J2_pade['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
             "expected 0.5 (opposite-spin cusp condition)")
 
 

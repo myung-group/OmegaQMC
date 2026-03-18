@@ -209,11 +209,11 @@ def get_psi_fun(mf, params_cusp=None, trial=None):
         """Trial wavefunction with explicit MO coefficients C."""
         ln_slater = log_slater_determinant_C(elec_crds, nuc_crds, C)
         jastrow_term = 0.0
-        if "J1_params" in curr_params:
-            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"])
-        if "J2_params" in curr_params:
-            jastrow_term += J2_aa(elec_crds, curr_params["J2_params"]) \
-                + J2_ab(elec_crds, curr_params["J2_params"])
+        if "J1_pade" in curr_params:
+            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_pade"])
+        if "J2_pade" in curr_params:
+            jastrow_term += J2_aa(elec_crds, curr_params["J2_pade"]) \
+                + J2_ab(elec_crds, curr_params["J2_pade"])
         return ln_slater + jastrow_term
 
     @jax.jit
@@ -370,11 +370,11 @@ def get_psi_fun(mf, params_cusp=None, trial=None):
         ln_slater = _log_slater(elec_crds, nuc_crds)
 
         jastrow_term = 0.0
-        if "J1_params" in curr_params:
-            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_params"])
-        if "J2_params" in curr_params:
-            jastrow_term += J2_aa(elec_crds, curr_params["J2_params"]) \
-                + J2_ab(elec_crds, curr_params["J2_params"])
+        if "J1_pade" in curr_params:
+            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_pade"])
+        if "J2_pade" in curr_params:
+            jastrow_term += J2_aa(elec_crds, curr_params["J2_pade"]) \
+                + J2_ab(elec_crds, curr_params["J2_pade"])
 
         return ln_slater + jastrow_term
 

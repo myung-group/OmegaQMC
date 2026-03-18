@@ -14,7 +14,7 @@ L = 2.0743
 bset_name = "6-31G"
 
 params_jastrow = {
-    "J1_params": {"N": jnp.array([0.0, 0.0])},
+    "J1_pade": {"N": jnp.array([0.0, 0.0])},
 }
 
 atoms_string = '''

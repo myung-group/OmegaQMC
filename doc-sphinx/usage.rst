@@ -49,7 +49,7 @@ Pass the mean-field object and Jastrow parameters to
     from OmegaQMC import get_vmc_func
     from OmegaQMC.utils import format_basis_name
 
-    params_jastrow = {"J2_params": jnp.array([])}   # no Jastrow factor
+    params_jastrow = {"J2_pade": jnp.array([])}   # no Jastrow factor
 
     data_prefix = "water2_vmc_{}".format(format_basis_name("6-31G"))
 
@@ -150,7 +150,7 @@ keyword.  MO relaxation is automatically disabled with a warning:
 
 .. code-block:: python
 
-    params_jastrow = {"J1_params": {"O": 0.0, "H": 0.0}}
+    params_jastrow = {"J1_pade": {"O": 0.0, "H": 0.0}}
 
     vmc_run = get_vmc_func(
         mf, params_jastrow,
