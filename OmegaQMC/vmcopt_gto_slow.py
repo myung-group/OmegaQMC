@@ -58,7 +58,8 @@ def _tau_int_from_acf(acf: jnp.ndarray) -> float:
 class _VMCOptSlowDriver:
     """Compiled VMC optimization kernels (slow/serial variant)."""
 
-    def __init__(self, mf, params_cusp):
+    def __init__(self, mf, params_cusp,
+                 bspline_config=None):
         nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
         eps = jnp.finfo(nuc_crds.dtype).eps
         nelec = mf.mol.tot_electrons()
@@ -72,7 +73,8 @@ class _VMCOptSlowDriver:
         self.Z_charges = Z_charges
 
         log_trial_wavefunction, local_energy, _, _ \
-            = get_psi_fun(mf, params_cusp=params_cusp)
+            = get_psi_fun(mf, params_cusp=params_cusp,
+                          bspline_config=bspline_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         enr_nn = local_energy_nn(nuc_crds)
@@ -304,7 +306,8 @@ class _VMCOptSlowDriver:
         return params_corr, {'energy': {'mean': E_mean, 'stderr': E_stderr}}
 
 
-def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
+def get_vmcopt_func(mf, cusp_scheme="Quady2025",
+                    bspline_config=None):
     """Create slow VMC optimization function."""
     num_nuc = mf.mol.natm
     if cusp_scheme == "Quady2025":
@@ -319,4 +322,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
                 params_cusp[atom_symbol] = p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptSlowDriver(mf, params_cusp)
+    return _VMCOptSlowDriver(
+        mf, params_cusp,
+        bspline_config=bspline_config
+    )

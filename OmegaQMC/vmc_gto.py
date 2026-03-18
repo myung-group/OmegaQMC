@@ -402,6 +402,35 @@ def _validate_params_corr(params_corr, mf) -> dict:
                 warnings.warn(
                     f"J2_pade['unlike'][0] = {float(j2['unlike'][0]):.8f}, "
                     "expected 0.5 (opposite-spin cusp condition)")
+
+    # Validate B-spline params
+    for bkey in ("J1_bspline", "J2_bspline"):
+        if bkey not in params_corr:
+            continue
+        v = params_corr[bkey]
+        if not isinstance(v, dict):
+            raise TypeError(
+                f"{bkey} must be a dict, got {type(v)}"
+            )
+        for sk, sv in v.items():
+            if not hasattr(sv, 'shape') or sv.shape[0] < 2:
+                raise ValueError(
+                    f"{bkey}['{sk}'] must have >= 2 "
+                    "coefficients"
+                )
+
+    # Warn if both pade + bspline present for same body
+    if "J1_pade" in params_corr \
+            and "J1_bspline" in params_corr:
+        warnings.warn(
+            "Both J1_pade and J1_bspline are present; "
+            "their contributions will be summed.")
+    if "J2_pade" in params_corr \
+            and "J2_bspline" in params_corr:
+        warnings.warn(
+            "Both J2_pade and J2_bspline are present; "
+            "their contributions will be summed.")
+
     return params_corr
 
 
@@ -456,7 +485,8 @@ class _VMCDriver:
                  nuc_crds, frag_reflect_data, single_frag_combos,
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
-                 gr_scheme='scheme1', trial=None):
+                 gr_scheme='scheme1', trial=None,
+                 bspline_config=None):
         # --- Store state ---
         self.mf = mf
         self.params_corr = params_corr
@@ -493,7 +523,8 @@ class _VMCDriver:
         # Get wavefunction and energy functions
         log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
             = get_psi_fun(mf, params_cusp=params_cusp,
-                          trial=trial)
+                          trial=trial,
+                          bspline_config=bspline_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         self.local_energy_ee = local_energy_ee
@@ -1263,7 +1294,8 @@ def get_vmc_func(mf,
                  symmop_list: str | list[str] | dict[int, list[str]] | None = None,
                  cluster_idx: Collection[int] = None,
                  mo_relax: bool = True,
-                 trial: dict | None = None):
+                 trial: dict | None = None,
+                 bspline_config: dict | None = None):
     """Construct a callable VMC driver for the given mean-field object.
 
     Assembles the trial wave function (Slater determinant + Jastrow factor
@@ -1300,8 +1332,15 @@ def get_vmc_func(mf,
         Indices of atoms forming a sub-cluster for gradient calculations.
         ``None`` (default) treats all atoms as one cluster.
     mo_relax : bool, optional
-        If ``True`` (default), relax the MO coefficients to minimise the
-        energy variance during the cusp-correction step.
+        If ``True`` (default), relax the MO coefficients
+        to minimise the energy variance during the
+        cusp-correction step.
+    bspline_config : dict or None, optional
+        Cutoff radii for B-spline Jastrow factors.
+        Example::
+
+            {"J1": {"H": {"r_cut": 5.0}},
+             "J2": {"r_cut": 10.0}}
 
     Returns
     -------
@@ -1359,4 +1398,5 @@ def get_vmc_func(mf,
                       ofname_chkpt, ofname_grd,
                       timestamp_init,
                       gr_scheme=gr_scheme,
-                      trial=trial)
+                      trial=trial,
+                      bspline_config=bspline_config)

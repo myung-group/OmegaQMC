@@ -87,7 +87,8 @@ def _check_j2_cusps(params_corr, eps):
 class _VMCOptDriver:
     """Compiled VMC optimization kernels for a given molecule."""
 
-    def __init__(self, mf, params_cusp):
+    def __init__(self, mf, params_cusp,
+                 bspline_config=None):
         nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
         eps = jnp.finfo(nuc_crds.dtype).eps
         nelec = mf.mol.tot_electrons()
@@ -101,13 +102,14 @@ class _VMCOptDriver:
         self.Z_charges = Z_charges
 
         log_trial_wavefunction, local_energy, _, _ \
-            = get_psi_fun(mf, params_cusp=params_cusp)
+            = get_psi_fun(mf, params_cusp=params_cusp,
+                          bspline_config=bspline_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         enr_nn = local_energy_nn(nuc_crds)
 
         @jax.jit
-        def metropolis_move(rng_key, elec_crds, _step_size, curr_params):  # noqa: E501
+        def metropolis_move(rng_key, elec_crds, _step_size, curr_params):
             """Metropolis step with improved distance calculations."""
             key_prop, key_accept = jax.random.split(rng_key)
 
@@ -394,7 +396,8 @@ class _VMCOptDriver:
         return params_corr, {'energy': {'mean': valid_energy}}
 
 
-def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
+def get_vmcopt_func(mf, cusp_scheme="Quady2025",
+                    bspline_config=None):
     """Construct a callable VMC wave-function optimizer for the given system.
 
     Builds cusp-corrected trial wave-function parameters and returns a
@@ -408,9 +411,16 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
         Converged mean-field object as returned by
         :func:`generate_molecular_orbitals`.
     cusp_scheme : str, optional
-        Cusp-correction scheme used to initialize nuclear-region parameters.
-        ``"Quady2025"`` (default) applies the scheme from Quady *et al.*
+        Cusp-correction scheme used to initialize
+        nuclear-region parameters.  ``"Quady2025"``
+        (default) applies the scheme from Quady *et al.*
         (2025).  Pass ``None`` to skip cusp corrections.
+    bspline_config : dict or None, optional
+        Cutoff radii for B-spline Jastrow factors.
+        Example::
+
+            {"J1": {"H": {"r_cut": 5.0}},
+             "J2": {"r_cut": 10.0}}
 
     Returns
     -------
@@ -432,4 +442,5 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025"):
                 params_cusp[atom_symbol] = p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptDriver(mf, params_cusp)
+    return _VMCOptDriver(mf, params_cusp,
+                         bspline_config=bspline_config)

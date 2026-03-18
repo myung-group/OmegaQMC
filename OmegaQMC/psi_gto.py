@@ -6,7 +6,59 @@ from OmegaQMC.shell import read_shell, evaluate_cusp_s
 # JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
 
-def get_psi_fun(mf, params_cusp=None, trial=None):
+# --- B-spline helpers (QMCPACK BsplineFunctor convention) ---
+
+def _build_bspline_coefs(params, delta_r, cusp_val):
+    """Map N user params → (N+4) full B-spline coefficients.
+
+    Following QMCPACK's BsplineFunctor.h:
+      coefs[1] = P[0], coefs[2] = P[1], ..., coefs[N] = P[N-1]
+      coefs[0] = coefs[2] - 2 * delta_r * cusp_val   (cusp)
+      coefs[N+1] = coefs[N+2] = coefs[N+3] = 0       (boundary)
+    """
+    # n = params.shape[0]
+    c0 = params[1] - 2.0 * delta_r * cusp_val
+    coefs = jnp.concatenate([
+        c0[jnp.newaxis],
+        params,
+        jnp.zeros(3),
+    ])
+    return coefs
+
+
+def _bspline_eval(r, coefs, delta_r_inv, max_index):
+    """Evaluate cubic B-spline at distances r.
+
+    Uses the uniform-knot cubic basis from QMCPACK.
+    r is an array of distances; returns u(r) for each.
+    """
+    u = r * delta_r_inv
+    i = jnp.clip(
+        jnp.floor(u).astype(jnp.int32), 0, max_index
+    )
+    t = u - i
+
+    # Cubic B-spline basis values (uniform knots)
+    tp = jnp.stack([t * t * t, t * t, t, jnp.ones_like(t)])
+    basis = jnp.array([
+        [-1,  3, -3, 1],
+        [ 3, -6,  3, 0],
+        [-3,  0,  3, 0],
+        [ 1,  4,  1, 0],
+    ], dtype=r.dtype) / 6.0
+
+    w = basis.T @ tp                      # (4, len(r))
+
+    c0 = coefs[i]
+    c1 = coefs[i + 1]
+    c2 = coefs[i + 2]
+    c3 = coefs[i + 3]
+
+    return w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3
+
+
+def get_psi_fun(mf, params_cusp=None, trial=None,
+                bspline_config=None):
     """
     Creates functions for evaluating the wavefunction
     and local energy components from a PySCF mean-field calculation.
@@ -189,14 +241,14 @@ def get_psi_fun(mf, params_cusp=None, trial=None):
     def get_ao_val(elec_crds, nuc_crds):
         """AO evaluation only (no MO contraction)."""
         ao_val, _ = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds,
-                                                              nuc_crds)
+                                                             nuc_crds)
         return ao_val   # (nelec, natm, nao_total)
 
     @jax.jit
     def log_slater_determinant_C(elec_crds, nuc_crds, C):
         """Slater determinant with explicit MO coefficients C."""
         ao_val, _ = jax.vmap(cgs_sph_get, in_axes=(0, None))(elec_crds,
-                                                              nuc_crds)
+                                                             nuc_crds)
         mo_val = jnp.einsum('ena,am->em', ao_val, C)
         alpha_matrix = mo_val[::2, :]
         beta_matrix = mo_val[1::2, :]
@@ -207,13 +259,32 @@ def get_psi_fun(mf, params_cusp=None, trial=None):
     @jax.jit
     def log_trial_wavefunction_C(elec_crds, nuc_crds, curr_params, C):
         """Trial wavefunction with explicit MO coefficients C."""
-        ln_slater = log_slater_determinant_C(elec_crds, nuc_crds, C)
+        ln_slater = log_slater_determinant_C(
+            elec_crds, nuc_crds, C
+        )
         jastrow_term = 0.0
         if "J1_pade" in curr_params:
-            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_pade"])
+            jastrow_term += J1(
+                elec_crds, nuc_crds,
+                curr_params["J1_pade"]
+            )
         if "J2_pade" in curr_params:
-            jastrow_term += J2_aa(elec_crds, curr_params["J2_pade"]) \
-                + J2_ab(elec_crds, curr_params["J2_pade"])
+            jastrow_term += J2_aa(
+                elec_crds, curr_params["J2_pade"]
+            ) + J2_ab(
+                elec_crds, curr_params["J2_pade"]
+            )
+        if "J1_bspline" in curr_params:
+            jastrow_term += J1_bspline_fn(
+                elec_crds, nuc_crds,
+                curr_params["J1_bspline"]
+            )
+        if "J2_bspline" in curr_params:
+            jastrow_term += J2_bspline_aa(
+                elec_crds, curr_params["J2_bspline"]
+            ) + J2_bspline_ab(
+                elec_crds, curr_params["J2_bspline"]
+            )
         return ln_slater + jastrow_term
 
     @jax.jit
@@ -364,6 +435,118 @@ def get_psi_fun(mf, params_cusp=None, trial=None):
             / (1.0 + b_per_atom[:, None] * r)
         return jnp.sum(u_vals)
 
+    # --- B-spline Jastrow functions ---
+    # Precompute config-derived constants at trace time
+    _bs_j2_cfg = None
+    _bs_j1_cfgs = {}
+    if bspline_config is not None:
+        if "J2" in bspline_config:
+            r_cut = float(bspline_config["J2"]["r_cut"])
+            # NumParams not known until params arrive;
+            # store r_cut for use inside the functions.
+            _bs_j2_cfg = {"r_cut": r_cut}
+        if "J1" in bspline_config:
+            for sym in unique_elements:
+                if sym in bspline_config["J1"]:
+                    rc = float(
+                        bspline_config["J1"][sym]["r_cut"]
+                    )
+                    _bs_j1_cfgs[sym] = {"r_cut": rc}
+
+    @jax.jit
+    def J2_bspline_aa(elec_crds, curr_params):
+        """Two-body B-spline Jastrow, like-spin pairs."""
+        n = curr_params["like"].shape[0]
+        r_cut = _bs_j2_cfg["r_cut"]
+        delta_r = r_cut / (n + 1)
+        delta_r_inv = 1.0 / delta_r
+        max_index = n
+
+        coefs = _build_bspline_coefs(
+            curr_params["like"], delta_r, -0.25
+        )
+
+        i_idx, j_idx = jnp.triu_indices(
+            elec_crds.shape[0], k=1
+        )
+        diffs = elec_crds[i_idx] - elec_crds[j_idx]
+        r_ij = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
+
+        same_spin = ((i_idx % 2) == (j_idx % 2)).astype(
+            r_ij.dtype
+        )
+        cutoff_mask = (r_ij < r_cut).astype(r_ij.dtype)
+
+        u = _bspline_eval(r_ij, coefs, delta_r_inv, max_index)
+        return jnp.sum(u * same_spin * cutoff_mask)
+
+    @jax.jit
+    def J2_bspline_ab(elec_crds, curr_params):
+        """Two-body B-spline Jastrow, unlike-spin pairs."""
+        n = curr_params["unlike"].shape[0]
+        r_cut = _bs_j2_cfg["r_cut"]
+        delta_r = r_cut / (n + 1)
+        delta_r_inv = 1.0 / delta_r
+        max_index = n
+
+        coefs = _build_bspline_coefs(
+            curr_params["unlike"], delta_r, -0.5
+        )
+
+        i_idx, j_idx = jnp.triu_indices(
+            elec_crds.shape[0], k=1
+        )
+        diffs = elec_crds[i_idx] - elec_crds[j_idx]
+        r_ij = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
+
+        opp_spin = ((i_idx % 2) != (j_idx % 2)).astype(
+            r_ij.dtype
+        )
+        cutoff_mask = (r_ij < r_cut).astype(r_ij.dtype)
+
+        u = _bspline_eval(r_ij, coefs, delta_r_inv, max_index)
+        return jnp.sum(u * opp_spin * cutoff_mask)
+
+    @jax.jit
+    def J1_bspline_fn(elec_crds, nuc_crds, curr_params):
+        """One-body B-spline Jastrow."""
+        total = 0.0
+        for ie, sym in enumerate(unique_elements):
+            if sym not in _bs_j1_cfgs:
+                continue
+            r_cut = _bs_j1_cfgs[sym]["r_cut"]
+            p = curr_params[sym]
+            n = p.shape[0]
+            delta_r = r_cut / (n + 1)
+            delta_r_inv = 1.0 / delta_r
+            max_index = n
+
+            cusp_val = 0.0 if l_cgto else -float(
+                Z_charges[atom_to_elem_idx == ie][0]
+            )
+            coefs = _build_bspline_coefs(
+                p, delta_r, cusp_val
+            )
+
+            elem_mask = (
+                atom_to_elem_idx == ie
+            ).astype(elec_crds.dtype)
+
+            diffs = (
+                elec_crds[None, :, :]
+                - nuc_crds[:, None, :]
+            )
+            r = jnp.linalg.norm(diffs, axis=-1)
+
+            u = _bspline_eval(
+                r.ravel(), coefs, delta_r_inv, max_index
+            ).reshape(r.shape)
+            cutoff = (r < r_cut).astype(r.dtype)
+            total += jnp.sum(
+                u * cutoff * elem_mask[:, None]
+            )
+        return total
+
     @jax.jit
     def log_trial_wavefunction(elec_crds, nuc_crds, curr_params):
         """Trial wavefunction."""
@@ -371,10 +554,25 @@ def get_psi_fun(mf, params_cusp=None, trial=None):
 
         jastrow_term = 0.0
         if "J1_pade" in curr_params:
-            jastrow_term += J1(elec_crds, nuc_crds, curr_params["J1_pade"])
+            jastrow_term += J1(
+                elec_crds, nuc_crds,
+                curr_params["J1_pade"]
+            )
         if "J2_pade" in curr_params:
-            jastrow_term += J2_aa(elec_crds, curr_params["J2_pade"]) \
-                + J2_ab(elec_crds, curr_params["J2_pade"])
+            jastrow_term += J2_aa(
+                elec_crds, curr_params["J2_pade"]
+            ) + J2_ab(elec_crds, curr_params["J2_pade"])
+        if "J1_bspline" in curr_params:
+            jastrow_term += J1_bspline_fn(
+                elec_crds, nuc_crds,
+                curr_params["J1_bspline"]
+            )
+        if "J2_bspline" in curr_params:
+            jastrow_term += J2_bspline_aa(
+                elec_crds, curr_params["J2_bspline"]
+            ) + J2_bspline_ab(
+                elec_crds, curr_params["J2_bspline"]
+            )
 
         return ln_slater + jastrow_term
 

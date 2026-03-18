@@ -172,6 +172,56 @@ The ``coeff_threshold`` argument controls how many determinants are kept
 from the CI expansion; smaller values include more determinants and
 improve accuracy at higher computational cost.
 
+B-spline Jastrow factors
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For higher variational freedom, replace the two-parameter Padé
+Jastrow with a cubic B-spline Jastrow (following the QMCPACK
+``BsplineFunctor`` convention).  Cutoff radii are passed
+separately via a ``bspline_config`` dict:
+
+.. code-block:: python
+
+    import jax.numpy as jnp
+    from OmegaQMC import get_vmcopt_func
+
+    bspline_config = {
+        "J1": {"H": {"r_cut": 5.0},
+               "O": {"r_cut": 8.0}},
+        "J2": {"r_cut": 10.0},
+    }
+
+    params_jastrow = {
+        "J2_bspline": {
+            "like":   jnp.zeros(8),
+            "unlike": jnp.zeros(8),
+        },
+    }
+
+    vmcopt_run = get_vmcopt_func(
+        mf, bspline_config=bspline_config
+    )
+    params_opt, info = vmcopt_run(
+        rng_key,
+        params_corr_init=params_jastrow,
+        num_walkers=500,
+    )
+
+The ``bspline_config`` dict specifies cutoff radii only
+(structural, not optimized).  The number of variational
+parameters is determined by the length of each coefficient
+array in ``params_jastrow``.
+
+Cusp constraints are enforced automatically:
+
+- **J2 like-spin**: cusp value = -1/4
+- **J2 unlike-spin**: cusp value = -1/2
+- **J1**: cusp value = -Z (nuclear charge), or 0
+  when cusp-corrected orbitals are used
+
+Both Padé and B-spline Jastrows can coexist (their
+contributions are summed), though a warning is emitted.
+
 AFQMC
 -----
 
