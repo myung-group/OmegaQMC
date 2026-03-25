@@ -161,7 +161,7 @@ class _VMCOptNaiveDriver:
                  num_blocks=10, num_blocks_equil=10,
                  mc_timestep=0.1, fname_log=None,
                  lr=0.02, optimizer="sgd",
-                 verbose=False):
+                 verbose=0):
         """Run the naïve VMC optimization loop.
 
         Parameters
@@ -192,8 +192,8 @@ class _VMCOptNaiveDriver:
             Optimizer learning rate.
         optimizer : str
             ``"sgd"`` or ``"adam"``.
-        verbose : bool
-            Print progress.
+        verbose : int
+            Verbosity level (0 = silent, 1 = progress).
 
         Returns
         -------

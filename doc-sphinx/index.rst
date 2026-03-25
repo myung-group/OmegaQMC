@@ -12,7 +12,6 @@ Welcome to QMC with PGCS's documentation!
 
    usage
    api
-   references
 
 Indices and tables
 ==================
@@ -20,3 +19,5 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
+
+.. bibliography::

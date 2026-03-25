@@ -508,7 +508,7 @@ class _VMCOptLinearDriver:
         shift_s_base=4.0,
         max_param_change=0.3,
         deriv_batch_size=100,
-        verbose=True,
+        verbose=1,
     ):
         """Run linear method VMC optimization.
 
@@ -548,8 +548,10 @@ class _VMCOptLinearDriver:
         deriv_batch_size : int
             Walker batch size for derivative
             computation (limits VRAM).
-        verbose : bool
-            Print progress.
+        verbose : int
+            Verbosity level.  0 = silent, 1 = per-epoch
+            progress, 2 = also print parameter values
+            after each accepted update.
 
         Returns
         -------
@@ -577,7 +579,7 @@ class _VMCOptLinearDriver:
         opt_indices = jnp.where(flat_mask)[0]
         num_opt = int(opt_indices.shape[0])
 
-        if verbose:
+        if verbose >= 1:
             n_total = flat_params.shape[0]
             print(
                 f"Linear method: {num_opt} optimizable"
@@ -626,16 +628,13 @@ class _VMCOptLinearDriver:
         )
         mc_stepsize = (3 * mc_timestep) ** 0.5
 
-        # Accept/reject history for shift adaptation
-        accept_hist = [False, False]
-
         # ===== Main loop =====
         # best_energy = jnp.inf
         for epoch in range(num_epochs):
             curr_params = _unflatten(flat_params)
 
             # 1. Equilibrate
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"\n--- Epoch {epoch + 1}"
                     f"/{num_epochs} ---"
@@ -648,7 +647,7 @@ class _VMCOptLinearDriver:
                     num_blocks_equil,
                     num_steps_per_block,
                 )
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  Acceptance rate:"
                     f" {float(acc_ratios[-1]):.3f}"
@@ -660,7 +659,7 @@ class _VMCOptLinearDriver:
                 1,
                 -(-num_opt_samples // num_walkers),
             )
-            if verbose:
+            if verbose >= 1:
                 n_total_samp = (
                     num_sample_blocks * num_walkers
                 )
@@ -685,7 +684,7 @@ class _VMCOptLinearDriver:
             num_samples = sample_walkers.shape[0]
 
             # 3. Compute per-walker derivatives (batched)
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  Computing derivatives for"
                     f" {num_samples} samples..."
@@ -715,7 +714,7 @@ class _VMCOptLinearDriver:
 
             E_mean = float(jnp.mean(E_L_all))
             E_std = float(jnp.std(E_L_all))
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  E_L = {E_mean:.8f}"
                     f" +/- {E_std / num_samples**0.5:.8f}"
@@ -730,7 +729,7 @@ class _VMCOptLinearDriver:
             eigenval, ev = self._solve_eigenvalue(
                 H, S, shift_i, shift_s
             )
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  Eigenvalue: {float(eigenval):.8f}"
                 )
@@ -740,7 +739,7 @@ class _VMCOptLinearDriver:
             Lambda = _nonlinear_rescale(
                 ev[1:], S_block
             )
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  Rescale factor: {float(Lambda):.4f}"
                 )
@@ -755,7 +754,7 @@ class _VMCOptLinearDriver:
             if largest > max_param_change:
                 scale = max_param_change / largest
                 delta_opt = delta_opt * scale
-                if verbose:
+                if verbose >= 1:
                     print(
                         f"  Capped update by {scale:.3f}"
                         f" (max change {largest:.4f})"
@@ -815,7 +814,7 @@ class _VMCOptLinearDriver:
                 jnp.isfinite(new_cost)
             )
 
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  Old cost: {old_cost:.8f},"
                     f"  New cost: {new_cost:.8f},"
@@ -827,32 +826,23 @@ class _VMCOptLinearDriver:
                 flat_params = flat_params_new
                 if shift_s > 1e-2:
                     shift_s = shift_s / shift_s_base
-                if verbose:
+                if verbose >= 1:
                     print("  -> Accepted.")
-                accept_hist = [True, accept_hist[0]]
-            else:
-                # Reject: revert params
-                shift_s = shift_s * shift_s_base
-                # If last was accepted but one before
-                # was rejected, soften the shift base.
-                if (accept_hist[0]
-                        and not accept_hist[1]):
-                    shift_s_base = jnp.sqrt(
-                        shift_s_base
+                if verbose >= 2:
+                    curr_params = _unflatten(flat_params)
+                    print(
+                        f"  Params: {curr_params}"
                     )
-                    if verbose:
-                        print(
-                            f"  shift_s_base -> "
-                            f"{float(shift_s_base):.4f}"
-                        )
-                if verbose:
+            else:
+                # Reject: revert params, raise shift
+                shift_s = shift_s * shift_s_base
+                if verbose >= 1:
                     print(
                         f"  -> Rejected."
                         f"  shift_s -> {shift_s:.4f}"
                     )
-                accept_hist = [False, accept_hist[0]]
 
-            if verbose:
+            if verbose >= 1:
                 print(
                     f"  shift_i={shift_i:.4f},"
                     f" shift_s={shift_s:.4f}"
@@ -862,7 +852,7 @@ class _VMCOptLinearDriver:
         params_corr = _unflatten(flat_params)
 
         # Short production run for final energy
-        if verbose:
+        if verbose >= 1:
             print("\nFinal energy evaluation...")
         (rng_key, walkers, mc_stepsize, _), \
             acc_ratios = self.run_equilibration(
@@ -883,7 +873,7 @@ class _VMCOptLinearDriver:
         neff = tw_energies.size
         final_err = final_std / neff ** 0.5
 
-        if verbose:
+        if verbose >= 1:
             print(
                 f"Final E = {final_E:.8f}"
                 f" +/- {final_err:.8f}"

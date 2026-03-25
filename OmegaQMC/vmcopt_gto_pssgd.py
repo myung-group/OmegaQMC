@@ -297,7 +297,7 @@ class _VMCOptDriver:
                  optimizer="sgd",
                  train_split=0.8,
                  batch_size=1000,
-                 verbose=True):
+                 verbose=1):
         """
         VMC optimization run with improved efficiency.
 
@@ -314,7 +314,7 @@ class _VMCOptDriver:
             num_blocks: Number of production blocks
             train_split: Fraction of data for training
             batch_size: Batch size for training
-            verbose: Print progress
+            verbose: Verbosity level (0 = silent, 1 = progress)
         """
         params_corr = _init_params_corr(params_corr_init)
         _check_j2_cusps(params_corr, self.eps)
@@ -334,20 +334,20 @@ class _VMCOptDriver:
         walkers = self.initialize_walkers(rng, num_walkers)
         mc_stepsize = (3 * mc_timestep)**0.5
 
-        if verbose:
+        if verbose >= 1:
             print("Running equilibration...")
         (rng_key, walkers, mc_stepsize, _), acc_ratios \
             = self.run_equilibration(rng_key, walkers, mc_stepsize,
                                      params_corr,
                                      num_blocks_equil, num_steps_per_block)
 
-        if verbose:
+        if verbose >= 1:
             print(f"Equilibration acceptance rate: {acc_ratios[-1]:.2f}")
             print("Adjusted step size: {:.4f} bohr "
                   "~ {:.4f} Ha⁻¹ in Brownian time"
                   .format(mc_stepsize, mc_stepsize * mc_stepsize / 3))
 
-        if verbose:
+        if verbose >= 1:
             print(f"\nRunning {num_blocks} production blocks...")
 
         all_samples = []
@@ -359,7 +359,7 @@ class _VMCOptDriver:
 
             all_samples.append(walkers)
 
-            if verbose:
+            if verbose >= 1:
                 print(f"  Run {block_cnt}/{num_blocks}: "
                       f"collected {walkers.shape[0]} samples")
 
@@ -373,7 +373,7 @@ class _VMCOptDriver:
         train_walkers = sampled_walkers[idx[:n_train]]
         valid_walkers = sampled_walkers[idx[n_train:]]
 
-        if verbose:
+        if verbose >= 1:
             print(f"\nTraining on {n_train} samples, "
                   f"validating on {n_samples-n_train} samples")
             if frozen_keys:
@@ -409,14 +409,14 @@ class _VMCOptDriver:
                     )
             valid_loss = jnp.array(valid_losses).mean()
 
-            if verbose:
+            if verbose >= 1:
                 print(f"Epoch {epoch:3d} | "
                       f"Loss: {train_loss:.6f} | "
                       f"Train E: {train_energy:.6f} | "
                       f"Valid Loss: {valid_loss:.6f} | "
                       f"Valid E: {valid_energy:.6f}")
 
-        if verbose:
+        if verbose >= 1:
             print(f"\nOptimized parameters: {params_corr}")
 
         return params_corr, {'energy': {'mean': valid_energy}}
