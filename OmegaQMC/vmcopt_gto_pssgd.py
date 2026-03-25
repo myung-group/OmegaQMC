@@ -1,3 +1,22 @@
+"""Post-sampling SGD VMC optimizer.
+
+This module implements Jastrow-factor optimization via a
+two-phase approach:
+
+1. **Sampling phase** — run several production MC blocks
+   and store the final walker positions from each block.
+2. **Optimization phase** — minimize a combined
+   energy-plus-variance loss on the stored snapshots
+   using SGD or Adam (via Optax).
+
+Because the gradient is computed only over the stored
+snapshots (not through the MC trajectory itself), this
+driver is faster and more memory-efficient than the
+naïve approach in :mod:`vmcopt_gto_naive`.  For the
+best convergence, prefer :mod:`vmcopt_gto_linear`
+(the linear method).
+"""
+
 import warnings
 import jax
 import jax.numpy as jnp
@@ -85,7 +104,14 @@ def _check_j2_cusps(params_corr, eps):
 
 
 class _VMCOptDriver:
-    """Compiled VMC optimization kernels for a given molecule."""
+    """Post-sampling SGD VMC optimizer.
+
+    Compiles the Metropolis kernel and local-energy
+    function for a given molecule, collects walker
+    snapshots in a sampling phase, then optimizes
+    Jastrow parameters on those snapshots with SGD
+    or Adam.
+    """
 
     def __init__(self, mf, params_cusp,
                  bspline_config=None):
@@ -398,21 +424,21 @@ class _VMCOptDriver:
 
 def get_vmcopt_func(mf, cusp_scheme="Quady2025",
                     bspline_config=None):
-    """Construct a callable VMC wave-function optimizer for the given system.
+    """Create a post-sampling SGD VMC optimizer.
 
-    Builds cusp-corrected trial wave-function parameters and returns a
-    :class:`_VMCOptDriver` that optimizes the Jastrow-factor coefficients by
-    minimizing the energy variance using the linear method (stochastic
-    reconfiguration).
+    Builds cusp-corrected trial wave-function parameters
+    and returns a :class:`_VMCOptDriver` that optimizes
+    Jastrow coefficients by minimizing a combined
+    energy-plus-variance loss on stored walker snapshots
+    using SGD or Adam.
 
     Parameters
     ----------
     mf : pyscf.scf.RHF
         Converged mean-field object as returned by
         :func:`generate_molecular_orbitals`.
-    cusp_scheme : str, optional
-        Cusp-correction scheme used to initialize
-        nuclear-region parameters.  ``"Quady2025"``
+    cusp_scheme : str or None, optional
+        Cusp-correction scheme.  ``"Quady2025"``
         (default) applies the scheme from Quady *et al.*
         (2025).  Pass ``None`` to skip cusp corrections.
     bspline_config : dict or None, optional
@@ -425,8 +451,9 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
     Returns
     -------
     driver : _VMCOptDriver
-        A callable optimizer.  Call it with ``driver(rng_key, ...)`` to run
-        the optimization loop and obtain optimized Jastrow parameters.
+        A callable optimizer.  Call it with
+        ``driver(rng_key, ...)`` to run the optimization
+        loop and obtain optimized Jastrow parameters.
     """
     num_nuc = mf.mol.natm
     if cusp_scheme == "Quady2025":

@@ -50,3 +50,44 @@ Cusp corrections
 -----------------
 
 .. autofunction:: OmegaQMC.cusp.get_cusp_params
+
+Jastrow optimizers
+-------------------
+
+Three optimizer implementations are provided, in order of
+increasing efficiency:
+
+**Linear method** (recommended)
+
+Ports the QMCPACK ``OneShiftOnly`` algorithm.  At each
+epoch it builds overlap (S) and Hamiltonian (H) matrices
+from per-walker log-psi and local-energy derivatives, then
+solves a shifted generalized eigenvalue problem for the
+parameter update.
+
+.. autofunction:: OmegaQMC.vmcopt_gto_linear.get_vmcopt_func
+
+.. autoclass:: OmegaQMC.vmcopt_gto_linear._VMCOptLinearDriver
+   :members: __call__
+
+**Post-sampling SGD**
+
+Collects walker snapshots in a sampling phase, then
+minimizes a combined energy-plus-variance loss on those
+snapshots with SGD or Adam.
+
+.. autofunction:: OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_func
+
+.. autoclass:: OmegaQMC.vmcopt_gto_pssgd._VMCOptDriver
+   :members: __call__
+
+**Naïve (reference)**
+
+Differentiates through the entire MC trajectory at each
+epoch.  Memory-intensive; intended as a reference
+implementation only.
+
+.. autofunction:: OmegaQMC.vmcopt_gto_naive.get_vmcopt_func
+
+.. autoclass:: OmegaQMC.vmcopt_gto_naive._VMCOptNaiveDriver
+   :members: __call__

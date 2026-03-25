@@ -1,10 +1,26 @@
+"""Naïve (serial) VMC optimizer.
+
+This module provides a reference implementation of the
+VMC Jastrow-factor optimizer that differentiates through
+the full production MC trajectory at each epoch.
+The gradient of a combined energy-plus-variance loss is
+computed via JAX automatic differentiation.
+
+This approach is exact but memory-intensive because JAX
+must retain the entire trajectory for backpropagation
+(hence ``jax.checkpoint`` in the inner loop).  For
+production use, prefer :mod:`vmcopt_gto_pssgd` (which
+samples first, then optimizes on the stored snapshots)
+or :mod:`vmcopt_gto_linear` (the linear method).
+"""
+
 import jax
 import jax.numpy as jnp
 import optax
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 from .constants import MIN_DIST_THRESHOLD
-from .vmcopt_gto import (
+from .vmcopt_gto_pssgd import (
     _build_opt_mask,
     _zero_frozen_grads,
     _init_params_corr,
@@ -55,8 +71,14 @@ def _tau_int_from_acf(acf: jnp.ndarray) -> float:
     return jnp.maximum(tau_int, 1.0)
 
 
-class _VMCOptSlowDriver:
-    """Compiled VMC optimization kernels (slow/serial variant)."""
+class _VMCOptNaiveDriver:
+    """Naïve VMC optimizer — differentiates through MC.
+
+    Compiles the Metropolis kernel and local-energy
+    function for a given molecule, then at each epoch
+    differentiates through the entire production MC
+    trajectory to compute parameter gradients.
+    """
 
     def __init__(self, mf, params_cusp,
                  bspline_config=None):
@@ -134,11 +156,52 @@ class _VMCOptSlowDriver:
     def __call__(self, rng_key,
                  params_corr_init=None, frozen_keys=None,
                  num_epochs=20, num_walkers=1000,
-                 num_steps_per_block=1000, num_steps_decorr=1,
+                 num_steps_per_block=1000,
+                 num_steps_decorr=1,
                  num_blocks=10, num_blocks_equil=10,
                  mc_timestep=0.1, fname_log=None,
-                 lr=0.02, optimizer="sgd", verbose=False):
-        """VMC optimization run."""
+                 lr=0.02, optimizer="sgd",
+                 verbose=False):
+        """Run the naïve VMC optimization loop.
+
+        Parameters
+        ----------
+        rng_key : jax.Array
+            JAX random key.
+        params_corr_init : dict or None
+            Initial Jastrow parameters.
+        frozen_keys : dict or None
+            Parameters to keep frozen.
+        num_epochs : int
+            Number of gradient-descent epochs.
+        num_walkers : int
+            Number of MC walkers.
+        num_steps_per_block : int
+            MC steps per production block.
+        num_steps_decorr : int
+            Decorrelation sub-steps per block.
+        num_blocks : int
+            Number of production blocks per epoch.
+        num_blocks_equil : int
+            Equilibration blocks (per epoch).
+        mc_timestep : float
+            Initial MC timestep.
+        fname_log : str or None
+            Unused; retained for API compatibility.
+        lr : float
+            Optimizer learning rate.
+        optimizer : str
+            ``"sgd"`` or ``"adam"``.
+        verbose : bool
+            Print progress.
+
+        Returns
+        -------
+        params_corr : dict
+            Optimized Jastrow parameters.
+        stats : dict
+            Energy statistics from the final epoch.
+        """
 
         params_corr = _init_params_corr(params_corr_init)
         _check_j2_cusps(params_corr, self.eps)
@@ -308,7 +371,27 @@ class _VMCOptSlowDriver:
 
 def get_vmcopt_func(mf, cusp_scheme="Quady2025",
                     bspline_config=None):
-    """Create slow VMC optimization function."""
+    """Create a naïve VMC optimizer.
+
+    Builds cusp-corrected trial wave-function parameters
+    and returns a :class:`_VMCOptNaiveDriver` that
+    optimizes Jastrow coefficients by differentiating
+    through the entire MC trajectory at each epoch.
+
+    Parameters
+    ----------
+    mf : pyscf.scf.RHF
+        Converged mean-field object.
+    cusp_scheme : str or None
+        ``"Quady2025"`` (default) or ``None``.
+    bspline_config : dict or None
+        B-spline Jastrow cutoff radii.
+
+    Returns
+    -------
+    driver : _VMCOptNaiveDriver
+        Callable optimizer.
+    """
     num_nuc = mf.mol.natm
     if cusp_scheme == "Quady2025":
         params_cusp = {}
@@ -322,7 +405,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
                 params_cusp[atom_symbol] = p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptSlowDriver(
+    return _VMCOptNaiveDriver(
         mf, params_cusp,
         bspline_config=bspline_config
     )

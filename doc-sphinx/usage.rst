@@ -103,18 +103,41 @@ returns symmetry-averaged nuclear forces with statistical error estimates:
 Optimizing Jastrow parameters
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Before a production VMC run you may want to optimize the Jastrow factor using
-:func:`~OmegaQMC.get_vmcopt_func`:
+Before a production VMC run, optimize the Jastrow factor
+with :func:`~OmegaQMC.get_vmcopt_func`.  The default
+implementation uses the **linear method** (a port of the
+QMCPACK ``OneShiftOnly`` algorithm), which typically
+converges an order of magnitude faster than gradient
+descent:
 
 .. code-block:: python
 
     from OmegaQMC import get_vmcopt_func
 
     vmcopt_run = get_vmcopt_func(mf)
-    params_opt, info = vmcopt_run(rng_key, num_walkers=500, num_steps=200)
+    params_opt, info = vmcopt_run(
+        rng_key,
+        num_walkers=1000,
+        num_opt_samples=5000,
+        num_epochs=50,
+    )
 
-Pass the returned *params_opt* as ``params_corr`` to :func:`~OmegaQMC.get_vmc_func`
-for the production run.
+``num_opt_samples`` controls how many walker snapshots are
+collected per epoch to build the overlap and Hamiltonian
+matrices; ``num_epochs`` should be at least
+``3–5 × num_params`` for reliable convergence.
+
+Pass the returned *params_opt* as ``params_corr`` to
+:func:`~OmegaQMC.get_vmc_func` for the production run.
+
+Two alternative optimizer implementations are also
+available directly from their submodules:
+
+- :func:`~OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_func` —
+  post-sampling SGD/Adam optimizer
+- :func:`~OmegaQMC.vmcopt_gto_naive.get_vmcopt_func` —
+  naïve optimizer (differentiates through MC; reference
+  implementation only)
 
 Multi-determinant trial wavefunction
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

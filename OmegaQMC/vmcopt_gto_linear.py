@@ -22,7 +22,7 @@ from functools import partial
 from .cusp import get_cusp_params
 from .psi_gto import get_psi_fun
 from .constants import MIN_DIST_THRESHOLD
-from .vmcopt_gto_bigmat import (
+from .vmcopt_gto_pssgd import (
     _build_opt_mask,
     _init_params_corr,
     _check_j2_cusps,
@@ -76,6 +76,38 @@ def _build_flat_mask(params_corr, frozen_keys):
         return jnp.ones(flat.shape[0], dtype=bool)
     leaves, _ = jax.tree_util.tree_flatten(mask_tree)
     return jnp.concatenate([l.ravel() for l in leaves])
+
+
+# -----------------------------------------------------------
+# Parameter validation
+# -----------------------------------------------------------
+
+def _check_pade_denominators(params_corr):
+    """Error if any Padé denominator parameter is <= 0.
+
+    The Padé form u(r) = a*r / (1 + b*r) diverges linearly
+    when b <= 0, making the Jastrow factor blow up at large
+    electron separations.  This always produces nonsensical
+    local energies and must be caught before sampling.
+    """
+    for key in ("J1_pade", "J2_pade"):
+        if key not in params_corr:
+            continue
+        sub = params_corr[key]
+        for name, arr in sub.items():
+            # arr[-1] is the denominator for J1_pade;
+            # arr[1] is the denominator for J2_pade.
+            b_val = float(arr[-1]) if key == "J1_pade" \
+                else float(arr[1])
+            if b_val <= 0.0:
+                raise ValueError(
+                    f"{key}['{name}'] has denominator"
+                    f" parameter b = {b_val:.6f}."
+                    f"  The Padé form a*r/(1+b*r)"
+                    f" diverges when b <= 0."
+                    f"  Use a positive value"
+                    f" (e.g. 1.0)."
+                )
 
 
 # -----------------------------------------------------------
@@ -464,12 +496,12 @@ class _VMCOptLinearDriver:
         rng_key,
         params_corr_init=None,
         frozen_keys=None,
-        num_iters=10,
+        num_epochs=20,
         num_walkers=1000,
         num_steps_per_block=200,
         num_steps_decorr=1,
-        num_blocks=5,
-        num_blocks_equil=5,
+        num_opt_samples=5000,
+        num_blocks_equil=10,
         mc_timestep=0.1,
         shift_i=0.01,
         shift_s=1.0,
@@ -487,7 +519,7 @@ class _VMCOptLinearDriver:
             Initial Jastrow parameters.
         frozen_keys : dict or None
             Parameters to freeze.
-        num_iters : int
+        num_epochs : int
             Number of macro-iterations (sample → solve).
         num_walkers : int
             Number of MC walkers.
@@ -495,8 +527,12 @@ class _VMCOptLinearDriver:
             MC steps per production block.
         num_steps_decorr : int
             Decorrelation sub-steps.
-        num_blocks : int
-            Production blocks for sampling.
+        num_opt_samples : int
+            Total walker snapshots to collect for
+            building the linear-method matrices.
+            Multiple production blocks are run until
+            this many samples are accumulated.
+            QMCPACK typically uses 16000–64000.
         num_blocks_equil : int
             Equilibration blocks.
         mc_timestep : float
@@ -524,6 +560,7 @@ class _VMCOptLinearDriver:
         """
         params_corr = _init_params_corr(params_corr_init)
         _check_j2_cusps(params_corr, self.eps)
+        _check_pade_denominators(params_corr)
 
         if not params_corr:
             warnings.warn(
@@ -593,15 +630,15 @@ class _VMCOptLinearDriver:
         accept_hist = [False, False]
 
         # ===== Main loop =====
-        best_energy = jnp.inf
-        for it in range(num_iters):
+        # best_energy = jnp.inf
+        for epoch in range(num_epochs):
             curr_params = _unflatten(flat_params)
 
             # 1. Equilibrate
             if verbose:
                 print(
-                    f"\n--- Iteration {it + 1}"
-                    f"/{num_iters} ---"
+                    f"\n--- Epoch {epoch + 1}"
+                    f"/{num_epochs} ---"
                 )
                 print("  Equilibrating...")
             (rng_key, walkers, mc_stepsize, _), \
@@ -617,30 +654,49 @@ class _VMCOptLinearDriver:
                     f" {float(acc_ratios[-1]):.3f}"
                 )
 
-            # 2. Sample
+            # 2. Sample — accumulate walker snapshots
+            #    across multiple production blocks.
+            num_sample_blocks = max(
+                1,
+                -(-num_opt_samples // num_walkers),
+            )
             if verbose:
-                print("  Sampling...")
-            (rng_key, walkers, mc_stepsize, _), \
-                (_, _) = self.run_production(
-                    rng_key, walkers, mc_stepsize,
-                    curr_params,
-                    num_steps_per_block,
-                    num_steps_decorr,
+                n_total_samp = (
+                    num_sample_blocks * num_walkers
                 )
+                print(
+                    f"  Sampling {num_sample_blocks}"
+                    f" blocks x {num_walkers} walkers"
+                    f" = {n_total_samp} samples..."
+                )
+            snapshots = []
+            for _blk in range(num_sample_blocks):
+                (rng_key, walkers, mc_stepsize, _), \
+                    (_, _) = self.run_production(
+                        rng_key, walkers, mc_stepsize,
+                        curr_params,
+                        num_steps_per_block,
+                        num_steps_decorr,
+                    )
+                snapshots.append(walkers)
+            sample_walkers = jnp.concatenate(
+                snapshots, axis=0
+            )[:num_opt_samples]
+            num_samples = sample_walkers.shape[0]
 
             # 3. Compute per-walker derivatives (batched)
             if verbose:
                 print(
                     f"  Computing derivatives for"
-                    f" {num_walkers} walkers..."
+                    f" {num_samples} samples..."
                 )
             all_EL = []
             all_dlogpsi = []
             all_dEL = []
             bs = deriv_batch_size
-            for i in range(0, num_walkers, bs):
-                batch = walkers[
-                    i:min(i + bs, num_walkers)
+            for i in range(0, num_samples, bs):
+                batch = sample_walkers[
+                    i:min(i + bs, num_samples)
                 ]
                 el, dlp, del_ = jax.vmap(
                     compute_walker_derivs,
@@ -662,7 +718,7 @@ class _VMCOptLinearDriver:
             if verbose:
                 print(
                     f"  E_L = {E_mean:.8f}"
-                    f" +/- {E_std / num_walkers**0.5:.8f}"
+                    f" +/- {E_std / num_samples**0.5:.8f}"
                 )
 
             # 4. Build matrices
@@ -715,12 +771,28 @@ class _VMCOptLinearDriver:
 
             # 8. Accept/reject via correlated sampling
             # Compute log-psi at old and new params
-            log_psi_old = jax.vmap(
-                compute_log_psi, in_axes=(0, None)
-            )(walkers, flat_params)
-            log_psi_new = jax.vmap(
-                compute_log_psi, in_axes=(0, None)
-            )(walkers, flat_params_new)
+            # on the full sample set.
+            lp_old_parts = []
+            lp_new_parts = []
+            el_new_parts = []
+            for i in range(0, num_samples, bs):
+                sw = sample_walkers[
+                    i:min(i + bs, num_samples)
+                ]
+                lp_old_parts.append(jax.vmap(
+                    compute_log_psi, in_axes=(0, None)
+                )(sw, flat_params))
+                lp_new_parts.append(jax.vmap(
+                    compute_log_psi, in_axes=(0, None)
+                )(sw, flat_params_new))
+                el_new_parts.append(jax.vmap(
+                    lambda r: E_L_fn(
+                        r, _unflatten(flat_params_new)
+                    ),
+                )(sw))
+            log_psi_old = jnp.concatenate(lp_old_parts)
+            log_psi_new = jnp.concatenate(lp_new_parts)
+            EL_new = jnp.concatenate(el_new_parts)
 
             # Importance weights: |Ψ_new/Ψ_old|²
             log_weights = 2.0 * (
@@ -734,11 +806,6 @@ class _VMCOptLinearDriver:
             weights = raw_weights / w_sum
 
             # Reweighted energy at new params
-            EL_new = jax.vmap(
-                lambda r: E_L_fn(r, _unflatten(
-                    flat_params_new
-                )),
-            )(walkers)
             new_cost = float(
                 jnp.sum(weights * EL_new)
             )
@@ -755,7 +822,7 @@ class _VMCOptLinearDriver:
                     f"  Delta: {new_cost - old_cost:.8f}"
                 )
 
-            if is_valid and new_cost < old_cost + 1.0:
+            if is_valid and new_cost < old_cost:
                 # Accept
                 flat_params = flat_params_new
                 if shift_s > 1e-2:
@@ -849,7 +916,7 @@ def get_vmcopt_func(
 
     Returns
     -------
-    driver : _VMCOptDriver_new
+    driver : _VMCOptLinearDriver
         Callable optimizer.
     """
     num_nuc = mf.mol.natm
