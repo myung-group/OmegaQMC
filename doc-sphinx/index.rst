@@ -12,6 +12,7 @@ Welcome to QMC with PGCS's documentation!
 
    usage
    api
+   references
 
 Indices and tables
 ==================

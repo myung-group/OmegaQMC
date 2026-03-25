@@ -2,9 +2,9 @@ Getting Started
 ===============
 
 This page walks through minimal workflows for the two quantum Monte Carlo
-methods provided by the ``OmegaQMC.` package: variational Monte Carlo (VMC)
-with point-group correlated sampling (PGCS) and auxiliary-field quantum Monte
-Carlo (AFQMC).
+methods provided by the ``OmegaQMC`` package: variational Monte Carlo
+(VMC) :cite:`Foulkes2001` with point-group correlated sampling (PGCS)
+and auxiliary-field quantum Monte Carlo (AFQMC) :cite:`Zhang2003`.
 
 VMC with PGCS
 -------------
@@ -105,10 +105,11 @@ Optimizing Jastrow parameters
 
 Before a production VMC run, optimize the Jastrow factor
 with :func:`~OmegaQMC.get_vmcopt_func`.  The default
-implementation uses the **linear method** (a port of the
-QMCPACK ``OneShiftOnly`` algorithm), which typically
-converges an order of magnitude faster than gradient
-descent:
+implementation uses the **linear method**
+:cite:`Umrigar2007,Toulouse2008` (a port of the QMCPACK
+:cite:`Kim2018` ``OneShiftOnly`` algorithm), which
+typically converges an order of magnitude faster than
+gradient descent:
 
 .. code-block:: python
 
@@ -199,9 +200,10 @@ B-spline Jastrow factors
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For higher variational freedom, replace the two-parameter Padé
-Jastrow with a cubic B-spline Jastrow (following the QMCPACK
-``BsplineFunctor`` convention).  Cutoff radii are passed
-separately via a ``bspline_config`` dict:
+Jastrow :cite:`Drummond2004` with a cubic B-spline Jastrow
+(following the QMCPACK :cite:`Kim2018` ``BsplineFunctor``
+convention).  Cutoff radii are passed separately via a
+``bspline_config`` dict:
 
 .. code-block:: python
 
@@ -235,12 +237,13 @@ The ``bspline_config`` dict specifies cutoff radii only
 parameters is determined by the length of each coefficient
 array in ``params_jastrow``.
 
-Cusp constraints are enforced automatically:
+Cusp constraints :cite:`Kato1957` are enforced
+automatically:
 
 - **J2 like-spin**: cusp value = -1/4
 - **J2 unlike-spin**: cusp value = -1/2
 - **J1**: cusp value = -Z (nuclear charge), or 0
-  when cusp-corrected orbitals are used
+  when cusp-corrected orbitals are used :cite:`Quady2025`
 
 Both Padé and B-spline Jastrows can coexist (their
 contributions are summed), though a warning is emitted.
@@ -248,10 +251,12 @@ contributions are summed), though a warning is emitted.
 AFQMC
 -----
 
-Auxiliary-field quantum Monte Carlo (AFQMC) provides systematically improvable
-correlation energies at polynomial cost.  The ``OmegaQMC.` package exposes a
-two-step API through :func:`~OmegaQMC.get_afqmc_func`: first build the driver,
-then call it to run the simulation.
+Auxiliary-field quantum Monte Carlo (AFQMC)
+:cite:`Zhang2003` provides systematically improvable
+correlation energies at polynomial cost.  The
+``OmegaQMC`` package exposes a two-step API through
+:func:`~OmegaQMC.get_afqmc_func`: first build the
+driver, then call it to run the simulation.
 
 Step 1 — Build the molecular system
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -348,8 +353,9 @@ Multi-determinant trial wavefunction
 
 AFQMC accuracy is sensitive to the trial wavefunction quality.
 Replacing the single-determinant Hartree-Fock trial with a CASSCF
-multi-determinant expansion reduces the phaseless approximation bias,
-which is particularly significant in strongly correlated systems.
+multi-determinant expansion reduces the phaseless approximation
+:cite:`Zhang2003` bias, which is particularly significant in
+strongly correlated systems.
 
 Run an RHF calculation followed by CASSCF, then extract the trial
 wavefunction using :func:`~OmegaQMC.afqmc_gto.extract_casscf_trial`:

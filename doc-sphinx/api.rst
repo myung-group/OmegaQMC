@@ -6,6 +6,9 @@ Top-level functions
 
 .. autofunction:: OmegaQMC.generate_molecular_orbitals
 
+   Constructs the mean-field object via PySCF
+   :cite:`Sun2020`.
+
 .. autofunction:: OmegaQMC.get_vmc_func
 
 .. autofunction:: OmegaQMC.get_vmcopt_func
@@ -13,6 +16,9 @@ Top-level functions
 .. autofunction:: OmegaQMC.get_afqmc_func
 
 .. autofunction:: OmegaQMC.get_qed_afqmc_func
+
+   Implements the phaseless QED-AFQMC method
+   :cite:`Weber2025`.
 
 VMC driver
 -----------
@@ -55,15 +61,16 @@ Jastrow optimizers
 -------------------
 
 Three optimizer implementations are provided, in order of
-increasing efficiency:
+decreasing efficiency:
 
 **Linear method** (recommended)
 
-Ports the QMCPACK ``OneShiftOnly`` algorithm.  At each
+Ports the QMCPACK :cite:`Kim2018` ``OneShiftOnly``
+algorithm :cite:`Umrigar2007,Toulouse2008`.  At each
 epoch it builds overlap (S) and Hamiltonian (H) matrices
-from per-walker log-psi and local-energy derivatives, then
-solves a shifted generalized eigenvalue problem for the
-parameter update.
+from per-walker log-psi and local-energy derivatives,
+then solves a shifted generalized eigenvalue problem
+for the parameter update.
 
 .. autofunction:: OmegaQMC.vmcopt_gto_linear.get_vmcopt_func
 
