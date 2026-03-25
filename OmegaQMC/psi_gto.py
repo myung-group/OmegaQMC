@@ -227,7 +227,12 @@ class _PsiGTO:
         self._bs_j2_cfg = None
         self._bs_j1_cfgs = {}
         if bspline_config is None:
+            for sym in self.unique_elements:
+                self._bs_j1_cfgs[sym] = {"r_cut": 10.0}
+            self._bs_j2_cfg = {"r_cut": 10.0}
+            # default cutoff at 10 bohrs
             return
+
         if "J2" in bspline_config:
             r_cut = float(bspline_config["J2"]["r_cut"])
             self._bs_j2_cfg = {"r_cut": r_cut}
@@ -480,8 +485,13 @@ class _PsiGTO:
             delta_r = r_cut / (n + 1)
             delta_r_inv = 1.0 / delta_r
             max_index = n
+            # Kato cusp: du/dr|_{r->0} = +1/4 (like spin).
+            # Note the sign difference from QMCPACK's BsplineFunctor:
+            # QMCPACK writes Psi = Det * exp(-J), so its cusp value
+            # is -0.25.  Here J is *added* to log|Psi| (exp(+J)
+            # convention), so the cusp value must be +0.25.
             coefs = _build_bspline_coefs(
-                curr_params["like"], delta_r, -0.25
+                curr_params["like"], delta_r, 0.25
             )
             i_idx, j_idx = jnp.triu_indices(
                 elec_crds.shape[0], k=1
@@ -507,8 +517,13 @@ class _PsiGTO:
             delta_r = r_cut / (n + 1)
             delta_r_inv = 1.0 / delta_r
             max_index = n
+            # Kato cusp: du/dr|_{r->0} = +1/2 (unlike spin).
+            # Note the sign difference from QMCPACK's BsplineFunctor:
+            # QMCPACK writes Psi = Det * exp(-J), so its cusp value
+            # is -0.5.  Here J is *added* to log|Psi| (exp(+J)
+            # convention), so the cusp value must be +0.5.
             coefs = _build_bspline_coefs(
-                curr_params["unlike"], delta_r, -0.5
+                curr_params["unlike"], delta_r, 0.5
             )
             i_idx, j_idx = jnp.triu_indices(
                 elec_crds.shape[0], k=1

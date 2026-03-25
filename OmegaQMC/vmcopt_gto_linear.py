@@ -911,8 +911,12 @@ def get_vmcopt_func(
     cusp_scheme : str or None
         Cusp-correction scheme. ``"Quady2025"``
         (default) or ``None``.
-    bspline_config : dict or None
-        B-spline Jastrow cutoff radii.
+    bspline_config : dict or None, optional
+        Cutoff radii for B-spline Jastrow factors.
+        Example::
+
+            {"J1": {"H": {"r_cut": 5.0}},
+             "J2": {"r_cut": 10.0}}
 
     Returns
     -------
