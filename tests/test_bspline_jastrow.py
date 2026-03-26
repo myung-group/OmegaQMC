@@ -159,7 +159,7 @@ class TestH2BsplineIntegration:
         bspline_config = {"J2": {"r_cut": 5.0}}
         log_psi, _, _, _ = get_psi_fun(
             self.mf,
-            bspline_config=bspline_config,
+            jastrow_config=bspline_config,
         )
 
         params = {
@@ -184,7 +184,7 @@ class TestH2BsplineIntegration:
         bspline_config = {"J2": {"r_cut": 5.0}}
         log_psi, _, _, _ = get_psi_fun(
             self.mf,
-            bspline_config=bspline_config,
+            jastrow_config=bspline_config,
         )
 
         params = {
@@ -238,7 +238,7 @@ class TestCoexistence:
         bspline_config = {"J2": {"r_cut": 5.0}}
         log_psi, _, _, _ = get_psi_fun(
             self.mf,
-            bspline_config=bspline_config,
+            jastrow_config=bspline_config,
         )
 
         params = {

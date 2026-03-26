@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import h5py
 from jax.sharding import NamedSharding, PartitionSpec
 
-from .psi_gto import get_psi_fun
+from .psi_gto import get_psi_fun, _sanitize_J3_eeI_params
 from .mo_relax import compute_orbital_response
 from .cusp import get_cusp_params
 from .utils import (parse_molecular_inspheres,
@@ -419,6 +419,25 @@ def _validate_params_corr(params_corr, mf) -> dict:
                     "coefficients"
                 )
 
+    # Validate and sanitize J3_eeI params
+    if "J3_eeI" in params_corr:
+        v = params_corr["J3_eeI"]
+        if not isinstance(v, dict):
+            raise TypeError(
+                "J3_eeI params must be a dict, "
+                f"got {type(v)}"
+            )
+        for sk in v:
+            if not (sk.startswith("like+")
+                    or sk.startswith("unlike+")):
+                raise ValueError(
+                    f"J3_eeI sub-key '{sk}' must "
+                    "start with 'like+' or 'unlike+'"
+                )
+        params_corr["J3_eeI"] = (
+            _sanitize_J3_eeI_params(v)
+        )
+
     # Warn if both pade + bspline present for same body
     if "J1_pade" in params_corr \
             and "J1_bspline" in params_corr:
@@ -486,7 +505,7 @@ class _VMCDriver:
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
                  gr_scheme='scheme1', trial=None,
-                 bspline_config=None):
+                 jastrow_config=None):
         # --- Store state ---
         self.mf = mf
         self.params_corr = params_corr
@@ -524,7 +543,7 @@ class _VMCDriver:
         log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
             = get_psi_fun(mf, params_cusp=params_cusp,
                           trial=trial,
-                          bspline_config=bspline_config)
+                          jastrow_config=jastrow_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         self.local_energy_ee = local_energy_ee
@@ -1295,7 +1314,7 @@ def get_vmc_func(mf,
                  cluster_idx: Collection[int] = None,
                  mo_relax: bool = True,
                  trial: dict | None = None,
-                 bspline_config: dict | None = None):
+                 jastrow_config: dict | None = None):
     """Construct a callable VMC driver for the given mean-field object.
 
     Assembles the trial wave function (Slater determinant + Jastrow factor
@@ -1335,12 +1354,13 @@ def get_vmc_func(mf,
         If ``True`` (default), relax the MO coefficients
         to minimise the energy variance during the
         cusp-correction step.
-    bspline_config : dict or None, optional
+    jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::
 
             {"J1": {"H": {"r_cut": 5.0}},
-             "J2": {"r_cut": 10.0}}
+             "J2": {"r_cut": 10.0},
+             "J3": {"r_cut": 5.0, "N_eI": 3, "N_ee": 3}}
 
     Returns
     -------
@@ -1399,4 +1419,4 @@ def get_vmc_func(mf,
                       timestamp_init,
                       gr_scheme=gr_scheme,
                       trial=trial,
-                      bspline_config=bspline_config)
+                      jastrow_config=jastrow_config)

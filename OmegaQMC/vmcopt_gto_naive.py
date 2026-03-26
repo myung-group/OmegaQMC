@@ -81,7 +81,7 @@ class _VMCOptNaiveDriver:
     """
 
     def __init__(self, mf, params_cusp,
-                 bspline_config=None):
+                 jastrow_config=None):
         nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
         eps = jnp.finfo(nuc_crds.dtype).eps
         nelec = mf.mol.tot_electrons()
@@ -96,7 +96,7 @@ class _VMCOptNaiveDriver:
 
         log_trial_wavefunction, local_energy, _, _ \
             = get_psi_fun(mf, params_cusp=params_cusp,
-                          bspline_config=bspline_config)
+                          jastrow_config=jastrow_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         enr_nn = local_energy_nn(nuc_crds)
@@ -370,7 +370,7 @@ class _VMCOptNaiveDriver:
 
 
 def get_vmcopt_func(mf, cusp_scheme="Quady2025",
-                    bspline_config=None):
+                    jastrow_config=None):
     """Create a naïve VMC optimizer.
 
     Builds cusp-corrected trial wave-function parameters
@@ -384,7 +384,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
         Converged mean-field object.
     cusp_scheme : str or None
         ``"Quady2025"`` (default) or ``None``.
-    bspline_config : dict or None
+    jastrow_config : dict or None
         B-spline Jastrow cutoff radii.
 
     Returns
@@ -407,5 +407,5 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
         params_cusp = None
     return _VMCOptNaiveDriver(
         mf, params_cusp,
-        bspline_config=bspline_config
+        jastrow_config=jastrow_config
     )

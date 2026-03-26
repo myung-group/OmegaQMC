@@ -177,7 +177,7 @@ class _VMCOptLinearDriver:
     """Linear method VMC optimizer (OneShiftOnly)."""
 
     def __init__(self, mf, params_cusp,
-                 bspline_config=None):
+                 jastrow_config=None):
         nuc_crds = jnp.array(
             mf.mol.atom_coords(unit='Bohr')
         )
@@ -195,7 +195,7 @@ class _VMCOptLinearDriver:
         (log_trial_wavefunction, local_energy, _, _) = \
             get_psi_fun(
                 mf, params_cusp=params_cusp,
-                bspline_config=bspline_config,
+                jastrow_config=jastrow_config,
             )
         (local_energy_ee, local_energy_nn,
          local_energy_en, local_energy_ke) = local_energy
@@ -890,7 +890,7 @@ class _VMCOptLinearDriver:
 
 def get_vmcopt_func(
     mf, cusp_scheme="Quady2025",
-    bspline_config=None,
+    jastrow_config=None,
 ):
     """Create a linear-method VMC optimizer.
 
@@ -901,12 +901,13 @@ def get_vmcopt_func(
     cusp_scheme : str or None
         Cusp-correction scheme. ``"Quady2025"``
         (default) or ``None``.
-    bspline_config : dict or None, optional
+    jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::
 
             {"J1": {"H": {"r_cut": 5.0}},
-             "J2": {"r_cut": 10.0}}
+             "J2": {"r_cut": 10.0},
+             "J3": {"r_cut": 5.0, "N_eI": 3, "N_ee": 3}}
 
     Returns
     -------
@@ -934,5 +935,5 @@ def get_vmcopt_func(
         params_cusp = None
     return _VMCOptLinearDriver(
         mf, params_cusp,
-        bspline_config=bspline_config,
+        jastrow_config=jastrow_config,
     )

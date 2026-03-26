@@ -57,6 +57,275 @@ def _bspline_eval(r, coefs, delta_r_inv, max_index):
     return w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3
 
 
+def _compute_eeI_num_params(N_eI, N_ee):
+    """Number of free eeI polynomial parameters."""
+    NumGamma = (
+        (N_eI + 1) * (N_eI + 2) // 2 * (N_ee + 1)
+    )
+    NumConstraints = (
+        (2 * N_eI + 1) + (N_eI + N_ee + 1)
+    )
+    return NumGamma - NumConstraints
+
+
+def _sanitize_J3_eeI_params(params_j3, N_eI=3,
+                             N_ee=3):
+    """Validate and sanitize J3_eeI parameter dict.
+
+    Each value must be a 1-D array of length
+    ``_compute_eeI_num_params(N_eI, N_ee)``.
+    Invalid or wrong-size entries are replaced with
+    zero arrays and a warning is emitted.
+
+    Parameters
+    ----------
+    params_j3 : dict
+        The ``params_corr["J3_eeI"]`` sub-dict.
+    N_eI, N_ee : int
+        Polynomial orders (must match the config
+        used when the driver was constructed).
+
+    Returns
+    -------
+    dict
+        Sanitized copy of *params_j3*.
+    """
+    import warnings
+    num_params = _compute_eeI_num_params(N_eI, N_ee)
+    out = {}
+    for k, v in params_j3.items():
+        try:
+            arr = jnp.asarray(v, dtype=jnp.float64)
+        except Exception:
+            warnings.warn(
+                f"J3_eeI['{k}']: cannot convert "
+                f"to array; replacing with zeros"
+            )
+            out[k] = jnp.zeros(num_params)
+            continue
+        if arr.ndim != 1:
+            warnings.warn(
+                f"J3_eeI['{k}']: expected 1-D "
+                f"array, got ndim={arr.ndim}; "
+                f"replacing with zeros"
+            )
+            out[k] = jnp.zeros(num_params)
+        elif arr.shape[0] != num_params:
+            warnings.warn(
+                f"J3_eeI['{k}']: expected "
+                f"{num_params} params (for "
+                f"N_eI={N_eI}, N_ee={N_ee}), "
+                f"got {arr.shape[0]}; "
+                f"replacing with zeros"
+            )
+            out[k] = jnp.zeros(num_params)
+        else:
+            out[k] = arr
+    return out
+
+
+# --- eeI (three-body) Jastrow helpers ---
+#
+# Port of QMCPACK's PolynomialFunctor3D.  The functional
+# form is:
+#   u(r12,r1I,r2I) = [(r1I-L)(r2I-L)]^C
+#                    * sum_{l,m,n} gamma(l,m,n)
+#                      * r1I^l * r2I^m * r12^n
+# with L = r_cut/2, C = 3 (continuity order), and
+# gamma symmetric in (l,m).  Zero-cusp constraints
+# reduce the free parameter count.
+
+def _build_eeI_constraint_map(N_eI, N_ee, r_cut):
+    """Build the linear map from free params to gammas.
+
+    Ports the constraint logic from QMCPACK
+    ``PolynomialFunctor3D::resize`` and ``reset_gamma``.
+
+    Parameters
+    ----------
+    N_eI : int
+        Max polynomial order in electron-ion distances.
+    N_ee : int
+        Max polynomial order in electron-electron
+        distance.
+    r_cut : float
+        Cutoff radius in bohr.
+
+    Returns
+    -------
+    A : jnp.ndarray, shape (NumGamma, NumParams)
+        Matrix mapping free parameters to the full
+        gamma vector: ``gamma_vec = A @ free_params``.
+    ls, ms, ns : jnp.ndarray
+        Index arrays for the unique gamma entries
+        (l >= m), used by ``_vec_to_gamma_3d``.
+    """
+    import numpy as np
+    L = 0.5 * r_cut
+    C = 3  # continuity order
+
+    # --- Index map (unique gammas with l >= m) ---
+    NumGamma = (
+        (N_eI + 1) * (N_eI + 2) // 2 * (N_ee + 1)
+    )
+    index = np.zeros(
+        (N_eI + 1, N_eI + 1, N_ee + 1), dtype=int
+    )
+    num = 0
+    idx_l, idx_m, idx_n = [], [], []
+    for m in range(N_eI + 1):
+        for l in range(m, N_eI + 1):
+            for n in range(N_ee + 1):
+                index[l, m, n] = num
+                index[m, l, n] = num
+                idx_l.append(l)
+                idx_m.append(m)
+                idx_n.append(n)
+                num += 1
+    assert num == NumGamma
+
+    # --- Constraint matrix ---
+    NumConstraints = (2 * N_eI + 1) + (N_eI + N_ee + 1)
+    C_mat = np.zeros((NumConstraints, NumGamma))
+
+    # e-e no-cusp constraints (n=1 coefficients)
+    for k in range(2 * N_eI + 1):
+        for m_idx in range(k + 1):
+            l_idx = k - m_idx
+            if l_idx <= N_eI and m_idx <= N_eI:
+                i = index[l_idx, m_idx, 1]
+                if l_idx > m_idx:
+                    C_mat[k, i] = 2.0
+                elif l_idx == m_idx:
+                    C_mat[k, i] = 1.0
+
+    # e-I no-cusp constraints
+    row_offset = 2 * N_eI + 1
+    for kp in range(N_eI + N_ee + 1):
+        if kp <= N_ee:
+            C_mat[
+                row_offset + kp,
+                index[0, 0, kp]
+            ] = float(C)
+            if N_eI >= 1:
+                C_mat[
+                    row_offset + kp,
+                    index[0, 1, kp]
+                ] = -L
+        for l_idx in range(1, kp + 1):
+            n_idx = kp - l_idx
+            if (n_idx >= 0 and n_idx <= N_ee
+                    and l_idx <= N_eI):
+                C_mat[
+                    row_offset + kp,
+                    index[l_idx, 0, n_idx]
+                ] = float(C)
+                if N_eI >= 1:
+                    C_mat[
+                        row_offset + kp,
+                        index[l_idx, 1, n_idx]
+                    ] = -L
+
+    # --- Row reduction with partial pivoting ---
+    IndepVar = np.zeros(NumGamma, dtype=bool)
+    col = -1
+    for row in range(NumConstraints):
+        while True:
+            col += 1
+            if col >= NumGamma:
+                break
+            max_loc = row
+            max_abs = abs(C_mat[row, col])
+            for ri in range(row + 1, NumConstraints):
+                av = abs(C_mat[ri, col])
+                if av > max_abs:
+                    max_loc = ri
+                    max_abs = av
+            if max_abs < 1e-6:
+                IndepVar[col] = True
+                continue
+            break
+        if col >= NumGamma:
+            break
+        C_mat[[row, max_loc]] = C_mat[[max_loc, row]]
+        C_mat[row] /= C_mat[row, col]
+        for ri in range(NumConstraints):
+            if ri != row:
+                C_mat[ri] -= (
+                    C_mat[ri, col] * C_mat[row]
+                )
+    for c in range(col + 1, NumGamma):
+        IndepVar[c] = True
+
+    NumParams = int(np.sum(IndepVar))
+    assert NumParams == NumGamma - NumConstraints
+
+    # --- Build A matrix: gamma_vec = A @ free_params ---
+    A = np.zeros((NumGamma, NumParams))
+    indep_cols = np.where(IndepVar)[0]
+    dep_cols = np.where(~IndepVar)[0]
+
+    for p, j in enumerate(indep_cols):
+        A[j, p] = 1.0
+
+    for c, i in enumerate(dep_cols):
+        for p, j in enumerate(indep_cols):
+            A[i, p] = -C_mat[c, j]
+
+    ls = jnp.array(idx_l, dtype=jnp.int32)
+    ms = jnp.array(idx_m, dtype=jnp.int32)
+    ns = jnp.array(idx_n, dtype=jnp.int32)
+
+    return jnp.array(A), ls, ms, ns
+
+
+def _vec_to_gamma_3d(gamma_vec, ls, ms, ns, shape):
+    """Convert flat gamma vector to symmetric 3-D array.
+
+    Parameters
+    ----------
+    gamma_vec : jnp.ndarray, shape (NumGamma,)
+    ls, ms, ns : index arrays from constraint map
+    shape : tuple (N_eI+1, N_eI+1, N_ee+1)
+    """
+    g = jnp.zeros(shape, dtype=gamma_vec.dtype)
+    g = g.at[ls, ms, ns].set(gamma_vec)
+    g = g.at[ms, ls, ns].set(gamma_vec)
+    return g
+
+
+def _power_table(r, max_pow):
+    """Build [r^0, r^1, ..., r^max_pow] for each r.
+
+    Returns shape ``(max_pow + 1, len(r))``.
+    """
+    pows = [jnp.ones_like(r)]
+    for _ in range(max_pow):
+        pows.append(pows[-1] * r)
+    return jnp.stack(pows)
+
+
+def _eval_eeI_poly(r_12, r_1I, r_2I,
+                   gamma_3d, L, N_eI, N_ee):
+    """Evaluate the eeI polynomial on a batch of triplets.
+
+    Parameters
+    ----------
+    r_12, r_1I, r_2I : shape (T,)
+    gamma_3d : shape (N_eI+1, N_eI+1, N_ee+1)
+    L : half-cutoff
+    N_eI, N_ee : polynomial orders
+    """
+    p1 = _power_table(r_1I, N_eI)
+    p2 = _power_table(r_2I, N_eI)
+    p12 = _power_table(r_12, N_ee)
+    P = jnp.einsum(
+        'lmn,lt,mt,nt->t', gamma_3d, p1, p2, p12
+    )
+    envelope = ((r_1I - L) * (r_2I - L)) ** 3
+    return P * envelope
+
+
 def _angular_cartesian(am, dr, rad_s):
     """Return GTO angular part for angular momentum am.
 
@@ -131,17 +400,19 @@ class _PsiGTO:
     """
 
     def __init__(self, mf, params_cusp=None, trial=None,
-                 bspline_config=None):
+                 jastrow_config=None):
         self.mf = mf
         self.trial = trial
         self._parse_mol(mf, params_cusp, trial)
         self._parse_shells(mf)
         self._parse_elements(mf)
-        self._parse_bspline_cfg(bspline_config)
+        self._parse_bspline_cfg(jastrow_config)
+        self._parse_eeI_cfg(jastrow_config)
         self._build_ao_fns()
         self._build_slater_fns()
         self._build_pade_jastrow_fns()
         self._build_bspline_jastrow_fns()
+        self._build_eeI_jastrow_fns()
         self._build_trial_wf_fns()
         self._build_coulomb_fns()
         self._build_ke_fns()
@@ -222,27 +493,43 @@ class _PsiGTO:
         self.unique_elements = unique_elements
         self.atom_to_elem_idx = jnp.array(atom_to_elem_idx)
 
-    def _parse_bspline_cfg(self, bspline_config):
-        """Extract r_cut values from bspline_config dict."""
+    def _parse_bspline_cfg(self, jastrow_config):
+        """Extract r_cut values from jastrow_config dict."""
         self._bs_j2_cfg = None
         self._bs_j1_cfgs = {}
-        if bspline_config is None:
+        if jastrow_config is None:
             for sym in self.unique_elements:
                 self._bs_j1_cfgs[sym] = {"r_cut": 10.0}
             self._bs_j2_cfg = {"r_cut": 10.0}
             # default cutoff at 10 bohrs
             return
 
-        if "J2" in bspline_config:
-            r_cut = float(bspline_config["J2"]["r_cut"])
+        if "J2" in jastrow_config:
+            r_cut = float(jastrow_config["J2"]["r_cut"])
             self._bs_j2_cfg = {"r_cut": r_cut}
-        if "J1" in bspline_config:
+        if "J1" in jastrow_config:
             for sym in self.unique_elements:
-                if sym in bspline_config["J1"]:
+                if sym in jastrow_config["J1"]:
                     rc = float(
-                        bspline_config["J1"][sym]["r_cut"]
+                        jastrow_config["J1"][sym]["r_cut"]
                     )
                     self._bs_j1_cfgs[sym] = {"r_cut": rc}
+
+    def _parse_eeI_cfg(self, jastrow_config):
+        """Extract eeI (three-body) Jastrow config."""
+        self._eeI_cfg = {
+            "N_eI": 3, "N_ee": 3, "r_cut": 5.0
+        }
+        if (jastrow_config is not None
+                and "J3" in jastrow_config):
+            j3 = jastrow_config["J3"]
+            for k in ("N_eI", "N_ee"):
+                if k in j3:
+                    self._eeI_cfg[k] = int(j3[k])
+            if "r_cut" in j3:
+                self._eeI_cfg["r_cut"] = float(
+                    j3["r_cut"]
+                )
 
     def _build_ao_fns(self):
         """Build AO/MO evaluation functions."""
@@ -581,6 +868,110 @@ class _PsiGTO:
         self.J2_bspline_ab = J2_bspline_ab
         self.J1_bspline_fn = J1_bspline_fn
 
+    def _build_eeI_jastrow_fns(self):
+        """Build the three-body eeI Jastrow closure.
+
+        Ports the ``PolynomialFunctor3D`` from QMCPACK.
+        The polynomial order and cutoff are read from
+        ``self._eeI_cfg``.
+        """
+        N_eI = self._eeI_cfg["N_eI"]
+        N_ee = self._eeI_cfg["N_ee"]
+        r_cut = self._eeI_cfg["r_cut"]
+        L = 0.5 * r_cut
+        g_shape = (N_eI + 1, N_eI + 1, N_ee + 1)
+
+        A, ls, ms, ns = _build_eeI_constraint_map(
+            N_eI, N_ee, r_cut
+        )
+        unique_elements = self.unique_elements
+        atom_to_elem_idx = self.atom_to_elem_idx
+
+        def _eeI_element_spin(
+            elec_crds, nuc_crds, gamma_3d,
+            ie, same_spin
+        ):
+            n_elec = elec_crds.shape[0]
+            n_atoms = nuc_crds.shape[0]
+            i_idx, j_idx = jnp.triu_indices(
+                n_elec, k=1
+            )
+            if same_spin:
+                sm = (i_idx % 2) == (j_idx % 2)
+            else:
+                sm = (i_idx % 2) != (j_idx % 2)
+            spin_f = sm.astype(elec_crds.dtype)
+
+            # ee distances (n_pairs,)
+            r_12 = jnp.linalg.norm(
+                elec_crds[i_idx]
+                - elec_crds[j_idx],
+                axis=-1,
+            )
+
+            # eI distances (n_atoms, n_elec)
+            r_eI = jnp.linalg.norm(
+                elec_crds[None, :, :]
+                - nuc_crds[:, None, :],
+                axis=-1,
+            )
+            r_1I = r_eI[:, i_idx]
+            r_2I = r_eI[:, j_idx]
+
+            # masks (n_atoms, n_pairs)
+            cutoff = (
+                (r_1I < L) & (r_2I < L)
+            ).astype(elec_crds.dtype)
+            elem = (
+                atom_to_elem_idx == ie
+            ).astype(elec_crds.dtype)[:, None]
+            mask = cutoff * elem * spin_f[None, :]
+
+            # flatten → (n_atoms * n_pairs,)
+            n_pairs = i_idx.shape[0]
+            r_12_f = jnp.broadcast_to(
+                r_12[None, :],
+                (n_atoms, n_pairs),
+            ).ravel()
+            r_1I_f = r_1I.ravel()
+            r_2I_f = r_2I.ravel()
+
+            u = _eval_eeI_poly(
+                r_12_f, r_1I_f, r_2I_f,
+                gamma_3d, L, N_eI, N_ee,
+            )
+            return jnp.sum(u * mask.ravel())
+
+        def J3_eeI_fn(elec_crds, nuc_crds,
+                      curr_params):
+            # Sign convention: QMCPACK uses exp(-J),
+            # OmegaQMC uses exp(+J).  We negate the
+            # polynomial sum so the same parameters
+            # carry the same physical meaning.
+            total = 0.0
+            for ie, sym in enumerate(
+                unique_elements
+            ):
+                for prefix, same in [
+                    ("like+", True),
+                    ("unlike+", False),
+                ]:
+                    key = prefix + sym
+                    if key not in curr_params:
+                        continue
+                    gamma_vec = A @ curr_params[key]
+                    gamma_3d = _vec_to_gamma_3d(
+                        gamma_vec, ls, ms, ns,
+                        g_shape,
+                    )
+                    total += _eeI_element_spin(
+                        elec_crds, nuc_crds,
+                        gamma_3d, ie, same,
+                    )
+            return -total
+
+        self.J3_eeI_fn = J3_eeI_fn
+
     def _build_trial_wf_fns(self):
         """Build log_trial_wavefunction and _C variant."""
         _log_slater = self._log_slater
@@ -591,6 +982,7 @@ class _PsiGTO:
         J1_bspline_fn = self.J1_bspline_fn
         J2_bspline_aa = self.J2_bspline_aa
         J2_bspline_ab = self.J2_bspline_ab
+        J3_eeI_fn = self.J3_eeI_fn
 
         @jax.jit
         def log_trial_wavefunction(
@@ -620,6 +1012,11 @@ class _PsiGTO:
                     elec_crds, curr_params["J2_bspline"]
                 ) + J2_bspline_ab(
                     elec_crds, curr_params["J2_bspline"]
+                )
+            if "J3_eeI" in curr_params:
+                jastrow_term += J3_eeI_fn(
+                    elec_crds, nuc_crds,
+                    curr_params["J3_eeI"],
                 )
             return ln_slater + jastrow_term
 
@@ -653,6 +1050,11 @@ class _PsiGTO:
                     elec_crds, curr_params["J2_bspline"]
                 ) + J2_bspline_ab(
                     elec_crds, curr_params["J2_bspline"]
+                )
+            if "J3_eeI" in curr_params:
+                jastrow_term += J3_eeI_fn(
+                    elec_crds, nuc_crds,
+                    curr_params["J3_eeI"],
                 )
             return ln_slater + jastrow_term
 
@@ -761,7 +1163,7 @@ class _PsiGTO:
 
 
 def get_psi_fun(mf, params_cusp=None, trial=None,
-                bspline_config=None):
+                jastrow_config=None):
     """
     Creates functions for evaluating the wavefunction
     and local energy components from a PySCF mean-field
@@ -771,7 +1173,7 @@ def get_psi_fun(mf, params_cusp=None, trial=None,
         mf,
         params_cusp=params_cusp,
         trial=trial,
-        bspline_config=bspline_config,
+        jastrow_config=jastrow_config,
     )
     return (
         obj.log_trial_wavefunction,

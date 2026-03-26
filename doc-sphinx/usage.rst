@@ -203,14 +203,14 @@ For higher variational freedom, replace the two-parameter Padé
 Jastrow :cite:`Drummond2004` with a cubic B-spline Jastrow
 (following the QMCPACK :cite:`Kim2018` ``BsplineFunctor``
 convention).  Cutoff radii are passed separately via a
-``bspline_config`` dict:
+``jastrow_config`` dict:
 
 .. code-block:: python
 
     import jax.numpy as jnp
     from OmegaQMC import get_vmcopt_func
 
-    bspline_config = {
+    jastrow_config = {
         "J1": {"H": {"r_cut": 5.0},
                "O": {"r_cut": 8.0}},
         "J2": {"r_cut": 10.0},
@@ -224,7 +224,7 @@ convention).  Cutoff radii are passed separately via a
     }
 
     vmcopt_run = get_vmcopt_func(
-        mf, bspline_config=bspline_config
+        mf, jastrow_config=jastrow_config
     )
     params_opt, info = vmcopt_run(
         rng_key,
@@ -232,7 +232,7 @@ convention).  Cutoff radii are passed separately via a
         num_walkers=500,
     )
 
-The ``bspline_config`` dict specifies cutoff radii only
+The ``jastrow_config`` dict specifies cutoff radii only
 (structural, not optimized).  The number of variational
 parameters is determined by the length of each coefficient
 array in ``params_jastrow``.
@@ -247,6 +247,102 @@ automatically:
 
 Both Padé and B-spline Jastrows can coexist (their
 contributions are summed), though a warning is emitted.
+
+Three-body (eeI) Jastrow factor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A three-body electron-electron-ion (eeI) Jastrow factor captures
+correlation effects that two-body terms miss, particularly in the
+vicinity of ions.  OmegaQMC implements the polynomial eeI Jastrow
+following the QMCPACK :cite:`Kim2018` ``PolynomialFunctor3D``
+convention.
+
+The total eeI contribution is
+
+.. math::
+
+   J_3 = \sum_I \sum_{i < j}
+         u\!\left(r_{ij},\, r_{iI},\, r_{jI}\right)
+
+where the pair function is
+
+.. math::
+
+   u = \bigl[(r_{iI}-L)(r_{jI}-L)\bigr]^{3}
+       \sum_{l=0}^{N_{eI}} \sum_{m=0}^{N_{eI}}
+       \sum_{n=0}^{N_{ee}}
+       \gamma_{lmn}\, r_{iI}^{\,l}\, r_{jI}^{\,m}\, r_{ij}^{\,n}
+
+with :math:`L = r_\text{cut}/2`.  The function is non-zero only
+when both :math:`r_{iI} < L` and :math:`r_{jI} < L`.  Exchange
+symmetry :math:`\gamma_{lmn} = \gamma_{mln}` is enforced exactly.
+
+Cusp constraints :cite:`Kato1957` are applied at construction
+time, eliminating
+
+.. math::
+
+   N_\text{constr} = (2N_{eI}+1) + (N_{eI}+N_{ee}+1)
+
+of the
+
+.. math::
+
+   N_\text{gamma} =
+     \frac{(N_{eI}+1)(N_{eI}+2)}{2}\,(N_{ee}+1)
+
+unique :math:`\gamma` coefficients, leaving
+
+.. math::
+
+   N_\text{params} =
+     N_\text{gamma} - N_\text{constr}
+
+free parameters per (spin channel, element) pair.  For the
+defaults :math:`N_{eI}=3`, :math:`N_{ee}=3` this gives
+:math:`40 - 14 = \mathbf{26}` free parameters.
+
+Add a ``"J3_eeI"`` key to ``params_jastrow``, with sub-keys
+``"like+{elem}"`` (same-spin pairs) and ``"unlike+{elem}"``
+(opposite-spin pairs), where ``{elem}`` is the chemical symbol.
+The structural parameters ``N_eI``, ``N_ee``, and ``r_cut`` go
+under ``jastrow_config["J3"]`` and are not variational:
+
+.. code-block:: python
+
+    import jax.numpy as jnp
+    from OmegaQMC import get_vmcopt_func
+
+    jastrow_config = {
+        "J1": {"N": {"r_cut": 5.0}},
+        "J2": {"r_cut": 10.0},
+        "J3": {"N_eI": 3, "N_ee": 3, "r_cut": 5.0},
+    }
+
+    params_jastrow = {
+        "J2_bspline": {
+            "like":   jnp.zeros(8),
+            "unlike": jnp.zeros(8),
+        },
+        "J3_eeI": {
+            "like+N":   jnp.zeros(26),
+            "unlike+N": jnp.zeros(26),
+        },
+    }
+
+    vmcopt_run = get_vmcopt_func(
+        mf, jastrow_config=jastrow_config
+    )
+    params_opt, info = vmcopt_run(
+        rng_key,
+        params_corr_init=params_jastrow,
+        num_walkers=500,
+    )
+
+For multi-element molecules supply one ``"like+{elem}"`` /
+``"unlike+{elem}"`` pair per distinct element.  Arrays with the
+wrong length are replaced by zero-filled arrays of the correct
+size with a warning.
 
 AFQMC
 -----

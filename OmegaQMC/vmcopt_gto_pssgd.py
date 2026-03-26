@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import optax
 from functools import partial
 from .cusp import get_cusp_params
-from .psi_gto import get_psi_fun
+from .psi_gto import get_psi_fun, _sanitize_J3_eeI_params
 from .constants import MIN_DIST_THRESHOLD
 
 
@@ -81,10 +81,20 @@ def _init_params_corr(params_corr_init):
     params_corr = {}
     for k, v in params_corr_init.items():
         if isinstance(v, dict):
-            params_corr[k] = {k2: jnp.asarray(v2, dtype=jnp.float64)
-                              for k2, v2 in v.items()}
+            params_corr[k] = {
+                k2: jnp.asarray(v2, dtype=jnp.float64)
+                for k2, v2 in v.items()
+            }
         else:
-            params_corr[k] = jnp.array(v, dtype=jnp.float64)
+            params_corr[k] = jnp.array(
+                v, dtype=jnp.float64
+            )
+    if "J3_eeI" in params_corr:
+        params_corr["J3_eeI"] = (
+            _sanitize_J3_eeI_params(
+                params_corr["J3_eeI"]
+            )
+        )
     return params_corr
 
 
@@ -114,7 +124,7 @@ class _VMCOptDriver:
     """
 
     def __init__(self, mf, params_cusp,
-                 bspline_config=None):
+                 jastrow_config=None):
         nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
         eps = jnp.finfo(nuc_crds.dtype).eps
         nelec = mf.mol.tot_electrons()
@@ -129,7 +139,7 @@ class _VMCOptDriver:
 
         log_trial_wavefunction, local_energy, _, _ \
             = get_psi_fun(mf, params_cusp=params_cusp,
-                          bspline_config=bspline_config)
+                          jastrow_config=jastrow_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         enr_nn = local_energy_nn(nuc_crds)
@@ -423,7 +433,7 @@ class _VMCOptDriver:
 
 
 def get_vmcopt_func(mf, cusp_scheme="Quady2025",
-                    bspline_config=None):
+                    jastrow_config=None):
     """Create a post-sampling SGD VMC optimizer.
 
     Builds cusp-corrected trial wave-function parameters
@@ -441,7 +451,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
         Cusp-correction scheme.  ``"Quady2025"``
         (default) applies the scheme from Quady *et al.*
         (2025).  Pass ``None`` to skip cusp corrections.
-    bspline_config : dict or None, optional
+    jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::
 
@@ -470,4 +480,4 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
     else:
         params_cusp = None
     return _VMCOptDriver(mf, params_cusp,
-                         bspline_config=bspline_config)
+                         jastrow_config=jastrow_config)
