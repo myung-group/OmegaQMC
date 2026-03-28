@@ -472,14 +472,12 @@ class _VMCOptLinearDriver:
         # Product matrix: S^{-1} @ H_shifted
         prd_mat = inv_mat @ H_shifted
 
-        # QMCPACK transposes because LAPACK geev
-        # returns right eigenvectors as rows in
-        # Fortran (column-major).  In JAX, eig()
-        # returns right eigenvectors as columns,
-        # so we transpose prd_mat to match.
-        eigenvals, eigenvecs = jnp.linalg.eig(
-            prd_mat.T
-        )
+        # QMCPACK explicitly transposes prd_mat before calling LAPACK dgeev.
+        # That transpose compensates for the C++ row-major to Fortran
+        # column-major storage mismatch — the net effect is that LAPACK sees
+        # prd_mat and returns its RIGHT eigenvectors.
+        # JAX has no such mismatch, so we pass prd_mat directly.
+        eigenvals, eigenvecs = jnp.linalg.eig(prd_mat)
 
         E0 = H[0, 0].real
         best_val, ev = _select_eigenvector(
