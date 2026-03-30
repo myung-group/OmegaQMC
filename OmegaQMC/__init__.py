@@ -4,7 +4,7 @@ import OmegaQMC.config
 
 from OmegaQMC.vmc_gto import generate_molecular_orbitals, get_vmc_func
 from OmegaQMC.vmcopt_gto_linear import get_vmcopt_func
-from OmegaQMC.afqmc_gto import get_afqmc_func
+from OmegaQMC.afqmc_gto import get_afqmc_func, extract_casscf_trial
 from OmegaQMC.qed_afqmc_gto import get_qed_afqmc_func
 # from OmegaQMC import psi_gto
 # from OmegaQMC import psi_gto_cusp

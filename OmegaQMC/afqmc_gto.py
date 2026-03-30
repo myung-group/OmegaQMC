@@ -29,6 +29,62 @@ WEIGHT_CLIP_FRACTION = 0.10
 FBBOUND_DEFAULT = 1.0
 
 
+def extract_casscf_trial(mc, coeff_threshold=1e-4):
+    """Extract multi-determinant trial wavefunction from a PySCF CASSCF/CASCI object.
+
+    Args:
+        mc: PySCF CASSCF or CASCI object (must have run kernel()).
+        coeff_threshold: Threshold on |c_I| for truncating the CI expansion.
+
+    Returns:
+        dict with keys:
+            'ci_coeffs': jnp.array of CI coefficients, shape (ndet,).
+            'occ_up': jnp.array of alpha occupied indices, shape (ndet, nup) int.
+            'occ_dn': jnp.array of beta occupied indices, shape (ndet, ndown) int.
+            'ndet': Number of determinants retained.
+            'mo_coeff': MO coefficient matrix from CASSCF, shape (nao, nmo).
+    """
+    from pyscf.fci import cistring
+
+    mol = mc.mol
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nelecas = mc.nelecas  # (nalpha_cas, nbeta_cas)
+    nup = ncore + nelecas[0]
+    ndown = ncore + nelecas[1]
+
+    # Generate occupation string lists for alpha and beta in active space
+    occslst_a = cistring.gen_occslst(range(ncas), nelecas[0])
+    occslst_b = cistring.gen_occslst(range(ncas), nelecas[1])
+
+    ci = np.asarray(mc.ci)
+    core_indices = list(range(ncore))
+
+    coeffs = []
+    occ_up_list = []
+    occ_dn_list = []
+
+    for ia in range(len(occslst_a)):
+        for ib in range(len(occslst_b)):
+            c = ci[ia, ib]
+            if abs(c) > coeff_threshold:
+                coeffs.append(c)
+                occ_a = core_indices + [ncore + j for j in occslst_a[ia]]
+                occ_b = core_indices + [ncore + j for j in occslst_b[ib]]
+                occ_up_list.append(occ_a)
+                occ_dn_list.append(occ_b)
+
+    ndet = len(coeffs)
+
+    return {
+        'ci_coeffs': jnp.array(np.array(coeffs)),
+        'occ_up': jnp.array(np.array(occ_up_list, dtype=np.int32)),
+        'occ_dn': jnp.array(np.array(occ_dn_list, dtype=np.int32)),
+        'ndet': ndet,
+        'mo_coeff': np.asarray(mc.mo_coeff),
+    }
+
+
 def _make_afqmc_sharding(num_walkers):
     """Return (phi_sharding, scalar_sharding) or (None, None).
 
@@ -111,7 +167,7 @@ def chunked_cholesky(mol, chol_cut=1e-5, max_vecs=None):
     return chol_vecs
 
 
-def prepare_afqmc_integrals(mf, chol_cut=1e-5):
+def prepare_afqmc_integrals(mf, chol_cut=1e-5, mo_coeff=None):
     """Prepare all integrals needed for AFQMC from a PySCF mean-field object.
 
     Computes:
@@ -122,6 +178,8 @@ def prepare_afqmc_integrals(mf, chol_cut=1e-5):
     Args:
         mf: PySCF mean-field object (RHF or UHF, must have run kernel()).
         chol_cut: Cholesky decomposition threshold.
+        mo_coeff: MO coefficient matrix to use instead of mf.mo_coeff.
+                  Useful for CASSCF trials where the MO basis differs from HF.
 
     Returns:
         dict with keys:
@@ -138,7 +196,10 @@ def prepare_afqmc_integrals(mf, chol_cut=1e-5):
     nbasis = mol.nao_nr()
 
     # Get MO coefficients
-    mo_coeff = np.asarray(mf.mo_coeff)
+    if mo_coeff is None:
+        mo_coeff = np.asarray(mf.mo_coeff)
+    else:
+        mo_coeff = np.asarray(mo_coeff)
 
     # Electron counts
     nup = mol.nelec[0]
@@ -195,6 +256,24 @@ def half_rotate_cholesky(chol, trial_up, trial_dn):
     rchol_a = jnp.einsum('pi,gpq->giq', trial_up.conj(), chol)
     rchol_b = jnp.einsum('pi,gpq->giq', trial_dn.conj(), chol)
     return rchol_a, rchol_b
+
+
+def half_rotate_cholesky_multidet(chol, trials_up, trials_dn):
+    """Half-rotate Cholesky vectors for each determinant in a multi-det trial.
+
+    Args:
+        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
+        trials_up: Trial alpha orbitals, shape (ndet, nbasis, nup).
+        trials_dn: Trial beta orbitals, shape (ndet, nbasis, ndown).
+
+    Returns:
+        rchols_a: shape (ndet, naux, nup, nbasis).
+        rchols_b: shape (ndet, naux, ndown, nbasis).
+    """
+    _hr = lambda trial: jnp.einsum('pi,gpq->giq', trial.conj(), chol)
+    rchols_a = jax.vmap(_hr)(trials_up)
+    rchols_b = jax.vmap(_hr)(trials_dn)
+    return rchols_a, rchols_b
 
 
 # ===================================================================
@@ -471,6 +550,81 @@ def greens_function(phia, phib, trial_up, trial_dn):
     return Ga, Gb, Ghalfa, Ghalfb, overlap
 
 
+def _gf_spin_single_det(phi, trial_I):
+    """Green's function for one determinant, all walkers, one spin channel.
+
+    Args:
+        phi: Walker orbitals, shape (nwalkers, nbasis, nocc).
+        trial_I: Trial orbitals for one determinant, shape (nbasis, nocc).
+
+    Returns:
+        Ghalf: Half-rotated GF, shape (nwalkers, nocc, nbasis).
+        ovlp: det(trial_I^dag phi), shape (nwalkers,).
+    """
+    ovlp_mat = jnp.einsum('wpi,pj->wij', phi, trial_I.conj())
+    ovlp_inv = jnp.linalg.inv(ovlp_mat)
+    Ghalf = jnp.einsum('wij,wqj->wiq', ovlp_inv, phi)
+    sign, log_det = jnp.linalg.slogdet(ovlp_mat)
+    ovlp = sign * jnp.exp(log_det)
+    return Ghalf, ovlp
+
+
+@partial(jax.jit, static_argnames=[])
+def greens_function_multidet(phia, phib, trials_up, trials_dn, ci_coeffs):
+    """Compute multi-determinant Green's function for all walkers.
+
+    Args:
+        phia: Walker alpha orbitals, shape (nwalkers, nbasis, nup).
+        phib: Walker beta orbitals, shape (nwalkers, nbasis, ndown).
+        trials_up: Trial alpha orbitals, shape (ndet, nbasis, nup).
+        trials_dn: Trial beta orbitals, shape (ndet, nbasis, ndown).
+        ci_coeffs: CI coefficients, shape (ndet,).
+
+    Returns:
+        Ga, Gb: Full GF, shape (nwalkers, nbasis, nbasis).
+        Ghalfa_all, Ghalfb_all: Per-det half-rotated GF (NaN-sanitized),
+            shape (ndet, nwalkers, nocc, nbasis).
+        overlap: Multi-det overlap, shape (nwalkers,).
+        ovlp_a_all, ovlp_b_all: Per-det spin overlaps,
+            shape (ndet, nwalkers).
+    """
+    # vmap over determinant axis
+    Ghalfa_all, ovlp_a_all = jax.vmap(
+        _gf_spin_single_det, in_axes=(None, 0))(phia, trials_up)
+    # Ghalfa_all: (ndet, nwalkers, nup, nbasis)
+    # ovlp_a_all: (ndet, nwalkers)
+
+    Ghalfb_all, ovlp_b_all = jax.vmap(
+        _gf_spin_single_det, in_axes=(None, 0))(phib, trials_dn)
+
+    # Sanitize NaN in Ghalf (from singular overlaps where det has zero
+    # overlap with walker — the weight w_I is also zero so contribution
+    # vanishes, but NaN * 0 = NaN in floating point)
+    Ghalfa_all = jnp.where(jnp.isnan(Ghalfa_all), 0.0, Ghalfa_all)
+    Ghalfb_all = jnp.where(jnp.isnan(Ghalfb_all), 0.0, Ghalfb_all)
+
+    # Per-det weight: w_I = c_I* × O_I^a × O_I^b
+    # ci_coeffs: (ndet,) -> (ndet, 1) for broadcasting
+    w_I = ci_coeffs.conj()[:, None] * ovlp_a_all * ovlp_b_all
+    # w_I: (ndet, nwalkers)
+
+    # Multi-det overlap
+    overlap = jnp.sum(w_I, axis=0)  # (nwalkers,)
+
+    # w_I: (ndet, nwalkers) -> (ndet, nwalkers, 1, 1)
+    w_expanded = w_I[:, :, None, None]
+
+    # Full G: G_a = sum_I w_I * trial_I^* @ Ghalf_I / O
+    Ga = jnp.sum(
+        w_expanded * jnp.einsum('dpi,dwiq->dwpq', trials_up.conj(), Ghalfa_all),
+        axis=0) / overlap[:, None, None]
+    Gb = jnp.sum(
+        w_expanded * jnp.einsum('dpi,dwiq->dwpq', trials_dn.conj(), Ghalfb_all),
+        axis=0) / overlap[:, None, None]
+
+    return Ga, Gb, Ghalfa_all, Ghalfb_all, overlap, ovlp_a_all, ovlp_b_all
+
+
 def local_energy_1body(h1e, Ga, Gb, enuc):
     """One-body contribution to the local energy.
 
@@ -555,6 +709,54 @@ def local_energy(h1e, chol, Ga, Gb, Ghalfa, Ghalfb, rchol_a, rchol_b, enuc):
     return e_tot, e_1b, e_2b
 
 
+@partial(jax.jit, static_argnames=[])
+def local_energy_multidet(h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+                          rchols_a, rchols_b, ci_coeffs,
+                          ovlp_a_all, ovlp_b_all, enuc):
+    """Compute multi-determinant mixed-estimator local energy.
+
+    One-body uses the aggregate full G. Two-body requires per-det
+    Ghalf paired with per-det half-rotated Cholesky vectors.
+
+    Args:
+        h1e: One-body Hamiltonian, shape (nbasis, nbasis).
+        Ga, Gb: Full GF, shape (nwalkers, nbasis, nbasis).
+        Ghalfa_all: Per-det half-rotated alpha GF, shape (ndet, nwalkers, nup, nbasis).
+        Ghalfb_all: Per-det half-rotated beta GF, shape (ndet, nwalkers, ndn, nbasis).
+        rchols_a: Per-det half-rotated Cholesky (alpha), shape (ndet, naux, nup, nbasis).
+        rchols_b: Per-det half-rotated Cholesky (beta), shape (ndet, naux, ndn, nbasis).
+        ci_coeffs: CI coefficients, shape (ndet,).
+        ovlp_a_all: Per-det alpha overlaps, shape (ndet, nwalkers).
+        ovlp_b_all: Per-det beta overlaps, shape (ndet, nwalkers).
+        enuc: Nuclear repulsion energy.
+
+    Returns:
+        e_tot, e_1b, e_2b: shape (nwalkers,) each.
+    """
+    # One-body: uses aggregate full G
+    e_1b = local_energy_1body(h1e, Ga, Gb, enuc)
+
+    # Two-body: per-det, then weighted sum
+    def _e2b_single_det(Ghalfa_I, Ghalfb_I, rchol_a_I, rchol_b_I):
+        e_coul, e_exch = local_energy_2body(Ghalfa_I, Ghalfb_I,
+                                            rchol_a_I, rchol_b_I)
+        return e_coul - e_exch  # (nwalkers,)
+
+    e_2b_all = jax.vmap(_e2b_single_det)(
+        Ghalfa_all, Ghalfb_all, rchols_a, rchols_b)
+    # e_2b_all: (ndet, nwalkers)
+
+    # Per-det weights
+    w_I = ci_coeffs.conj()[:, None] * ovlp_a_all * ovlp_b_all
+    overlap = jnp.sum(w_I, axis=0)  # (nwalkers,)
+
+    # Weighted two-body energy
+    e_2b = jnp.sum(w_I * e_2b_all, axis=0) / overlap
+
+    e_tot = e_1b + e_2b
+    return e_tot, e_1b, e_2b
+
+
 # ===================================================================
 # Propagation
 # ===================================================================
@@ -627,7 +829,8 @@ def _update_weights_phaseless(weights, ovlp_old, ovlp_new, cfb, cmf,
     return weights_new, e_hybrid_new
 
 
-def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt):
+def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt,
+                     G_charge=None):
     """Build the one-body propagator and mean-field shift.
 
     Args:
@@ -636,6 +839,8 @@ def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt):
         trial_up: Trial alpha orbitals, shape (nbasis, nup).
         trial_dn: Trial beta orbitals, shape (nbasis, ndown).
         dt: Imaginary time step.
+        G_charge: Pre-computed charge density matrix for multi-det trials.
+                  If None, computed from single-det trial.
 
     Returns:
         dict with:
@@ -644,9 +849,10 @@ def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt):
             'dt': Time step.
     """
     # Compute trial one-body density matrix
-    G_trial_a = trial_up @ trial_up.T.conj()
-    G_trial_b = trial_dn @ trial_dn.T.conj()
-    G_charge = G_trial_a + G_trial_b
+    if G_charge is None:
+        G_trial_a = trial_up @ trial_up.T.conj()
+        G_trial_b = trial_dn @ trial_dn.T.conj()
+        G_charge = G_trial_a + G_trial_b
 
     # Mean-field shift (ipie convention)
     mf_shift = 1j * jnp.einsum('gpq,qp->g', chol, G_charge)
@@ -760,6 +966,101 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
     return phia, phib, weights_new, ovlp_new, e_hybrid_new, rng_key
 
 
+def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
+                               propagator, chol, rchols_a, rchols_b,
+                               trials_up, trials_dn, ci_coeffs,
+                               eshift, rng_key,
+                               fbbound=None, exp_nmax=6):
+    """Propagate all walkers by one time step using multi-det trial.
+
+    Same structure as single-det propagate_walkers but uses
+    greens_function_multidet and per-det force bias.
+
+    Args:
+        phia: shape (nwalkers, nbasis, nup).
+        phib: shape (nwalkers, nbasis, ndown).
+        weights: shape (nwalkers,).
+        overlap: Overlap from previous step, shape (nwalkers,).
+        e_hybrid: Hybrid energy from previous step, shape (nwalkers,).
+        propagator: dict from build_propagator().
+        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
+        rchols_a: Per-det half-rotated Cholesky (alpha), shape (ndet, naux, nup, nbasis).
+        rchols_b: Per-det half-rotated Cholesky (beta), shape (ndet, naux, ndn, nbasis).
+        trials_up: Trial alpha orbitals, shape (ndet, nbasis, nup).
+        trials_dn: Trial beta orbitals, shape (ndet, nbasis, ndown).
+        ci_coeffs: CI coefficients, shape (ndet,).
+        eshift: Energy shift for population control (scalar).
+        rng_key: JAX random key.
+        fbbound: Force bias magnitude bound (default: 1.0).
+        exp_nmax: Taylor expansion order for matrix exponential.
+
+    Returns:
+        phia_new, phib_new, weights_new, overlap_new, e_hybrid_new, rng_key.
+    """
+    dt = propagator['dt']
+    expH1 = propagator['expH1']
+    mf_shift = propagator['mf_shift']
+    nwalkers = phia.shape[0]
+    naux = chol.shape[0]
+
+    if fbbound is None:
+        fbbound = FBBOUND_DEFAULT
+
+    # 1. Compute multi-det Green's function
+    Ga, Gb, Ghalfa_all, Ghalfb_all, ovlp, _, _ = greens_function_multidet(
+        phia, phib, trials_up, trials_dn, ci_coeffs)
+
+    # 2. Apply first half of one-body propagator
+    phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
+    phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
+
+    # 3. Force bias from aggregate multi-det GF
+    vbias_a = jnp.einsum('gpq,wqp->gw', chol, Ga)
+    vbias_b = jnp.einsum('gpq,wqp->gw', chol, Gb)
+    vbias = vbias_a + vbias_b
+
+    # Optimal shift
+    xbar = -jnp.sqrt(dt) * (1j * vbias - mf_shift[:, None])
+    xbar = xbar.T  # (nwalkers, naux)
+
+    # Bound force bias
+    xbar_abs = jnp.abs(xbar)
+    xbar = jnp.where(xbar_abs > fbbound,
+                     xbar * fbbound / xbar_abs,
+                     xbar)
+
+    # 4. Sample auxiliary fields
+    rng_key, subkey = jax.random.split(rng_key)
+    xi = jax.random.normal(subkey, shape=(nwalkers, naux))
+
+    # Shifted fields
+    xshifted = xi - xbar
+
+    # Constant factors for weight update
+    cmf = -jnp.sqrt(dt) * jnp.einsum('wg,g->w', xshifted, mf_shift)
+    cfb = (jnp.sum(xi * xbar, axis=1)
+           - 0.5 * jnp.sum(xbar * xbar, axis=1))
+
+    # 5. Construct and apply VHS
+    VHS = 1j * jnp.sqrt(dt) * jnp.einsum('wg,gpq->wpq', xshifted, chol)
+
+    phia = _apply_exp_vhs(VHS, phia, exp_nmax)
+    phib = _apply_exp_vhs(VHS, phib, exp_nmax)
+
+    # 6. Apply second half of one-body propagator
+    phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
+    phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
+
+    # 7. Compute new overlap and update weights
+    _, _, _, _, ovlp_new, _, _ = greens_function_multidet(
+        phia, phib, trials_up, trials_dn, ci_coeffs)
+
+    weights_new, e_hybrid_new = _update_weights_phaseless(
+        weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
+
+    return phia, phib, weights_new, ovlp_new, e_hybrid_new, rng_key
+
+
 # ===================================================================
 # Driver
 # ===================================================================
@@ -772,7 +1073,8 @@ class _AFQMCDriver:
     via :func:`get_afqmc_func`.
     """
 
-    def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True):
+    def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
+                 trial=None):
         """Prepare integrals and build the propagator.
 
         Args:
@@ -780,17 +1082,22 @@ class _AFQMCDriver:
             dt: Imaginary time step (default 0.005 Ha^{-1}).
             chol_cut: Cholesky decomposition threshold.
             verbose: Print progress.
+            trial: Multi-determinant trial dict from extract_casscf_trial(),
+                   or None for single-det HF trial (default).
         """
         self.mf = mf
         self.dt = dt
         self.verbose = verbose
+        self.multidet = trial is not None
 
         # 1. Prepare integrals
         if verbose:
             print("Preparing integrals (Cholesky decomposition)...")
             t0 = time.time()
 
-        integrals = prepare_afqmc_integrals(mf, chol_cut=chol_cut)
+        mo_coeff_override = trial['mo_coeff'] if trial is not None else None
+        integrals = prepare_afqmc_integrals(
+            mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override)
         self.h1e = integrals['h1e']
         self.h1e_mod = integrals['h1e_mod']
         self.chol = integrals['chol']
@@ -806,21 +1113,62 @@ class _AFQMCDriver:
                   f"ndown={self.ndown}, naux={self.naux}")
             print(f"  Integral preparation took {time.time()-t0:.2f} s")
 
-        # 2. Trial wavefunction (HF determinant)
-        self.trial_up = jnp.eye(self.nbasis, self.nup)
-        self.trial_dn = jnp.eye(self.nbasis, self.ndown)
+        if trial is not None:
+            # Multi-determinant trial wavefunction
+            ndet = trial['ndet']
+            self.ci_coeffs = trial['ci_coeffs']
 
-        # Half-rotate Cholesky vectors
-        self.rchol_a, self.rchol_b = half_rotate_cholesky(
-            self.chol, self.trial_up, self.trial_dn)
+            # Build stacked trial matrices from occupation indices
+            eye = jnp.eye(self.nbasis)
+            # occ_up: (ndet, nup) int indices -> trials_up: (ndet, nbasis, nup)
+            self.trials_up = eye[:, trial['occ_up']].transpose(1, 0, 2)
+            self.trials_dn = eye[:, trial['occ_dn']].transpose(1, 0, 2)
 
-        if verbose:
-            print(f"  rchol_a shape: {self.rchol_a.shape}, "
-                  f"rchol_b shape: {self.rchol_b.shape}")
+            # Dominant determinant for walker initialization
+            self.trial_up = self.trials_up[0]
+            self.trial_dn = self.trials_dn[0]
 
-        # 3. Build propagator
-        self.propagator = build_propagator(
-            self.h1e_mod, self.chol, self.trial_up, self.trial_dn, dt)
+            # Half-rotate Cholesky vectors for all determinants
+            self.rchols_a, self.rchols_b = half_rotate_cholesky_multidet(
+                self.chol, self.trials_up, self.trials_dn)
+
+            if verbose:
+                print(f"  Multi-det trial: {ndet} determinants")
+                print(f"  rchols_a shape: {self.rchols_a.shape}, "
+                      f"rchols_b shape: {self.rchols_b.shape}")
+
+            # Compute weighted G_charge for propagator
+            ci_abs2 = jnp.abs(self.ci_coeffs) ** 2
+            ci_abs2 = ci_abs2 / jnp.sum(ci_abs2)  # normalize
+            G_charge = jnp.einsum(
+                'd,dpi,dqi->pq', ci_abs2,
+                self.trials_up, self.trials_up.conj())
+            G_charge = G_charge + jnp.einsum(
+                'd,dpi,dqi->pq', ci_abs2,
+                self.trials_dn, self.trials_dn.conj())
+
+            # Build propagator with multi-det charge density
+            self.propagator = build_propagator(
+                self.h1e_mod, self.chol,
+                self.trial_up, self.trial_dn, dt,
+                G_charge=G_charge)
+        else:
+            # Single-determinant HF trial
+            self.trial_up = jnp.eye(self.nbasis, self.nup)
+            self.trial_dn = jnp.eye(self.nbasis, self.ndown)
+
+            # Half-rotate Cholesky vectors
+            self.rchol_a, self.rchol_b = half_rotate_cholesky(
+                self.chol, self.trial_up, self.trial_dn)
+
+            if verbose:
+                print(f"  rchol_a shape: {self.rchol_a.shape}, "
+                      f"rchol_b shape: {self.rchol_b.shape}")
+
+            # Build propagator
+            self.propagator = build_propagator(
+                self.h1e_mod, self.chol,
+                self.trial_up, self.trial_dn, dt)
 
         if verbose:
             print(f"  E_HF = {float(mf.e_tot):.10f}")
@@ -919,10 +1267,22 @@ class _AFQMCDriver:
 
                 # Propagate one step
                 rng_key, step_key = jax.random.split(rng_key)
-                phia, phib, weights, overlap, e_hybrid, _ = propagate_walkers(
-                    phia, phib, weights, overlap, e_hybrid,
-                    self.propagator, self.chol, self.rchol_a, self.rchol_b,
-                    self.trial_up, self.trial_dn, eshift, step_key)
+                if self.multidet:
+                    phia, phib, weights, overlap, e_hybrid, _ = \
+                        propagate_walkers_multidet(
+                            phia, phib, weights, overlap, e_hybrid,
+                            self.propagator, self.chol,
+                            self.rchols_a, self.rchols_b,
+                            self.trials_up, self.trials_dn,
+                            self.ci_coeffs, eshift, step_key)
+                else:
+                    phia, phib, weights, overlap, e_hybrid, _ = \
+                        propagate_walkers(
+                            phia, phib, weights, overlap, e_hybrid,
+                            self.propagator, self.chol,
+                            self.rchol_a, self.rchol_b,
+                            self.trial_up, self.trial_dn,
+                            eshift, step_key)
 
                 # Clip weights (ipie convention: skip step 1)
                 if step_count > 1:
@@ -947,12 +1307,24 @@ class _AFQMCDriver:
                     jnp.abs(weights) * e_hybrid.real))
 
             # End of block: compute energy via mixed estimator
-            Ga, Gb, Ghalfa, Ghalfb, ovlp_block = greens_function(
-                phia, phib, self.trial_up, self.trial_dn)
+            if self.multidet:
+                Ga, Gb, Ghalfa_all, Ghalfb_all, ovlp_block, \
+                    ovlp_a_all, ovlp_b_all = \
+                    greens_function_multidet(
+                        phia, phib, self.trials_up, self.trials_dn,
+                        self.ci_coeffs)
 
-            e_tot, e_1b, e_2b = local_energy(
-                self.h1e, self.chol, Ga, Gb, Ghalfa, Ghalfb,
-                self.rchol_a, self.rchol_b, self.enuc)
+                e_tot, e_1b, e_2b = local_energy_multidet(
+                    self.h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+                    self.rchols_a, self.rchols_b, self.ci_coeffs,
+                    ovlp_a_all, ovlp_b_all, self.enuc)
+            else:
+                Ga, Gb, Ghalfa, Ghalfb, ovlp_block = greens_function(
+                    phia, phib, self.trial_up, self.trial_dn)
+
+                e_tot, e_1b, e_2b = local_energy(
+                    self.h1e, self.chol, Ga, Gb, Ghalfa, Ghalfb,
+                    self.rchol_a, self.rchol_b, self.enuc)
 
             # Weighted average over walkers
             w = jnp.abs(weights)
@@ -1002,7 +1374,8 @@ class _AFQMCDriver:
         }
 
 
-def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True):
+def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
+                   trial=None):
     """Create a reusable AFQMC driver.
 
     Args:
@@ -1010,8 +1383,11 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True):
         dt: Imaginary time step (default 0.005 Ha^{-1}).
         chol_cut: Cholesky decomposition threshold.
         verbose: Print progress.
+        trial: Multi-determinant trial dict from extract_casscf_trial(),
+               or None for single-det HF trial (default).
 
     Returns:
         _AFQMCDriver instance (callable).
     """
-    return _AFQMCDriver(mf, dt=dt, chol_cut=chol_cut, verbose=verbose)
+    return _AFQMCDriver(mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
+                        trial=trial)
