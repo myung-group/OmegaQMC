@@ -15,6 +15,7 @@ Reference: QMCPACK ``QMCFixedSampleLinearOptimize.cpp``,
 ``one_shift_run()``.
 """
 
+import subprocess
 import warnings
 import jax
 import jax.numpy as jnp
@@ -167,6 +168,105 @@ def _nonlinear_rescale(dP, S_block):
         / ((1 - xi) + xi * jnp.sqrt(1 + D))
     )
     return 1.0 / (1.0 - rescale)
+
+
+# -----------------------------------------------------------
+# GPU memory auto-tuning
+# -----------------------------------------------------------
+
+def _get_free_gpu_mb():
+    """Return free GPU memory in MiB via nvidia-smi.
+
+    Returns
+    -------
+    float or None
+        Free GPU memory in MiB, or None if unavailable.
+    """
+    try:
+        result = subprocess.run(
+            [
+                'nvidia-smi',
+                '--query-gpu=memory.free',
+                '--format=csv,noheader,nounits',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        lines = result.stdout.strip().split('\n')
+        gpu_devs = [
+            d for d in jax.devices()
+            if d.platform == 'gpu'
+        ]
+        idx = gpu_devs[0].id if gpu_devs else 0
+        idx = min(idx, len(lines) - 1)
+        return float(lines[idx].strip())
+    except Exception:
+        return None
+
+
+def _autotune_deriv_batch(
+        compute_fn, nelec, n_params,
+        flat_params_sample, free_mb,
+        mem_frac=0.75,
+):
+    """Choose batch size for derivative computation.
+
+    Compiles the vmapped derivative function for a
+    single-walker probe to measure per-walker GPU
+    memory via JAX AOT analysis.  Falls back to a
+    0.5 MB/walker heuristic when AOT is unavailable.
+
+    Parameters
+    ----------
+    compute_fn : callable
+        Single-walker derivative function
+        ``(elec_crds, fp) -> (e_loc, dlogpsi, dEL)``.
+    nelec : int
+        Number of electrons.
+    n_params : int
+        Number of optimizable parameters.
+    flat_params_sample : jnp.ndarray, shape (n_params,)
+        Representative parameter vector for tracing.
+    free_mb : float or None
+        Free GPU memory in MiB; ``None`` assumes 4096.
+    mem_frac : float
+        Fraction of free memory to target (default 0.75).
+
+    Returns
+    -------
+    int
+        Recommended per-call batch size.
+    """
+    bytes_per_walker = None
+    try:
+        probe = jnp.zeros((1, nelec, 3))
+        vmapped = jax.vmap(
+            compute_fn, in_axes=(0, None)
+        )
+        compiled = (
+            jax.jit(vmapped)
+            .lower(probe, flat_params_sample)
+            .compile()
+        )
+        analysis = compiled.memory_analysis()
+        bytes_per_walker = (
+            analysis.alias_size
+            + analysis.temp_size
+        )
+    except Exception:
+        pass
+
+    if not bytes_per_walker:
+        bytes_per_walker = 0.5e6  # 0.5 MB fallback
+
+    free_bytes = (
+        (free_mb or 4096.0) * 1e6 * mem_frac
+    )
+    bs = int(free_bytes / bytes_per_walker)
+    return max(10, min(bs, 8192))
 
 
 # -----------------------------------------------------------
@@ -495,17 +595,17 @@ class _VMCOptLinearDriver:
         params_corr_init=None,
         frozen_keys=None,
         num_epochs=20,
-        num_walkers=1000,
+        num_walkers='auto',
         num_steps_per_block=200,
         num_steps_decorr=1,
-        num_opt_samples=5000,
+        num_opt_samples='auto',
         num_blocks_equil=10,
         mc_timestep=0.1,
         shift_i=0.01,
         shift_s=1.0,
         shift_s_base=4.0,
         max_param_change=0.3,
-        deriv_batch_size=100,
+        deriv_batch_size='auto',
         verbose=1,
     ):
         """Run linear method VMC optimization.
@@ -519,18 +619,21 @@ class _VMCOptLinearDriver:
             Parameters to freeze.
         num_epochs : int
             Number of macro-iterations (sample → solve).
-        num_walkers : int
-            Number of MC walkers.
+        num_walkers : int or ``'auto'``
+            Number of MC walkers.  ``'auto'`` queries
+            free GPU memory and sets this to the largest
+            batch that fits (via JAX AOT analysis).
         num_steps_per_block : int
             MC steps per production block.
         num_steps_decorr : int
             Decorrelation sub-steps.
-        num_opt_samples : int
+        num_opt_samples : int or ``'auto'``
             Total walker snapshots to collect for
             building the linear-method matrices.
             Multiple production blocks are run until
             this many samples are accumulated.
             QMCPACK typically uses 16000–64000.
+            ``'auto'`` sets this to ``5 * num_walkers``.
         num_blocks_equil : int
             Equilibration blocks.
         mc_timestep : float
@@ -543,9 +646,11 @@ class _VMCOptLinearDriver:
             Multiplicative factor for shift adaptation.
         max_param_change : float
             Cap on largest single-parameter change.
-        deriv_batch_size : int
+        deriv_batch_size : int or ``'auto'``
             Walker batch size for derivative
-            computation (limits VRAM).
+            computation (limits VRAM).  ``'auto'``
+            matches ``num_walkers`` so all derivatives
+            are computed in a single vmap call.
         verbose : int
             Verbosity level.  0 = silent, 1 = per-epoch
             progress, 2 = also print parameter values
@@ -619,11 +724,181 @@ class _VMCOptLinearDriver:
                 elec_crds, nuc_crds, _unflatten(fp),
             )
 
+        # Auto-tune batch sizes to fit GPU memory
+        _need_auto = (
+            num_walkers == 'auto'
+            or num_opt_samples == 'auto'
+            or deriv_batch_size == 'auto'
+        )
+        if _need_auto:
+            free_mb = _get_free_gpu_mb()
+            auto_bs = _autotune_deriv_batch(
+                compute_walker_derivs,
+                self.nelec, num_opt,
+                flat_params, free_mb,
+            )
+            if num_walkers == 'auto':
+                num_walkers = auto_bs
+            if deriv_batch_size == 'auto':
+                deriv_batch_size = auto_bs
+            if num_opt_samples == 'auto':
+                num_opt_samples = 5 * num_walkers
+            if verbose >= 1:
+                print(
+                    f"  Auto-tuned:"
+                    f" num_walkers={num_walkers},"
+                    f" deriv_batch_size="
+                    f"{deriv_batch_size},"
+                    f" num_opt_samples="
+                    f"{num_opt_samples}"
+                )
+
+        # Snap num_walkers / deriv_batch_size to
+        # multiples of device count for sharding
+        n_devices = len(jax.devices())
+        if n_devices > 1:
+            def _snap(x):
+                return max(
+                    n_devices,
+                    (x // n_devices) * n_devices,
+                )
+            if num_walkers % n_devices != 0:
+                num_walkers = _snap(num_walkers)
+                if verbose >= 1:
+                    print(
+                        f"  num_walkers snapped to"
+                        f" {num_walkers} (divisible"
+                        f" by {n_devices} devices)"
+                    )
+            if deriv_batch_size % n_devices != 0:
+                deriv_batch_size = _snap(
+                    deriv_batch_size
+                )
+
+        # Sharding objects (None, None on single GPU)
+        walkers_sharding, walker_keys_sharding = (
+            _make_sharding(num_walkers)
+        )
+        if verbose >= 1 and walkers_sharding is not None:
+            print(
+                f"  Sharding {num_walkers} walkers"
+                f" across {n_devices} devices"
+            )
+
+        # Define scan functions here (not __init__)
+        # so they close over walker_keys_sharding and
+        # insert with_sharding_constraint on random
+        # keys, propagating the walker PartitionSpec
+        # through lax.scan on multi-GPU runs.
+        _metro = self.metropolis_move
+        _enr_fn = self.total_local_energy_fn
+
+        @partial(jax.jit, static_argnums=(4, 5))
+        def run_equilibration(
+            rng_key, walkers, step_size,
+            params_corr, num_be, num_spb,
+        ):
+            def eq_step(carried_in, _):
+                rkey, w, s, cp = carried_in
+                rkey0, rkey1 = (
+                    jax.random.split(rkey)
+                )
+                keys = jax.random.split(
+                    rkey1, w.shape[0]
+                )
+                if walker_keys_sharding is not None:
+                    keys = (
+                        jax.lax
+                        .with_sharding_constraint(
+                            keys,
+                            walker_keys_sharding,
+                        )
+                    )
+                new_w, accepted = jax.vmap(
+                    _metro,
+                    in_axes=(0, 0, None, None),
+                )(keys, w, s, cp)
+                rate = accepted.mean()
+                new_s = s * (0.6 + rate)
+                return (
+                    (rkey0, new_w, new_s, cp),
+                    rate,
+                )
+
+            for _ in range(num_be):
+                carry_in = (
+                    rng_key, walkers,
+                    step_size, params_corr,
+                )
+                carry_out, acc_ratios = (
+                    jax.lax.scan(
+                        eq_step, carry_in,
+                        jnp.arange(num_spb),
+                    )
+                )
+                (rng_key, walkers,
+                 step_size, _) = carry_out
+            return carry_out, acc_ratios
+
+        @partial(jax.jit, static_argnums=(4, 5))
+        def run_production(
+            rng_key, walkers, step_size,
+            params_corr, num_spb, num_dc,
+        ):
+            def prod_step(carried_in, _):
+                rkey, w, s, cp = carried_in
+                for _ in range(num_dc):
+                    rkey0, rkey1 = (
+                        jax.random.split(rkey)
+                    )
+                    keys = jax.random.split(
+                        rkey1, w.shape[0]
+                    )
+                    if (
+                        walker_keys_sharding
+                        is not None
+                    ):
+                        keys = (
+                            jax.lax
+                            .with_sharding_constraint(
+                                keys,
+                                walker_keys_sharding,
+                            )
+                        )
+                    new_w, accepted = jax.vmap(
+                        _metro,
+                        in_axes=(0, 0, None, None),
+                    )(keys, w, s, cp)
+                    w = new_w
+                    rkey = rkey0
+                r = accepted.mean()
+                energies = jax.vmap(
+                    _enr_fn, in_axes=(0, None),
+                )(new_w, cp)
+                return (
+                    (rkey, new_w, s, cp),
+                    (r, energies),
+                )
+
+            carry_in = (
+                rng_key, walkers,
+                step_size, params_corr,
+            )
+            carried_out, results = jax.lax.scan(
+                prod_step, carry_in,
+                jnp.arange(num_spb),
+            )
+            return carried_out, results
+
         # Initialize walkers
         rng_key, rng = jax.random.split(rng_key)
         walkers = self.initialize_walkers(
             rng, num_walkers
         )
+        if walkers_sharding is not None:
+            walkers = jax.device_put(
+                walkers, walkers_sharding
+            )
         mc_stepsize = (3 * mc_timestep) ** 0.5
 
         # ===== Main loop =====
@@ -639,7 +914,7 @@ class _VMCOptLinearDriver:
                 )
                 print("  Equilibrating...")
             (rng_key, walkers, mc_stepsize, _), \
-                acc_ratios = self.run_equilibration(
+                acc_ratios = run_equilibration(
                     rng_key, walkers, mc_stepsize,
                     curr_params,
                     num_blocks_equil,
@@ -669,7 +944,7 @@ class _VMCOptLinearDriver:
             snapshots = []
             for _blk in range(num_sample_blocks):
                 (rng_key, walkers, mc_stepsize, _), \
-                    (_, _) = self.run_production(
+                    (_, _) = run_production(
                         rng_key, walkers, mc_stepsize,
                         curr_params,
                         num_steps_per_block,
@@ -695,6 +970,12 @@ class _VMCOptLinearDriver:
                 batch = sample_walkers[
                     i:min(i + bs, num_samples)
                 ]
+                if (walkers_sharding is not None
+                        and batch.shape[0]
+                        % n_devices == 0):
+                    batch = jax.device_put(
+                        batch, walkers_sharding
+                    )
                 el, dlp, del_ = jax.vmap(
                     compute_walker_derivs,
                     in_axes=(0, None),
@@ -776,6 +1057,12 @@ class _VMCOptLinearDriver:
                 sw = sample_walkers[
                     i:min(i + bs, num_samples)
                 ]
+                if (walkers_sharding is not None
+                        and sw.shape[0]
+                        % n_devices == 0):
+                    sw = jax.device_put(
+                        sw, walkers_sharding
+                    )
                 lp_old_parts.append(jax.vmap(
                     compute_log_psi, in_axes=(0, None)
                 )(sw, flat_params))
@@ -828,23 +1115,15 @@ class _VMCOptLinearDriver:
                     print("  -> Accepted.")
                 if verbose >= 2:
                     curr_params = _unflatten(flat_params)
-                    print(
-                        f"  Params: {curr_params}"
-                    )
+                    print(f"  Params: {curr_params}")
             else:
                 # Reject: revert params, raise shift
                 shift_s = shift_s * shift_s_base
                 if verbose >= 1:
-                    print(
-                        f"  -> Rejected."
-                        f"  shift_s -> {shift_s:.4f}"
-                    )
+                    print(f"  -> Rejected.  shift_s -> {shift_s:.4f}")
 
             if verbose >= 1:
-                print(
-                    f"  shift_i={shift_i:.4f},"
-                    f" shift_s={shift_s:.4f}"
-                )
+                print(f"  shift_i={shift_i:.4f}, shift_s={shift_s:.4f}")
 
         # ===== Final evaluation =====
         params_corr = _unflatten(flat_params)
@@ -853,14 +1132,14 @@ class _VMCOptLinearDriver:
         if verbose >= 1:
             print("\nFinal energy evaluation...")
         (rng_key, walkers, mc_stepsize, _), \
-            acc_ratios = self.run_equilibration(
+            acc_ratios = run_equilibration(
                 rng_key, walkers, mc_stepsize,
                 params_corr,
                 num_blocks_equil,
                 num_steps_per_block,
             )
         (rng_key, walkers, _, _), (_, tw_energies) = \
-            self.run_production(
+            run_production(
                 rng_key, walkers, mc_stepsize,
                 params_corr,
                 num_steps_per_block,
