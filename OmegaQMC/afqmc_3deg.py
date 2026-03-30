@@ -553,8 +553,9 @@ class _AFQMC3DEGDriver:
                 self.rchol_b = jnp.zeros_like(self.rchol_b)
         else:
             ndn_eff = max(ndown, 1)
-            self.rchol_a = jnp.zeros((0, nup, N_pw))
-            self.rchol_b = jnp.zeros((0, ndn_eff, N_pw))
+            N_q = self.N_q
+            self.rchol_a = jnp.zeros((N_q, nup, N_pw))
+            self.rchol_b = jnp.zeros((N_q, ndn_eff, N_pw))
 
         # Build propagator with sign-aware mean-field shift
         # For fully polarized: use zero beta trial so the mean-field
