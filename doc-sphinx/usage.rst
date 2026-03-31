@@ -145,7 +145,7 @@ Multi-determinant trial wavefunction
 
 A CASSCF multi-determinant expansion can replace the single Slater
 determinant.  The helper
-:func:`~OmegaQMC.afqmc_gto.extract_casscf_trial` converts a converged
+:func:`~OmegaQMC.integrals.cholesky.extract_casscf_trial` converts a converged
 CASSCF object into the ``trial`` dict accepted by
 :func:`~OmegaQMC.get_vmc_func`.
 
@@ -156,7 +156,7 @@ Build the mean-field object with
 
     from pyscf import mcscf
     from OmegaQMC import generate_molecular_orbitals, get_vmc_func
-    from OmegaQMC.afqmc_gto import extract_casscf_trial
+    from OmegaQMC.integrals import extract_casscf_trial
 
     mf = generate_molecular_orbitals(
         "O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692",
@@ -454,13 +454,13 @@ multi-determinant expansion reduces the phaseless approximation
 strongly correlated systems.
 
 Run an RHF calculation followed by CASSCF, then extract the trial
-wavefunction using :func:`~OmegaQMC.afqmc_gto.extract_casscf_trial`:
+wavefunction using :func:`~OmegaQMC.integrals.cholesky.extract_casscf_trial`:
 
 .. code-block:: python
 
     from pyscf import gto, scf, mcscf
     from OmegaQMC import get_afqmc_func
-    from OmegaQMC.afqmc_gto import extract_casscf_trial
+    from OmegaQMC.integrals import extract_casscf_trial
 
     mol = gto.M(
         atom="O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692",
@@ -498,5 +498,5 @@ keyword argument:
           f"+/- {result['energy_err']:.10f}")
 
 The ``trial`` dict is shared between the VMC and AFQMC drivers, so the
-same :func:`~OmegaQMC.afqmc_gto.extract_casscf_trial` call can feed
+same :func:`~OmegaQMC.integrals.cholesky.extract_casscf_trial` call can feed
 either driver without modification.

@@ -24,16 +24,17 @@ class VMCTrialState(NamedTuple):
     """Container for a VMC trial wavefunction.
 
     Attributes:
-        log_psi: (elec_crds, nuc_crds, params) -> float
-            Log of the trial wavefunction.
-        log_psi_C: (elec_crds, nuc_crds, params, mo_C)
-            -> float.  Variant accepting explicit MO
-            coefficients.
-        energy_fns: Tuple of energy component functions
-            (local_energy_ee, local_energy_nn,
-             local_energy_en, local_energy_ke).
+        log_psi: Callable ``(elec_crds, nuc_crds, params)
+            -> float``.  Log of the trial wavefunction.
+        log_psi_C: Callable ``(elec_crds, nuc_crds,
+            params, mo_C) -> float``.  Variant that
+            accepts explicit MO coefficients.
+        energy_fns: Tuple of energy component callables
+            ``(local_energy_ee, local_energy_nn,
+            local_energy_en, local_energy_ke)``.
         get_psi_mo: MO evaluation function.
-        ke_C: Kinetic energy with explicit MO coefficients.
+        ke_C: Kinetic energy callable with explicit
+            MO coefficients.
     """
     log_psi: Callable
     log_psi_C: Callable

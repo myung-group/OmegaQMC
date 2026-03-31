@@ -1,10 +1,18 @@
 """
 Phaseless Auxiliary-Field Quantum Monte Carlo (AFQMC) driver.
 
-Consolidates integral preparation, walker management, estimators,
-propagation, and the main QMC loop into a single module.  The public
-entry point is :func:`get_afqmc_func`, which returns a reusable
-``_AFQMCDriver`` instance (setup once, run many times).
+The public entry point is :func:`get_afqmc_func`, which returns a
+reusable ``_AFQMCDriver`` instance (setup once, run many times).
+
+Canonical implementations live in dedicated submodules:
+
+* :mod:`OmegaQMC.integrals.cholesky` — Cholesky decomposition,
+  half-rotation, integral preparation, CASSCF trial extraction.
+* :mod:`OmegaQMC.observables.energy` — local energy estimators.
+* :mod:`OmegaQMC.observables.greens` — Green's function routines.
+
+All names from those submodules are re-exported here for backward
+compatibility.
 
 Uses JAX + PySCF.
 """

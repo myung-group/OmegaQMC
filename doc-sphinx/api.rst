@@ -43,6 +43,68 @@ QED-FCI
 
 .. autofunction:: OmegaQMC.qed_fci.qed_fci
 
+Observables
+-----------
+
+Energy estimators
+~~~~~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.observables.energy.local_energy_1body
+
+.. autofunction:: OmegaQMC.observables.energy.local_energy_2body
+
+.. autofunction:: OmegaQMC.observables.energy.local_energy
+
+.. autofunction:: OmegaQMC.observables.energy.local_energy_multidet
+
+Green's functions
+~~~~~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.observables.greens.greens_function
+
+.. autofunction:: OmegaQMC.observables.greens.greens_function_multidet
+
+Integrals
+---------
+
+Cholesky decomposition
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.integrals.cholesky.chunked_cholesky
+
+.. autofunction:: OmegaQMC.integrals.cholesky.prepare_afqmc_integrals
+
+.. autofunction:: OmegaQMC.integrals.cholesky.half_rotate_cholesky
+
+.. autofunction:: OmegaQMC.integrals.cholesky.half_rotate_cholesky_multidet
+
+.. autofunction:: OmegaQMC.integrals.cholesky.extract_casscf_trial
+
+QED integrals
+~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.integrals.qed.prepare_qed_integrals
+
+Trial wavefunctions
+--------------------
+
+Interfaces
+~~~~~~~~~~
+
+.. autoclass:: OmegaQMC.psi.VMCTrialState
+
+.. autoclass:: OmegaQMC.psi.AFQMCTrialState
+
+GTO trial
+~~~~~~~~~
+
+.. autofunction:: OmegaQMC.psi.gto.get_psi_fun
+
+Cusp corrections
+~~~~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.psi.cusp.get_cusp_params
+
 Utilities
 ----------
 
@@ -51,11 +113,6 @@ Utilities
 .. autofunction:: OmegaQMC.utils.format_basis_name
 
 .. autofunction:: OmegaQMC.utils.do_binning_analysis
-
-Cusp corrections
------------------
-
-.. autofunction:: OmegaQMC.cusp.get_cusp_params
 
 Jastrow optimizers
 -------------------

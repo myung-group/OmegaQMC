@@ -16,7 +16,7 @@ def extract_casscf_trial(mc, coeff_threshold=1e-4):
     Args:
         mc: PySCF CASSCF or CASCI object
             (must have run kernel()).
-        coeff_threshold: Threshold on |c_I| for
+        coeff_threshold: Threshold on ``|c_I|`` for
             truncating the CI expansion.
 
     Returns:
@@ -85,8 +85,8 @@ def chunked_cholesky(mol, chol_cut=1e-5, max_vecs=None):
 
     Computes the full ERI tensor and performs pivoted
     Cholesky decomposition on the reshaped
-    (nbasis^2, nbasis^2) matrix:
-        (pq|rs) ~ sum_g L^g_{pq} L^g_{rs}
+    ``(nbasis^2, nbasis^2)`` matrix:
+    ``(pq|rs) ~ sum_g L^g_{pq} L^g_{rs}``
 
     Args:
         mol: PySCF Mole object.

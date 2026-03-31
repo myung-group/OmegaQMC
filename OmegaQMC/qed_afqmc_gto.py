@@ -6,6 +6,16 @@ photon mode via the Pauli-Fierz Hamiltonian in the dipole gauge.
 
 Reference: arXiv:2410.18838 (Bauer et al., 2024)
 
+The integral preparation routine has moved to its canonical location:
+
+* :func:`OmegaQMC.integrals.qed.prepare_qed_integrals`
+
+Energy estimators and Green's functions shared with the plain AFQMC
+driver are in:
+
+* :mod:`OmegaQMC.observables.energy`
+* :mod:`OmegaQMC.observables.greens`
+
 Uses JAX + PySCF.
 """
 
