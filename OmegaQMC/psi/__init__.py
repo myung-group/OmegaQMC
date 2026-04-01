@@ -5,6 +5,7 @@ Submodules
 ----------
 gto  : GTO-based trial wavefunctions from PySCF.
 cusp : Cusp correction parameter generation.
+nn   : Neural network trial wavefunctions (Flax NNX).
 
 Interfaces
 ----------
@@ -24,23 +25,24 @@ class VMCTrialState(NamedTuple):
     """Container for a VMC trial wavefunction.
 
     Attributes:
-        log_psi: Callable ``(elec_crds, nuc_crds, params)
-            -> float``.  Log of the trial wavefunction.
-        log_psi_C: Callable ``(elec_crds, nuc_crds,
-            params, mo_C) -> float``.  Variant that
-            accepts explicit MO coefficients.
-        energy_fns: Tuple of energy component callables
-            ``(local_energy_ee, local_energy_nn,
-            local_energy_en, local_energy_ke)``.
-        get_psi_mo: MO evaluation function.
+        log_psi: Callable ``(elec_crds, nuc_crds,
+            params) -> float``.  Log of the trial
+            wavefunction.
+        log_psi_C: Callable or None. Variant that
+            accepts explicit MO coefficients (GTO
+            only; None for NN trials).
+        energy_fns: Tuple of energy component
+            callables ``(E_ee, E_nn, E_en, E_ke)``.
+        get_psi_mo: MO evaluation function or None
+            (GTO only; None for NN trials).
         ke_C: Kinetic energy callable with explicit
-            MO coefficients.
+            MO coefficients or None (GTO only).
     """
     log_psi: Callable
-    log_psi_C: Callable
-    energy_fns: Any
-    get_psi_mo: Callable
-    ke_C: Callable
+    log_psi_C: Callable = None
+    energy_fns: Any = None
+    get_psi_mo: Callable = None
+    ke_C: Callable = None
 
 
 class AFQMCTrialState(NamedTuple):

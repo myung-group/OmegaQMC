@@ -38,7 +38,7 @@ l_grad = True
 # Load VMC functions
 vmc_run = get_vmc_func(
     modrv,
-    params_vmc=params_jastrow,
+    params_corr=params_jastrow,
     prefix=chkfile_prefix,
     symmop_list=symmetry_ops,
 )

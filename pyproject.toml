@@ -35,4 +35,5 @@ classifiers = [
 
 [project.optional-dependencies]
 bse = ["basis-set-exchange"]
+nn = ["flax>=0.10.0", "pyyaml"]
 
