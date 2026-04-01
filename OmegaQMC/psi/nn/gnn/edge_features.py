@@ -23,6 +23,15 @@ class DifferenceEdgeFeature:
         self.log_rescale = log_rescale
 
     def __call__(self, d: jax.Array) -> jax.Array:
+        """Compute difference-based edge features.
+
+        Args:
+            d: Pairwise difference vectors
+                ``(..., 3)``.
+
+        Returns:
+            Array ``(..., 3)``, optionally log-rescaled.
+        """
         if self.log_rescale:
             r = norm(d, safe=True)
             d = d * (jnp.log1p(r) / r)[..., None]
@@ -54,6 +63,15 @@ class DistancePowerEdgeFeature:
         self.log_rescale = log_rescale
 
     def __call__(self, d: jax.Array) -> jax.Array:
+        """Compute distance-power edge features.
+
+        Args:
+            d: Pairwise difference vectors
+                ``(..., 3)``.
+
+        Returns:
+            Array ``(..., len(powers))``.
+        """
         r = norm(d, safe=True)
         pw = jnp.where(
             self.powers > 0,
@@ -94,6 +112,15 @@ class GaussianEdgeFeature:
         self.sigmas = (1 + radius * qs) / 7
 
     def __call__(self, d: jax.Array) -> jax.Array:
+        """Compute Gaussian-basis edge features.
+
+        Args:
+            d: Pairwise difference vectors
+                ``(..., 3)``.
+
+        Returns:
+            Array ``(..., n_gaussian)``.
+        """
         r = norm(d, safe=True)
         return jnp.exp(
             -((r[..., None] - self.mus) ** 2)
@@ -115,6 +142,15 @@ class CombinedEdgeFeature:
         self.features = features
 
     def __call__(self, d: jax.Array) -> jax.Array:
+        """Concatenate all constituent feature outputs.
+
+        Args:
+            d: Pairwise difference vectors
+                ``(..., 3)``.
+
+        Returns:
+            Concatenated array ``(..., sum_of_dims)``.
+        """
         return jnp.concatenate(
             [f(d) for f in self.features], axis=-1,
         )

@@ -26,6 +26,24 @@ VMC driver
 .. autoclass:: OmegaQMC.vmc_gto._VMCDriver
    :members: __call__
 
+NN VMC driver
+--------------
+
+.. autofunction:: OmegaQMC.vmc_nn.get_vmc_nn_func
+
+.. autoclass:: OmegaQMC.vmc_nn._VMCDriverNN
+   :members: __call__
+
+NN VMC optimizer
+-----------------
+
+.. autofunction:: OmegaQMC.vmcopt_nn.get_vmcopt_nn_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn._VMCOptNNDriver
+   :members: __call__
+
+.. autofunction:: OmegaQMC.vmcopt_nn.pretrain_to_hf
+
 AFQMC driver
 -------------
 
@@ -104,6 +122,163 @@ Cusp corrections
 ~~~~~~~~~~~~~~~~
 
 .. autofunction:: OmegaQMC.psi.cusp.get_cusp_params
+
+Neural network trial
+~~~~~~~~~~~~~~~~~~~~~
+
+Ports the DeepQMC architectures (PauliNet, FermiNet, DeepErwin,
+PsiFormer) using Flax NNX.  All NN-related code lives under
+``OmegaQMC.psi.nn``.
+
+.. autofunction:: OmegaQMC.psi.nn.adapter.make_nn_log_psi
+
+.. autoclass:: OmegaQMC.psi.nn.wf.MoleculeInfo
+   :members:
+
+.. autoclass:: OmegaQMC.psi.nn.wf.NeuralNetworkWaveFunction
+   :members: __call__
+
+Configuration
+'''''''''''''
+
+.. autoclass:: OmegaQMC.psi.nn.config.NNAnsatzConfig
+   :members: __post_init__
+
+.. autofunction:: OmegaQMC.psi.nn.config.load_nn_config
+
+Types
+'''''
+
+.. autoclass:: OmegaQMC.psi.nn.types.PhysicalConfiguration
+
+.. autoclass:: OmegaQMC.psi.nn.types.Psi
+
+Compatibility
+'''''''''''''
+
+.. autofunction:: OmegaQMC.psi.nn.compat.param_value
+
+.. autofunction:: OmegaQMC.psi.nn.compat.register_pytree
+
+Layers
+''''''
+
+.. autoclass:: OmegaQMC.psi.nn.layers.MLP
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.layers.ResidualConnection
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.layers.GLU
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.layers.SumPool
+
+.. autoclass:: OmegaQMC.psi.nn.layers.Identity
+
+Envelopes and cusp corrections
+''''''''''''''''''''''''''''''''
+
+.. autoclass:: OmegaQMC.psi.nn.env.ExponentialEnvelopes
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.cusp.ElectronicCuspAsymptotic
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.cusp.NuclearCuspAsymptotic
+   :members: __call__
+
+OmniNet (GNN + Jastrow + Backflow)
+''''''''''''''''''''''''''''''''''''
+
+.. autoclass:: OmegaQMC.psi.nn.omni.OmniNet
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.omni.Jastrow
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.omni.Backflow
+   :members: __call__
+
+Graph neural network
+'''''''''''''''''''''
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.electron_gnn.ElectronGNN
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.electron_gnn.ElectronGNNLayer
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.electron_gnn.ElectronEmbedding
+   :members: __call__
+
+Edge features
+'''''''''''''
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.edge_features.DifferenceEdgeFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.edge_features.DistancePowerEdgeFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.edge_features.GaussianEdgeFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.edge_features.CombinedEdgeFeature
+   :members: __call__
+
+Update features
+''''''''''''''''
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.update_features.ResidualElectronUpdateFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.update_features.NodeSumElectronUpdateFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.update_features.EdgeSumElectronUpdateFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.update_features.ConvolutionElectronUpdateFeature
+   :members: __call__
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.update_features.NodeAttentionElectronUpdateFeature
+   :members: __call__
+
+Physics utilities
+''''''''''''''''''
+
+.. autofunction:: OmegaQMC.psi.nn.physics.pairwise_diffs
+
+.. autofunction:: OmegaQMC.psi.nn.physics.pairwise_self_distance
+
+.. autofunction:: OmegaQMC.psi.nn.physics.laplacian
+
+Graph utilities
+''''''''''''''''
+
+.. autofunction:: OmegaQMC.psi.nn.gnn.graph.GraphEdgeBuilder
+
+.. autofunction:: OmegaQMC.psi.nn.gnn.graph.MolecularGraphEdgeBuilder
+
+.. autofunction:: OmegaQMC.psi.nn.gnn.graph.GraphUpdate
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.graph.SimpleGraphEdges
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.graph.SameGraphEdges
+
+.. autoclass:: OmegaQMC.psi.nn.gnn.graph.AntiGraphEdges
+
+Utility functions
+''''''''''''''''''
+
+.. autofunction:: OmegaQMC.psi.nn.utils.norm
+
+.. autofunction:: OmegaQMC.psi.nn.utils.triu_flat
+
+.. autofunction:: OmegaQMC.psi.nn.utils.flatten
+
+.. autofunction:: OmegaQMC.psi.nn.utils.unflatten
 
 Utilities
 ----------

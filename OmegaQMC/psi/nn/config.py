@@ -110,6 +110,7 @@ class NNAnsatzConfig:
     nucleus_residual: bool = False
 
     def __post_init__(self):
+        """Fill in ``None`` fields with sensible defaults."""
         if self.mlp_hidden_layers is None:
             self.mlp_hidden_layers = ['log', 2]
         if self.bf_mlp_hidden_layers is None:

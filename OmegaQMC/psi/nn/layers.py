@@ -55,14 +55,25 @@ def _w_init(init_name: str):
     }[init_name]
 
 
+def _ferminet_bias_init(key, shape, dtype=jnp.float32):
+    """FermiNet-style bias init (variance-scaled normal).
+
+    Falls back to zeros for 1-D shapes (pure bias
+    vectors) where fan computation is undefined.
+    """
+    if len(shape) < 2:
+        return jnp.zeros(shape, dtype=dtype)
+    return nnx.initializers.variance_scaling(
+        1.0, 'fan_out', 'normal',
+    )(key, shape, dtype)
+
+
 def _b_init(init_name: str):
     """Bias initializer by name."""
     return {
         'deeperwin': nnx.initializers.zeros_init(),
         'default': nnx.initializers.zeros_init(),
-        'ferminet': nnx.initializers.variance_scaling(
-            1.0, 'fan_out', 'normal',
-        ),
+        'ferminet': _ferminet_bias_init,
     }[init_name]
 
 
@@ -145,6 +156,14 @@ class MLP(nnx.Module):
         self.layers = nnx.List(layers)
 
     def __call__(self, x: jax.Array) -> jax.Array:
+        """Forward pass through all linear layers.
+
+        Args:
+            x: Input array of shape ``(..., in_dim)``.
+
+        Returns:
+            Output array of shape ``(..., out_dim)``.
+        """
         n = len(self.layers)
         for i, layer in enumerate(self.layers):
             x = layer(x)
@@ -169,6 +188,19 @@ class ResidualConnection:
         self.normalize = normalize
 
     def __call__(self, inp, update):
+        """Apply residual connection leaf-by-leaf.
+
+        Args:
+            inp: Original pytree (pre-update).
+            update: Updated pytree (same structure).
+
+        Returns:
+            Pytree of the same structure as *inp*; each
+            leaf is ``(x + y) / sqrt(2)`` if shapes match
+            and *normalize* is ``True``, ``x + y`` if
+            *normalize* is ``False``, or ``y`` when shapes
+            differ.
+        """
         def leaf_residual(x, y):
             if x.shape != y.shape:
                 return y
@@ -185,6 +217,7 @@ class SumPool:
 
     Args:
         out_dim: Must be 1.
+        name: Unused; accepted for API compatibility.
     """
 
     def __init__(self, out_dim, name=None):
@@ -254,6 +287,18 @@ class GLU(nnx.Module):
             )
 
     def __call__(self, x, y):
+        """Compute gated linear output.
+
+        Args:
+            x: Input for the gating branch, shape
+                ``(..., in_dim)``.
+            y: Input for the value branch, shape
+                ``(..., in_dim)``.
+
+        Returns:
+            ``activation(W_x · x) ⊙ (W_y · y)``,
+            shape ``(..., out_dim)``.
+        """
         if self.layer_norm_before:
             x = self.ln_x(x)
             y = self.ln_y(y)

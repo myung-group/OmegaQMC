@@ -28,6 +28,13 @@ from .utils import flatten, triu_flat
 def get_shell(z):
     """Number of (partially) occupied shells for *z*
     electrons. Ported from ``deepqmc/hamil.py``.
+
+    Args:
+        z: Number of electrons (integer).
+
+    Returns:
+        Shell count ``n`` such that the first *n* shells
+        can hold at least *z* electrons.
     """
     max_elec = 0
     for n in count():
@@ -116,6 +123,21 @@ class BackflowOp(nnx.Module):
         self.with_envelope = with_envelope
 
     def __call__(self, xs, fs_mult, fs_add, dists_nuc):
+        """Apply backflow transformation to orbital matrix.
+
+        Args:
+            xs: Orbital matrix ``(n_det, n_elec, n_orb)``.
+            fs_mult: Multiplicative correction tensor,
+                or ``None``.
+            fs_add: Additive correction tensor, or
+                ``None``.
+            dists_nuc: Electron-nucleus distances
+                ``(n_elec, n_nuc)``.
+
+        Returns:
+            Transformed orbital matrix, same shape as
+            *xs*.
+        """
         if self.with_envelope:
             envel = jnp.sqrt(
                 (xs**2).sum(
@@ -227,6 +249,21 @@ class NeuralNetworkWaveFunction(nnx.Module):
         )
 
     def __call__(self, phys_conf, return_mos=False):
+        """Evaluate the wavefunction.
+
+        Args:
+            phys_conf: :class:`~.types.PhysicalConfiguration`
+                with nuclear coordinates *R* and electron
+                coordinates *r*.
+            return_mos: If ``True``, return the raw
+                spin-up and spin-down orbital matrices
+                instead of ``Psi``.
+
+        Returns:
+            :class:`~.types.Psi` ``(sign, log)`` when
+            *return_mos* is ``False``, otherwise a tuple
+            ``(orb_up, orb_down)`` of orbital matrices.
+        """
         diffs_nuc = pairwise_diffs(
             phys_conf.r, phys_conf.R,
         )

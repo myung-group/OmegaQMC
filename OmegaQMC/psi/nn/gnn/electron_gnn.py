@@ -65,7 +65,6 @@ class ElectronEmbedding(nnx.Module):
         self.embedding_dim = embedding_dim
         self.ne_embed = positional_embedding_ne
         self.use_spin = use_spin
-        self.proj = None
 
         if positional_embedding_ne is not None:
             in_dim = ne_feat_dim * n_nuc
@@ -76,6 +75,8 @@ class ElectronEmbedding(nnx.Module):
                     in_dim, embedding_dim,
                     use_bias=False, rngs=rngs,
                 )
+            else:
+                self.proj = None
         else:
             n_types = (
                 1 if n_up == n_down else 2
@@ -89,6 +90,18 @@ class ElectronEmbedding(nnx.Module):
             )
 
     def __call__(self, phys_conf, nucleus_embedding):
+        """Build initial per-electron embeddings.
+
+        Args:
+            phys_conf: :class:`~..types.PhysicalConfiguration`.
+            nucleus_embedding: Nucleus embedding array
+                (unused; accepted for interface
+                compatibility).
+
+        Returns:
+            Electron embedding array ``(n_elec, emb_dim)``
+            or ``(n_elec, ne_feat_dim * n_nuc [+ 1])``.
+        """
         if self.ne_embed is not None:
             factory = MolecularGraphEdgeBuilder(
                 self.n_nuc,
@@ -183,6 +196,18 @@ class ElectronGNNLayer(nnx.Module):
         )
 
     def __call__(self, graph, last_layer=False):
+        """Apply one message-passing step.
+
+        Args:
+            graph: :class:`~.graph.Graph` containing
+                current node and edge states.
+            last_layer: If ``True``, skip the deep-
+                feature edge update (not needed on the
+                final layer).
+
+        Returns:
+            Updated :class:`~.graph.Graph`.
+        """
         nodes, edges = graph
 
         # 1. Aggregate: compute update features

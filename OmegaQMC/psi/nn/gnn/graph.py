@@ -53,6 +53,10 @@ def GraphEdgeBuilder(mask_self):
 
     Args:
         mask_self: If True, exclude self-loops.
+
+    Returns:
+        Callable ``(pos_sender, pos_receiver)``
+        ``-> Array`` of coordinate differences.
     """
     def build(pos_sender, pos_receiver):
         assert pos_sender.shape[-1] == 3
@@ -81,7 +85,12 @@ def MolecularGraphEdgeBuilder(
         n_down: Number of spin-down electrons.
         edge_types: Edge types to build (e.g.
             ``['same', 'anti', 'ne']``).
-        self_interaction: Include self-loops.
+        self_interaction: Include self-loops for
+            same-spin and nucleus-nucleus edges.
+
+    Returns:
+        Callable ``(phys_conf)`` ``-> dict`` mapping
+        each edge type to a :class:`GraphEdges` instance.
     """
     _map = {
         'nn': ['nn'], 'ne': ['ne'], 'en': ['en'],
@@ -159,9 +168,16 @@ def GraphUpdate(
     """Graph update step for GNNs.
 
     Args:
-        aggregate_edges_for_nodes_fn: Edge aggregation.
-        update_nodes_fn: Optional node update function.
-        update_edges_fn: Optional edge update function.
+        aggregate_edges_for_nodes_fn: Callable
+            ``(nodes, edges) -> aggregated``.
+        update_nodes_fn: Optional callable
+            ``(nodes, agg) -> new_nodes``.
+        update_edges_fn: Optional callable
+            ``(edges) -> new_edges``.
+
+    Returns:
+        Callable ``(graph) -> Graph`` that applies
+        the node and edge update in sequence.
     """
     def update_graph(graph):
         nodes, edges = graph

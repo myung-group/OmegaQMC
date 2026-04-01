@@ -102,6 +102,17 @@ class ResidualElectronUpdateFeature(nnx.Module):
         return self._emb_dim
 
     def __call__(self, nodes, edges):
+        """Return unchanged electron embeddings.
+
+        Args:
+            nodes: Current :class:`~.graph.GraphNodes`.
+            edges: Current edge dict (unused).
+
+        Returns:
+            List containing one
+            :class:`~.graph.GraphNodes` with the
+            original electron embeddings.
+        """
         return [
             GraphNodes(None, nodes.electrons),
         ]
@@ -144,6 +155,17 @@ class NodeSumElectronUpdateFeature(nnx.Module):
         return self._emb_dim * len(self.node_types)
 
     def __call__(self, nodes, edges):
+        """Aggregate per-spin node sums.
+
+        Args:
+            nodes: Current :class:`~.graph.GraphNodes`.
+            edges: Current edge dict (unused).
+
+        Returns:
+            List of :class:`~.graph.GraphNodes`, one per
+            requested *node_type*, each tiled to all
+            electrons.
+        """
         idx = {
             'up': slice(None, self.n_up),
             'down': slice(self.n_up, None),
@@ -202,6 +224,17 @@ class EdgeSumElectronUpdateFeature(nnx.Module):
         return self._tp_dim * len(self.edge_types)
 
     def __call__(self, nodes, edges):
+        """Aggregate edge sums per edge type.
+
+        Args:
+            nodes: Current :class:`~.graph.GraphNodes`
+                (unused).
+            edges: Current edge dict.
+
+        Returns:
+            List of :class:`~.graph.GraphNodes`, one per
+            *edge_type*, holding the summed edge features.
+        """
         updates = []
         for et in self.edge_types:
             if et == 'ee':
@@ -302,6 +335,16 @@ class ConvolutionElectronUpdateFeature(
         )
 
     def __call__(self, nodes, edges):
+        """Compute convolution-based update features.
+
+        Args:
+            nodes: Current :class:`~.graph.GraphNodes`.
+            edges: Current edge dict.
+
+        Returns:
+            List of :class:`~.graph.GraphNodes`, one per
+            *edge_type*, holding the convolved features.
+        """
         updates = []
         for et in self.edge_types:
             if et == 'ee':
@@ -370,6 +413,17 @@ class NodeAttentionElectronUpdateFeature(
         return self._emb_dim
 
     def __call__(self, nodes, edges):
+        """Compute attention-based update feature.
+
+        Args:
+            nodes: Current :class:`~.graph.GraphNodes`.
+            edges: Current edge dict (unused).
+
+        Returns:
+            List containing one
+            :class:`~.graph.GraphNodes` with the
+            post-attention, post-MLP embedding.
+        """
         h = nodes.electrons
         att = self.attention(h, h, h)
         if self.attention_residual:

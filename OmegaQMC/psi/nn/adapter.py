@@ -25,12 +25,13 @@ def make_nn_log_psi(config, mol_info, rng_key):
         rng_key: JAX PRNG key for parameter init.
 
     Returns:
-        log_psi: ``(elec_crds, nuc_crds, params)
-            -> float``. The ``params`` argument is
-            an NNX ``State`` pytree.
-        init_params: Initial NN parameter pytree.
-        graphdef: NNX ``GraphDef`` for model
-            reconstruction.
+        Tuple ``(log_psi, init_params, graphdef)``.
+        *log_psi* is a callable
+        ``(elec_crds, nuc_crds, params) -> float``
+        where *params* is an NNX ``State`` pytree.
+        *init_params* is the initial parameter pytree.
+        *graphdef* is the NNX ``GraphDef`` needed to
+        reconstruct the model via ``nnx.merge``.
     """
     if isinstance(config, str):
         config = load_nn_config(config)
