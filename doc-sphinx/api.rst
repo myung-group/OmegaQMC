@@ -9,9 +9,9 @@ Top-level functions
    Constructs the mean-field object via PySCF
    :cite:`Sun2020`.
 
-.. autofunction:: OmegaQMC.get_vmc_func
+.. autofunction:: OmegaQMC.get_vmc_gto_func
 
-.. autofunction:: OmegaQMC.get_vmcopt_func
+.. autofunction:: OmegaQMC.get_vmcopt_gto_func
 
 .. autofunction:: OmegaQMC.get_afqmc_func
 
@@ -304,7 +304,7 @@ from per-walker log-psi and local-energy derivatives,
 then solves a shifted generalized eigenvalue problem
 for the parameter update.
 
-.. autofunction:: OmegaQMC.vmcopt_gto_linear.get_vmcopt_func
+.. autofunction:: OmegaQMC.vmcopt_gto_linear.get_vmcopt_gto_func
 
 .. autoclass:: OmegaQMC.vmcopt_gto_linear._VMCOptLinearDriver
    :members: __call__
@@ -315,7 +315,7 @@ Collects walker snapshots in a sampling phase, then
 minimizes a combined energy-plus-variance loss on those
 snapshots with SGD or Adam.
 
-.. autofunction:: OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_func
+.. autofunction:: OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_gto_func
 
 .. autoclass:: OmegaQMC.vmcopt_gto_pssgd._VMCOptDriver
    :members: __call__
@@ -326,7 +326,7 @@ Differentiates through the entire MC trajectory at each
 epoch.  Memory-intensive; intended as a reference
 implementation only.
 
-.. autofunction:: OmegaQMC.vmcopt_gto_naive.get_vmcopt_func
+.. autofunction:: OmegaQMC.vmcopt_gto_naive.get_vmcopt_gto_func
 
 .. autoclass:: OmegaQMC.vmcopt_gto_naive._VMCOptNaiveDriver
    :members: __call__

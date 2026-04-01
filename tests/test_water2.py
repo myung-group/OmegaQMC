@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from OmegaQMC import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
 from OmegaQMC.utils import format_basis_name
 
@@ -50,7 +50,7 @@ data_prefix = 'water2_vmc_{}'.format(format_basis_name(bset_name))
 symmetry_ops = None
 
 # Load VMC functions
-vmc_run = get_vmc_func(
+vmc_run = get_vmc_gto_func(
     modrv,
     params_jastrow,
     prefix=data_prefix,

@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from pyscf import mcscf
 
-from OmegaQMC import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.afqmc_gto import extract_casscf_trial
 from OmegaQMC.utils import format_basis_name
 
@@ -37,7 +37,7 @@ chkfile_prefix = 'N2_vmc_msd_{}'.format(
     format_basis_name(bset_name)
 )
 
-vmc_run = get_vmc_func(
+vmc_run = get_vmc_gto_func(
     modrv, params_jastrow,
     cusp_scheme='Quady2025',
     gr_scheme='scheme1',

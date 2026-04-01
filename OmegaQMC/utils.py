@@ -575,7 +575,7 @@ def vmc_forces_with_pgcs(
     ----------
     prefix : str, optional
         File-name stem used when the VMC run was set up (the ``prefix``
-        argument of :func:`get_vmc_func`).  The function looks for
+        argument of :func:`get_vmc_gto_func`).  The function looks for
         ``<prefix>.grd.h5``; trailing ``.chk.h5`` or ``.grd.h5`` suffixes
         are stripped automatically.  Default is ``"vmc"``.
     logfile : bool or str, optional

@@ -1165,7 +1165,7 @@ class _VMCOptLinearDriver:
         }
 
 
-def get_vmcopt_func(
+def get_vmcopt_gto_func(
     mf, cusp_scheme="Quady2025",
     jastrow_config=None,
 ):

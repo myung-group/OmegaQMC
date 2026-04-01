@@ -432,7 +432,7 @@ class _VMCOptDriver:
         return params_corr, {'energy': {'mean': valid_energy}}
 
 
-def get_vmcopt_func(mf, cusp_scheme="Quady2025",
+def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
                     jastrow_config=None):
     """Create a post-sampling SGD VMC optimizer.
 

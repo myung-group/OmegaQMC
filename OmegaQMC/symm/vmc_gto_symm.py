@@ -268,7 +268,7 @@ def process_symmetric_diatomic_molecule(chkfile_mc,
 
 if __name__ == "__main__":
     from pyscf import gto, scf
-    from OmegaQMC import get_vmc_func
+    from OmegaQMC import get_vmc_gto_func
 
     mol = gto.M(
               atom='''
@@ -303,7 +303,7 @@ H        1.000000   -0.807216   -0.469229
     }
 
     vmc_run, vmc_energy, vmc_gradient_prep, vmc_grad =\
-        get_vmc_func (mf,
+        get_vmc_gto_func (mf,
                       params_vmc_no_jastrow,
                       chkfile_mc=chkfile_mc,
                       chkfile_enr=chkfile_enr,

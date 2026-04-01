@@ -134,7 +134,7 @@ def generate_molecular_orbitals(astr: str,
     Wraps PySCF to build a molecule, detect its point-group symmetry,
     run a restricted Hartree-Fock (or post-HF) calculation, and symmetrize
     the resulting molecular orbitals.  The returned object is passed directly
-    to :func:`get_vmc_func` and :func:`get_vmcopt_func`.
+    to :func:`get_vmc_gto_func` and :func:`get_vmcopt_gto_func`.
 
     Parameters
     ----------
@@ -287,7 +287,7 @@ def generate_molecular_orbitals(astr: str,
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers (no JAX, called once during get_vmc_func setup)
+# Module-level helpers (no JAX, called once during get_vmc_gto_func setup)
 # ---------------------------------------------------------------------------
 
 def _build_frag_symmops(mf, symmop_list, frag_ids) -> dict:
@@ -1305,7 +1305,7 @@ class _VMCDriver:
             f["timestamps"].create_dataset("end", data=str(timestamp_fin))
 
 
-def get_vmc_func(mf,
+def get_vmc_gto_func(mf,
                  params_corr: dict | None,
                  cusp_scheme='Quady2025',
                  gr_scheme='scheme1',

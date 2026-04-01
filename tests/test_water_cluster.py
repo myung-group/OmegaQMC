@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from OmegaQMC import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
 
 
@@ -36,7 +36,7 @@ rng_key = jax.random.key(888)
 l_grad = True
 
 # Load VMC functions
-vmc_run = get_vmc_func(
+vmc_run = get_vmc_gto_func(
     modrv,
     params_corr=params_jastrow,
     prefix=chkfile_prefix,

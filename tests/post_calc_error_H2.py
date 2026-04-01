@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from OmegaQMC import generate_molecular_orbitals, get_vmc_func
+from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
 from OmegaQMC.utils import compute_energy_with_error, format_basis_name
 
@@ -31,7 +31,7 @@ symmetry_ops = ['E', 'x', 'y', 'C2z']
 
 l_grad = True
 # Load VMC functions
-vmc_run = get_vmc_func(
+vmc_run = get_vmc_gto_func(
     modrv,
     params_corr=params_jastrow,
     prefix=chkfile_prefix,

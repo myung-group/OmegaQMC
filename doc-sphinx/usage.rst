@@ -41,12 +41,12 @@ Step 2 — Construct the VMC driver
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Pass the mean-field object and Jastrow parameters to
-:func:`~OmegaQMC.get_vmc_func`:
+:func:`~OmegaQMC.get_vmc_gto_func`:
 
 .. code-block:: python
 
     import jax.numpy as jnp
-    from OmegaQMC import get_vmc_func
+    from OmegaQMC import get_vmc_gto_func
     from OmegaQMC.utils import format_basis_name
 
     params_jastrow = {"J2_pade": jnp.array([])}   # no Jastrow factor
@@ -55,7 +55,7 @@ Pass the mean-field object and Jastrow parameters to
 
     symmetry_ops = {1: ["E"], 2: ["E"]}   # identity only per fragment
 
-    vmc_run = get_vmc_func(
+    vmc_run = get_vmc_gto_func(
         mf,
         params_jastrow,
         prefix=data_prefix,
@@ -104,7 +104,7 @@ Optimizing Jastrow parameters
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Before a production VMC run, optimize the Jastrow factor
-with :func:`~OmegaQMC.get_vmcopt_func`.  The default
+with :func:`~OmegaQMC.get_vmcopt_gto_func`.  The default
 implementation uses the **linear method**
 :cite:`Umrigar2007,Toulouse2008` (a port of the QMCPACK
 :cite:`Kim2018` ``OneShiftOnly`` algorithm), which
@@ -113,9 +113,9 @@ gradient descent:
 
 .. code-block:: python
 
-    from OmegaQMC import get_vmcopt_func
+    from OmegaQMC import get_vmcopt_gto_func
 
-    vmcopt_run = get_vmcopt_func(mf)
+    vmcopt_run = get_vmcopt_gto_func(mf)
     params_opt, info = vmcopt_run(
         rng_key,
         num_walkers=1000,
@@ -129,14 +129,14 @@ matrices; ``num_epochs`` should be at least
 ``3–5 × num_params`` for reliable convergence.
 
 Pass the returned *params_opt* as ``params_corr`` to
-:func:`~OmegaQMC.get_vmc_func` for the production run.
+:func:`~OmegaQMC.get_vmc_gto_func` for the production run.
 
 Two alternative optimizer implementations are also
 available directly from their submodules:
 
-- :func:`~OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_func` —
+- :func:`~OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_gto_func` —
   post-sampling SGD/Adam optimizer
-- :func:`~OmegaQMC.vmcopt_gto_naive.get_vmcopt_func` —
+- :func:`~OmegaQMC.vmcopt_gto_naive.get_vmcopt_gto_func` —
   naïve optimizer (differentiates through MC; reference
   implementation only)
 
@@ -147,7 +147,7 @@ A CASSCF multi-determinant expansion can replace the single Slater
 determinant.  The helper
 :func:`~OmegaQMC.integrals.cholesky.extract_casscf_trial` converts a converged
 CASSCF object into the ``trial`` dict accepted by
-:func:`~OmegaQMC.get_vmc_func`.
+:func:`~OmegaQMC.get_vmc_gto_func`.
 
 Build the mean-field object with
 :func:`~OmegaQMC.generate_molecular_orbitals`, then run CASSCF on top:
@@ -155,7 +155,7 @@ Build the mean-field object with
 .. code-block:: python
 
     from pyscf import mcscf
-    from OmegaQMC import generate_molecular_orbitals, get_vmc_func
+    from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
     from OmegaQMC.integrals import extract_casscf_trial
 
     mf = generate_molecular_orbitals(
@@ -169,14 +169,14 @@ Build the mean-field object with
     trial = extract_casscf_trial(mc, coeff_threshold=1e-2)
     print(f"Determinants retained: {trial['ndet']}")
 
-Pass the trial dict to :func:`~OmegaQMC.get_vmc_func` via the ``trial``
+Pass the trial dict to :func:`~OmegaQMC.get_vmc_gto_func` via the ``trial``
 keyword.  MO relaxation is automatically disabled with a warning:
 
 .. code-block:: python
 
     params_jastrow = {"J1_pade": {"O": 0.0, "H": 0.0}}
 
-    vmc_run = get_vmc_func(
+    vmc_run = get_vmc_gto_func(
         mf, params_jastrow,
         prefix="h2o_msd_vmc",
         trial=trial,
@@ -208,7 +208,7 @@ convention).  Cutoff radii are passed separately via a
 .. code-block:: python
 
     import jax.numpy as jnp
-    from OmegaQMC import get_vmcopt_func
+    from OmegaQMC import get_vmcopt_gto_func
 
     jastrow_config = {
         "J1": {"H": {"r_cut": 5.0},
@@ -223,7 +223,7 @@ convention).  Cutoff radii are passed separately via a
         },
     }
 
-    vmcopt_run = get_vmcopt_func(
+    vmcopt_run = get_vmcopt_gto_func(
         mf, jastrow_config=jastrow_config
     )
     params_opt, info = vmcopt_run(
@@ -311,7 +311,7 @@ under ``jastrow_config["J3"]`` and are not variational:
 .. code-block:: python
 
     import jax.numpy as jnp
-    from OmegaQMC import get_vmcopt_func
+    from OmegaQMC import get_vmcopt_gto_func
 
     jastrow_config = {
         "J1": {"N": {"r_cut": 5.0}},
@@ -330,7 +330,7 @@ under ``jastrow_config["J3"]`` and are not variational:
         },
     }
 
-    vmcopt_run = get_vmcopt_func(
+    vmcopt_run = get_vmcopt_gto_func(
         mf, jastrow_config=jastrow_config
     )
     params_opt, info = vmcopt_run(
