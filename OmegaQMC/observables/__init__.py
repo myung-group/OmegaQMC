@@ -5,7 +5,8 @@ Submodules
 ----------
 energy : Local energy estimators (one-body, two-body, mixed).
 greens : One-particle Green's function routines.
-force  : PGCS nuclear force post-processing.
+force  : Nuclear force gradient computation, storage,
+         and PGCS post-processing.
 """
 
 from OmegaQMC.observables.energy import (
@@ -21,5 +22,7 @@ from OmegaQMC.observables.greens import (
 )
 
 from OmegaQMC.observables.force import (
+    vmc_gto_gradients,
+    save_gto_gradients,
     postproc_h5_pgcs,
 )

@@ -1,21 +1,547 @@
-"""Post-processing of VMC gradient data for nuclear forces.
+"""Nuclear force gradient computation, storage, and
+PGCS post-processing.
 
-Reads the gradient HDF5 file written by
-:meth:`~OmegaQMC.vmc_gto._VMCDriverGTO.__call__` and
+:func:`vmc_gto_gradients` builds a JIT-compiled
+callable that evaluates Hellmann-Feynman, kinetic-energy,
+and Pulay gradient components for a batch of walkers.
+
+:func:`save_gto_gradients` accumulates and writes
+per-block gradient data (reference + symmetry-related
+secondary configurations) to HDF5 during a VMC run.
+
+:func:`postproc_h5_pgcs` reads that HDF5 file and
 applies Point Group Correlated Sampling (PGCS) to
 obtain symmetry-averaged nuclear force estimates.
 """
 
 import sys
 
+import jax
 import h5py
 import jax.numpy as jnp
 from pyscf import gto
 
+from ..symm.operations import symmetry_operations_map
 from ..utils import (
     batched_binning_analysis_grds,
     compute_torque_with_error,
 )
+
+PSI2_RATIO_THRESHOLD = 1e-4
+
+
+def vmc_gto_gradients(
+    local_energy_ee,
+    local_energy_en,
+    local_energy_ke,
+    log_trial_wavefunction,
+    nuc_crds,
+    params_corr,
+    get_psi_mo,
+    eps,
+    gr_scheme,
+    mo_relax=False,
+    local_energy_ke_C=None,
+    log_trial_wavefunction_C=None,
+    C0=None,
+    mo1s=None,
+    num_nuc=None,
+):
+    """Build a JIT-compiled nuclear-gradient batch function.
+
+    Constructs all intermediate gradient closures
+    (Hellmann-Feynman, kinetic, Pulay, and optional
+    MO-relaxation corrections) and returns a single
+    JIT-compiled callable that evaluates them for a
+    batch of walker positions.
+
+    Parameters
+    ----------
+    local_energy_ee : callable
+        Electron-electron energy ``(elec_crds) -> float``.
+    local_energy_en : callable
+        Electron-nuclear energy
+        ``(elec_crds, nuc_crds) -> float``.
+    local_energy_ke : callable
+        Kinetic energy
+        ``(elec_crds, nuc_crds, params) -> float``.
+    log_trial_wavefunction : callable
+        Log trial wavefunction
+        ``(elec_crds, nuc_crds, params) -> float``.
+    nuc_crds : jnp.ndarray
+        Nuclear coordinates, shape ``(natom, 3)``.
+    params_corr : pytree
+        Jastrow / correlation parameters.
+    get_psi_mo : callable
+        MO evaluator (used by redistribution scheme 1).
+    eps : float
+        Machine epsilon for the coordinate dtype.
+    gr_scheme : str
+        ``'scheme1'`` (MO-based) or ``'scheme2'``
+        (distance-based) space-warping redistribution.
+    mo_relax : bool, optional
+        Enable CPHF MO-relaxation correction.
+        Default ``False``.
+    local_energy_ke_C : callable, optional
+        KE as a function of MO coefficients (for CPHF).
+    log_trial_wavefunction_C : callable, optional
+        log|ψ| as a function of MO coefficients.
+    C0 : jnp.ndarray, optional
+        Reference MO coefficient matrix.
+    mo1s : jnp.ndarray, optional
+        Orbital response tensors from CPHF,
+        shape ``(natom, 3, nao, nocc)``.
+    num_nuc : int, optional
+        Number of nuclei (required when *mo_relax*
+        is ``True``).
+
+    Returns
+    -------
+    callable
+        ``(batch_samples) -> (grd_ee, grd_en,
+        grd_ke, grd_logpsi)`` where each component
+        has shape ``(batch, natom, 3)``.
+    """
+    # --- Space-warping redistribution schemes ---
+    @jax.jit
+    def _redistribute_scheme1(elec_crds):
+        _, mo_val_s = get_psi_mo(elec_crds, nuc_crds)
+        weight = jnp.einsum(
+            'neo,neo->en', mo_val_s, mo_val_s,
+        )
+        return weight / jnp.sum(
+            weight, axis=-1, keepdims=True,
+        )
+
+    @jax.jit
+    def _redistribute_scheme2(elec_crds):
+        diff = (
+            elec_crds[:, None, :]
+            - nuc_crds[None, :, :]
+        )
+        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+        dist = jnp.where(dist < eps, eps, dist)
+        weight = dist**(-4.0)
+        return weight / jnp.sum(
+            weight, axis=-1, keepdims=True,
+        )
+
+    rescale_fn = (
+        _redistribute_scheme2
+        if 'scheme2' in gr_scheme
+        else _redistribute_scheme1
+    )
+    jac_rescale_fn = jax.jacobian(
+        rescale_fn, argnums=0,
+    )
+
+    # --- Per-walker gradient functions ---
+    @jax.jit
+    def _grad_fn_ee(e_pos):
+        return jax.grad(local_energy_ee)(e_pos)
+
+    @jax.jit
+    def _grad_fn_en(e_pos):
+        return jax.grad(
+            local_energy_en, argnums=(0, 1),
+        )(e_pos, nuc_crds)
+
+    @jax.jit
+    def _grad_fn_ke(e_pos):
+        return jax.grad(
+            local_energy_ke, argnums=(0, 1),
+        )(e_pos, nuc_crds, params_corr)
+
+    @jax.jit
+    def _grad_fn_logpsi(e_pos):
+        return jax.grad(
+            log_trial_wavefunction, argnums=(0, 1),
+        )(e_pos, nuc_crds, params_corr)
+
+    if mo_relax:
+        @jax.jit
+        def _grad_fn_ke_mo(e_pos):
+            """dE_ke/dC · dC/dR via JVP."""
+            def ke_of_C(C):
+                return local_energy_ke_C(
+                    e_pos, nuc_crds, params_corr, C,
+                )
+            results = jnp.zeros((num_nuc, 3))
+            for ia in range(num_nuc):
+                for K in range(3):
+                    _, dke = jax.jvp(
+                        ke_of_C,
+                        (C0,), (mo1s[ia, K],),
+                    )
+                    results = results.at[
+                        ia, K
+                    ].set(dke)
+            return results
+
+        @jax.jit
+        def _grad_fn_logpsi_mo(e_pos):
+            """dlog|ψ|/dC · dC/dR via JVP."""
+            def logpsi_of_C(C):
+                return log_trial_wavefunction_C(
+                    e_pos, nuc_crds, params_corr, C,
+                )
+            results = jnp.zeros((num_nuc, 3))
+            for ia in range(num_nuc):
+                for K in range(3):
+                    _, dlp = jax.jvp(
+                        logpsi_of_C,
+                        (C0,), (mo1s[ia, K],),
+                    )
+                    results = results.at[
+                        ia, K
+                    ].set(dlp)
+            return results
+
+    # --- Batched gradient function ---
+    @jax.jit
+    def _vmc_gradient_batch(batch_samples):
+        grd_ee_elc = jax.vmap(
+            _grad_fn_ee,
+        )(batch_samples)
+        grd_en_elc, grd_en_nuc = jax.vmap(
+            _grad_fn_en,
+        )(batch_samples)
+        grd_ke_elc, grd_ke_nuc = jax.vmap(
+            _grad_fn_ke,
+        )(batch_samples)
+        grd_logpsi_elc, grd_logpsi_nuc = jax.vmap(
+            _grad_fn_logpsi,
+        )(batch_samples)
+
+        rescale = jax.vmap(
+            rescale_fn,
+        )(batch_samples)
+        jac_rescale_elc = jax.vmap(
+            jac_rescale_fn,
+        )(batch_samples)
+        novel_correction = 0.5 * jnp.einsum(
+            'beneK->bnK', jac_rescale_elc,
+        )
+
+        grd_ee = jnp.einsum(
+            'beK,ben->bnK', grd_ee_elc, rescale,
+        )
+        grd_en = grd_en_nuc + jnp.einsum(
+            'beK,ben->bnK', grd_en_elc, rescale,
+        )
+        grd_ke = grd_ke_nuc + jnp.einsum(
+            'beK,ben->bnK', grd_ke_elc, rescale,
+        )
+
+        grd_logpsi = grd_logpsi_nuc + jnp.einsum(
+            'beK,ben->bnK',
+            grd_logpsi_elc, rescale,
+        )
+        grd_logpsi += novel_correction
+
+        if mo_relax:
+            grd_ke_mo_batch = jax.vmap(
+                _grad_fn_ke_mo,
+            )(batch_samples)
+            grd_logpsi_mo_batch = jax.vmap(
+                _grad_fn_logpsi_mo,
+            )(batch_samples)
+
+            grd_ke = grd_ke + grd_ke_mo_batch
+            grd_logpsi = (
+                grd_logpsi + grd_logpsi_mo_batch
+            )
+
+        return grd_ee, grd_en, grd_ke, grd_logpsi
+
+    return _vmc_gradient_batch
+
+
+def save_gto_gradients(
+    block_cnt,
+    sampled_walkers,
+    local_energies,
+    batch_size,
+    num_batches,
+    single_frag_combos,
+    ofname_grd,
+    vmc_gradient_batch,
+    log_psi_batch,
+    local_energy_batch,
+    apply_single_frag_symmop,
+):
+    """Save per-block nuclear-force gradient data.
+
+    Evaluates gradient components (Hellmann-Feynman,
+    kinetic, Pulay) at the reference walker positions
+    and at each symmetry-related secondary
+    configuration, then writes everything to an HDF5
+    file.
+
+    This is a free-function equivalent of the former
+    ``_VMCDriverGTO._gradient_save`` method.  All
+    JIT-compiled kernels are passed in explicitly,
+    so no performance is lost.
+
+    Args:
+        block_cnt: Current production-block index.
+        sampled_walkers: Walker positions, shape
+            ``(num_steps_per_block * num_walkers,
+            nelec, 3)``.
+        local_energies: Local energies, shape
+            ``(num_steps_per_block, num_walkers)``.
+        batch_size: Walkers per gradient batch.
+        num_batches: Number of batches.
+        single_frag_combos: List of
+            ``(frag_pos, op, label)`` tuples
+            describing fragment symmetry operations.
+        ofname_grd: Path to the gradient HDF5 file.
+        vmc_gradient_batch: JIT-compiled callable
+            ``(walkers) -> (g_ee, g_en, g_ke,
+            g_logpsi)``.
+        log_psi_batch: JIT-compiled callable
+            ``(walkers) -> log|ψ|`` (batched).
+        local_energy_batch: JIT-compiled callable
+            ``(walkers) -> E_local`` (batched).
+        apply_single_frag_symmop: JIT-compiled
+            callable
+            ``(walkers, frag_pos, op_matrix)
+            -> transformed_walkers``.
+
+    Returns:
+        Dict mapping combo labels to their
+        weighted-mean block energies, or empty dict
+        if *single_frag_combos* is empty.
+    """
+    num_samples_per_block = sampled_walkers.shape[0]
+
+    # Reference gradient accumulators
+    w_grd_ee_en = []
+    w_grd_ke = []
+    w_grd_logpsi = []
+
+    # Per-combo accumulators
+    combo_grd_ee_en = {
+        label: []
+        for _, _, label in single_frag_combos
+    }
+    combo_grd_ke = {
+        label: []
+        for _, _, label in single_frag_combos
+    }
+    combo_grd_logpsi = {
+        label: []
+        for _, _, label in single_frag_combos
+    }
+    combo_weights = {
+        label: []
+        for _, _, label in single_frag_combos
+    }
+    combo_E_local = {
+        label: []
+        for _, _, label in single_frag_combos
+    }
+
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(
+            start_idx + batch_size,
+            num_samples_per_block,
+        )
+        batch_orig = (
+            sampled_walkers[start_idx:end_idx, :, :]
+        )
+
+        # Reference gradients
+        g_ee, g_en, g_ke, g_logpsi = (
+            vmc_gradient_batch(batch_orig)
+        )
+        w_grd_ee_en.append(g_ee + g_en)
+        w_grd_ke.append(g_ke)
+        w_grd_logpsi.append(g_logpsi)
+
+        # log|ψ| at original positions (once)
+        log_psi_orig = log_psi_batch(batch_orig)
+
+        # Single-fragment symmetry combos
+        for frag_pos, op, label in (
+            single_frag_combos
+        ):
+            batch_trans = apply_single_frag_symmop(
+                batch_orig, frag_pos,
+                symmetry_operations_map[op],
+            )
+
+            # Screen: fall back where |ψ|² drops
+            log_psi_trans = log_psi_batch(
+                batch_trans,
+            )
+            psi2_ratio = jnp.exp(
+                2.0
+                * (log_psi_trans - log_psi_orig)
+            )
+            safe = (
+                psi2_ratio > PSI2_RATIO_THRESHOLD
+            )
+            batch_trans = jnp.where(
+                safe[:, None, None],
+                batch_trans, batch_orig,
+            )
+
+            # Weight: J * |ψ(r')|²/|ψ(r)|²
+            weight = jnp.where(
+                safe, psi2_ratio, 1.0,
+            )
+
+            g_ee, g_en, g_ke, g_logpsi = (
+                vmc_gradient_batch(batch_trans)
+            )
+            combo_grd_ee_en[label].append(
+                g_ee + g_en,
+            )
+            combo_grd_ke[label].append(g_ke)
+            combo_grd_logpsi[label].append(
+                g_logpsi,
+            )
+            combo_weights[label].append(weight)
+
+            E_trans = local_energy_batch(
+                batch_trans,
+            )
+            combo_E_local[label].append(E_trans)
+
+    # Stack all batches
+    w_grd_ee_en = jnp.vstack(w_grd_ee_en)
+    w_grd_ke = jnp.vstack(w_grd_ke)
+    w_grd_logpsi = jnp.vstack(w_grd_logpsi)
+
+    # Save to HDF5
+    with h5py.File(ofname_grd, "a") as f:
+        block_cnt_str = f'{block_cnt}'
+
+        grp_names = [
+            'grd_ee_en', 'grd_ke',
+            'grd_logpsi', 'local_energies',
+        ]
+        if single_frag_combos:
+            grp_names.append('fragment_weights')
+        for k in grp_names:
+            if k not in f.keys():
+                f.create_group(k)
+
+        # Clean up existing block (restart)
+        if block_cnt_str in f['grd_ee_en'].keys():
+            del f['grd_ee_en'][block_cnt_str]
+            del f['grd_ke'][block_cnt_str]
+            del f['grd_logpsi'][block_cnt_str]
+            del f['local_energies'][block_cnt_str]
+            for _, _, label in single_frag_combos:
+                if (
+                    label in f['grd_ee_en']
+                    and block_cnt_str
+                    in f['grd_ee_en'][label]
+                ):
+                    del f['grd_ee_en'][
+                        label
+                    ][block_cnt_str]
+                    del f['grd_ke'][
+                        label
+                    ][block_cnt_str]
+                    del f['grd_logpsi'][
+                        label
+                    ][block_cnt_str]
+                    del f['fragment_weights'][
+                        label
+                    ][block_cnt_str]
+                if (
+                    label in f['local_energies']
+                    and block_cnt_str
+                    in f['local_energies'][label]
+                ):
+                    del f['local_energies'][
+                        label
+                    ][block_cnt_str]
+
+        # A. Reference gradients
+        f['grd_ee_en'].create_dataset(
+            block_cnt_str, data=w_grd_ee_en,
+        )
+        f['grd_ke'].create_dataset(
+            block_cnt_str, data=w_grd_ke,
+        )
+        f['grd_logpsi'].create_dataset(
+            block_cnt_str, data=w_grd_logpsi,
+        )
+        f['local_energies'].create_dataset(
+            block_cnt_str, data=local_energies,
+        )
+
+        # B. Per-combo secondary gradients/weights
+        for _, _, label in single_frag_combos:
+            c_ee_en = jnp.vstack(
+                combo_grd_ee_en[label],
+            )
+            c_ke = jnp.vstack(
+                combo_grd_ke[label],
+            )
+            c_logpsi = jnp.vstack(
+                combo_grd_logpsi[label],
+            )
+            c_w = jnp.concatenate(
+                combo_weights[label],
+            )
+
+            for grp, data in [
+                ('grd_ee_en', c_ee_en),
+                ('grd_ke', c_ke),
+                ('grd_logpsi', c_logpsi),
+            ]:
+                if label not in f[grp]:
+                    f[grp].create_group(label)
+                f[grp][label].create_dataset(
+                    block_cnt_str, data=data,
+                )
+
+            if label not in f['fragment_weights']:
+                f['fragment_weights'].create_group(
+                    label,
+                )
+            f['fragment_weights'][
+                label
+            ].create_dataset(
+                block_cnt_str, data=c_w,
+            )
+
+            c_E = jnp.concatenate(
+                combo_E_local[label],
+            )
+            if label not in f['local_energies']:
+                f['local_energies'].create_group(
+                    label,
+                )
+            f['local_energies'][
+                label
+            ].create_dataset(
+                block_cnt_str, data=c_E,
+            )
+
+    # Return per-combo weighted-mean block energies
+    combo_weights_all = {
+        label: jnp.concatenate(
+            combo_weights[label],
+        )
+        for _, _, label in single_frag_combos
+    }
+    combo_block_E = {}
+    for _, _, label in single_frag_combos:
+        c_E = jnp.concatenate(
+            combo_E_local[label],
+        )
+        w = combo_weights_all[label]
+        combo_block_E[label] = float(
+            jnp.sum(w * c_E) / jnp.sum(w)
+        )
+    return combo_block_E
 
 
 def postproc_h5_pgcs(

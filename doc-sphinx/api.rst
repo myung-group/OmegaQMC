@@ -127,6 +127,10 @@ Energy estimators
 Nuclear forces
 ~~~~~~~~~~~~~~
 
+.. autofunction:: OmegaQMC.observables.force.vmc_gto_gradients
+
+.. autofunction:: OmegaQMC.observables.force.save_gto_gradients
+
 .. autofunction:: OmegaQMC.observables.force.postproc_h5_pgcs
 
 Green's functions
