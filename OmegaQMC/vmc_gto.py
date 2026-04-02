@@ -496,7 +496,7 @@ def _apply_fragment_op(elec_crds: jnp.ndarray,
 # _VMCRunner: holds all precompiled VMC kernels and runs the simulation
 # ---------------------------------------------------------------------------
 
-class _VMCDriver:
+class _VMCDriverGTO:
     """Holds all precompiled VMC computation kernels
     and runs the simulation."""
 
@@ -1010,15 +1010,15 @@ class _VMCDriver:
             and continue accumulating blocks.  Default ``False``.
         compute_gradients : bool, optional
             If ``True``, accumulate and save nuclear-force gradient data
-            needed by :func:`~OmegaQMC.utils.vmc_forces_with_pgcs`.
+            needed by :func:`~OmegaQMC.observables.force.postproc_h5_pgcs`.
             Default ``False``.
 
         Returns
         -------
         None
             All output is written to disk.  Use
-            :func:`~OmegaQMC.utils.vmc_forces_with_pgcs` to post-process
-            the gradient file.
+            :func:`~OmegaQMC.observables.force.postproc_h5_pgcs` to
+            post-process the gradient file.
         """
         # tolerance_enr_std_per_elec=CHEMICAL_ACCURACY,
         mf = self.mf
@@ -1318,7 +1318,7 @@ def get_vmc_gto_func(mf,
     """Construct a callable VMC driver for the given mean-field object.
 
     Assembles the trial wave function (Slater determinant + Jastrow factor
-    with optional cusp corrections) and returns a :class:`_VMCDriver`
+    with optional cusp corrections) and returns a :class:`_VMCDriverGTO`
     instance that can be called directly to run a VMC simulation.
 
     Parameters
@@ -1364,9 +1364,9 @@ def get_vmc_gto_func(mf,
 
     Returns
     -------
-    driver : _VMCDriver
+    driver : _VMCDriverGTO
         A callable object.  Call it with ``driver(rng_key, ...)`` to run the
-        VMC simulation; see :meth:`_VMCDriver.__call__` for parameters.
+        VMC simulation; see :meth:`_VMCDriverGTO.__call__` for parameters.
     """
     # Build per-fragment symmetry operations dict
     if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
@@ -1411,7 +1411,7 @@ def get_vmc_gto_func(mf,
     timestamp_init = datetime.now()
     print("Begin time: {}".format(timestamp_init))
 
-    return _VMCDriver(mf, params_corr, params_cusp, mo_relax,
+    return _VMCDriverGTO(mf, params_corr, params_cusp, mo_relax,
                       nuc_crds, frag_reflect_data,
                       single_frag_combos,
                       frag_symmops, frag_ops_sets, frag_ids,

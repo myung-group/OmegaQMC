@@ -15,18 +15,20 @@ from :func:`~OmegaQMC.psi.nn.physics.laplacian`, with no
 PySCF dependency.
 """
 
+import os
 import jax
 import jax.numpy as jnp
 import optax
 from functools import partial
 
+from .nn_checkpoint import save_nn_checkpoint
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
 from .psi.nn.wf import MoleculeInfo
 from .constants import MIN_DIST_THRESHOLD
 
 
-class _VMCOptNNDriver:
+class _VMCOptDriverNN:
     """Post-sampling Adam VMC optimizer for NN trials.
 
     Compiles the Metropolis kernel and local-energy
@@ -51,6 +53,10 @@ class _VMCOptNNDriver:
         self.nuc_crds = nuc_crds
         self.charges = charges
         self.nelec = nelec
+        self.config_name = (
+            config if isinstance(config, str)
+            else getattr(config, 'name', 'custom')
+        )
 
         log_psi, init_params, graphdef = make_nn_log_psi(
             config, mol_info, init_key,
@@ -289,12 +295,20 @@ class _VMCOptNNDriver:
         train_split=0.8,
         batch_size=200,
         verbose=1,
+        prefix='nnopt',
     ):
         """Run VMC optimization for NN wavefunctions.
 
+        After each epoch the current parameters are
+        written to ``{prefix}.chk.h5``.  Before each
+        write the previous ``{prefix}.chk.h5`` is
+        preserved as ``{prefix}.{epoch}.h5`` so that
+        every completed epoch is recoverable.
+
         Args:
             rng_key: JAX PRNG key.
-            num_epochs: Number of Adam optimization epochs.
+            num_epochs: Number of Adam optimization
+                epochs.
             num_walkers: Number of MC walkers.
             num_steps_per_block: MC steps per production
                 block.
@@ -308,6 +322,11 @@ class _VMCOptNNDriver:
             train_split: Fraction of data for training.
             batch_size: Batch size for optimization.
             verbose: Verbosity level (0 = silent).
+            prefix: Filename prefix for the HDF5
+                checkpoint.  The live checkpoint is
+                ``{prefix}.chk.h5``; superseded
+                checkpoints are renamed
+                ``{prefix}.{epoch}.h5``.
 
         Returns:
             Tuple ``(params_final, energy_data)`` where
@@ -404,10 +423,10 @@ class _VMCOptNNDriver:
                 )
                 epoch_losses.append(loss)
 
+            train_loss = (
+                jnp.array(epoch_losses).mean()
+            )
             if verbose >= 1:
-                train_loss = (
-                    jnp.array(epoch_losses).mean()
-                )
                 v_losses = []
                 for si in range(
                     0, valid_w.shape[0], batch_size,
@@ -429,6 +448,19 @@ class _VMCOptNNDriver:
                     f"Loss: {train_loss:.6f} | "
                     f"Valid: {valid_loss:.6f}"
                 )
+
+            chkpt_path = f"{prefix}.chk.h5"
+            if os.path.exists(chkpt_path):
+                os.rename(
+                    chkpt_path,
+                    f"{prefix}.{epoch}.h5",
+                )
+            save_nn_checkpoint(
+                chkpt_path, params, epoch,
+                self.config_name,
+                self.mol_info,
+                energy=float(train_loss),
+            )
 
         # Final energy estimate
         v_energies = []
@@ -469,10 +501,10 @@ def get_vmcopt_nn_func(mol_info, config, init_key):
             initialisation.
 
     Returns:
-        :class:`_VMCOptNNDriver` instance.  Call it with
+        :class:`_VMCOptDriverNN` instance.  Call it with
         ``driver(rng_key, ...)`` to run the optimization.
     """
-    return _VMCOptNNDriver(mol_info, config, init_key)
+    return _VMCOptDriverNN(mol_info, config, init_key)
 
 
 def pretrain_to_hf(nn_trial, mf, rng_key, steps=1000):

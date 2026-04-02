@@ -190,6 +190,31 @@ class _VMCDriverNN:
             )
         )
 
+    def load_checkpoint(self, filepath):
+        """Load optimised parameters from a checkpoint.
+
+        Replaces ``self.params`` with the parameter
+        values stored in the ``.chk.h5`` file.
+
+        Args:
+            filepath: Path to the HDF5 checkpoint
+                created by
+                :class:`~OmegaQMC.vmcopt_nn\
+._VMCOptDriverNN`.
+
+        Returns:
+            Dict of checkpoint metadata (epoch,
+            config_name, energy, etc.).
+        """
+        from .nn_checkpoint import (
+            load_nn_checkpoint,
+        )
+        params, meta = load_nn_checkpoint(
+            filepath, self.params,
+        )
+        self.params = params
+        return meta
+
     def __call__(
         self,
         rng_key,
@@ -200,11 +225,14 @@ class _VMCDriverNN:
         num_blocks_equil=10,
         mc_timestep=0.1,
         verbose=1,
+        prefix='nnopt',
     ):
         """Execute a VMC run with fixed NN parameters.
 
         Runs Metropolis-Hastings sampling and
         accumulates local energies block by block.
+        VMC results are appended to the checkpoint
+        file ``{prefix}.chk.h5``.
 
         Args:
             rng_key: JAX PRNG key (int or array).
@@ -215,6 +243,9 @@ class _VMCDriverNN:
             num_blocks_equil: Equilibration blocks.
             mc_timestep: Initial MC timestep.
             verbose: Verbosity (0 = silent).
+            prefix: Filename prefix for the HDF5
+                checkpoint.  VMC results are appended
+                to ``{prefix}.chk.h5``.
 
         Returns:
             Dict with keys ``'E_mean'``,
@@ -369,11 +400,22 @@ class _VMCDriverNN:
                 f"Total time: {elapsed:.2f} seconds"
             )
 
-        return {
+        result = {
             'E_mean': float(e_mean),
             'E_serr': float(e_serr),
             'E_blocks': E_blocks,
         }
+
+        chkpt_file = f"{prefix}.chk.h5"
+        from .nn_checkpoint import append_vmc_results
+        append_vmc_results(chkpt_file, result)
+        if verbose >= 1:
+            print(
+                f"VMC results written to"
+                f" {chkpt_file}"
+            )
+
+        return result
 
 
 def get_vmc_nn_func(mol_info, config, init_key):

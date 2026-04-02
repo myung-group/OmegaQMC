@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
-from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
+from OmegaQMC.observables.force import postproc_h5_pgcs as vmc_forces
 
 rng_key = jax.random.key(888)
 

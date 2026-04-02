@@ -71,7 +71,7 @@ def _tau_int_from_acf(acf: jnp.ndarray) -> float:
     return jnp.maximum(tau_int, 1.0)
 
 
-class _VMCOptNaiveDriver:
+class _VMCOptDriverGTO_Naive:
     """Naïve VMC optimizer — differentiates through MC.
 
     Compiles the Metropolis kernel and local-energy
@@ -374,7 +374,7 @@ def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
     """Create a naïve VMC optimizer.
 
     Builds cusp-corrected trial wave-function parameters
-    and returns a :class:`_VMCOptNaiveDriver` that
+    and returns a :class:`_VMCOptDriverGTO_Naive` that
     optimizes Jastrow coefficients by differentiating
     through the entire MC trajectory at each epoch.
 
@@ -389,7 +389,7 @@ def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
 
     Returns
     -------
-    driver : _VMCOptNaiveDriver
+    driver : _VMCOptDriverGTO_Naive
         Callable optimizer.
     """
     num_nuc = mf.mol.natm
@@ -405,7 +405,7 @@ def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
                 params_cusp[atom_symbol] = p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptNaiveDriver(
+    return _VMCOptDriverGTO_Naive(
         mf, params_cusp,
         jastrow_config=jastrow_config
     )

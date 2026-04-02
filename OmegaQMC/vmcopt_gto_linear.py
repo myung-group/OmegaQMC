@@ -273,7 +273,7 @@ def _autotune_deriv_batch(
 # Driver class
 # -----------------------------------------------------------
 
-class _VMCOptLinearDriver:
+class _VMCOptDriverGTO_Linear:
     """Linear method VMC optimizer (OneShiftOnly)."""
 
     def __init__(self, mf, params_cusp,
@@ -1188,7 +1188,7 @@ def get_vmcopt_gto_func(
 
     Returns
     -------
-    driver : _VMCOptLinearDriver
+    driver : _VMCOptDriverGTO_Linear
         Callable optimizer.
     """
     num_nuc = mf.mol.natm
@@ -1210,7 +1210,7 @@ def get_vmcopt_gto_func(
                     p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptLinearDriver(
+    return _VMCOptDriverGTO_Linear(
         mf, params_cusp,
         jastrow_config=jastrow_config,
     )

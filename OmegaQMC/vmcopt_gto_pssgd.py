@@ -113,7 +113,7 @@ def _check_j2_cusps(params_corr, eps):
             "expected 0.5 (opposite-spin cusp condition)")
 
 
-class _VMCOptDriver:
+class _VMCOptDriverGTO_PSSGD:
     """Post-sampling SGD VMC optimizer.
 
     Compiles the Metropolis kernel and local-energy
@@ -437,7 +437,7 @@ def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
     """Create a post-sampling SGD VMC optimizer.
 
     Builds cusp-corrected trial wave-function parameters
-    and returns a :class:`_VMCOptDriver` that optimizes
+    and returns a :class:`_VMCOptDriverGTO_PSSGD` that optimizes
     Jastrow coefficients by minimizing a combined
     energy-plus-variance loss on stored walker snapshots
     using SGD or Adam.
@@ -460,7 +460,7 @@ def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
 
     Returns
     -------
-    driver : _VMCOptDriver
+    driver : _VMCOptDriverGTO_PSSGD
         A callable optimizer.  Call it with
         ``driver(rng_key, ...)`` to run the optimization
         loop and obtain optimized Jastrow parameters.
@@ -479,5 +479,5 @@ def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
                 params_cusp[atom_symbol] = p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptDriver(mf, params_cusp,
+    return _VMCOptDriverGTO_PSSGD(mf, params_cusp,
                          jastrow_config=jastrow_config)

@@ -9,10 +9,6 @@ Top-level functions
    Constructs the mean-field object via PySCF
    :cite:`Sun2020`.
 
-.. autofunction:: OmegaQMC.get_vmc_gto_func
-
-.. autofunction:: OmegaQMC.get_vmcopt_gto_func
-
 .. autofunction:: OmegaQMC.get_afqmc_func
 
 .. autofunction:: OmegaQMC.get_qed_afqmc_func
@@ -20,10 +16,54 @@ Top-level functions
    Implements the phaseless QED-AFQMC method
    :cite:`Weber2025`.
 
-VMC driver
------------
+GTO VMC driver
+---------------
 
-.. autoclass:: OmegaQMC.vmc_gto._VMCDriver
+.. autofunction:: OmegaQMC.vmc_gto.get_vmc_gto_func
+
+.. autoclass:: OmegaQMC.vmc_gto._VMCDriverGTO
+   :members: __call__
+
+GTO VMC optimizers
+-------------------
+
+Three optimizer implementations are provided, in order of
+decreasing efficiency:
+
+**Linear method** (recommended)
+
+Ports the QMCPACK :cite:`Kim2018` ``OneShiftOnly``
+algorithm :cite:`Umrigar2007,Toulouse2008`.  At each
+epoch it builds overlap (S) and Hamiltonian (H) matrices
+from per-walker log-psi and local-energy derivatives,
+then solves a shifted generalized eigenvalue problem
+for the parameter update.
+
+.. autofunction:: OmegaQMC.vmcopt_gto_linear.get_vmcopt_gto_func
+
+.. autoclass:: OmegaQMC.vmcopt_gto_linear._VMCOptDriverGTO_Linear
+   :members: __call__
+
+**Post-sampling SGD**
+
+Collects walker snapshots in a sampling phase, then
+minimizes a combined energy-plus-variance loss on those
+snapshots with SGD or Adam.
+
+.. autofunction:: OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_gto_func
+
+.. autoclass:: OmegaQMC.vmcopt_gto_pssgd._VMCOptDriverGTO_PSSGD
+   :members: __call__
+
+**Naïve (reference)**
+
+Differentiates through the entire MC trajectory at each
+epoch.  Memory-intensive; intended as a reference
+implementation only.
+
+.. autofunction:: OmegaQMC.vmcopt_gto_naive.get_vmcopt_gto_func
+
+.. autoclass:: OmegaQMC.vmcopt_gto_naive._VMCOptDriverGTO_Naive
    :members: __call__
 
 NN VMC driver
@@ -32,17 +72,26 @@ NN VMC driver
 .. autofunction:: OmegaQMC.vmc_nn.get_vmc_nn_func
 
 .. autoclass:: OmegaQMC.vmc_nn._VMCDriverNN
-   :members: __call__
+   :members: __call__, load_checkpoint
 
 NN VMC optimizer
 -----------------
 
 .. autofunction:: OmegaQMC.vmcopt_nn.get_vmcopt_nn_func
 
-.. autoclass:: OmegaQMC.vmcopt_nn._VMCOptNNDriver
+.. autoclass:: OmegaQMC.vmcopt_nn._VMCOptDriverNN
    :members: __call__
 
 .. autofunction:: OmegaQMC.vmcopt_nn.pretrain_to_hf
+
+NN checkpoints
+---------------
+
+.. autofunction:: OmegaQMC.nn_checkpoint.save_nn_checkpoint
+
+.. autofunction:: OmegaQMC.nn_checkpoint.load_nn_checkpoint
+
+.. autofunction:: OmegaQMC.nn_checkpoint.append_vmc_results
 
 AFQMC driver
 -------------
@@ -74,6 +123,11 @@ Energy estimators
 .. autofunction:: OmegaQMC.observables.energy.local_energy
 
 .. autofunction:: OmegaQMC.observables.energy.local_energy_multidet
+
+Nuclear forces
+~~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.observables.force.postproc_h5_pgcs
 
 Green's functions
 ~~~~~~~~~~~~~~~~~
@@ -283,50 +337,7 @@ Utility functions
 Utilities
 ----------
 
-.. autofunction:: OmegaQMC.utils.vmc_forces_with_pgcs
-
 .. autofunction:: OmegaQMC.utils.format_basis_name
 
 .. autofunction:: OmegaQMC.utils.do_binning_analysis
 
-Jastrow optimizers
--------------------
-
-Three optimizer implementations are provided, in order of
-decreasing efficiency:
-
-**Linear method** (recommended)
-
-Ports the QMCPACK :cite:`Kim2018` ``OneShiftOnly``
-algorithm :cite:`Umrigar2007,Toulouse2008`.  At each
-epoch it builds overlap (S) and Hamiltonian (H) matrices
-from per-walker log-psi and local-energy derivatives,
-then solves a shifted generalized eigenvalue problem
-for the parameter update.
-
-.. autofunction:: OmegaQMC.vmcopt_gto_linear.get_vmcopt_gto_func
-
-.. autoclass:: OmegaQMC.vmcopt_gto_linear._VMCOptLinearDriver
-   :members: __call__
-
-**Post-sampling SGD**
-
-Collects walker snapshots in a sampling phase, then
-minimizes a combined energy-plus-variance loss on those
-snapshots with SGD or Adam.
-
-.. autofunction:: OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_gto_func
-
-.. autoclass:: OmegaQMC.vmcopt_gto_pssgd._VMCOptDriver
-   :members: __call__
-
-**Naïve (reference)**
-
-Differentiates through the entire MC trajectory at each
-epoch.  Memory-intensive; intended as a reference
-implementation only.
-
-.. autofunction:: OmegaQMC.vmcopt_gto_naive.get_vmcopt_gto_func
-
-.. autoclass:: OmegaQMC.vmcopt_gto_naive._VMCOptNaiveDriver
-   :members: __call__

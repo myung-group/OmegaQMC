@@ -89,14 +89,14 @@ and ``<prefix>.grd.h5`` (gradient data).
 Step 4 — Post-process forces
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:func:`~OmegaQMC.utils.vmc_forces_with_pgcs` reads the gradient file and
-returns symmetry-averaged nuclear forces with statistical error estimates:
+:func:`~OmegaQMC.observables.force.postproc_h5_pgcs` reads the gradient file
+and returns symmetry-averaged nuclear forces with statistical error estimates:
 
 .. code-block:: python
 
-    from OmegaQMC.utils import vmc_forces_with_pgcs
+    from OmegaQMC.observables.force import postproc_h5_pgcs
 
-    forces, forces_err = vmc_forces_with_pgcs(prefix=data_prefix)
+    forces, forces_err = postproc_h5_pgcs(prefix=data_prefix)
     print("Forces (Ha/Bohr):\n", forces)
     print("Errors:\n", forces_err)
 
