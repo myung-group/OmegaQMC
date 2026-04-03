@@ -57,25 +57,34 @@ class _VMCDriverNN:
         self.nuc_crds = nuc_crds
         self.charges = charges
         self.nelec = nelec
+        self.n_nuc = n_nuc
 
         log_psi, init_params, graphdef = (
             make_nn_log_psi(config, mol_info, init_key)
         )
+        self.log_psi = log_psi
         self.params = init_params
 
-        # Precompute nuclear repulsion
-        enr_nn = 0.0
-        for a in range(n_nuc):
-            for b in range(a + 1, n_nuc):
-                rab = jnp.linalg.norm(
-                    nuc_crds[a] - nuc_crds[b],
-                )
-                enr_nn = enr_nn + (
-                    charges[a] * charges[b] / rab
-                )
+        # Precompute nuclear repulsion energy and gradient
+        def _nuc_repulsion(R):
+            enr = jnp.float64(0.0)
+            for a in range(n_nuc):
+                for b in range(a + 1, n_nuc):
+                    rab = jnp.linalg.norm(
+                        R[a] - R[b],
+                    )
+                    enr = enr + (
+                        charges[a] * charges[b] / rab
+                    )
+            return enr
+
         self.enr_nn = jnp.asarray(
-            enr_nn, dtype=jnp.float64,
+            _nuc_repulsion(nuc_crds),
+            dtype=jnp.float64,
         )
+        self.grd_nn = jax.grad(
+            _nuc_repulsion,
+        )(nuc_crds)
 
         i_e, j_e = jnp.triu_indices(nelec, k=1)
 
@@ -224,6 +233,7 @@ class _VMCDriverNN:
         num_blocks=100,
         num_blocks_equil=10,
         mc_timestep=0.1,
+        compute_gradients=False,
         verbose=1,
         prefix='nnopt',
     ):
@@ -242,6 +252,10 @@ class _VMCDriverNN:
             num_blocks: Total production blocks.
             num_blocks_equil: Equilibration blocks.
             mc_timestep: Initial MC timestep.
+            compute_gradients: If ``True``, evaluate
+                ZVZB nuclear force estimator each
+                block and write to
+                ``{prefix}.grd.h5``.
             verbose: Verbosity (0 = silent).
             prefix: Filename prefix for the HDF5
                 checkpoint.  VMC results are appended
@@ -256,6 +270,7 @@ class _VMCDriverNN:
 
         nelec = self.nelec
         nuc_crds = self.nuc_crds
+        charges = self.charges
         params = self.params
         enr_nn = self.enr_nn
         energy_ee = self.energy_ee
@@ -266,6 +281,47 @@ class _VMCDriverNN:
         )
 
         timestamp_init = datetime.now()
+
+        # --- Force setup ---
+        if compute_gradients:
+            import h5py
+            import pathlib
+            from .observables.force import (
+                vmc_nn_forces_zvzb,
+                save_nn_forces,
+            )
+
+            ofname_grd = f"{prefix}.grd.h5"
+            grd_nn = self.grd_nn
+
+            zvzb_force_batch = vmc_nn_forces_zvzb(
+                self.log_psi, nuc_crds, charges,
+                nelec, params,
+            )
+
+            p = pathlib.Path(ofname_grd)
+            if p.exists():
+                p.unlink()
+            with h5py.File(ofname_grd, 'w') as f:
+                f.create_dataset(
+                    'grd_nn', data=grd_nn,
+                )
+                g = f.create_group("system")
+                g.create_dataset(
+                    "charges", data=charges,
+                )
+                g.create_dataset(
+                    "atom_coords", data=nuc_crds,
+                )
+
+            n_nuc = self.n_nuc
+            base_batch_size = 500
+            mem_factor = max(
+                1, nelec * n_nuc // 1000,
+            )
+            batch_size = min(
+                50, base_batch_size // mem_factor,
+            )
 
         rng_key, init_key = jax.random.split(rng_key)
         walkers = self.initialize_walkers(
@@ -310,25 +366,54 @@ class _VMCDriverNN:
             )
 
         # --- Production ---
-        @jax.jit
-        def prod_step(state, _):
-            rk, w, s = state
-            for _ in range(num_steps_decorr):
-                rk, key = jax.random.split(rk)
-                keys = jax.random.split(
-                    key, num_walkers,
+        if compute_gradients:
+            @jax.jit
+            def prod_step(state, _):
+                rk, w, s = state
+                for _ in range(num_steps_decorr):
+                    rk, key = jax.random.split(rk)
+                    keys = jax.random.split(
+                        key, num_walkers,
+                    )
+                    nw, acc = metropolis_move_allw(
+                        keys, w, s, params,
+                    )
+                    w = nw
+                ar = acc.mean()
+                e_ee = jax.vmap(energy_ee)(nw)
+                e_en = jax.vmap(energy_en)(nw)
+                e_ke = jax.vmap(
+                    energy_ke,
+                    in_axes=(0, None),
+                )(nw, params)
+                return (
+                    (rk, nw, s),
+                    (ar, e_ee, e_en, e_ke, nw),
                 )
-                nw, acc = metropolis_move_allw(
-                    keys, w, s, params,
+        else:
+            @jax.jit
+            def prod_step(state, _):
+                rk, w, s = state
+                for _ in range(num_steps_decorr):
+                    rk, key = jax.random.split(rk)
+                    keys = jax.random.split(
+                        key, num_walkers,
+                    )
+                    nw, acc = metropolis_move_allw(
+                        keys, w, s, params,
+                    )
+                    w = nw
+                ar = acc.mean()
+                e_ee = jax.vmap(energy_ee)(nw)
+                e_en = jax.vmap(energy_en)(nw)
+                e_ke = jax.vmap(
+                    energy_ke,
+                    in_axes=(0, None),
+                )(nw, params)
+                return (
+                    (rk, nw, s),
+                    (ar, e_ee, e_en, e_ke),
                 )
-                w = nw
-            ar = acc.mean()
-            e_ee = jax.vmap(energy_ee)(nw)
-            e_en = jax.vmap(energy_en)(nw)
-            e_ke = jax.vmap(
-                energy_ke, in_axes=(0, None),
-            )(nw, params)
-            return (rk, nw, s), (ar, e_ee, e_en, e_ke)
 
         if verbose >= 1:
             print(
@@ -350,10 +435,15 @@ class _VMCDriverNN:
                 jnp.arange(num_steps_per_block),
             )
             rng_key, walkers, _ = state
-            ratios, e_ee, e_en, e_ke = result
+
+            if compute_gradients:
+                (ratios, e_ee, e_en,
+                 e_ke, sampled_w) = result
+            else:
+                ratios, e_ee, e_en, e_ke = result
 
             E_loc = e_ee + e_en + e_ke + enr_nn
-            # E_loc: (num_steps_per_block, num_walkers)
+            # E_loc: (num_steps_per_block,num_walkers)
 
             E_step = E_loc.mean(axis=1)
             E_mean = E_step.mean()
@@ -377,6 +467,29 @@ class _VMCDriverNN:
                     f"{dt:>14.4f}"
                 )
                 timestamp_prev = now
+
+            if compute_gradients:
+                # sampled_w: (steps, walkers, nel, 3)
+                n_samples = (
+                    num_steps_per_block
+                    * num_walkers
+                )
+                num_batches = (
+                    (n_samples + batch_size - 1)
+                    // batch_size
+                )
+                save_nn_forces(
+                    blk,
+                    sampled_w.reshape(
+                        -1, nelec, 3,
+                    ),
+                    E_loc.reshape(-1),
+                    float(E_mean),
+                    batch_size,
+                    num_batches,
+                    ofname_grd,
+                    zvzb_force_batch,
+                )
 
         # --- Binning analysis ---
         E_arr = jnp.array(E_blocks)

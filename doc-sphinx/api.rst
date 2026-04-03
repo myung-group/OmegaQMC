@@ -133,6 +133,12 @@ Nuclear forces
 
 .. autofunction:: OmegaQMC.observables.force.postproc_h5_pgcs
 
+.. autofunction:: OmegaQMC.observables.force.vmc_nn_forces_zvzb
+
+.. autofunction:: OmegaQMC.observables.force.save_nn_forces
+
+.. autofunction:: OmegaQMC.observables.force.postproc_nn_forces
+
 Green's functions
 ~~~~~~~~~~~~~~~~~
 

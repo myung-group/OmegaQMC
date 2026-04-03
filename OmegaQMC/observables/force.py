@@ -19,9 +19,7 @@ import sys
 import jax
 import h5py
 import jax.numpy as jnp
-from pyscf import gto
 
-from ..symm.operations import symmetry_operations_map
 from ..utils import (
     batched_binning_analysis_grds,
     compute_torque_with_error,
@@ -257,6 +255,317 @@ def vmc_gto_gradients(
     return _vmc_gradient_batch
 
 
+def vmc_nn_forces_zvzb(
+    log_psi,
+    nuc_crds,
+    charges,
+    nelec,
+    params,
+):
+    """Build a JIT-compiled ZVZB force batch function.
+
+    Implements the zero-variance zero-bias (ZVZB)
+    nuclear force estimator of Assaraf, Caffarel &
+    Khelif :cite:`Assaraf2003`, following the formulation
+    in :cite:`Pathak2022`.  Designed for use with NN
+    wavefunctions where autodiff through the entire
+    wavefunction is available.
+
+    Parameters
+    ----------
+    log_psi : callable
+        ``(elec_crds, nuc_crds, params) -> float``.
+        Log absolute value of the NN trial
+        wavefunction for a single walker.
+    nuc_crds : jnp.ndarray
+        Nuclear coordinates, shape ``(natom, 3)``.
+    charges : jnp.ndarray
+        Nuclear charges, shape ``(natom,)``.
+    nelec : int
+        Total number of electrons.
+    params : pytree
+        NN wavefunction parameters (NNX State).
+
+    Returns
+    -------
+    callable
+        ``(batch_walkers, e_loc_batch, e_bar)
+        -> force_zvzb`` where *batch_walkers* has shape
+        ``(batch, nelec, 3)``, *e_loc_batch* has shape
+        ``(batch,)``, *e_bar* is a scalar mean energy,
+        and *force_zvzb* has shape
+        ``(batch, natom, 3)``.
+    """
+    from ..psi.nn.physics import laplacian
+
+    n_nuc = len(charges)
+    charges_elec = -jnp.ones(nelec)
+
+    # --- Coulomb force utility ---
+    def _coulomb_force(
+        r1, r2, c1, c2, remove_self=False,
+    ):
+        """Pairwise Coulomb force on particles in r1.
+
+        ``F_i = sum_j c_i c_j (r_i - r_j)/|r_i-r_j|^3``
+        """
+        diffs = r1[:, None] - r2[None]
+        norms = jnp.linalg.norm(
+            diffs, axis=-1, keepdims=True,
+        )
+        force = (
+            (c1[:, None] * c2[None])[..., None]
+            * diffs
+            / norms ** 3
+        )
+        if remove_self:
+            n = len(r1)
+            mask = ~jnp.eye(n, dtype=bool)
+            force = force * mask[..., None]
+        return force.sum(-2)
+
+    # --- Bare Hellmann-Feynman force (single walker) ---
+    @jax.jit
+    def _force_bare(elec_crds):
+        f_nn = _coulomb_force(
+            nuc_crds, nuc_crds,
+            charges, charges, True,
+        )
+        f_en = _coulomb_force(
+            nuc_crds, elec_crds,
+            charges, charges_elec, False,
+        )
+        return f_nn + f_en
+
+    # --- Grad of log|psi| w.r.t. nuclear coords ---
+    @jax.jit
+    def _grad_nuc_log_psi(elec_crds):
+        return jax.grad(
+            log_psi, argnums=1,
+        )(elec_crds, nuc_crds, params)
+
+    # --- Kinetic energy of psi (single walker) ---
+    @jax.jit
+    def _ke_psi(elec_crds):
+        def _log_psi_flat(r_flat):
+            r = r_flat.reshape(nelec, 3)
+            return log_psi(r, nuc_crds, params)
+        r_flat = elec_crds.reshape(-1)
+        lap_fn = laplacian(_log_psi_flat)
+        lap_val, grad_val = lap_fn(r_flat)
+        return -0.5 * (
+            lap_val + jnp.dot(grad_val, grad_val)
+        )
+
+    # --- KE of dpsi/dR_{ij} for one (i,j) ---
+    def _ke_dpsi_component(elec_crds, ia, k):
+        r"""KE of `\partial\psi/\partial R_{ia,k}`.
+
+        Uses the identity
+        `\log|\partial\psi/\partial R_{ia,k}|`
+        `= \log|\psi| + \log|h_{ia,k}|`
+        where `h = \partial\log|\psi|/\partial R`.
+        """
+        def _log_abs_dpsi(r_flat):
+            r = r_flat.reshape(nelec, 3)
+            lp = log_psi(r, nuc_crds, params)
+            h = jax.grad(
+                log_psi, argnums=1,
+            )(r, nuc_crds, params)[ia, k]
+            return lp + jnp.log(jnp.abs(h))
+        r_flat = elec_crds.reshape(-1)
+        lap_fn = laplacian(_log_abs_dpsi)
+        lap_val, grad_val = lap_fn(r_flat)
+        return -0.5 * (
+            lap_val + jnp.dot(grad_val, grad_val)
+        )
+
+    # --- Full ZVZB force (single walker) ---
+    @jax.jit
+    def _force_zvzb(elec_crds, e_loc, e_bar):
+        f_bare = _force_bare(elec_crds)
+        grad_lp = _grad_nuc_log_psi(elec_crds)
+        ke_psi = _ke_psi(elec_crds)
+
+        # KE of dpsi/dR_{ia,k} for all (ia, k)
+        def body_fn(idx, val):
+            ia = idx // 3
+            k = idx % 3
+            ke_d = _ke_dpsi_component(
+                elec_crds, ia, k,
+            )
+            return val.at[ia, k].set(ke_d)
+
+        ke_dpsi_all = jax.lax.fori_loop(
+            0, n_nuc * 3, body_fn,
+            jnp.zeros((n_nuc, 3)),
+        )
+
+        # ZV: F_bare - (KE_dpsi - KE_psi) * grad_log_psi
+        # (potential terms cancel in the difference)
+        f_zv = f_bare - (
+            (ke_dpsi_all - ke_psi) * grad_lp
+        )
+
+        # ZB: -2 * (E_loc - E_bar) * grad_log_psi
+        f_zb = (
+            -2.0 * (e_loc - e_bar) * grad_lp
+        )
+
+        return f_zv + f_zb
+
+    # --- Batched version ---
+    @jax.jit
+    def _force_zvzb_batch(
+        batch_walkers, e_loc_batch, e_bar,
+    ):
+        return jax.vmap(
+            _force_zvzb, in_axes=(0, 0, None),
+        )(batch_walkers, e_loc_batch, e_bar)
+
+    return _force_zvzb_batch
+
+
+def save_nn_forces(
+    block_cnt,
+    sampled_walkers,
+    local_energies,
+    e_bar,
+    batch_size,
+    num_batches,
+    ofname_grd,
+    zvzb_force_batch,
+):
+    """Save per-block ZVZB force data to HDF5.
+
+    Evaluates the ZVZB nuclear force estimator on
+    batches of walker positions and writes the
+    per-sample forces and local energies to the
+    gradient HDF5 file.
+
+    Parameters
+    ----------
+    block_cnt : int
+        Current production-block index.
+    sampled_walkers : jnp.ndarray
+        Walker positions, shape
+        ``(num_samples, nelec, 3)``.
+    local_energies : jnp.ndarray
+        Per-walker local energies, shape
+        ``(num_samples,)``.
+    e_bar : float
+        Running mean energy for zero-bias term.
+    batch_size : int
+        Number of walkers per gradient batch.
+    num_batches : int
+        Number of batches.
+    ofname_grd : str
+        Path to the gradient HDF5 file.
+    zvzb_force_batch : callable
+        JIT-compiled ``(walkers, e_loc, e_bar)
+        -> forces`` with shapes
+        ``(batch, nelec, 3)``, ``(batch,)``,
+        scalar, and ``(batch, natom, 3)``.
+    """
+    num_samples = sampled_walkers.shape[0]
+
+    force_accum = []
+    for batch_idx in range(num_batches):
+        start = batch_idx * batch_size
+        end = min(start + batch_size, num_samples)
+        batch_w = sampled_walkers[start:end]
+        batch_e = local_energies[start:end]
+
+        forces = zvzb_force_batch(
+            batch_w, batch_e, e_bar,
+        )
+        force_accum.append(forces)
+
+    all_forces = jnp.concatenate(
+        force_accum, axis=0,
+    )
+
+    with h5py.File(ofname_grd, 'a') as f:
+        grp = f.require_group('force_zvzb')
+        grp.create_dataset(
+            str(block_cnt), data=all_forces,
+        )
+        grp2 = f.require_group('local_energies')
+        grp2.create_dataset(
+            str(block_cnt),
+            data=local_energies[:num_samples],
+        )
+
+
+def postproc_nn_forces(prefix='nnvmc'):
+    """Post-process NN ZVZB force data from HDF5.
+
+    Reads per-block ZVZB force data written by
+    :func:`save_nn_forces`, adds the nuclear-nuclear
+    gradient, and performs binning analysis to obtain
+    mean forces with statistical errors.
+
+    Parameters
+    ----------
+    prefix : str, optional
+        File-name stem.  The function looks for
+        ``<prefix>.grd.h5``; trailing ``.chk.h5`` or
+        ``.grd.h5`` suffixes are stripped.  Default
+        is ``"nnvmc"``.
+
+    Returns
+    -------
+    forces : jnp.ndarray, shape ``(natom, 3)``
+        Mean nuclear forces (Hartree / Bohr).
+    errors : jnp.ndarray, shape ``(natom, 3)``
+        Standard error of each force component.
+    """
+    from ..utils import do_binning_analysis
+
+    suffixes = [".chk.h5", ".grd.h5"]
+    for s in suffixes:
+        if prefix.endswith(s):
+            prefix = prefix[:-len(s)]
+    ofname_grd = prefix + ".grd.h5"
+
+    with h5py.File(ofname_grd, 'r') as f:
+        grd_nn = jnp.array(f['grd_nn'][:])
+        grp = f['force_zvzb']
+        block_keys = sorted(
+            grp.keys(), key=int,
+        )
+
+        # Per-block mean forces
+        block_forces = []
+        for key in block_keys:
+            # (num_samples, natom, 3)
+            fdata = jnp.array(grp[key][:])
+            block_forces.append(
+                fdata.mean(axis=0),
+            )
+
+    block_forces = jnp.stack(block_forces, axis=0)
+    # block_forces: (num_blocks, natom, 3)
+
+    natom = block_forces.shape[1]
+    forces = jnp.zeros((natom, 3))
+    errors = jnp.zeros((natom, 3))
+
+    for ia in range(natom):
+        for k in range(3):
+            component = block_forces[:, ia, k]
+            mean, serr, _, _ = (
+                do_binning_analysis(component)
+            )
+            forces = forces.at[ia, k].set(mean)
+            errors = errors.at[ia, k].set(serr)
+
+    # Add nuclear-nuclear gradient
+    forces = forces + grd_nn
+
+    return forces, errors
+
+
 def save_gto_gradients(
     block_cnt,
     sampled_walkers,
@@ -313,6 +622,10 @@ def save_gto_gradients(
         weighted-mean block energies, or empty dict
         if *single_frag_combos* is empty.
     """
+    from ..symm.operations import (
+        symmetry_operations_map,
+    )
+
     num_samples_per_block = sampled_walkers.shape[0]
 
     # Reference gradient accumulators
@@ -588,6 +901,8 @@ nuclear forces using PGCS.
         Statistical error (standard error of the mean)
         of each force component.
     """
+    from pyscf import gto
+
     suffixes_checked = [".chk.h5", ".grd.h5"]
     for s in suffixes_checked:
         if prefix.endswith(s):

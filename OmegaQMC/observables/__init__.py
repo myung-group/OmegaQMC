@@ -25,4 +25,7 @@ from OmegaQMC.observables.force import (
     vmc_gto_gradients,
     save_gto_gradients,
     postproc_h5_pgcs,
+    vmc_nn_forces_zvzb,
+    save_nn_forces,
+    postproc_nn_forces,
 )
