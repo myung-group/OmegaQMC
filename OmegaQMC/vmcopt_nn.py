@@ -16,16 +16,77 @@ PySCF dependency.
 """
 
 import os
+import h5py
 import jax
 import jax.numpy as jnp
 import optax
 from functools import partial
 
-from .nn_checkpoint import save_nn_checkpoint
+from .nn_checkpoint import (
+    save_nn_checkpoint,
+    load_nn_checkpoint,
+)
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
 from .psi.nn.wf import MoleculeInfo
 from .constants import MIN_DIST_THRESHOLD
+from .vmcopt_gto_linear import _get_free_gpu_mb
+
+
+def _autotune_nn_batch(
+        compute_energy_fn, nelec, params,
+        free_mb, mem_frac=0.75,
+):
+    """Choose walker batch size for NN energy eval.
+
+    Compiles the vmapped energy function for a single
+    walker to measure per-walker GPU memory via JAX AOT
+    analysis.  Falls back to a 2 MB/walker heuristic
+    when AOT is unavailable (NN walkers are costlier
+    than GTO walkers due to the full Laplacian).
+
+    Parameters
+    ----------
+    compute_energy_fn : callable
+        Vmapped energy function
+        ``(walkers, params) -> energies``.
+    nelec : int
+        Number of electrons.
+    params : pytree
+        Representative NN parameter pytree.
+    free_mb : float or None
+        Free GPU memory in MiB; ``None`` assumes 4096.
+    mem_frac : float
+        Fraction of free memory to target (0.75).
+
+    Returns
+    -------
+    int
+        Recommended walker batch size.
+    """
+    bytes_per_walker = None
+    try:
+        probe = jnp.zeros((1, nelec, 3))
+        compiled = (
+            jax.jit(compute_energy_fn)
+            .lower(probe, params)
+            .compile()
+        )
+        analysis = compiled.memory_analysis()
+        bytes_per_walker = (
+            analysis.alias_size
+            + analysis.temp_size
+        )
+    except Exception:
+        pass
+
+    if not bytes_per_walker:
+        bytes_per_walker = 2.0e6  # 2 MB fallback
+    free_bytes = (
+        (free_mb or 4096.0) * 1e6 * mem_frac
+    )
+    bs = int(free_bytes / bytes_per_walker)
+    return max(10, min(bs, 8192))
 
 
 class _VMCOptDriverNN:
@@ -285,10 +346,10 @@ class _VMCOptDriverNN:
         self,
         rng_key,
         num_epochs=20,
-        num_walkers=500,
+        num_walkers='auto',
         num_steps_per_block=200,
         num_steps_decorr=1,
-        num_blocks=5,
+        num_opt_samples='auto',
         num_blocks_equil=5,
         mc_timestep=0.1,
         lr=1e-3,
@@ -309,12 +370,15 @@ class _VMCOptDriverNN:
             rng_key: JAX PRNG key.
             num_epochs: Number of Adam optimization
                 epochs.
-            num_walkers: Number of MC walkers.
+            num_walkers: Number of MC walkers, or
+                ``'auto'`` to set from GPU memory.
             num_steps_per_block: MC steps per production
                 block.
             num_steps_decorr: Decorrelation steps between
                 samples.
-            num_blocks: Number of production blocks.
+            num_opt_samples: Total walker snapshots to
+                collect for optimization, or ``'auto'``
+                to set to ``5 * num_walkers``.
             num_blocks_equil: Number of equilibration
                 blocks.
             mc_timestep: Initial MC timestep.
@@ -337,6 +401,100 @@ class _VMCOptDriverNN:
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
         opt_state = optimizer.init(params)
+        start_epoch = 0
+
+        # Resume from checkpoint if one exists
+        chkpt_path = f"{prefix}.chk.h5"
+        if os.path.exists(chkpt_path):
+            template_leaves = jax.tree.leaves(params)
+            n_model = len(template_leaves)
+            try:
+                with h5py.File(chkpt_path, 'r') as f:
+                    n_chk = int(
+                        f['params'].attrs['num_leaves']
+                    )
+                    if n_chk != n_model:
+                        print(
+                            f"Error: checkpoint"
+                            f" '{chkpt_path}' has"
+                            f" {n_chk} parameter"
+                            f" leaves but current"
+                            f" model has {n_model}."
+                            " Incompatible"
+                            " architecture — stopping."
+                        )
+                        return None, {}
+                    for i, leaf in enumerate(
+                        template_leaves
+                    ):
+                        chk_shape = (
+                            f['params'][str(i)].shape
+                        )
+                        if chk_shape != leaf.shape:
+                            print(
+                                f"Error: parameter"
+                                f" leaf {i} shape"
+                                f" mismatch:"
+                                f" checkpoint"
+                                f" {chk_shape} vs"
+                                f" model {leaf.shape}."
+                                " Incompatible"
+                                " architecture"
+                                " — stopping."
+                            )
+                            return None, {}
+            except (KeyError, OSError) as exc:
+                print(
+                    f"Error reading checkpoint"
+                    f" '{chkpt_path}': {exc}"
+                    " — stopping."
+                )
+                return None, {}
+
+            params, meta = load_nn_checkpoint(
+                chkpt_path, params,
+            )
+            start_epoch = (
+                int(meta.get('epoch', -1)) + 1
+            )
+            opt_state = optimizer.init(params)
+            if verbose >= 1:
+                print(
+                    f"Resuming from '{chkpt_path}'"
+                    f" (epoch {start_epoch - 1}"
+                    f" completed,"
+                    f" continuing from"
+                    f" epoch {start_epoch})"
+                )
+
+        # Auto-tune walker counts to fit GPU memory
+        _need_auto = (
+            num_walkers == 'auto'
+            or num_opt_samples == 'auto'
+        )
+        if _need_auto:
+            free_mb = _get_free_gpu_mb()
+            auto_bs = _autotune_nn_batch(
+                self.compute_batch_energy,
+                self.nelec, params, free_mb,
+            )
+            if num_walkers == 'auto':
+                num_walkers = auto_bs
+            if num_opt_samples == 'auto':
+                num_opt_samples = 5 * num_walkers
+            if verbose >= 1:
+                print(
+                    f"  Auto-tuned:"
+                    f" num_walkers={num_walkers},"
+                    f" num_opt_samples="
+                    f"{num_opt_samples}"
+                )
+
+        # Ceiling division: blocks needed to collect
+        # at least num_opt_samples walker snapshots
+        num_sample_blocks = (
+            -(-num_opt_samples // num_walkers)
+        )
 
         rng_key, rng = jax.random.split(rng_key)
         walkers = self.initialize_walkers(
@@ -364,11 +522,11 @@ class _VMCOptDriverNN:
 
         if verbose >= 1:
             print(
-                f"\nRunning {num_blocks} production"
-                " blocks..."
+                f"\nRunning {num_sample_blocks}"
+                " production blocks..."
             )
         all_samples = []
-        for blk in range(1, num_blocks + 1):
+        for blk in range(1, num_sample_blocks + 1):
             (rng_key, walkers, mc_stepsize, _), (
                 acc_r, tw_e,
             ) = self.run_production(
@@ -380,13 +538,14 @@ class _VMCOptDriverNN:
             all_samples.append(walkers)
             if verbose >= 1:
                 print(
-                    f"  block {blk}/{num_blocks}: "
+                    f"  block"
+                    f" {blk}/{num_sample_blocks}: "
                     f"{walkers.shape[0]} samples"
                 )
 
         sampled = jnp.vstack(all_samples).reshape(
             -1, self.nelec, 3,
-        )
+        )[:num_opt_samples]
         n_samples = sampled.shape[0]
 
         rng_key, rng1 = jax.random.split(rng_key)
@@ -407,7 +566,9 @@ class _VMCOptDriverNN:
                 f" (lr={lr})...\n"
             )
 
-        for epoch in range(num_epochs):
+        for epoch in range(
+            start_epoch, start_epoch + num_epochs,
+        ):
             epoch_losses = []
             for si in range(0, n_train, batch_size):
                 ei = min(si + batch_size, n_train)
@@ -449,7 +610,6 @@ class _VMCOptDriverNN:
                     f"Valid: {valid_loss:.6f}"
                 )
 
-            chkpt_path = f"{prefix}.chk.h5"
             if os.path.exists(chkpt_path):
                 os.rename(
                     chkpt_path,
@@ -473,15 +633,25 @@ class _VMCOptDriverNN:
             v_energies.append(
                 self.compute_batch_energy(
                     valid_w[si:ei], params,
-                ).mean()
+                )
             )
-        final_e = jnp.array(v_energies).mean()
+        all_e = jnp.concatenate(v_energies)
+        final_e = float(all_e.mean())
+        neff = all_e.size
+        final_err = float(all_e.std()) / neff ** 0.5
 
         if verbose >= 1:
-            print(f"\nFinal energy: {final_e:.6f}")
+            print(
+                f"\nFinal energy:"
+                f" {final_e:.8f}"
+                f" +/- {final_err:.8f}"
+            )
 
         return params, {
-            'energy': {'mean': float(final_e)},
+            'energy': {
+                'mean': final_e,
+                'stderr': final_err,
+            },
         }
 
 

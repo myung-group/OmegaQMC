@@ -21,21 +21,9 @@ mol = MoleculeInfo(
 
 init_key, opt_key = jax.random.split(rng_key)
 
-vmcopt_run = get_vmcopt_nn_func(
-    mol, 'psiformer', init_key,
-)
+vmcopt_run = get_vmcopt_nn_func(mol, 'psiformer', init_key)
 
-params_final, E_data = vmcopt_run(
-    opt_key,
-    num_epochs=3,
-    num_walkers=100,
-    num_steps_per_block=50,
-    num_blocks=2,
-    num_blocks_equil=2,
-    batch_size=50,
-    lr=1e-3,
-    verbose=1,
-)
+params_final, E_data = vmcopt_run(opt_key, lr=1e-3, verbose=1)
 
 print(f"\nFinal params keys: {list(params_final.keys())}")
 print(f"Energy data: {E_data}")
