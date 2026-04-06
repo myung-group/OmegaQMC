@@ -23,7 +23,7 @@ from functools import partial
 from .cusp import get_cusp_params
 from .psi_gto import get_psi_fun
 from .constants import MIN_DIST_THRESHOLD
-from .vmcopt_gto_pssgd import (
+from .vmcopt_gto_irsgd import (
     _build_opt_mask,
     _init_params_corr,
     _check_j2_cusps,

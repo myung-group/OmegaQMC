@@ -134,8 +134,8 @@ Pass the returned *params_opt* as ``params_corr`` to
 Two alternative optimizer implementations are also
 available directly from their submodules:
 
-- :func:`~OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_gto_func` —
-  post-sampling SGD/Adam optimizer
+- :func:`~OmegaQMC.vmcopt_gto_irsgd.get_vmcopt_gto_func` —
+  iteratively-resampled SGD/Adam optimizer
 - :func:`~OmegaQMC.vmcopt_gto_naive.get_vmcopt_gto_func` —
   naïve optimizer (differentiates through MC; reference
   implementation only)

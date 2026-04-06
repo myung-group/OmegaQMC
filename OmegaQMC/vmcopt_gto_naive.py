@@ -9,7 +9,7 @@ computed via JAX automatic differentiation.
 This approach is exact but memory-intensive because JAX
 must retain the entire trajectory for backpropagation
 (hence ``jax.checkpoint`` in the inner loop).  For
-production use, prefer :mod:`vmcopt_gto_pssgd` (which
+production use, prefer :mod:`vmcopt_gto_irsgd` (which
 samples first, then optimizes on the stored snapshots)
 or :mod:`vmcopt_gto_linear` (the linear method).
 """
@@ -20,7 +20,7 @@ import optax
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 from .constants import MIN_DIST_THRESHOLD
-from .vmcopt_gto_pssgd import (
+from .vmcopt_gto_irsgd import (
     _build_opt_mask,
     _zero_frozen_grads,
     _init_params_corr,

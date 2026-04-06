@@ -44,15 +44,15 @@ for the parameter update.
 .. autoclass:: OmegaQMC.vmcopt_gto_linear._VMCOptDriverGTO_Linear
    :members: __call__
 
-**Post-sampling SGD**
+**Iteratively-resampled SGD (IRSGD)**
 
-Collects walker snapshots in a sampling phase, then
-minimizes a combined energy-plus-variance loss on those
-snapshots with SGD or Adam.
+Alternates MCMC resampling with SGD or Adam epochs,
+avoiding stale-sample drift while remaining more
+memory-efficient than the naïve approach.
 
-.. autofunction:: OmegaQMC.vmcopt_gto_pssgd.get_vmcopt_gto_func
+.. autofunction:: OmegaQMC.vmcopt_gto_irsgd.get_vmcopt_gto_func
 
-.. autoclass:: OmegaQMC.vmcopt_gto_pssgd._VMCOptDriverGTO_PSSGD
+.. autoclass:: OmegaQMC.vmcopt_gto_irsgd._VMCOptDriverGTO_IRSGD
    :members: __call__
 
 **Naïve (reference)**

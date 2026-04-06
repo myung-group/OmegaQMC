@@ -1,17 +1,23 @@
-"""Post-sampling Adam VMC optimizer for NN wavefunctions.
+"""Iterative Adam VMC optimizer for NN wavefunctions.
 
-Implements Jastrow + backflow parameter optimization via a
-two-phase approach:
+Optimises Jastrow + backflow parameters via an outer loop
+that alternates between:
 
-1. **Sampling phase** — equilibrate walkers, then run
-   production MC blocks and store final walker positions.
-2. **Optimization phase** — minimize a combined
-   energy-plus-variance loss on the stored snapshots
-   using Adam (via Optax).
+1. **Sampling** — collect fresh walker snapshots from the
+   current |ψ(params)|² via Metropolis Monte Carlo.
+2. **Optimization** — run several Adam epochs on those
+   snapshots.
 
-Unlike :mod:`vmcopt_gto_pssgd`, the local energy is computed
-entirely from the NN trial wavefunction via the O(N) Laplacian
-from :func:`~OmegaQMC.psi.nn.physics.laplacian`, with no
+Periodic resampling keeps the training distribution
+aligned with the evolving wavefunction, avoiding the
+stale-sample problem of a single sample-then-optimize
+cycle and converging comparably to the interleaved
+approach used by DeepQMC.
+
+Unlike :mod:`vmcopt_gto_irsgd`, the local energy is
+computed entirely from the NN trial wavefunction via the
+O(N) Laplacian from
+:func:`~OmegaQMC.psi.nn.physics.laplacian`, with no
 PySCF dependency.
 """
 
@@ -89,14 +95,21 @@ def _autotune_nn_batch(
     return max(10, min(bs, 8192))
 
 
+# Target total parameter updates when num_iters='auto'.
+# DeepQMC typically needs 50 000–100 000 interleaved
+# sample-then-update steps to converge a PsiFormer;
+# 50 000 is a conservative default for iterative
+# resampling with multiple Adam epochs per iteration.
+_TARGET_UPDATES = 50000
+
+
 class _VMCOptDriverNN:
-    """Post-sampling Adam VMC optimizer for NN trials.
+    """Iterative Adam VMC optimizer for NN trials.
 
     Compiles the Metropolis kernel and local-energy
-    function for a given molecule, collects walker
-    snapshots in a sampling phase, then optimizes
-    the full NN parameter set on those snapshots with
-    Adam.
+    function for a given molecule, then runs an outer
+    loop of (resample walkers → Adam epochs) until the
+    target number of parameter updates is reached.
     """
 
     def __init__(self, mol_info, config, init_key):
@@ -345,11 +358,12 @@ class _VMCOptDriverNN:
     def __call__(
         self,
         rng_key,
+        num_iters='auto',
         num_epochs=20,
         num_walkers='auto',
         num_steps_per_block=200,
         num_steps_decorr=1,
-        num_opt_samples='auto',
+        num_sample_blocks=5,
         num_blocks_equil=5,
         mc_timestep=0.1,
         lr=1e-3,
@@ -358,86 +372,111 @@ class _VMCOptDriverNN:
         verbose=1,
         prefix='nnopt',
     ):
-        """Run VMC optimization for NN wavefunctions.
+        """Run iterative VMC optimization for NN
+        wavefunctions.
 
-        After each epoch the current parameters are
-        written to ``{prefix}.chk.h5``.  Before each
-        write the previous ``{prefix}.chk.h5`` is
-        preserved as ``{prefix}.{epoch}.h5`` so that
-        every completed epoch is recoverable.
+        Uses an outer loop that alternates between
+        (1) sampling fresh walker snapshots from the
+        current |ψ(params)|² and (2) running
+        ``num_epochs`` Adam passes over those
+        snapshots.  This avoids the stale-sample
+        problem of a single sample-then-optimize
+        cycle.
+
+        After each iteration the current parameters
+        are written to ``{prefix}.chk.h5``.  Before
+        each write the previous file is preserved as
+        ``{prefix}.{iter}.h5`` so every completed
+        iteration is recoverable.
 
         Args:
             rng_key: JAX PRNG key.
-            num_epochs: Number of Adam optimization
-                epochs.
+            num_iters: Number of outer
+                (resample + optimize) iterations,
+                or ``'auto'`` to target
+                ~50 000 total parameter updates.
+            num_epochs: Adam passes over sampled
+                data per iteration.
             num_walkers: Number of MC walkers, or
                 ``'auto'`` to set from GPU memory.
-            num_steps_per_block: MC steps per production
-                block.
-            num_steps_decorr: Decorrelation steps between
+            num_steps_per_block: MC steps per
+                production block.
+            num_steps_decorr: Decorrelation steps
+                between samples.
+            num_sample_blocks: Production blocks
+                per iteration for collecting fresh
                 samples.
-            num_opt_samples: Total walker snapshots to
-                collect for optimization, or ``'auto'``
-                to set to ``5 * num_walkers``.
-            num_blocks_equil: Number of equilibration
-                blocks.
+            num_blocks_equil: Equilibration blocks
+                (initial only).
             mc_timestep: Initial MC timestep.
             lr: Adam learning rate.
-            train_split: Fraction of data for training.
-            batch_size: Batch size for optimization.
-            verbose: Verbosity level (0 = silent).
+            train_split: Fraction of data for
+                training (rest for validation).
+            batch_size: Batch size for Adam.
+            verbose: Verbosity level
+                (0 = silent).
             prefix: Filename prefix for the HDF5
-                checkpoint.  The live checkpoint is
-                ``{prefix}.chk.h5``; superseded
-                checkpoints are renamed
-                ``{prefix}.{epoch}.h5``.
+                checkpoint.
 
         Returns:
-            Tuple ``(params_final, energy_data)`` where
-            *params_final* is the optimized NNX parameter
-            pytree and *energy_data* is a dict with key
-            ``'energy'``.
+            Tuple ``(params_final, energy_data)``
+            where *params_final* is the optimized
+            NNX parameter pytree and *energy_data*
+            is a dict with key ``'energy'``.
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
         opt_state = optimizer.init(params)
-        start_epoch = 0
+        start_iter = 0
 
         # Resume from checkpoint if one exists
         chkpt_path = f"{prefix}.chk.h5"
         if os.path.exists(chkpt_path):
-            template_leaves = jax.tree.leaves(params)
+            template_leaves = jax.tree.leaves(
+                params,
+            )
             n_model = len(template_leaves)
             try:
-                with h5py.File(chkpt_path, 'r') as f:
+                with h5py.File(
+                    chkpt_path, 'r',
+                ) as f:
                     n_chk = int(
-                        f['params'].attrs['num_leaves']
+                        f['params'].attrs[
+                            'num_leaves'
+                        ]
                     )
                     if n_chk != n_model:
                         print(
                             f"Error: checkpoint"
-                            f" '{chkpt_path}' has"
-                            f" {n_chk} parameter"
-                            f" leaves but current"
-                            f" model has {n_model}."
+                            f" '{chkpt_path}'"
+                            f" has {n_chk}"
+                            f" parameter leaves"
+                            f" but current model"
+                            f" has {n_model}."
                             " Incompatible"
-                            " architecture — stopping."
+                            " architecture"
+                            " — stopping."
                         )
                         return None, {}
                     for i, leaf in enumerate(
                         template_leaves
                     ):
                         chk_shape = (
-                            f['params'][str(i)].shape
+                            f['params'][
+                                str(i)
+                            ].shape
                         )
                         if chk_shape != leaf.shape:
                             print(
-                                f"Error: parameter"
-                                f" leaf {i} shape"
+                                f"Error:"
+                                f" parameter"
+                                f" leaf {i}"
+                                f" shape"
                                 f" mismatch:"
                                 f" checkpoint"
-                                f" {chk_shape} vs"
-                                f" model {leaf.shape}."
+                                f" {chk_shape}"
+                                f" vs model"
+                                f" {leaf.shape}."
                                 " Incompatible"
                                 " architecture"
                                 " — stopping."
@@ -454,195 +493,236 @@ class _VMCOptDriverNN:
             params, meta = load_nn_checkpoint(
                 chkpt_path, params,
             )
-            start_epoch = (
+            start_iter = (
                 int(meta.get('epoch', -1)) + 1
             )
             opt_state = optimizer.init(params)
             if verbose >= 1:
                 print(
-                    f"Resuming from '{chkpt_path}'"
-                    f" (epoch {start_epoch - 1}"
+                    f"Resuming from"
+                    f" '{chkpt_path}'"
+                    f" (iteration"
+                    f" {start_iter - 1}"
                     f" completed,"
                     f" continuing from"
-                    f" epoch {start_epoch})"
+                    f" iteration"
+                    f" {start_iter})"
                 )
 
-        # Auto-tune walker counts to fit GPU memory
-        _need_auto = (
-            num_walkers == 'auto'
-            or num_opt_samples == 'auto'
-        )
-        if _need_auto:
+        # Auto-tune walker count and iterations
+        auto_walkers = num_walkers == 'auto'
+        auto_iters = num_iters == 'auto'
+        if auto_walkers:
             free_mb = _get_free_gpu_mb()
-            auto_bs = _autotune_nn_batch(
+            num_walkers = _autotune_nn_batch(
                 self.compute_batch_energy,
                 self.nelec, params, free_mb,
             )
-            if num_walkers == 'auto':
-                num_walkers = auto_bs
-            if num_opt_samples == 'auto':
-                num_opt_samples = 5 * num_walkers
-            if verbose >= 1:
-                print(
-                    f"  Auto-tuned:"
-                    f" num_walkers={num_walkers},"
-                    f" num_opt_samples="
-                    f"{num_opt_samples}"
-                )
-
-        # Ceiling division: blocks needed to collect
-        # at least num_opt_samples walker snapshots
-        num_sample_blocks = (
-            -(-num_opt_samples // num_walkers)
+        n_train_per_iter = int(
+            train_split
+            * num_walkers
+            * num_sample_blocks
         )
+        updates_per_iter = num_epochs * max(
+            1,
+            -(-n_train_per_iter // batch_size),
+        )
+        if auto_iters:
+            num_iters = max(
+                1,
+                -(
+                    -_TARGET_UPDATES
+                    // updates_per_iter
+                ),
+            )
+        if (auto_walkers or auto_iters) \
+                and verbose >= 1:
+            print(
+                f"  Auto-tuned:"
+                f" num_walkers={num_walkers},"
+                f" num_iters={num_iters}"
+            )
 
+        # Initialize walkers
         rng_key, rng = jax.random.split(rng_key)
         walkers = self.initialize_walkers(
             rng, num_walkers,
         )
         mc_stepsize = (3 * mc_timestep) ** 0.5
 
+        # Initial equilibration
         if verbose >= 1:
             print("Running equilibration...")
-        (rng_key, walkers, mc_stepsize, _), acc = (
-            self.run_equilibration(
-                rng_key, walkers, mc_stepsize,
-                params,
-                num_blocks_equil,
-                num_steps_per_block,
-            )
-        )
-        if verbose >= 1:
-            print(
-                f"  acceptance rate: {acc[-1]:.2f}"
-            )
-            print(
-                f"  step size: {mc_stepsize:.4f}"
-            )
-
-        if verbose >= 1:
-            print(
-                f"\nRunning {num_sample_blocks}"
-                " production blocks..."
-            )
-        all_samples = []
-        for blk in range(1, num_sample_blocks + 1):
-            (rng_key, walkers, mc_stepsize, _), (
-                acc_r, tw_e,
-            ) = self.run_production(
-                rng_key, walkers, mc_stepsize,
-                params,
-                num_steps_per_block,
-                num_steps_decorr,
-            )
-            all_samples.append(walkers)
-            if verbose >= 1:
-                print(
-                    f"  block"
-                    f" {blk}/{num_sample_blocks}: "
-                    f"{walkers.shape[0]} samples"
+        (rng_key, walkers, mc_stepsize, _), \
+            acc = (
+                self.run_equilibration(
+                    rng_key, walkers,
+                    mc_stepsize, params,
+                    num_blocks_equil,
+                    num_steps_per_block,
                 )
-
-        sampled = jnp.vstack(all_samples).reshape(
-            -1, self.nelec, 3,
-        )[:num_opt_samples]
-        n_samples = sampled.shape[0]
-
-        rng_key, rng1 = jax.random.split(rng_key)
-        idx = jax.random.permutation(
-            rng1, jnp.arange(n_samples),
-        )
-        n_train = int(train_split * n_samples)
-        train_w = sampled[idx[:n_train]]
-        valid_w = sampled[idx[n_train:]]
-
+            )
         if verbose >= 1:
             print(
-                f"\nTraining on {n_train}, "
-                f"validating on {n_samples - n_train}"
+                f"  acceptance rate:"
+                f" {acc[-1]:.2f}"
             )
             print(
-                f"Starting {num_epochs} Adam epochs"
-                f" (lr={lr})...\n"
+                f"  step size:"
+                f" {mc_stepsize:.4f}"
+            )
+            total_updates = (
+                num_iters * updates_per_iter
+            )
+            print(
+                f"\nStarting {num_iters}"
+                f" iterations"
+                f" (~{total_updates}"
+                f" param updates,"
+                f" lr={lr})...\n"
             )
 
-        for epoch in range(
-            start_epoch, start_epoch + num_epochs,
+        # ===== Main iterative loop =====
+        for iteration in range(
+            start_iter, start_iter + num_iters,
         ):
-            epoch_losses = []
-            for si in range(0, n_train, batch_size):
-                ei = min(si + batch_size, n_train)
-                batch = train_w[si:ei]
-                loss, grads = jax.value_and_grad(
-                    self.loss_fn,
-                )(params, batch)
-                updates, opt_state = optimizer.update(
-                    grads, opt_state, params,
+            # (a) Sample fresh walker snapshots
+            all_samples = []
+            for blk in range(num_sample_blocks):
+                (
+                    rng_key, walkers,
+                    mc_stepsize, _,
+                ), (acc_r, tw_e) = (
+                    self.run_production(
+                        rng_key, walkers,
+                        mc_stepsize, params,
+                        num_steps_per_block,
+                        num_steps_decorr,
+                    )
                 )
-                params = optax.apply_updates(
-                    params, updates,
-                )
-                epoch_losses.append(loss)
-
-            train_loss = (
-                jnp.array(epoch_losses).mean()
+                all_samples.append(walkers)
+            sampled = jnp.vstack(
+                all_samples,
+            ).reshape(-1, self.nelec, 3)
+            n_samples = sampled.shape[0]
+            rng_key, rng1 = jax.random.split(
+                rng_key,
             )
-            if verbose >= 1:
-                v_losses = []
+            idx = jax.random.permutation(
+                rng1, jnp.arange(n_samples),
+            )
+            n_train = int(
+                train_split * n_samples
+            )
+            train_w = sampled[idx[:n_train]]
+            valid_w = sampled[idx[n_train:]]
+
+            # (b) Adam optimization epochs
+            epoch_losses = []
+            for ep in range(num_epochs):
                 for si in range(
-                    0, valid_w.shape[0], batch_size,
+                    0, n_train, batch_size,
                 ):
                     ei = min(
                         si + batch_size,
-                        valid_w.shape[0],
+                        n_train,
                     )
-                    v_losses.append(
-                        self.loss_fn(
-                            params, valid_w[si:ei],
+                    batch = train_w[si:ei]
+                    loss, grads = (
+                        jax.value_and_grad(
+                            self.loss_fn,
+                        )(params, batch)
+                    )
+                    updates, opt_state = (
+                        optimizer.update(
+                            grads, opt_state,
+                            params,
                         )
                     )
-                valid_loss = (
-                    jnp.array(v_losses).mean()
+                    params = optax.apply_updates(
+                        params, updates,
+                    )
+                    epoch_losses.append(loss)
+
+            # (c) Validation energy
+            v_energies = []
+            for si in range(
+                0, valid_w.shape[0], batch_size,
+            ):
+                ei = min(
+                    si + batch_size,
+                    valid_w.shape[0],
+                )
+                v_energies.append(
+                    self.compute_batch_energy(
+                        valid_w[si:ei], params,
+                    )
+                )
+            all_e = jnp.concatenate(v_energies)
+            iter_e = float(all_e.mean())
+            iter_err = (
+                float(all_e.std())
+                / all_e.size ** 0.5
+            )
+
+            if verbose >= 1:
+                iter_loss = float(
+                    jnp.array(
+                        epoch_losses
+                    ).mean()
                 )
                 print(
-                    f"Epoch {epoch:3d} | "
-                    f"Loss: {train_loss:.6f} | "
-                    f"Valid: {valid_loss:.6f}"
+                    f"Iter {iteration:5d}"
+                    f" | E = {iter_e:.8f}"
+                    f" +/- {iter_err:.8f}"
+                    f" | Loss:"
+                    f" {iter_loss:.6f}"
                 )
 
+            # (d) Checkpoint
             if os.path.exists(chkpt_path):
                 os.rename(
                     chkpt_path,
-                    f"{prefix}.{epoch}.h5",
+                    f"{prefix}.{iteration}.h5",
                 )
             save_nn_checkpoint(
-                chkpt_path, params, epoch,
+                chkpt_path, params, iteration,
                 self.config_name,
                 self.mol_info,
-                energy=float(train_loss),
+                energy=iter_e,
             )
 
-        # Final energy estimate
-        v_energies = []
-        for si in range(
-            0, valid_w.shape[0], batch_size,
-        ):
-            ei = min(
-                si + batch_size, valid_w.shape[0],
+        # ===== Final energy estimate =====
+        if verbose >= 1:
+            print(
+                "\nFinal energy evaluation..."
             )
-            v_energies.append(
-                self.compute_batch_energy(
-                    valid_w[si:ei], params,
+        (rng_key, walkers, mc_stepsize, _), \
+            acc = (
+                self.run_equilibration(
+                    rng_key, walkers,
+                    mc_stepsize, params,
+                    num_blocks_equil,
+                    num_steps_per_block,
                 )
             )
-        all_e = jnp.concatenate(v_energies)
-        final_e = float(all_e.mean())
-        neff = all_e.size
-        final_err = float(all_e.std()) / neff ** 0.5
+        (rng_key, walkers, _, _), \
+            (_, tw_e) = (
+                self.run_production(
+                    rng_key, walkers,
+                    mc_stepsize, params,
+                    num_steps_per_block,
+                    num_steps_decorr,
+                )
+            )
+        final_e = float(jnp.mean(tw_e))
+        final_std = float(jnp.std(tw_e))
+        neff = tw_e.size
+        final_err = final_std / neff ** 0.5
 
         if verbose >= 1:
             print(
-                f"\nFinal energy:"
+                f"Final energy:"
                 f" {final_e:.8f}"
                 f" +/- {final_err:.8f}"
             )
@@ -656,7 +736,7 @@ class _VMCOptDriverNN:
 
 
 def get_vmcopt_nn_func(mol_info, config, init_key):
-    """Create a post-sampling Adam VMC optimizer for NN.
+    """Create an iterative Adam VMC optimizer for NN.
 
     Builds the NN trial wavefunction from *config*,
     compiles the Metropolis kernel and local-energy
