@@ -17,12 +17,13 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding, PartitionSpec
 
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
 from .psi.nn.wf import MoleculeInfo
 from .constants import MIN_DIST_THRESHOLD
-from .utils import do_binning_analysis
+from .utils import do_binning_analysis, _make_sharding
 
 # VMC hyperparameters (matching vmc_gto)
 TARGET_ACCEPTANCE_RATE = 0.4
@@ -327,6 +328,11 @@ class _VMCDriverNN:
         walkers = self.initialize_walkers(
             init_key, num_walkers,
         )
+        walkers_sharding, walker_keys_sharding = \
+            _make_sharding(num_walkers)
+        if walkers_sharding is not None:
+            walkers = jax.device_put(
+                walkers, walkers_sharding)
         mc_stepsize = (3 * mc_timestep) ** 0.5
 
         # --- Equilibration ---
@@ -337,6 +343,14 @@ class _VMCDriverNN:
             keys = jax.random.split(
                 key, num_walkers,
             )
+            if walker_keys_sharding is not None:
+                keys = (
+                    jax.lax
+                    .with_sharding_constraint(
+                        keys,
+                        walker_keys_sharding,
+                    )
+                )
             nw, acc = metropolis_move_allw(
                 keys, w, s, params,
             )
@@ -375,6 +389,14 @@ class _VMCDriverNN:
                     keys = jax.random.split(
                         key, num_walkers,
                     )
+                    if walker_keys_sharding is not None:
+                        keys = (
+                            jax.lax
+                            .with_sharding_constraint(
+                                keys,
+                                walker_keys_sharding,
+                            )
+                        )
                     nw, acc = metropolis_move_allw(
                         keys, w, s, params,
                     )
@@ -399,6 +421,14 @@ class _VMCDriverNN:
                     keys = jax.random.split(
                         key, num_walkers,
                     )
+                    if walker_keys_sharding is not None:
+                        keys = (
+                            jax.lax
+                            .with_sharding_constraint(
+                                keys,
+                                walker_keys_sharding,
+                            )
+                        )
                     nw, acc = metropolis_move_allw(
                         keys, w, s, params,
                     )
@@ -470,6 +500,17 @@ class _VMCDriverNN:
 
             if compute_gradients:
                 # sampled_w: (steps, walkers, nel, 3)
+                if walkers_sharding is not None:
+                    sampled_w = jax.device_put(
+                        sampled_w,
+                        NamedSharding(
+                            walkers_sharding.mesh,
+                            PartitionSpec(
+                                None, None,
+                                None, None,
+                            ),
+                        ),
+                    )
                 n_samples = (
                     num_steps_per_block
                     * num_walkers
