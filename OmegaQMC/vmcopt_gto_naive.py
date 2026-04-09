@@ -9,7 +9,7 @@ computed via JAX automatic differentiation.
 This approach is exact but memory-intensive because JAX
 must retain the entire trajectory for backpropagation
 (hence ``jax.checkpoint`` in the inner loop).  For
-production use, prefer :mod:`vmcopt_gto_pssgd` (which
+production use, prefer :mod:`vmcopt_gto_irsgd` (which
 samples first, then optimizes on the stored snapshots)
 or :mod:`vmcopt_gto_linear` (the linear method).
 """
@@ -20,7 +20,7 @@ import optax
 from .psi_gto import get_psi_fun
 from .cusp import get_cusp_params
 from .constants import MIN_DIST_THRESHOLD
-from .vmcopt_gto_pssgd import (
+from .vmcopt_gto_irsgd import (
     _build_opt_mask,
     _zero_frozen_grads,
     _init_params_corr,
@@ -71,7 +71,7 @@ def _tau_int_from_acf(acf: jnp.ndarray) -> float:
     return jnp.maximum(tau_int, 1.0)
 
 
-class _VMCOptNaiveDriver:
+class _VMCOptDriverGTO_Naive:
     """Naïve VMC optimizer — differentiates through MC.
 
     Compiles the Metropolis kernel and local-energy
@@ -369,12 +369,12 @@ class _VMCOptNaiveDriver:
         return params_corr, {'energy': {'mean': E_mean, 'stderr': E_stderr}}
 
 
-def get_vmcopt_func(mf, cusp_scheme="Quady2025",
+def get_vmcopt_gto_func(mf, cusp_scheme="Quady2025",
                     jastrow_config=None):
     """Create a naïve VMC optimizer.
 
     Builds cusp-corrected trial wave-function parameters
-    and returns a :class:`_VMCOptNaiveDriver` that
+    and returns a :class:`_VMCOptDriverGTO_Naive` that
     optimizes Jastrow coefficients by differentiating
     through the entire MC trajectory at each epoch.
 
@@ -389,7 +389,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
 
     Returns
     -------
-    driver : _VMCOptNaiveDriver
+    driver : _VMCOptDriverGTO_Naive
         Callable optimizer.
     """
     num_nuc = mf.mol.natm
@@ -405,7 +405,7 @@ def get_vmcopt_func(mf, cusp_scheme="Quady2025",
                 params_cusp[atom_symbol] = p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptNaiveDriver(
+    return _VMCOptDriverGTO_Naive(
         mf, params_cusp,
         jastrow_config=jastrow_config
     )

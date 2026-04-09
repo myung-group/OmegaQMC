@@ -1,80 +1,47 @@
+import jax
 import jax.numpy as jnp
 
-import json
-import pprint
-from pyscf import gto, scf
-from importlib import resources
+from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
+from OmegaQMC.observables.force import postproc_h5_pgcs as vmc_forces
+from OmegaQMC.utils import compute_energy_with_error, format_basis_name
 
-from OmegaQMC import get_vmc_func
-from OmegaQMC.vmc_utils import (
-    compute_energy_with_error
-)
+rng_key = jax.random.key(888)
 
+params_jastrow = {
+    "J1_pade": {"H": jnp.array([-0.05574627,  0.08272289])},
+    "J2_pade": {"like": jnp.array([0.25, 0.6046799]),
+                "unlike": jnp.array([0.5, 0.38077791])}
+}
 
 # Set H2 molecule
-mol = gto.M(atom='''
-H       0.000000    0.00    0.00
-H       0.000000    0.00    1.40
-''',
-            basis='6-31g',
-            unit='Bohr')
+L = 1.4010
+bset_name = "6-31G"
+atoms_string = '''
+H       0.0000    0.0000    {:.6f}      1
+H       0.0000    0.0000    {:.6f}      1
+'''.format(-L/2, L/2)
 
-mol.build()
-mf = scf.RHF(mol)
-mf.kernel()
-mf_grad = mf.nuc_grad_method()
-grad = mf_grad.kernel()
+modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
+                                    basis=bset_name)
 
-# Optimized Jastrow parameters
-params_jastrow = {
-    "J1_pade": {"H": jnp.array([-0.15486924,  0.08576524])},
-    "J2_pade": {"like": jnp.array([0.25, 0.6046799]),
-                  "unlike": jnp.array([0.5, 0.46045336])}
-}
-
-# Load cusp coefficients for the 6-31G basis set
-with resources.open_text('OmegaQMC.basis', 'cusp_coeff_631g.json') as f:
-    coeff_data = json.load(f)
-
-cgto_coeff = {
-    int(Z): {
-        'q0': v['q0'],
-        'coeff': jnp.array(v['coeff'])
-    } for Z, v in coeff_data.items()
-}
-# if no cusp correction: cgto_coeff = None
-pprint.pprint(cgto_coeff)
-
-# Set filenames for saving results and checkpoints
-chkfile = 'H2_vmc_631gd.hdf5'
+chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
 
 # Set parameters
-reflection_op_list = ['E', 'x', 'y', 'Rz180']
-rng_key = 888
-l_cusp = True
-l_grad = True
+symmetry_ops = ['E', 'x', 'y', 'C2z']
 
+l_grad = True
 # Load VMC functions
-vmc_run, vmc_grad = get_vmc_func(
-    mf=mf,
-    params_vmc=params_jastrow,
-    scheme='scheme1',
-    chkfile=chkfile,
-    cgto_coeff=cgto_coeff,
-    symmop_list=reflection_op_list,
-    cluster_idx=None
+vmc_run = get_vmc_gto_func(
+    modrv,
+    params_corr=params_jastrow,
+    prefix=chkfile_prefix,
+    symmop_list=symmetry_ops,
 )
 
 # Calculate energy and error using {chkfile}
-e_mean, e_err = compute_energy_with_error(chkfile)
+e_mean, e_err = compute_energy_with_error(chkfile_prefix)
 print(f'Total energy | error [Ha]: {e_mean:.6f} | {e_err:.6f}')
 
 # Compute gradients of energy
 if l_grad:
-    grd, grd_err = vmc_grad(
-        fname_log='vmc_H2_grd.log',
-        compute_error=True,
-        walker_based_batch_size=10  # Walker-based Batch size for error calc.
-    )
-    # Compute torque and error
-    # torque, dtau = compute_torque_with_error(mol, grd, grd_err)
+    forces, std_forces = vmc_forces(prefix=chkfile_prefix)

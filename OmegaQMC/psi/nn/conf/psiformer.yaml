@@ -1,0 +1,74 @@
+# PsiFormer architecture (Transformer-based)
+n_determinants: 16
+full_determinant: true
+backflow_transform: mult
+
+# Envelope
+envelope_isotropic: true
+envelope_per_shell: false
+envelope_per_orbital_exponent: true
+envelope_spin_restricted: false
+envelope_init_to_ones: true
+envelope_softplus_zeta: false
+
+# Cusp
+cusp_electrons: true
+cusp_electrons_type: psiformer
+cusp_same_scale: 0.25
+cusp_anti_scale: 0.5
+cusp_alpha: 1.0
+cusp_trainable_alpha: true
+cusp_nuclei: false
+
+# OmniNet / GNN
+embedding_dim: 256
+use_jastrow: false
+use_backflow: true
+n_interactions: 4
+two_particle_stream_dim: 32
+self_interaction: true
+deep_features: false
+update_rule: concatenate
+
+# MLP defaults (not directly used in PsiFormer)
+mlp_hidden_layers: [log, 2]
+mlp_bias: true
+mlp_activation: tanh
+mlp_init: ferminet
+
+# Backflow MLP
+bf_mlp_hidden_layers: [log, 1]
+bf_mlp_bias: false
+bf_mlp_last_linear: true
+bf_mlp_activation: null
+bf_mlp_init: ferminet
+
+# Conf coeff
+conf_coeff: sum_pool
+
+# Edge types (PsiFormer has no explicit edge types)
+edge_types: null
+
+# Ne positional embedding
+ne_powers: [1]
+ne_log_rescale: true
+
+# Embeddings
+use_spin_embedding: true
+project_to_embedding_dim: true
+
+# Residual connections
+electron_residual_normalize: false
+two_particle_residual_normalize: false
+nucleus_residual: false
+
+# Update features: attention-based
+update_features:
+  - type: node_attention
+    num_heads: 4
+    mlp_hidden_layers: [log, 2]
+    mlp_bias: true
+    mlp_activation: tanh
+    mlp_init: ferminet
+    attention_residual_normalize: false
+    mlp_residual_normalize: false

@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
-from OmegaQMC import generate_molecular_orbitals, get_vmc_func
-from OmegaQMC.utils import vmc_forces_with_pgcs as vmc_forces
+from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
+from OmegaQMC.observables.force import postproc_h5_pgcs as vmc_forces
 
 rng_key = jax.random.key(888)
 
@@ -36,7 +36,7 @@ symmetry_ops = ['E', 'C2z']
 # 'Rz180' here means 180-degree rotation
 #                 ... or negate both x and y coordinates
 
-vmc_run = get_vmc_func(modrv, params_jastrow,
+vmc_run = get_vmc_gto_func(modrv, params_jastrow,
                        cusp_scheme='Quady2025',
                        gr_scheme='scheme1',
                        symmop_list=symmetry_ops,

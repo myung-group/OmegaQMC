@@ -1,10 +1,18 @@
 """
 Phaseless Auxiliary-Field Quantum Monte Carlo (AFQMC) driver.
 
-Consolidates integral preparation, walker management, estimators,
-propagation, and the main QMC loop into a single module.  The public
-entry point is :func:`get_afqmc_func`, which returns a reusable
-``_AFQMCDriver`` instance (setup once, run many times).
+The public entry point is :func:`get_afqmc_func`, which returns a
+reusable ``_AFQMCDriver`` instance (setup once, run many times).
+
+Canonical implementations live in dedicated submodules:
+
+* :mod:`OmegaQMC.integrals.cholesky` — Cholesky decomposition,
+  half-rotation, integral preparation, CASSCF trial extraction.
+* :mod:`OmegaQMC.observables.energy` — local energy estimators.
+* :mod:`OmegaQMC.observables.greens` — Green's function routines.
+
+All names from those submodules are re-exported here for backward
+compatibility.
 
 Uses JAX + PySCF.
 """
@@ -29,60 +37,10 @@ WEIGHT_CLIP_FRACTION = 0.10
 FBBOUND_DEFAULT = 1.0
 
 
-def extract_casscf_trial(mc, coeff_threshold=1e-4):
-    """Extract multi-determinant trial wavefunction from a PySCF CASSCF/CASCI object.
-
-    Args:
-        mc: PySCF CASSCF or CASCI object (must have run kernel()).
-        coeff_threshold: Threshold on |c_I| for truncating the CI expansion.
-
-    Returns:
-        dict with keys:
-            'ci_coeffs': jnp.array of CI coefficients, shape (ndet,).
-            'occ_up': jnp.array of alpha occupied indices, shape (ndet, nup) int.
-            'occ_dn': jnp.array of beta occupied indices, shape (ndet, ndown) int.
-            'ndet': Number of determinants retained.
-            'mo_coeff': MO coefficient matrix from CASSCF, shape (nao, nmo).
-    """
-    from pyscf.fci import cistring
-
-    mol = mc.mol
-    ncore = mc.ncore
-    ncas = mc.ncas
-    nelecas = mc.nelecas  # (nalpha_cas, nbeta_cas)
-    nup = ncore + nelecas[0]
-    ndown = ncore + nelecas[1]
-
-    # Generate occupation string lists for alpha and beta in active space
-    occslst_a = cistring.gen_occslst(range(ncas), nelecas[0])
-    occslst_b = cistring.gen_occslst(range(ncas), nelecas[1])
-
-    ci = np.asarray(mc.ci)
-    core_indices = list(range(ncore))
-
-    coeffs = []
-    occ_up_list = []
-    occ_dn_list = []
-
-    for ia in range(len(occslst_a)):
-        for ib in range(len(occslst_b)):
-            c = ci[ia, ib]
-            if abs(c) > coeff_threshold:
-                coeffs.append(c)
-                occ_a = core_indices + [ncore + j for j in occslst_a[ia]]
-                occ_b = core_indices + [ncore + j for j in occslst_b[ib]]
-                occ_up_list.append(occ_a)
-                occ_dn_list.append(occ_b)
-
-    ndet = len(coeffs)
-
-    return {
-        'ci_coeffs': jnp.array(np.array(coeffs)),
-        'occ_up': jnp.array(np.array(occ_up_list, dtype=np.int32)),
-        'occ_dn': jnp.array(np.array(occ_dn_list, dtype=np.int32)),
-        'ndet': ndet,
-        'mo_coeff': np.asarray(mc.mo_coeff),
-    }
+# --- Integrals re-exported from OmegaQMC.integrals ---
+from OmegaQMC.integrals.cholesky import (        # noqa: E402
+    extract_casscf_trial,
+)
 
 
 def _make_afqmc_sharding(num_walkers):
@@ -105,175 +63,12 @@ def _make_afqmc_sharding(num_walkers):
     return phi_sharding, scalar_sharding
 
 
-# ===================================================================
-# Integrals
-# ===================================================================
-
-def chunked_cholesky(mol, chol_cut=1e-5, max_vecs=None):
-    """Modified Cholesky decomposition of the ERI tensor.
-
-    Computes the full ERI tensor and performs pivoted Cholesky decomposition
-    on the reshaped (nbasis^2, nbasis^2) matrix:
-        (pq|rs) ≈ Σ_γ L^γ_{pq} L^γ_{rs}
-
-    Args:
-        mol: PySCF Mole object.
-        chol_cut: Threshold for convergence (max diagonal residual).
-        max_vecs: Maximum number of Cholesky vectors. Defaults to 10*nbasis.
-
-    Returns:
-        chol_vecs: np.ndarray of shape (naux, nbasis, nbasis).
-    """
-    nbasis = mol.nao_nr()
-    nao2 = nbasis * nbasis
-    if max_vecs is None:
-        max_vecs = 10 * nbasis
-
-    # Compute full ERI tensor: (pq|rs)
-    eri = mol.intor('int2e', aosym='s1') \
-        .reshape(nbasis, nbasis, nbasis, nbasis)
-    # Reshape to 2D: ERI_matrix[pq, rs] = (pq|rs)
-    eri_2d = eri.reshape(nao2, nao2)
-
-    # Pivoted Cholesky decomposition
-    diag = np.diag(eri_2d).copy()
-
-    chol_list = []
-    for ivec in range(max_vecs):
-        delta_max = np.max(diag)
-        if delta_max < chol_cut:
-            break
-
-        # Select pivot
-        nu = np.argmax(diag)
-
-        # Compute Cholesky vector
-        col = eri_2d[:, nu].copy()
-
-        # Subtract contributions from previous vectors
-        for prev_vec in chol_list:
-            col -= prev_vec * prev_vec[nu]
-
-        # Normalize
-        col /= np.sqrt(delta_max)
-        chol_list.append(col)
-
-        # Update diagonal
-        diag -= col * col
-        diag = np.maximum(diag, 0.0)
-
-    naux = len(chol_list)
-    chol_vecs = np.array(chol_list).reshape(naux, nbasis, nbasis)
-    return chol_vecs
-
-
-def prepare_afqmc_integrals(mf, chol_cut=1e-5, mo_coeff=None):
-    """Prepare all integrals needed for AFQMC from a PySCF mean-field object.
-
-    Computes:
-    1. Cholesky-decomposed ERIs in MO basis
-    2. Modified one-body Hamiltonian (h1e_mod)
-    3. Nuclear repulsion energy
-
-    Args:
-        mf: PySCF mean-field object (RHF or UHF, must have run kernel()).
-        chol_cut: Cholesky decomposition threshold.
-        mo_coeff: MO coefficient matrix to use instead of mf.mo_coeff.
-                  Useful for CASSCF trials where the MO basis differs from HF.
-
-    Returns:
-        dict with keys:
-            'h1e': one-body integrals in MO basis, shape (nbasis, nbasis)
-            'h1e_mod': modified one-body Hamiltonian, shape (nbasis, nbasis)
-            'chol': Cholesky vectors in MO basis, shape (naux, nbasis, nbasis)
-            'enuc': nuclear repulsion energy (float)
-            'nbasis': number of MO basis functions
-            'nup': number of alpha electrons
-            'ndown': number of beta electrons
-            'mo_coeff': MO coefficient matrix
-    """
-    mol = mf.mol
-    nbasis = mol.nao_nr()
-
-    # Get MO coefficients
-    if mo_coeff is None:
-        mo_coeff = np.asarray(mf.mo_coeff)
-    else:
-        mo_coeff = np.asarray(mo_coeff)
-
-    # Electron counts
-    nup = mol.nelec[0]
-    ndown = mol.nelec[1]
-
-    # 1. One-body integrals in MO basis
-    hcore_ao = np.asarray(mf.get_hcore())
-    h1e = mo_coeff.T @ hcore_ao @ mo_coeff
-
-    # 2. Cholesky decomposition in AO basis
-    chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)
-    # naux = chol_ao.shape[0]
-
-    # Transform to MO basis: L^γ_pq (MO) = C^T L^γ (AO) C
-    chol_mo = np.einsum('ab,gbc,cd->gad', mo_coeff.T, chol_ao, mo_coeff)
-
-    # 3. Modified one-body Hamiltonian
-    # v0[i,k] = -0.5 * Σ_γ Σ_j L^γ_{ij} L^γ_{kj}
-    v0 = np.einsum('gij,gkj->ik', chol_mo, chol_mo)
-    v0 *= -0.5
-    h1e_mod = h1e + v0
-
-    # 4. Nuclear repulsion energy
-    enuc = mol.energy_nuc()
-
-    return {
-        'h1e': jnp.array(h1e),
-        'h1e_mod': jnp.array(h1e_mod),
-        'chol': jnp.array(chol_mo),
-        'enuc': float(enuc),
-        'nbasis': nbasis,
-        'nup': nup,
-        'ndown': ndown,
-        'mo_coeff': jnp.array(mo_coeff),
-    }
-
-
-def half_rotate_cholesky(chol, trial_up, trial_dn):
-    """Half-rotate Cholesky vectors with trial wavefunction.
-
-    Precomputes rchol_a[γ, i, q] = Σ_p trial_up[p, i]* L^γ_{pq}
-    to reduce cost of force bias and energy from O(M^2 * naux) to
-    O(nocc * M * naux).
-
-    Args:
-        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
-        trial_up: Trial alpha orbitals, shape (nbasis, nup).
-        trial_dn: Trial beta orbitals, shape (nbasis, ndown).
-
-    Returns:
-        rchol_a: shape (naux, nup, nbasis).
-        rchol_b: shape (naux, ndown, nbasis).
-    """
-    rchol_a = jnp.einsum('pi,gpq->giq', trial_up.conj(), chol)
-    rchol_b = jnp.einsum('pi,gpq->giq', trial_dn.conj(), chol)
-    return rchol_a, rchol_b
-
-
-def half_rotate_cholesky_multidet(chol, trials_up, trials_dn):
-    """Half-rotate Cholesky vectors for each determinant in a multi-det trial.
-
-    Args:
-        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
-        trials_up: Trial alpha orbitals, shape (ndet, nbasis, nup).
-        trials_dn: Trial beta orbitals, shape (ndet, nbasis, ndown).
-
-    Returns:
-        rchols_a: shape (ndet, naux, nup, nbasis).
-        rchols_b: shape (ndet, naux, ndown, nbasis).
-    """
-    _hr = lambda trial: jnp.einsum('pi,gpq->giq', trial.conj(), chol)
-    rchols_a = jax.vmap(_hr)(trials_up)
-    rchols_b = jax.vmap(_hr)(trials_dn)
-    return rchols_a, rchols_b
+from OmegaQMC.integrals.cholesky import (        # noqa: E402
+    chunked_cholesky,
+    prepare_afqmc_integrals,
+    half_rotate_cholesky,
+    half_rotate_cholesky_multidet,
+)
 
 
 # ===================================================================
@@ -486,275 +281,20 @@ def population_control_pair_branch(weights, phia, phib, rng_key):
 # Estimators
 # ===================================================================
 
-def _greens_function_spin(phi, trial):
-    """Green's function for one spin channel.
-
-    Args:
-        phi: Walker orbitals, shape (nwalkers, nbasis, nocc).
-        trial: Trial orbitals, shape (nbasis, nocc).
-
-    Returns:
-        G: Full Green's function, shape (nwalkers, nbasis, nbasis).
-        Ghalf: Half-rotated GF, shape (nwalkers, nocc, nbasis).
-        ovlp: det(trial^dag phi), shape (nwalkers,).
-        log_ovlp: log|det(trial^dag phi)|, shape (nwalkers,).
-    """
-    # Overlap matrix: overlap = phi^T @ trial^* (ipie convention)
-    ovlp = jnp.einsum('wpi,pj->wij', phi, trial.conj())
-
-    # Inverse overlap
-    ovlp_inv = jnp.linalg.inv(ovlp)
-
-    # Half-rotated Green's function: Ghalf = ovlp^{-1} @ phi^T
-    Ghalf = jnp.einsum('wij,wqj->wiq', ovlp_inv, phi)
-
-    # Full Green's function: G = trial.conj() @ Ghalf
-    G = jnp.einsum('pi,wiq->wpq', trial.conj(), Ghalf)
-
-    # Overlap determinant
-    sign, log_det = jnp.linalg.slogdet(ovlp)
-    ovlp = sign * jnp.exp(log_det)
-    log_ovlp = log_det
-
-    return G, Ghalf, ovlp, log_ovlp
-
-
-@partial(jax.jit, static_argnames=[])
-def greens_function(phia, phib, trial_up, trial_dn):
-    """Compute the one-particle Green's function for all walkers.
-
-    G = phi (trial^dag phi)^{-1} trial^dag
-
-    Also returns the half-rotated Green's function:
-    Ghalf = (trial^dag phi)^{-1} phi^T
-
-    Args:
-        phia: Walker alpha orbitals, shape (nwalkers, nbasis, nup).
-        phib: Walker beta orbitals, shape (nwalkers, nbasis, ndown).
-        trial_up: Trial alpha orbitals, shape (nbasis, nup).
-        trial_dn: Trial beta orbitals, shape (nbasis, ndown).
-
-    Returns:
-        Ga: Full Green's function alpha, shape (nwalkers, nbasis, nbasis).
-        Gb: Full Green's function beta, shape (nwalkers, nbasis, nbasis).
-        Ghalfa: Half-rotated GF alpha, shape (nwalkers, nup, nbasis).
-        Ghalfb: Half-rotated GF beta, shape (nwalkers, ndown, nbasis).
-        overlap: <psi_T|phi> for each walker, shape (nwalkers,).
-    """
-    Ga, Ghalfa, ovlp_a, log_ovlp_a = _greens_function_spin(phia, trial_up)
-    Gb, Ghalfb, ovlp_b, log_ovlp_b = _greens_function_spin(phib, trial_dn)
-
-    # Total overlap is product of alpha and beta overlaps
-    overlap = ovlp_a * ovlp_b
-
-    return Ga, Gb, Ghalfa, Ghalfb, overlap
-
-
-def _gf_spin_single_det(phi, trial_I):
-    """Green's function for one determinant, all walkers, one spin channel.
-
-    Args:
-        phi: Walker orbitals, shape (nwalkers, nbasis, nocc).
-        trial_I: Trial orbitals for one determinant, shape (nbasis, nocc).
-
-    Returns:
-        Ghalf: Half-rotated GF, shape (nwalkers, nocc, nbasis).
-        ovlp: det(trial_I^dag phi), shape (nwalkers,).
-    """
-    ovlp_mat = jnp.einsum('wpi,pj->wij', phi, trial_I.conj())
-    ovlp_inv = jnp.linalg.inv(ovlp_mat)
-    Ghalf = jnp.einsum('wij,wqj->wiq', ovlp_inv, phi)
-    sign, log_det = jnp.linalg.slogdet(ovlp_mat)
-    ovlp = sign * jnp.exp(log_det)
-    return Ghalf, ovlp
-
-
-@partial(jax.jit, static_argnames=[])
-def greens_function_multidet(phia, phib, trials_up, trials_dn, ci_coeffs):
-    """Compute multi-determinant Green's function for all walkers.
-
-    Args:
-        phia: Walker alpha orbitals, shape (nwalkers, nbasis, nup).
-        phib: Walker beta orbitals, shape (nwalkers, nbasis, ndown).
-        trials_up: Trial alpha orbitals, shape (ndet, nbasis, nup).
-        trials_dn: Trial beta orbitals, shape (ndet, nbasis, ndown).
-        ci_coeffs: CI coefficients, shape (ndet,).
-
-    Returns:
-        Ga, Gb: Full GF, shape (nwalkers, nbasis, nbasis).
-        Ghalfa_all, Ghalfb_all: Per-det half-rotated GF (NaN-sanitized),
-            shape (ndet, nwalkers, nocc, nbasis).
-        overlap: Multi-det overlap, shape (nwalkers,).
-        ovlp_a_all, ovlp_b_all: Per-det spin overlaps,
-            shape (ndet, nwalkers).
-    """
-    # vmap over determinant axis
-    Ghalfa_all, ovlp_a_all = jax.vmap(
-        _gf_spin_single_det, in_axes=(None, 0))(phia, trials_up)
-    # Ghalfa_all: (ndet, nwalkers, nup, nbasis)
-    # ovlp_a_all: (ndet, nwalkers)
-
-    Ghalfb_all, ovlp_b_all = jax.vmap(
-        _gf_spin_single_det, in_axes=(None, 0))(phib, trials_dn)
-
-    # Sanitize NaN in Ghalf (from singular overlaps where det has zero
-    # overlap with walker — the weight w_I is also zero so contribution
-    # vanishes, but NaN * 0 = NaN in floating point)
-    Ghalfa_all = jnp.where(jnp.isnan(Ghalfa_all), 0.0, Ghalfa_all)
-    Ghalfb_all = jnp.where(jnp.isnan(Ghalfb_all), 0.0, Ghalfb_all)
-
-    # Per-det weight: w_I = c_I* × O_I^a × O_I^b
-    # ci_coeffs: (ndet,) -> (ndet, 1) for broadcasting
-    w_I = ci_coeffs.conj()[:, None] * ovlp_a_all * ovlp_b_all
-    # w_I: (ndet, nwalkers)
-
-    # Multi-det overlap
-    overlap = jnp.sum(w_I, axis=0)  # (nwalkers,)
-
-    # w_I: (ndet, nwalkers) -> (ndet, nwalkers, 1, 1)
-    w_expanded = w_I[:, :, None, None]
-
-    # Full G: G_a = sum_I w_I * trial_I^* @ Ghalf_I / O
-    Ga = jnp.sum(
-        w_expanded * jnp.einsum('dpi,dwiq->dwpq', trials_up.conj(), Ghalfa_all),
-        axis=0) / overlap[:, None, None]
-    Gb = jnp.sum(
-        w_expanded * jnp.einsum('dpi,dwiq->dwpq', trials_dn.conj(), Ghalfb_all),
-        axis=0) / overlap[:, None, None]
-
-    return Ga, Gb, Ghalfa_all, Ghalfb_all, overlap, ovlp_a_all, ovlp_b_all
-
-
-def local_energy_1body(h1e, Ga, Gb, enuc):
-    """One-body contribution to the local energy.
-
-    E_1b = Tr(h1e @ Ga) + Tr(h1e @ Gb) + E_nuc
-
-    Args:
-        h1e: shape (nbasis, nbasis).
-        Ga: shape (nwalkers, nbasis, nbasis).
-        Gb: shape (nwalkers, nbasis, nbasis).
-        enuc: Nuclear repulsion energy.
-
-    Returns:
-        e_1b: shape (nwalkers,).
-    """
-    e_1b_a = jnp.einsum('pq,wqp->w', h1e, Ga)
-    e_1b_b = jnp.einsum('pq,wqp->w', h1e, Gb)
-    return e_1b_a + e_1b_b + enuc
-
-
-def local_energy_2body(Ghalfa, Ghalfb, rchol_a, rchol_b):
-    """Two-body contribution to the local energy using half-rotated quantities.
-
-    Coulomb: E_coul = 0.5 * Σ_γ (X_a^γ + X_b^γ)^2
-    Exchange: E_exch = 0.5 * Σ_γ (Tr(T_a^γ T_a^{γT}) + Tr(T_b^γ T_b^{γT}))
-
-    Args:
-        Ghalfa: shape (nwalkers, nup, nbasis).
-        Ghalfb: shape (nwalkers, ndown, nbasis).
-        rchol_a: shape (naux, nup, nbasis).
-        rchol_b: shape (naux, ndown, nbasis).
-
-    Returns:
-        e_coul: Coulomb energy, shape (nwalkers,).
-        e_exch: Exchange energy, shape (nwalkers,).
-    """
-    # Coulomb: X_σ^γ = Tr(rchol_σ^γ * Ghalf_σ^T)
-    Xa = jnp.einsum('giq,wiq->gw', rchol_a, Ghalfa)
-    Xb = jnp.einsum('giq,wiq->gw', rchol_b, Ghalfb)
-
-    e_coul = 0.5 * jnp.sum((Xa + Xb) ** 2, axis=0)
-
-    # Exchange: T_σ^γ[i,j] = Σ_q rchol_σ[γ,i,q] * Ghalf_σ[w,j,q]
-    Ta = jnp.einsum('giq,wjq->gwij', rchol_a, Ghalfa)
-    Tb = jnp.einsum('giq,wjq->gwij', rchol_b, Ghalfb)
-
-    # Tr(T @ T^T) = Σ_{ij} T[i,j]^2
-    e_exch_a = 0.5 * jnp.sum(Ta * Ta.transpose(0, 1, 3, 2), axis=(0, 2, 3))
-    e_exch_b = 0.5 * jnp.sum(Tb * Tb.transpose(0, 1, 3, 2), axis=(0, 2, 3))
-    e_exch = e_exch_a + e_exch_b
-
-    return e_coul, e_exch
-
-
-@partial(jax.jit, static_argnames=[])
-def local_energy(h1e, chol, Ga, Gb, Ghalfa, Ghalfb, rchol_a, rchol_b, enuc):
-    """Compute the mixed-estimator local energy for all walkers.
-
-    E_loc = E_1body + E_coulomb - E_exchange + E_nuc
-
-    Uses half-rotated Cholesky vectors for efficiency.
-
-    Args:
-        h1e: One-body Hamiltonian in MO basis, shape (nbasis, nbasis).
-        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
-        Ga: Alpha Green's function, shape (nwalkers, nbasis, nbasis).
-        Gb: Beta Green's function, shape (nwalkers, nbasis, nbasis).
-        Ghalfa: Half-rotated alpha GF, shape (nwalkers, nup, nbasis).
-        Ghalfb: Half-rotated beta GF, shape (nwalkers, ndown, nbasis).
-        rchol_a: Half-rotated Cholesky (alpha), shape (naux, nup, nbasis).
-        rchol_b: Half-rotated Cholesky (beta), shape (naux, ndown, nbasis).
-        enuc: Nuclear repulsion energy.
-
-    Returns:
-        e_tot: Total local energy per walker, shape (nwalkers,).
-        e_1b: One-body energy per walker, shape (nwalkers,).
-        e_2b: Two-body energy per walker, shape (nwalkers,).
-    """
-    e_1b = local_energy_1body(h1e, Ga, Gb, enuc)
-    e_coul, e_exch = local_energy_2body(Ghalfa, Ghalfb, rchol_a, rchol_b)
-    e_2b = e_coul - e_exch
-    e_tot = e_1b + e_2b
-    return e_tot, e_1b, e_2b
-
-
-@partial(jax.jit, static_argnames=[])
-def local_energy_multidet(h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
-                          rchols_a, rchols_b, ci_coeffs,
-                          ovlp_a_all, ovlp_b_all, enuc):
-    """Compute multi-determinant mixed-estimator local energy.
-
-    One-body uses the aggregate full G. Two-body requires per-det
-    Ghalf paired with per-det half-rotated Cholesky vectors.
-
-    Args:
-        h1e: One-body Hamiltonian, shape (nbasis, nbasis).
-        Ga, Gb: Full GF, shape (nwalkers, nbasis, nbasis).
-        Ghalfa_all: Per-det half-rotated alpha GF, shape (ndet, nwalkers, nup, nbasis).
-        Ghalfb_all: Per-det half-rotated beta GF, shape (ndet, nwalkers, ndn, nbasis).
-        rchols_a: Per-det half-rotated Cholesky (alpha), shape (ndet, naux, nup, nbasis).
-        rchols_b: Per-det half-rotated Cholesky (beta), shape (ndet, naux, ndn, nbasis).
-        ci_coeffs: CI coefficients, shape (ndet,).
-        ovlp_a_all: Per-det alpha overlaps, shape (ndet, nwalkers).
-        ovlp_b_all: Per-det beta overlaps, shape (ndet, nwalkers).
-        enuc: Nuclear repulsion energy.
-
-    Returns:
-        e_tot, e_1b, e_2b: shape (nwalkers,) each.
-    """
-    # One-body: uses aggregate full G
-    e_1b = local_energy_1body(h1e, Ga, Gb, enuc)
-
-    # Two-body: per-det, then weighted sum
-    def _e2b_single_det(Ghalfa_I, Ghalfb_I, rchol_a_I, rchol_b_I):
-        e_coul, e_exch = local_energy_2body(Ghalfa_I, Ghalfb_I,
-                                            rchol_a_I, rchol_b_I)
-        return e_coul - e_exch  # (nwalkers,)
-
-    e_2b_all = jax.vmap(_e2b_single_det)(
-        Ghalfa_all, Ghalfb_all, rchols_a, rchols_b)
-    # e_2b_all: (ndet, nwalkers)
-
-    # Per-det weights
-    w_I = ci_coeffs.conj()[:, None] * ovlp_a_all * ovlp_b_all
-    overlap = jnp.sum(w_I, axis=0)  # (nwalkers,)
-
-    # Weighted two-body energy
-    e_2b = jnp.sum(w_I * e_2b_all, axis=0) / overlap
-
-    e_tot = e_1b + e_2b
-    return e_tot, e_1b, e_2b
+# --- Observables re-exported from OmegaQMC.observables ---
+# These lived here originally; now canonical in observables/.
+from OmegaQMC.observables.greens import (       # noqa: E402
+    _greens_function_spin,
+    greens_function,
+    _gf_spin_single_det,
+    greens_function_multidet,
+)
+from OmegaQMC.observables.energy import (        # noqa: E402
+    local_energy_1body,
+    local_energy_2body,
+    local_energy,
+    local_energy_multidet,
+)
 
 
 # ===================================================================

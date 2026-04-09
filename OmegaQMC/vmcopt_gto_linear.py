@@ -23,7 +23,7 @@ from functools import partial
 from .cusp import get_cusp_params
 from .psi_gto import get_psi_fun
 from .constants import MIN_DIST_THRESHOLD
-from .vmcopt_gto_pssgd import (
+from .vmcopt_gto_irsgd import (
     _build_opt_mask,
     _init_params_corr,
     _check_j2_cusps,
@@ -273,7 +273,7 @@ def _autotune_deriv_batch(
 # Driver class
 # -----------------------------------------------------------
 
-class _VMCOptLinearDriver:
+class _VMCOptDriverGTO_Linear:
     """Linear method VMC optimizer (OneShiftOnly)."""
 
     def __init__(self, mf, params_cusp,
@@ -1165,7 +1165,7 @@ class _VMCOptLinearDriver:
         }
 
 
-def get_vmcopt_func(
+def get_vmcopt_gto_func(
     mf, cusp_scheme="Quady2025",
     jastrow_config=None,
 ):
@@ -1188,7 +1188,7 @@ def get_vmcopt_func(
 
     Returns
     -------
-    driver : _VMCOptLinearDriver
+    driver : _VMCOptDriverGTO_Linear
         Callable optimizer.
     """
     num_nuc = mf.mol.natm
@@ -1210,7 +1210,7 @@ def get_vmcopt_func(
                     p[atom_symbol]
     else:
         params_cusp = None
-    return _VMCOptLinearDriver(
+    return _VMCOptDriverGTO_Linear(
         mf, params_cusp,
         jastrow_config=jastrow_config,
     )

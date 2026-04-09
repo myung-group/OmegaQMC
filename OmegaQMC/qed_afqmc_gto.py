@@ -6,6 +6,16 @@ photon mode via the Pauli-Fierz Hamiltonian in the dipole gauge.
 
 Reference: arXiv:2410.18838 (Bauer et al., 2024)
 
+The integral preparation routine has moved to its canonical location:
+
+* :func:`OmegaQMC.integrals.qed.prepare_qed_integrals`
+
+Energy estimators and Green's functions shared with the plain AFQMC
+driver are in:
+
+* :mod:`OmegaQMC.observables.energy`
+* :mod:`OmegaQMC.observables.greens`
+
 Uses JAX + PySCF.
 """
 
@@ -18,106 +28,26 @@ from jax.scipy.linalg import expm
 from functools import partial
 
 from OmegaQMC.utils import do_binning_analysis
-from OmegaQMC.afqmc_gto import (
-    chunked_cholesky,
-    half_rotate_cholesky,
-    _apply_exp_vhs,
-    orthogonalize_walkers,
-    greens_function,
+from OmegaQMC.observables.energy import (
     local_energy_1body,
     local_energy_2body,
+)
+from OmegaQMC.observables.greens import greens_function
+from OmegaQMC.integrals.cholesky import (
+    chunked_cholesky,
+    half_rotate_cholesky,
+)
+from OmegaQMC.integrals.qed import (
+    prepare_qed_integrals,
+)
+from OmegaQMC.afqmc_gto import (
+    _apply_exp_vhs,
+    orthogonalize_walkers,
     _update_weights_phaseless,
     _make_afqmc_sharding,
     WEIGHT_CLIP_FRACTION,
     FBBOUND_DEFAULT,
 )
-
-
-# ===================================================================
-# Integrals
-# ===================================================================
-
-def prepare_qed_integrals(mf, omega, coupling_vec, chol_cut=1e-5):
-    """Prepare AFQMC integrals augmented with QED dipole self-energy.
-
-    In the dipole gauge Pauli-Fierz Hamiltonian:
-        H = Σ h_ij(q) c†_iσ c_jσ + ½ Σ v_ijkl c†c†cc + Ω/2(Π² + q² - 1)
-    where:
-        h_ij(q) = h_ij^0 + √Ω * q * d_ij
-        v_ijkl  = v_ijkl^Coulomb + d_ik * d_jl   (DSE)
-        d_ij    = λ * <i|r·ε|j>
-
-    The DSE term adds one extra Cholesky vector (the dipole matrix d_ij).
-
-    Args:
-        mf: PySCF mean-field object (must have run kernel()).
-        omega: Photon frequency in Hartree.
-        coupling_vec: Light-matter coupling vector (3,). Direction gives
-            polarization ε, magnitude gives coupling strength λ.
-        chol_cut: Cholesky decomposition threshold.
-
-    Returns:
-        dict with keys:
-            'h1e': bare one-body integrals in MO basis (nbasis, nbasis)
-            'h1e_mod_0': q-independent modified one-body Hamiltonian
-            'chol_qed': augmented Cholesky vectors (naux+1, nbasis, nbasis)
-            'dip_mo': dipole matrix in MO basis (nbasis, nbasis)
-            'enuc': nuclear repulsion energy
-            'nbasis', 'nup', 'ndown', 'mo_coeff', 'omega'
-    """
-    mol = mf.mol
-    nbasis = mol.nao_nr()
-    mo_coeff = np.asarray(mf.mo_coeff)
-    nup, ndown = mol.nelec
-
-    # --- Standard electronic integrals ---
-    hcore_ao = np.asarray(mf.get_hcore())
-    h1e = mo_coeff.T @ hcore_ao @ mo_coeff
-
-    chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)
-    # naux = chol_ao.shape[0]
-    chol_mo = np.einsum('ab,gbc,cd->gad', mo_coeff.T, chol_ao, mo_coeff)
-
-    # --- QED: dipole matrix elements ---
-    coupling_vec = np.asarray(coupling_vec, dtype=np.float64)
-    lam = np.linalg.norm(coupling_vec)
-
-    if lam > 1e-15:
-        epsilon = coupling_vec / lam
-    else:
-        epsilon = np.array([0.0, 0.0, 1.0])
-        lam = 0.0
-
-    # Dipole integrals in AO basis: <mu|r|nu>, shape (3, nao, nao)
-    dip_ao = mol.intor('int1e_r', comp=3)
-    # Project onto polarization direction and scale by λ
-    dip_ao_proj = lam * np.einsum('k,kpq->pq', epsilon, dip_ao)
-    # Transform to MO basis
-    dip_mo = mo_coeff.T @ dip_ao_proj @ mo_coeff
-
-    # --- Augment Cholesky vectors with DSE ---
-    # DSE adds v_ijkl += d_ik * d_jl, which is one extra Cholesky vector = d_ij
-    chol_qed = np.concatenate([chol_mo, dip_mo[None, :, :]], axis=0)
-
-    # --- Modified one-body Hamiltonian (q-independent part) ---
-    # v0 includes the DSE contribution from the augmented Cholesky
-    v0 = np.einsum('gij,gkj->ik', chol_qed, chol_qed) * (-0.5)
-    h1e_mod_0 = h1e + v0
-
-    enuc = mol.energy_nuc()
-
-    return {
-        'h1e': jnp.array(h1e),
-        'h1e_mod_0': jnp.array(h1e_mod_0),
-        'chol_qed': jnp.array(chol_qed),
-        'dip_mo': jnp.array(dip_mo),
-        'enuc': float(enuc),
-        'nbasis': nbasis,
-        'nup': nup,
-        'ndown': ndown,
-        'mo_coeff': jnp.array(mo_coeff),
-        'omega': float(omega),
-    }
 
 
 # ===================================================================

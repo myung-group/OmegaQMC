@@ -1,0 +1,75 @@
+# DeepErwin architecture
+n_determinants: 32
+full_determinant: true
+backflow_transform: mult
+
+# Envelope
+envelope_isotropic: true
+envelope_per_shell: false
+envelope_per_orbital_exponent: true
+envelope_spin_restricted: false
+envelope_init_to_ones: true
+envelope_softplus_zeta: true
+
+# Cusp
+cusp_electrons: false
+cusp_nuclei: false
+
+# OmniNet / GNN
+embedding_dim: 256
+use_jastrow: false
+use_backflow: true
+n_interactions: 4
+two_particle_stream_dim: 32
+self_interaction: true
+deep_features: separate
+update_rule: concatenate
+
+# MLP defaults
+mlp_hidden_layers: [log, 1]
+mlp_bias: true
+mlp_activation: tanh
+mlp_init: deeperwin
+
+# G subnet MLP
+g_mlp_hidden_layers: [log, 1]
+g_mlp_bias: false
+g_mlp_last_linear: false
+g_mlp_activation: tanh
+g_mlp_init: deeperwin
+
+# Backflow MLP
+bf_mlp_hidden_layers: [log, 1]
+bf_mlp_bias: false
+bf_mlp_last_linear: true
+bf_mlp_activation: ssp
+bf_mlp_init: deeperwin
+
+# Conf coeff
+conf_coeff: sum_pool
+
+# Edge types
+edge_types: [same, anti]
+
+# Ne positional embedding
+ne_powers: [1]
+ne_log_rescale: false
+
+# Embeddings
+use_spin_embedding: false
+project_to_embedding_dim: false
+
+# Residual connections
+electron_residual_normalize: false
+two_particle_residual_normalize: true
+nucleus_residual: false
+
+# Update features
+update_features:
+  - type: residual
+  - type: node_sum
+    node_types: [up, down]
+    normalize: true
+  - type: convolution
+    edge_types: [same, anti]
+    normalize: false

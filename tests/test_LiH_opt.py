@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from OmegaQMC import generate_molecular_orbitals
-from OmegaQMC.vmcopt_gto_linear import get_vmcopt_func
+from OmegaQMC.vmcopt_gto_linear import get_vmcopt_gto_func
 
 rng_key = jax.random.key(888)
 
@@ -29,7 +29,7 @@ modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
 
 # reflection_op_list = ['E', 'x', 'y', 'Rz180']
 
-vmcopt_run = get_vmcopt_func(modrv)
+vmcopt_run = get_vmcopt_gto_func(modrv)
 params_jastrow_final, E_data \
     = vmcopt_run(rng_key, params_corr_init=params_jastrow,
                  frozen_keys={"J2_pade": {"like": [0], "unlike": [0]}})
