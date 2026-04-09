@@ -44,7 +44,10 @@ class _VMCDriverNN:
     wavefunction and runs the simulation.
     """
 
-    def __init__(self, mol_info, config, init_key):
+    def __init__(
+        self, mol_info, config, init_key,
+        ofname_chkpt, ofname_grd,
+    ):
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
         )
@@ -59,6 +62,8 @@ class _VMCDriverNN:
         self.charges = charges
         self.nelec = nelec
         self.n_nuc = n_nuc
+        self.ofname_chkpt = ofname_chkpt
+        self.ofname_grd = ofname_grd
 
         log_psi, init_params, graphdef = (
             make_nn_log_psi(config, mol_info, init_key)
@@ -235,14 +240,13 @@ class _VMCDriverNN:
         mc_timestep=0.1,
         compute_gradients=False,
         verbose=1,
-        prefix='nnopt',
     ):
         """Execute a VMC run with fixed NN parameters.
 
         Runs Metropolis-Hastings sampling and
         accumulates local energies block by block.
         VMC results are appended to the checkpoint
-        file ``{prefix}.chk.h5``.
+        file set by :func:`get_vmc_nn_func`.
 
         Args:
             rng_key: JAX PRNG key (int or array).
@@ -254,12 +258,9 @@ class _VMCDriverNN:
             mc_timestep: Initial MC timestep.
             compute_gradients: If ``True``, evaluate
                 ZVZB nuclear force estimator each
-                block and write to
-                ``{prefix}.grd.h5``.
+                block and write to the gradient
+                file set by :func:`get_vmc_nn_func`.
             verbose: Verbosity (0 = silent).
-            prefix: Filename prefix for the HDF5
-                checkpoint.  VMC results are appended
-                to ``{prefix}.chk.h5``.
 
         Returns:
             Dict with keys ``'E_mean'``,
@@ -291,7 +292,7 @@ class _VMCDriverNN:
                 save_nn_forces,
             )
 
-            ofname_grd = f"{prefix}.grd.h5"
+            ofname_grd = self.ofname_grd
             grd_nn = self.grd_nn
 
             zvzb_force_batch = vmc_nn_forces_zvzb(
@@ -559,19 +560,20 @@ class _VMCDriverNN:
             'E_blocks': E_blocks,
         }
 
-        chkpt_file = f"{prefix}.chk.h5"
         from .nn_checkpoint import append_vmc_results
-        append_vmc_results(chkpt_file, result)
+        append_vmc_results(self.ofname_chkpt, result)
         if verbose >= 1:
             print(
                 f"VMC results written to"
-                f" {chkpt_file}"
+                f" {self.ofname_chkpt}"
             )
 
         return result
 
 
-def get_vmc_nn_func(mol_info, config, init_key):
+def get_vmc_nn_func(
+    mol_info, config, init_key, prefix='vmc',
+):
     """Construct a VMC driver for NN wavefunctions.
 
     Builds the NN trial wavefunction from *config*,
@@ -585,10 +587,23 @@ def get_vmc_nn_func(mol_info, config, init_key):
             or a string (built-in name or YAML path).
         init_key: JAX PRNG key for parameter
             initialisation.
+        prefix: Stem used for output file names
+            (``<prefix>.chk.h5``,
+            ``<prefix>.grd.h5``).
+            Default is ``"vmc"``.
 
     Returns:
         :class:`_VMCDriverNN` instance.  Call it with
         ``driver(rng_key, ...)`` to run the VMC
         simulation.
     """
-    return _VMCDriverNN(mol_info, config, init_key)
+    for s in [".chk.h5", ".grd.h5"]:
+        if prefix.endswith(s):
+            prefix = prefix[:-len(s)]
+    ofname_chkpt = prefix + ".chk.h5"
+    ofname_grd = prefix + ".grd.h5"
+
+    return _VMCDriverNN(
+        mol_info, config, init_key,
+        ofname_chkpt, ofname_grd,
+    )
