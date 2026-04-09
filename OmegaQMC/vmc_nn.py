@@ -209,8 +209,7 @@ class _VMCDriverNN:
         Args:
             filepath: Path to the HDF5 checkpoint
                 created by
-                :class:`~OmegaQMC.vmcopt_nn\
-._VMCOptDriverNN`.
+                :class:`~OmegaQMC.vmcopt_nn_iradam._VMCOptDriverNN_IRAdam`.
 
         Returns:
             Dict of checkpoint metadata (epoch,

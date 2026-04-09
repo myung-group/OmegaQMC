@@ -5,7 +5,10 @@ import OmegaQMC.config
 from OmegaQMC.vmc_gto import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.vmc_nn import get_vmc_nn_func
 from OmegaQMC.vmcopt_gto_linear import get_vmcopt_gto_func
-from OmegaQMC.vmcopt_nn import get_vmcopt_nn_func
+from OmegaQMC.vmcopt_gto_irsgd import get_vmcopt_gto_func as get_vmcopt_nn_irsgd_func
+from OmegaQMC.vmcopt_gto_naive import get_vmcopt_gto_func as get_vmcopt_nn_naive_func
+from OmegaQMC.vmcopt_nn_sr import get_vmcopt_nn_func
+from OmegaQMC.vmcopt_nn_iradam import get_vmcopt_nn_func as get_vmcopt_nn_iradam_func
 from OmegaQMC.afqmc_gto import get_afqmc_func, extract_casscf_trial
 from OmegaQMC.qed_afqmc_gto import get_qed_afqmc_func
 # from OmegaQMC import psi_gto

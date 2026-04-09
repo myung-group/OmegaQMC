@@ -1,4 +1,5 @@
-"""Iterative Adam VMC optimizer for NN wavefunctions.
+"""Iteratively-resampled Adam VMC optimizer for NN
+wavefunctions.
 
 Optimises Jastrow + backflow parameters via an outer loop
 that alternates between:
@@ -103,8 +104,8 @@ def _autotune_nn_batch(
 _TARGET_UPDATES = 50000
 
 
-class _VMCOptDriverNN:
-    """Iterative Adam VMC optimizer for NN trials.
+class _VMCOptDriverNN_IRAdam:
+    """Iteratively-resampled Adam VMC optimizer for NN.
 
     Compiles the Metropolis kernel and local-energy
     function for a given molecule, then runs an outer
@@ -736,7 +737,8 @@ class _VMCOptDriverNN:
 
 
 def get_vmcopt_nn_func(mol_info, config, init_key):
-    """Create an iterative Adam VMC optimizer for NN.
+    """Create an iteratively-resampled Adam VMC
+    optimizer for NN.
 
     Builds the NN trial wavefunction from *config*,
     compiles the Metropolis kernel and local-energy
@@ -751,10 +753,13 @@ def get_vmcopt_nn_func(mol_info, config, init_key):
             initialisation.
 
     Returns:
-        :class:`_VMCOptDriverNN` instance.  Call it with
-        ``driver(rng_key, ...)`` to run the optimization.
+        :class:`_VMCOptDriverNN_IRAdam` instance.
+        Call it with ``driver(rng_key, ...)`` to run
+        the optimization.
     """
-    return _VMCOptDriverNN(mol_info, config, init_key)
+    return _VMCOptDriverNN_IRAdam(
+        mol_info, config, init_key,
+    )
 
 
 def pretrain_to_hf(nn_trial, mf, rng_key, steps=1000):

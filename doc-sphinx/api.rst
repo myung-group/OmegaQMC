@@ -74,15 +74,32 @@ NN VMC driver
 .. autoclass:: OmegaQMC.vmc_nn._VMCDriverNN
    :members: __call__, load_checkpoint
 
-NN VMC optimizer
------------------
+NN VMC optimizers
+------------------
 
-.. autofunction:: OmegaQMC.vmcopt_nn.get_vmcopt_nn_func
+**Stochastic Reconfiguration** (recommended)
 
-.. autoclass:: OmegaQMC.vmcopt_nn._VMCOptDriverNN
+Natural-gradient optimizer using Stochastic
+Reconfiguration (SR).  Instead of Adam, the parameter
+update direction is obtained by solving the
+natural-gradient equation via conjugate gradient,
+accounting for the Fisher information metric of the
+wavefunction.  Scales to ~100K parameters without
+forming the full overlap matrix.
+
+.. autofunction:: OmegaQMC.vmcopt_nn_sr.get_vmcopt_nn_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_sr._VMCOptDriverNN_SR
    :members: __call__
 
-.. autofunction:: OmegaQMC.vmcopt_nn.pretrain_to_hf
+**Iteratively-resampled Adam (IRAdam)**
+
+.. autofunction:: OmegaQMC.vmcopt_nn_iradam.get_vmcopt_nn_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_iradam._VMCOptDriverNN_IRAdam
+   :members: __call__
+
+.. autofunction:: OmegaQMC.vmcopt_nn_iradam.pretrain_to_hf
 
 NN checkpoints
 ---------------

@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 from OmegaQMC.psi.nn.wf import MoleculeInfo
-from OmegaQMC.vmcopt_nn import get_vmcopt_nn_func
+from OmegaQMC.vmcopt_nn_sr import get_vmcopt_nn_func
 
 rng_key = jax.random.key(42)
 
