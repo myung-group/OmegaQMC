@@ -113,10 +113,7 @@ def vmc_gto_gradients(
 
     @jax.jit
     def _redistribute_scheme2(elec_crds):
-        diff = (
-            elec_crds[:, None, :]
-            - nuc_crds[None, :, :]
-        )
+        diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
         dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
         dist = jnp.where(dist < eps, eps, dist)
         weight = dist**(-4.0)
@@ -171,9 +168,7 @@ def vmc_gto_gradients(
                         ke_of_C,
                         (C0,), (mo1s[ia, K],),
                     )
-                    results = results.at[
-                        ia, K
-                    ].set(dke)
+                    results = results.at[ia, K].set(dke)
             return results
 
         @jax.jit
@@ -190,9 +185,7 @@ def vmc_gto_gradients(
                         logpsi_of_C,
                         (C0,), (mo1s[ia, K],),
                     )
-                    results = results.at[
-                        ia, K
-                    ].set(dlp)
+                    results = results.at[ia, K].set(dlp)
             return results
 
     # --- Batched gradient function ---
@@ -246,13 +239,104 @@ def vmc_gto_gradients(
             )(batch_samples)
 
             grd_ke = grd_ke + grd_ke_mo_batch
-            grd_logpsi = (
-                grd_logpsi + grd_logpsi_mo_batch
-            )
+            grd_logpsi = grd_logpsi + grd_logpsi_mo_batch
 
         return grd_ee, grd_en, grd_ke, grd_logpsi
 
     return _vmc_gradient_batch
+
+
+def _build_param_response_fns(
+    log_trial_wavefunction,
+    local_energy_ke,
+    local_energy_en,
+    nuc_crds,
+    params_corr,
+):
+    """Build per-walker Jastrow parameter-response
+    derivative functions for the ZVZB2 estimator.
+
+    Returns a JIT-compiled batch function and the
+    number of flattened Jastrow parameters.
+
+    The returned callable evaluates, for each walker:
+
+    - ``O_flat``: :math:`\\partial\\log|\\psi|/
+      \\partial p_i` (flattened Jastrow param grad)
+    - ``dEL_dp_flat``: :math:`\\partial E_L/
+      \\partial p_i` (flattened; only KE contributes)
+    - ``dEL_dR_nuc``: nuclear-only
+      :math:`\\partial E_L/\\partial R` (no SWCT)
+    - ``dlogpsi_dR_nuc``: nuclear-only
+      :math:`\\partial\\log|\\psi|/\\partial R`
+      (no SWCT)
+
+    Parameters
+    ----------
+    log_trial_wavefunction : callable
+        ``(elec_crds, nuc_crds, params) -> float``
+    local_energy_ke : callable
+        ``(elec_crds, nuc_crds, params) -> float``
+    local_energy_en : callable
+        ``(elec_crds, nuc_crds) -> float``
+    nuc_crds : jnp.ndarray
+        Nuclear coordinates, shape ``(natom, 3)``.
+    params_corr : pytree
+        Jastrow / correlation parameters.
+
+    Returns
+    -------
+    param_response_batch : callable
+        ``(walkers) -> (O_flat, dEL_dp_flat,
+        dEL_dR_nuc, dlogpsi_dR_nuc)``
+        where shapes are ``(batch, n_flat)``,
+        ``(batch, n_flat)``,
+        ``(batch, natom, 3)``,
+        ``(batch, natom, 3)``.
+    n_flat : int
+        Number of flattened Jastrow parameters.
+    """
+    from jax.flatten_util import ravel_pytree
+
+    flat_p, _ = ravel_pytree(params_corr)
+    n_flat = flat_p.shape[0]
+
+    def _single_walker(e_pos):
+        # dlog|psi|/dp_i
+        O_tree = jax.grad(
+            log_trial_wavefunction, argnums=2,
+        )(e_pos, nuc_crds, params_corr)
+        O_flat, _ = ravel_pytree(O_tree)
+
+        # dE_L/dp_i (only KE depends on params)
+        dEL_tree = jax.grad(
+            local_energy_ke, argnums=2,
+        )(e_pos, nuc_crds, params_corr)
+        dEL_flat, _ = ravel_pytree(dEL_tree)
+
+        # Nuclear-only dE_L/dR (no SWCT)
+        dEL_dR = jax.grad(
+            local_energy_ke, argnums=1,
+        )(e_pos, nuc_crds, params_corr)
+        dEL_dR = dEL_dR + jax.grad(
+            local_energy_en, argnums=1,
+        )(e_pos, nuc_crds)
+
+        # Nuclear-only dlog|psi|/dR (no SWCT)
+        dlogpsi_dR = jax.grad(
+            log_trial_wavefunction, argnums=1,
+        )(e_pos, nuc_crds, params_corr)
+
+        return (
+            O_flat, dEL_flat,
+            dEL_dR, dlogpsi_dR,
+        )
+
+    @jax.jit
+    def param_response_batch(walkers):
+        return jax.vmap(_single_walker)(walkers)
+
+    return param_response_batch, n_flat
 
 
 def vmc_nn_forces_zvzb(
@@ -376,9 +460,7 @@ def vmc_nn_forces_zvzb(
         r_flat = elec_crds.reshape(-1)
         lap_fn = laplacian(_log_abs_dpsi)
         lap_val, grad_val = lap_fn(r_flat)
-        return -0.5 * (
-            lap_val + jnp.dot(grad_val, grad_val)
-        )
+        return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
     # --- Full ZVZB force (single walker) ---
     @jax.jit
@@ -403,14 +485,10 @@ def vmc_nn_forces_zvzb(
 
         # ZV: F_bare - (KE_dpsi - KE_psi) * grad_log_psi
         # (potential terms cancel in the difference)
-        f_zv = f_bare - (
-            (ke_dpsi_all - ke_psi) * grad_lp
-        )
+        f_zv = f_bare - ((ke_dpsi_all - ke_psi) * grad_lp)
 
         # ZB: -2 * (E_loc - E_bar) * grad_log_psi
-        f_zb = (
-            -2.0 * (e_loc - e_bar) * grad_lp
-        )
+        f_zb = -2.0 * (e_loc - e_bar) * grad_lp
 
         return f_zv + f_zb
 
@@ -554,9 +632,7 @@ def postproc_nn_forces(prefix='nnvmc'):
     for ia in range(natom):
         for k in range(3):
             component = block_forces[:, ia, k]
-            mean, serr, _, _ = (
-                do_binning_analysis(component)
-            )
+            mean, serr, _, _ = do_binning_analysis(component)
             forces = forces.at[ia, k].set(mean)
             errors = errors.at[ia, k].set(serr)
 
@@ -578,6 +654,7 @@ def save_gto_gradients(
     log_psi_batch,
     local_energy_batch,
     apply_single_frag_symmop,
+    param_response_batch=None,
 ):
     """Save per-block nuclear-force gradient data.
 
@@ -616,6 +693,12 @@ def save_gto_gradients(
             callable
             ``(walkers, frag_pos, op_matrix)
             -> transformed_walkers``.
+        param_response_batch : callable or None
+            When not ``None``, a JIT-compiled callable
+            ``(walkers) -> (O_flat, dEL_dp_flat,
+            dEL_dR_nuc, dlogpsi_dR_nuc)`` providing
+            per-walker Jastrow parameter derivatives
+            for the ZVZB2 estimator.
 
     Returns:
         Dict mapping combo labels to their
@@ -633,27 +716,18 @@ def save_gto_gradients(
     w_grd_ke = []
     w_grd_logpsi = []
 
+    # Parameter-response accumulators (ZVZB2)
+    w_O_params = []
+    w_dEL_dparams = []
+    w_dEL_dR_nuc = []
+    w_dlogpsi_dR_nuc = []
+
     # Per-combo accumulators
-    combo_grd_ee_en = {
-        label: []
-        for _, _, label in single_frag_combos
-    }
-    combo_grd_ke = {
-        label: []
-        for _, _, label in single_frag_combos
-    }
-    combo_grd_logpsi = {
-        label: []
-        for _, _, label in single_frag_combos
-    }
-    combo_weights = {
-        label: []
-        for _, _, label in single_frag_combos
-    }
-    combo_E_local = {
-        label: []
-        for _, _, label in single_frag_combos
-    }
+    combo_grd_ee_en = {label: [] for _, _, label in single_frag_combos}
+    combo_grd_ke = {label: [] for _, _, label in single_frag_combos}
+    combo_grd_logpsi = {label: [] for _, _, label in single_frag_combos}
+    combo_weights = {label: [] for _, _, label in single_frag_combos}
+    combo_E_local = {label: [] for _, _, label in single_frag_combos}
 
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
@@ -661,25 +735,27 @@ def save_gto_gradients(
             start_idx + batch_size,
             num_samples_per_block,
         )
-        batch_orig = (
-            sampled_walkers[start_idx:end_idx, :, :]
-        )
+        batch_orig = (sampled_walkers[start_idx:end_idx, :, :])
 
         # Reference gradients
-        g_ee, g_en, g_ke, g_logpsi = (
-            vmc_gradient_batch(batch_orig)
-        )
+        g_ee, g_en, g_ke, g_logpsi = (vmc_gradient_batch(batch_orig))
         w_grd_ee_en.append(g_ee + g_en)
         w_grd_ke.append(g_ke)
         w_grd_logpsi.append(g_logpsi)
+
+        # Parameter-response derivatives (ZVZB2)
+        if param_response_batch is not None:
+            O_f, dEL_f, dEL_R, dlp_R = param_response_batch(batch_orig)
+            w_O_params.append(O_f)
+            w_dEL_dparams.append(dEL_f)
+            w_dEL_dR_nuc.append(dEL_R)
+            w_dlogpsi_dR_nuc.append(dlp_R)
 
         # log|ψ| at original positions (once)
         log_psi_orig = log_psi_batch(batch_orig)
 
         # Single-fragment symmetry combos
-        for frag_pos, op, label in (
-            single_frag_combos
-        ):
+        for frag_pos, op, label in single_frag_combos:
             batch_trans = apply_single_frag_symmop(
                 batch_orig, frag_pos,
                 symmetry_operations_map[op],
@@ -689,13 +765,8 @@ def save_gto_gradients(
             log_psi_trans = log_psi_batch(
                 batch_trans,
             )
-            psi2_ratio = jnp.exp(
-                2.0
-                * (log_psi_trans - log_psi_orig)
-            )
-            safe = (
-                psi2_ratio > PSI2_RATIO_THRESHOLD
-            )
+            psi2_ratio = jnp.exp(2.0 * (log_psi_trans - log_psi_orig))
+            safe = (psi2_ratio > PSI2_RATIO_THRESHOLD)
             batch_trans = jnp.where(
                 safe[:, None, None],
                 batch_trans, batch_orig,
@@ -706,9 +777,7 @@ def save_gto_gradients(
                 safe, psi2_ratio, 1.0,
             )
 
-            g_ee, g_en, g_ke, g_logpsi = (
-                vmc_gradient_batch(batch_trans)
-            )
+            g_ee, g_en, g_ke, g_logpsi = (vmc_gradient_batch(batch_trans))
             combo_grd_ee_en[label].append(
                 g_ee + g_en,
             )
@@ -728,6 +797,15 @@ def save_gto_gradients(
     w_grd_ke = jnp.vstack(w_grd_ke)
     w_grd_logpsi = jnp.vstack(w_grd_logpsi)
 
+    has_pr = param_response_batch is not None
+    if has_pr:
+        w_O_params = jnp.vstack(w_O_params)
+        w_dEL_dparams = jnp.vstack(w_dEL_dparams)
+        w_dEL_dR_nuc = jnp.vstack(w_dEL_dR_nuc)
+        w_dlogpsi_dR_nuc = jnp.vstack(
+            w_dlogpsi_dR_nuc,
+        )
+
     # Save to HDF5
     with h5py.File(ofname_grd, "a") as f:
         block_cnt_str = f'{block_cnt}'
@@ -736,6 +814,11 @@ def save_gto_gradients(
             'grd_ee_en', 'grd_ke',
             'grd_logpsi', 'local_energies',
         ]
+        if has_pr:
+            grp_names += [
+                'O_params', 'dEL_dparams',
+                'dEL_dR_nuc', 'dlogpsi_dR_nuc',
+            ]
         if single_frag_combos:
             grp_names.append('fragment_weights')
         for k in grp_names:
@@ -748,32 +831,25 @@ def save_gto_gradients(
             del f['grd_ke'][block_cnt_str]
             del f['grd_logpsi'][block_cnt_str]
             del f['local_energies'][block_cnt_str]
+            if has_pr:
+                for prk in [
+                    'O_params', 'dEL_dparams',
+                    'dEL_dR_nuc', 'dlogpsi_dR_nuc',
+                ]:
+                    if prk in f and block_cnt_str in f[prk]:
+                        del f[prk][block_cnt_str]
             for _, _, label in single_frag_combos:
-                if (
-                    label in f['grd_ee_en']
-                    and block_cnt_str
-                    in f['grd_ee_en'][label]
-                ):
-                    del f['grd_ee_en'][
-                        label
-                    ][block_cnt_str]
-                    del f['grd_ke'][
-                        label
-                    ][block_cnt_str]
-                    del f['grd_logpsi'][
-                        label
-                    ][block_cnt_str]
-                    del f['fragment_weights'][
-                        label
-                    ][block_cnt_str]
+                if label in f['grd_ee_en'] \
+                        and block_cnt_str in f['grd_ee_en'][label]:
+                    del f['grd_ee_en'][label][block_cnt_str]
+                    del f['grd_ke'][label][block_cnt_str]
+                    del f['grd_logpsi'][label][block_cnt_str]
+                    del f['fragment_weights'][label][block_cnt_str]
                 if (
                     label in f['local_energies']
-                    and block_cnt_str
-                    in f['local_energies'][label]
+                    and block_cnt_str in f['local_energies'][label]
                 ):
-                    del f['local_energies'][
-                        label
-                    ][block_cnt_str]
+                    del f['local_energies'][label][block_cnt_str]
 
         # A. Reference gradients
         f['grd_ee_en'].create_dataset(
@@ -788,6 +864,22 @@ def save_gto_gradients(
         f['local_energies'].create_dataset(
             block_cnt_str, data=local_energies,
         )
+
+        # A2. Parameter-response data (ZVZB2)
+        if has_pr:
+            f['O_params'].create_dataset(
+                block_cnt_str, data=w_O_params,
+            )
+            f['dEL_dparams'].create_dataset(
+                block_cnt_str, data=w_dEL_dparams,
+            )
+            f['dEL_dR_nuc'].create_dataset(
+                block_cnt_str, data=w_dEL_dR_nuc,
+            )
+            f['dlogpsi_dR_nuc'].create_dataset(
+                block_cnt_str,
+                data=w_dlogpsi_dR_nuc,
+            )
 
         # B. Per-combo secondary gradients/weights
         for _, _, label in single_frag_combos:
@@ -819,9 +911,7 @@ def save_gto_gradients(
                 f['fragment_weights'].create_group(
                     label,
                 )
-            f['fragment_weights'][
-                label
-            ].create_dataset(
+            f['fragment_weights'][label].create_dataset(
                 block_cnt_str, data=c_w,
             )
 
@@ -832,9 +922,7 @@ def save_gto_gradients(
                 f['local_energies'].create_group(
                     label,
                 )
-            f['local_energies'][
-                label
-            ].create_dataset(
+            f['local_energies'][label].create_dataset(
                 block_cnt_str, data=c_E,
             )
 
@@ -851,10 +939,143 @@ def save_gto_gradients(
             combo_E_local[label],
         )
         w = combo_weights_all[label]
-        combo_block_E[label] = float(
-            jnp.sum(w * c_E) / jnp.sum(w)
-        )
+        combo_block_E[label] = float(jnp.sum(w * c_E) / jnp.sum(w))
     return combo_block_E
+
+
+def _solve_param_response(
+    dict_grd_samples, block_nums, enr_mean,
+):
+    """Estimate Jastrow parameter response dp/dR.
+
+    Uses analytical linear response at the VMC
+    optimum: ``dp/dR = -H_pp^{-1} · H_pR`` where
+    ``H_pp`` is the energy Hessian w.r.t. Jastrow
+    parameters and ``H_pR`` is the mixed
+    parameter–nuclear second derivative.
+
+    Leading-order estimators:
+
+    .. math::
+
+        H_{pp}[i,j] \\approx 2\\,\\mathrm{Cov}(
+            E_L^{(i)}, O_j) + 2\\,\\mathrm{Cov}(
+            E_L^{(j)}, O_i)
+
+        H_{pR}[i,A,k] \\approx 2\\,\\mathrm{Cov}(
+            \\partial E_L/\\partial R_{A,k}, O_i)
+            + 2\\,\\mathrm{Cov}(E_L^{(i)},
+            \\partial\\log|\\psi|/\\partial R_{A,k})
+
+    Parameters
+    ----------
+    dict_grd_samples : dict
+        Nested dict of per-block HDF5 data.
+    block_nums : list of int
+        Sorted list of block indices.
+    enr_mean : float
+        Global mean local energy.
+
+    Returns
+    -------
+    dp_dR : jnp.ndarray, shape (n_params, natom, 3)
+        Parameter response vector, or ``None`` if
+        the Hessian is singular.
+    """
+    # Collect all per-walker data across blocks
+    all_O = []
+    all_dEL_dp = []
+    all_dEL_dR = []
+    all_dlogpsi_dR = []
+
+    for bc in block_nums:
+        bcs = f'{bc}'
+        all_O.append(
+            dict_grd_samples['O_params'][bcs]
+        )
+        all_dEL_dp.append(
+            dict_grd_samples['dEL_dparams'][bcs]
+        )
+        all_dEL_dR.append(
+            dict_grd_samples['dEL_dR_nuc'][bcs]
+        )
+        all_dlogpsi_dR.append(
+            dict_grd_samples[
+                'dlogpsi_dR_nuc'
+            ][bcs]
+        )
+
+    # (total_walkers, n_params) etc.
+    O = jnp.concatenate(all_O, axis=0)
+    dEL_dp = jnp.concatenate(all_dEL_dp, axis=0)
+    dEL_dR = jnp.concatenate(all_dEL_dR, axis=0)
+    dlp_dR = jnp.concatenate(
+        all_dlogpsi_dR, axis=0,
+    )
+
+    n_w = O.shape[0]
+    n_p = O.shape[1]
+    n_nuc = dEL_dR.shape[1]
+
+    # Center quantities
+    O_mean = O.mean(axis=0)
+    dEL_dp_mean = dEL_dp.mean(axis=0)
+    dEL_dR_mean = dEL_dR.mean(axis=0)
+    dlp_dR_mean = dlp_dR.mean(axis=0)
+
+    dO = O - O_mean[None, :]
+    ddEL_dp = dEL_dp - dEL_dp_mean[None, :]
+    ddEL_dR = dEL_dR - dEL_dR_mean[None, :, :]
+    ddlp_dR = dlp_dR - dlp_dR_mean[None, :, :]
+
+    # H_pp (n_p × n_p): leading-order Hessian
+    # H_pp[i,j] = 2*Cov(dEL/dp_i, O_j)
+    #           + 2*Cov(dEL/dp_j, O_i)
+    cov_ij = (ddEL_dp.T @ dO) / n_w
+    H_pp = 2.0 * (cov_ij + cov_ij.T)
+
+    # H_pR (n_p × n_nuc × 3)
+    # H_pR[i,A,k] = 2*Cov(dEL/dR_{A,k}, O_i)
+    #             + 2*Cov(dEL/dp_i, dlogpsi/dR_{A,k})
+    H_pR = jnp.zeros((n_p, n_nuc, 3))
+    for A in range(n_nuc):
+        for k in range(3):
+            cov_RO = (
+                ddEL_dR[:, A, k] @ dO
+            ) / n_w
+            cov_pR = (
+                ddEL_dp.T @ ddlp_dR[:, A, k]
+            ) / n_w
+            H_pR = H_pR.at[:, A, k].set(
+                2.0 * (cov_RO + cov_pR)
+            )
+
+    # Solve dp/dR = -H_pp^{-1} H_pR
+    cond_hpp = float(jnp.linalg.cond(H_pp))
+    H_pR_flat = H_pR.reshape(n_p, -1)
+    dp_dR_flat = -jnp.linalg.solve(
+        H_pp, H_pR_flat,
+    )
+    dp_dR = dp_dR_flat.reshape(n_p, n_nuc, 3)
+
+    if (
+        not jnp.all(jnp.isfinite(dp_dR))
+        or cond_hpp > 1e12
+    ):
+        print(
+            f"  ZVZB2: H_pp ill-conditioned "
+            f"(cond={cond_hpp:.2e}), skipping "
+            f"parameter response correction"
+        )
+        dp_dR = None
+    else:
+        print(
+            f"  ZVZB2: param response solved "
+            f"({n_p} params, "
+            f"cond(H_pp)={cond_hpp:.2e})"
+        )
+
+    return dp_dR
 
 
 def postproc_h5_pgcs(
@@ -1013,6 +1234,15 @@ nuclear forces using PGCS.
             )
         states = [None] + combo_labels
 
+        # Detect parameter-response data (ZVZB2)
+        has_pr = ('O_params' in dict_grd_samples)
+        dp_dR = None
+        if has_pr and states[0] is None:
+            dp_dR = _solve_param_response(
+                dict_grd_samples, block_nums,
+                enr_mean,
+            )
+
         if ofname_log is None:
             fout = sys.stdout
         else:
@@ -1033,15 +1263,9 @@ nuclear forces using PGCS.
 
             for block_cnt in block_nums:
                 if state_label is None:
-                    grd_ee_en = dict_grd_samples[
-                        'grd_ee_en'
-                    ][f'{block_cnt}']
-                    grd_ke = dict_grd_samples[
-                        'grd_ke'
-                    ][f'{block_cnt}']
-                    grd_logpsi = dict_grd_samples[
-                        'grd_logpsi'
-                    ][f'{block_cnt}']
+                    grd_ee_en = dict_grd_samples['grd_ee_en'][f'{block_cnt}']
+                    grd_ke = dict_grd_samples['grd_ke'][f'{block_cnt}']
+                    grd_logpsi = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
                 else:
                     grd_ee_en = dict_grd_samples[
                         'grd_ee_en'
@@ -1053,18 +1277,14 @@ nuclear forces using PGCS.
                         'grd_logpsi'
                     ][state_label][f'{block_cnt}']
                 local_energies = jnp.array(
-                    dict_grd_samples[
-                        'local_energies'
-                    ][f'{block_cnt}']
+                    dict_grd_samples['local_energies'][f'{block_cnt}']
                 )
 
                 # Pulay force contribution
                 d_enr = local_energies - enr_mean
 
                 _, num_nuc, _ = grd_ee_en.shape
-                num_steps_per_block, num_walkers = (
-                    local_energies.shape
-                )
+                num_steps_per_block, num_walkers = local_energies.shape
 
                 # Regroup
                 grd_ee_en = grd_ee_en.reshape(
@@ -1085,22 +1305,38 @@ nuclear forces using PGCS.
                 )
 
                 grd_nn_sw = jnp.broadcast_to(
-                    grd_nn[
-                        jnp.newaxis, jnp.newaxis,
-                        :, :
-                    ],
-                    (num_steps_per_block,
-                     num_walkers, num_nuc, 3),
+                    grd_nn[jnp.newaxis, jnp.newaxis, :, :],
+                    (num_steps_per_block, num_walkers, num_nuc, 3),
                 )
                 grd_arrays = [
                     grd_nn_sw,
                     grd_ee_en, grd_ke,
                     grd_pulay,
                 ]
-                grd_tot_sw = (
-                    jnp.stack(grd_arrays, axis=0)
-                    .sum(axis=0)
-                )
+                grd_tot_sw = jnp.stack(grd_arrays, axis=0).sum(axis=0)
+
+                # Parameter-response correction
+                if dp_dR is not None and state_label is None:
+                    O_p = dict_grd_samples['O_params'][f'{block_cnt}']
+                    dEL_p = dict_grd_samples['dEL_dparams'][f'{block_cnt}']
+                    # n_s = num_steps_per_block * num_walkers
+                    n_jp = O_p.shape[-1]
+                    O_p = O_p.reshape(
+                        num_steps_per_block,
+                        num_walkers, n_jp,
+                    )
+                    dEL_p = dEL_p.reshape(
+                        num_steps_per_block,
+                        num_walkers, n_jp,
+                    )
+                    # correction per walker:
+                    # dEL_p + 2*(E_L-<E>)*O_p
+                    cv = dEL_p + 2.0 * (d_enr[..., None] * O_p)
+                    # dp_dR: (n_jp, natom, 3)
+                    delta_f = jnp.einsum(
+                        'swi,inK->swnK', cv, dp_dR,
+                    )
+                    grd_tot_sw = grd_tot_sw + delta_f
 
                 # Load fragment weights for
                 # secondary states
@@ -1123,39 +1359,20 @@ nuclear forces using PGCS.
                         weights=frag_w,
                     )
                 )
-                grd_tot_list.append(
-                    xbar[None, :, :, :]
-                )
-                grd_err_list.append(
-                    serr[None, :, :, :]
-                )
+                grd_tot_list.append(xbar[None, :, :, :])
+                grd_err_list.append(serr[None, :, :, :])
 
-                grd_ee_en_sum += (
-                    grd_ee_en.sum(axis=0)
-                )
+                grd_ee_en_sum += grd_ee_en.sum(axis=0)
                 grd_ke_sum += grd_ke.sum(axis=0)
-                grd_pulay_sum += (
-                    grd_pulay.sum(axis=0)
-                )
+                grd_pulay_sum += grd_pulay.sum(axis=0)
 
-                valid_samples_count += (
-                    local_energies.shape[0]
-                )
+                valid_samples_count += local_energies.shape[0]
 
             # Compute averages
             if valid_samples_count > 0:
-                grd_ee_en = (
-                    grd_ee_en_sum
-                    / valid_samples_count
-                )
-                grd_ke = (
-                    grd_ke_sum
-                    / valid_samples_count
-                )
-                grd_pulay = (
-                    grd_pulay_sum
-                    / valid_samples_count
-                )
+                grd_ee_en = grd_ee_en_sum / valid_samples_count
+                grd_ke = grd_ke_sum / valid_samples_count
+                grd_pulay = grd_pulay_sum / valid_samples_count
 
                 grd_tot_bw = jnp.concatenate(
                     grd_tot_list, axis=0,
@@ -1165,10 +1382,7 @@ nuclear forces using PGCS.
                 )
 
                 # mean over blocks, then walkers
-                grd_tot = (
-                    grd_tot_bw.mean(axis=0)
-                    .squeeze()
-                )
+                grd_tot = grd_tot_bw.mean(axis=0).squeeze()
                 grd_tot = grd_tot.mean(axis=0)
 
                 grd_err = (
@@ -1279,10 +1493,7 @@ nuclear forces using PGCS.
                 fout.write("\n")
 
         # --- Fragment-wise averaging of PGCS ---
-        if (
-            atom_frag_map is not None
-            and combo_labels
-        ):
+        if atom_frag_map is not None and combo_labels:
             frag_to_states = {}
             for fid in set(atom_frag_map):
                 frag_to_states[fid] = [None]
@@ -1291,9 +1502,7 @@ nuclear forces using PGCS.
                 for part in label.split(','):
                     fid_str, op = part.split(':')
                     if op != 'E':
-                        frag_to_states[
-                            int(fid_str)
-                        ].append(label)
+                        frag_to_states[int(fid_str)].append(label)
                         break
 
             avg_grd_tot = jnp.zeros((num_nuc, 3))
@@ -1301,22 +1510,13 @@ nuclear forces using PGCS.
 
             for i in range(num_nuc):
                 fid = atom_frag_map[i]
-                relevant_states = (
-                    frag_to_states.get(fid, [None])
-                )
-                forces = jnp.stack([
-                    all_state_results[s][0][i]
-                    for s in relevant_states
-                ])
-                errors = jnp.stack([
-                    all_state_results[s][1][i]
-                    for s in relevant_states
-                ])
+                relevant_states = frag_to_states.get(fid, [None])
+                forces = jnp.stack([all_state_results[s][0][i]
+                                    for s in relevant_states])
+                errors = jnp.stack([all_state_results[s][1][i]
+                                    for s in relevant_states])
                 N = len(relevant_states)
-                avg_grd_tot = (
-                    avg_grd_tot.at[i]
-                    .set(forces.mean(axis=0))
-                )
+                avg_grd_tot = avg_grd_tot.at[i] .set(forces.mean(axis=0))
                 avg_grd_err = (
                     avg_grd_err.at[i].set(
                         jnp.sqrt(
@@ -1337,18 +1537,10 @@ nuclear forces using PGCS.
             with jnp.printoptions(
                 precision=12, suppress=True,
             ):
-                fout.write(
-                    "\n\tFragment-wise averaged"
-                    " forces\n"
-                )
-                fout.write(
-                    "Total gradients (averaged)\n"
-                )
+                fout.write("\n\tFragment-wise averaged forces\n")
+                fout.write("Total gradients (averaged)\n")
                 fout.write(f" {avg_grd_tot}\n")
-                fout.write(
-                    "Total forces"
-                    " (-gradients, averaged)\n"
-                )
+                fout.write("Total forces (-gradients, averaged)\n")
                 for i in range(num_nuc):
                     fid = atom_frag_map[i]
                     n_states = len(
@@ -1365,12 +1557,9 @@ nuclear forces using PGCS.
                         " over {} states)\n"
                         .format(
                             myMol.atom_symbol(i),
-                            -avg_grd_tot[i, 0],
-                            avg_grd_err[i, 0],
-                            -avg_grd_tot[i, 1],
-                            avg_grd_err[i, 1],
-                            -avg_grd_tot[i, 2],
-                            avg_grd_err[i, 2],
+                            -avg_grd_tot[i, 0], avg_grd_err[i, 0],
+                            -avg_grd_tot[i, 1], avg_grd_err[i, 1],
+                            -avg_grd_tot[i, 2], avg_grd_err[i, 2],
                             fid, n_states,
                         )
                     )

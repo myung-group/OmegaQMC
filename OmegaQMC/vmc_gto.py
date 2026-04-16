@@ -21,8 +21,11 @@ from .utils import (parse_molecular_inspheres,
                     _make_sharding)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import populate_fragment_symmops
-from .observables.force import (vmc_gto_gradients,
-                                save_gto_gradients)
+from .observables.force import (
+    vmc_gto_gradients,
+    _build_param_response_fns,
+    save_gto_gradients,
+)
 from .symm.point_groups import (auto_symmetrize_molecule,
                                 detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
@@ -493,7 +496,7 @@ def _apply_fragment_op(elec_crds: jnp.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# _VMCRunner: holds all precompiled VMC kernels and runs the simulation
+# _VMCDriverGTO: holds all precompiled VMC kernels and runs the simulation
 # ---------------------------------------------------------------------------
 
 class _VMCDriverGTO:
@@ -504,12 +507,15 @@ class _VMCDriverGTO:
                  nuc_crds, frag_reflect_data, single_frag_combos,
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
-                 gr_scheme='scheme1', trial=None,
+                 gr_scheme='scheme1',
+                 force_estimator='simple',
+                 trial=None,
                  jastrow_config=None):
         # --- Store state ---
         self.mf = mf
         self.params_corr = params_corr
         self.mo_relax = mo_relax
+        self.force_estimator = force_estimator
         self.nuc_crds = nuc_crds
         self.single_frag_combos = single_frag_combos
         self.frag_symmops = frag_symmops
@@ -586,6 +592,25 @@ class _VMCDriverGTO:
             mo_relax=mo_relax,
             **_mo_kw,
         )
+
+        # Parameter-response functions (ZVZB2)
+        # ref. Assaraf and Caffarel. JCP (2003) Eq 79
+        if force_estimator == 'zvzb2':
+            pr_batch, n_jp = (
+                _build_param_response_fns(
+                    log_trial_wavefunction,
+                    local_energy_ke,
+                    local_energy_en,
+                    nuc_crds,
+                    params_corr,
+                )
+            )
+            self.param_response_batch = pr_batch
+            self.n_jastrow_params = n_jp
+        else:
+            # ref. Assaraf and Caffarel. JCP (2003) Eq 73
+            self.param_response_batch = None
+            self.n_jastrow_params = 0
 
         @jax.jit
         def _log_psi_batch(batch):
@@ -1038,6 +1063,9 @@ class _VMCDriverGTO:
                     self._log_psi_batch,
                     self._local_energy_batch,
                     self._apply_single_frag_symmop,
+                    param_response_batch=(
+                        self.param_response_batch
+                    ),
                 )
                 if combo_E:
                     all_E = [float(E_mean)] + list(combo_E.values())
@@ -1085,6 +1113,7 @@ def get_vmc_gto_func(mf,
                      params_corr: dict | None,
                      cusp_scheme='Quady2025',
                      gr_scheme='scheme1',
+                     force_estimator='simple',
                      prefix='vmc',
                      symmop_list: str | list[str] | dict[int, list[str]] | None = None,
                      cluster_idx: Collection[int] = None,
@@ -1112,6 +1141,12 @@ def get_vmc_gto_func(mf,
         Pass ``None`` to disable cusp corrections.
     gr_scheme : str, optional
         Gradient estimator scheme.  Default is ``"scheme1"``.
+    force_estimator : str, optional
+        Force estimator to use.  ``'simple'`` (default)
+        uses the standard ZVZB estimator.  ``'zvzb2'``
+        adds a parameter-response variance-reduction
+        correction via analytical linear response of
+        the Jastrow parameters.
     prefix : str, optional
         Stem used for output file names (``<prefix>.chk.h5``,
         ``<prefix>.grd.h5``, ``<prefix>.log``).  Default is ``"vmc"``.
@@ -1194,5 +1229,6 @@ def get_vmc_gto_func(mf,
                          ofname_chkpt, ofname_grd,
                          timestamp_init,
                          gr_scheme=gr_scheme,
+                         force_estimator=force_estimator,
                          trial=trial,
                          jastrow_config=jastrow_config)

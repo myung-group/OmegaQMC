@@ -36,10 +36,11 @@ symmetry_ops = ['E', 'C2z']
 # symmetry_ops = ['E']
 
 vmc_run = get_vmc_gto_func(modrv, params_jastrow,
-                       cusp_scheme='Quady2025',
-                       gr_scheme='scheme1',
-                       prefix=chkfile_prefix,
-                       symmop_list=symmetry_ops)
+                           cusp_scheme='Quady2025',
+                           gr_scheme='scheme1',
+                           force_estimator="simple",
+                           prefix=chkfile_prefix,
+                           symmop_list=symmetry_ops)
 
 l_grad = True
 vmc_run(rng_key,
