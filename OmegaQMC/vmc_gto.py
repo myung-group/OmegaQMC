@@ -524,7 +524,7 @@ class _VMCDriver:
         log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
             = get_psi_fun(mf, params_cusp=params_cusp,
                           trial=trial,
-                          bspline_config=bspline_config)
+                          jastrow_config=bspline_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         self.local_energy_ee = local_energy_ee
@@ -1069,7 +1069,8 @@ class _VMCDriver:
                 if walkers_sharding is not None:
                     walkers = jax.device_put(walkers, walkers_sharding)
                 E_b = list(f['E_blocks'][:])
-                E_cs_b = []
+                E_cs_b = list(f['E_cs_blocks'][:]) \
+                    if 'E_cs_blocks' in f else []
                 print("Restarting ...")
 
             # for _ in range(num_blocks_equil):
@@ -1268,6 +1269,8 @@ class _VMCDriver:
             g.create_dataset("ao_basis", data=" ".join(aobs))
             g.create_dataset("units", data=mf.mol.unit.upper())
             f.create_dataset('E_blocks', data=E_b)
+            if E_cs_b:
+                f.create_dataset('E_cs_blocks', data=E_cs_b)
             f.create_dataset('rng_key',
                              data=jax.random.key_data(rng_key))
             f.create_dataset('block_count', data=block_cnt,
