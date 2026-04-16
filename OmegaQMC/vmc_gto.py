@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import h5py
 from jax.sharding import NamedSharding, PartitionSpec
 
-from .psi_gto import get_psi_fun, _sanitize_J3_eeI_params
+from .psi_gto import get_psi_fun
 from .mo_relax import compute_orbital_response
 from .cusp import get_cusp_params
 from .utils import (parse_molecular_inspheres,
@@ -20,9 +20,8 @@ from .utils import (parse_molecular_inspheres,
                     do_binning_analysis,
                     _make_sharding)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
-from .symm.operations import populate_fragment_symmops
-from .observables.force import (vmc_gto_gradients,
-                                save_gto_gradients)
+from .symm.operations import (symmetry_operations_map,
+                              populate_fragment_symmops)
 from .symm.point_groups import (auto_symmetrize_molecule,
                                 detect_symmetry_quality)
 # from .constants import CHEMICAL_ACCURACY
@@ -31,6 +30,7 @@ from .constants import MIN_DIST_THRESHOLD
 # VMC hyperparameters
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
+PSI2_RATIO_THRESHOLD = 1e-4  # screen symmetrized gradient samples
 
 
 def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
@@ -134,7 +134,7 @@ def generate_molecular_orbitals(astr: str,
     Wraps PySCF to build a molecule, detect its point-group symmetry,
     run a restricted Hartree-Fock (or post-HF) calculation, and symmetrize
     the resulting molecular orbitals.  The returned object is passed directly
-    to :func:`get_vmc_gto_func` and :func:`get_vmcopt_gto_func`.
+    to :func:`get_vmc_func` and :func:`get_vmcopt_func`.
 
     Parameters
     ----------
@@ -287,7 +287,7 @@ def generate_molecular_orbitals(astr: str,
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers (no JAX, called once during get_vmc_gto_func setup)
+# Module-level helpers (no JAX, called once during get_vmc_func setup)
 # ---------------------------------------------------------------------------
 
 def _build_frag_symmops(mf, symmop_list, frag_ids) -> dict:
@@ -419,25 +419,6 @@ def _validate_params_corr(params_corr, mf) -> dict:
                     "coefficients"
                 )
 
-    # Validate and sanitize J3_eeI params
-    if "J3_eeI" in params_corr:
-        v = params_corr["J3_eeI"]
-        if not isinstance(v, dict):
-            raise TypeError(
-                "J3_eeI params must be a dict, "
-                f"got {type(v)}"
-            )
-        for sk in v:
-            if not (sk.startswith("like+")
-                    or sk.startswith("unlike+")):
-                raise ValueError(
-                    f"J3_eeI sub-key '{sk}' must "
-                    "start with 'like+' or 'unlike+'"
-                )
-        params_corr["J3_eeI"] = (
-            _sanitize_J3_eeI_params(v)
-        )
-
     # Warn if both pade + bspline present for same body
     if "J1_pade" in params_corr \
             and "J1_bspline" in params_corr:
@@ -496,7 +477,7 @@ def _apply_fragment_op(elec_crds: jnp.ndarray,
 # _VMCRunner: holds all precompiled VMC kernels and runs the simulation
 # ---------------------------------------------------------------------------
 
-class _VMCDriverGTO:
+class _VMCDriver:
     """Holds all precompiled VMC computation kernels
     and runs the simulation."""
 
@@ -505,7 +486,7 @@ class _VMCDriverGTO:
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
                  gr_scheme='scheme1', trial=None,
-                 jastrow_config=None):
+                 bspline_config=None):
         # --- Store state ---
         self.mf = mf
         self.params_corr = params_corr
@@ -543,7 +524,7 @@ class _VMCDriverGTO:
         log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
             = get_psi_fun(mf, params_cusp=params_cusp,
                           trial=trial,
-                          jastrow_config=jastrow_config)
+                          bspline_config=bspline_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         self.local_energy_ee = local_energy_ee
@@ -561,31 +542,71 @@ class _VMCDriverGTO:
             mo1s = compute_orbital_response(mf)  # (natm, 3, nao, nocc)
             C0 = jnp.array(mf.mo_coeff[:, :nocc])
 
-        # --- Build batched gradient function ---
-        _mo_kw = {}
+        # --- Gradient sample redistribution schemes for space warping ---
+        @jax.jit
+        def redistribute_scheme1(elec_crds: jnp.ndarray) -> jnp.ndarray:
+            _, mo_val_s = get_psi_mo(elec_crds, nuc_crds)
+            weight = jnp.einsum('neo,neo->en', mo_val_s, mo_val_s)
+            return weight / jnp.sum(weight, axis=-1, keepdims=True)
+
+        @jax.jit
+        def redistribute_scheme2(elec_crds: jnp.ndarray) -> jnp.ndarray:
+            diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
+            dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
+            dist = jnp.where(dist < eps, eps, dist)
+            weight = dist**(-4.0)
+            return weight / jnp.sum(weight, axis=-1, keepdims=True)
+
+        rescale_fn = redistribute_scheme2 \
+            if 'scheme2' in gr_scheme \
+            else redistribute_scheme1
+        jac_rescale_fn = jax.jacobian(rescale_fn, argnums=0)
+
+        # --- Gradient functions ---
+        @jax.jit
+        def grad_fn_ee(e_pos: jnp.ndarray) -> jnp.ndarray:
+            return jax.grad(local_energy_ee)(e_pos)
+
+        @jax.jit
+        def grad_fn_en(e_pos: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+            return jax.grad(local_energy_en, argnums=(0, 1))(e_pos, nuc_crds)
+
+        @jax.jit
+        def grad_fn_ke(e_pos: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+            return jax.grad(local_energy_ke,
+                            argnums=(0, 1))(e_pos, nuc_crds, params_corr)
+
+        @jax.jit
+        def grad_fn_logpsi(e_pos: jnp.ndarray) \
+                -> tuple[jnp.ndarray, jnp.ndarray]:
+            return jax.grad(log_trial_wavefunction,
+                            argnums=(0, 1))(e_pos, nuc_crds, params_corr)
+
         if mo_relax:
-            _mo_kw = dict(
-                local_energy_ke_C=local_energy_ke_C,
-                log_trial_wavefunction_C=(
-                    log_trial_wavefunction_C
-                ),
-                C0=C0,
-                mo1s=mo1s,
-                num_nuc=num_nuc,
-            )
-        self.vmc_gradient_batch = vmc_gto_gradients(
-            local_energy_ee,
-            local_energy_en,
-            local_energy_ke,
-            log_trial_wavefunction,
-            nuc_crds,
-            params_corr,
-            get_psi_mo,
-            eps,
-            gr_scheme,
-            mo_relax=mo_relax,
-            **_mo_kw,
-        )
+            @jax.jit
+            def grad_fn_ke_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
+                """dE_ke/dC · dC/dR via JVP for each atom and direction."""
+                def ke_of_C(C):
+                    return local_energy_ke_C(e_pos, nuc_crds, params_corr, C)
+                results = jnp.zeros((num_nuc, 3))
+                for ia in range(num_nuc):
+                    for K in range(3):
+                        _, dke = jax.jvp(ke_of_C, (C0,), (mo1s[ia, K],))
+                        results = results.at[ia, K].set(dke)
+                return results  # (num_nuc, 3)
+
+            @jax.jit
+            def grad_fn_logpsi_mo(e_pos: jnp.ndarray) -> jnp.ndarray:
+                """dlog|psi|/dC · dC/dR via JVP for each atom and direction."""
+                def logpsi_of_C(C):
+                    return log_trial_wavefunction_C(
+                        e_pos, nuc_crds, params_corr, C)
+                results = jnp.zeros((num_nuc, 3))
+                for ia in range(num_nuc):
+                    for K in range(3):
+                        _, dlp = jax.jvp(logpsi_of_C, (C0,), (mo1s[ia, K],))
+                        results = results.at[ia, K].set(dlp)
+                return results  # (num_nuc, 3)
 
         @jax.jit
         def _log_psi_batch(batch):
@@ -707,6 +728,43 @@ class _VMCDriverGTO:
         self.metropolis_move_allw = jax.vmap(metropolis_move_1w,
                                              in_axes=(0, 0, None, None))
 
+        # --- Gradient batch computation ---
+        @jax.jit
+        def vmc_gradient_batch(batch_samples: jnp.ndarray) \
+                -> tuple[jnp.ndarray, ...]:
+            grd_ee_elc = jax.vmap(grad_fn_ee)(batch_samples)
+            grd_en_elc, grd_en_nuc = jax.vmap(grad_fn_en)(batch_samples)
+            grd_ke_elc, grd_ke_nuc = jax.vmap(grad_fn_ke)(batch_samples)
+            grd_logpsi_elc, grd_logpsi_nuc \
+                = jax.vmap(grad_fn_logpsi)(batch_samples)
+
+            rescale = jax.vmap(rescale_fn)(batch_samples)
+            jac_rescale_elc = jax.vmap(jac_rescale_fn)(batch_samples)
+            novel_correction = 0.5 * jnp.einsum('beneK->bnK', jac_rescale_elc)
+
+            grd_ee = jnp.einsum('beK,ben->bnK', grd_ee_elc, rescale)
+            grd_en = grd_en_nuc \
+                + jnp.einsum('beK,ben->bnK', grd_en_elc, rescale)
+            grd_ke = grd_ke_nuc \
+                + jnp.einsum('beK,ben->bnK', grd_ke_elc, rescale)
+
+            grd_logpsi = grd_logpsi_nuc + jnp.einsum('beK,ben->bnK',
+                                                     grd_logpsi_elc, rescale)
+            grd_logpsi += novel_correction
+
+            if mo_relax:
+                # MO relaxation correction (CPHF)
+                grd_ke_mo_batch = jax.vmap(grad_fn_ke_mo)(batch_samples)
+                grd_logpsi_mo_batch \
+                    = jax.vmap(grad_fn_logpsi_mo)(batch_samples)
+
+                grd_ke = grd_ke + grd_ke_mo_batch
+                grd_logpsi = grd_logpsi + grd_logpsi_mo_batch
+
+            return grd_ee, grd_en, grd_ke, grd_logpsi
+
+        self.vmc_gradient_batch = vmc_gradient_batch
+
         # --- Per-fragment symmetry operation for gradient batches ---
         def _apply_single_frag_symmop(batch_samples, frag_pos, s_op_fn):
             """Apply a symmetry operation to a single fragment only.
@@ -733,6 +791,160 @@ class _VMCDriverGTO:
             return jnp.where(mask[:, :, None], proposed, batch_samples)
 
         self._apply_single_frag_symmop = _apply_single_frag_symmop
+
+    def _gradient_save(self, block_cnt: int,
+                       sampled_walkers: jnp.ndarray,
+                       local_energies: jnp.ndarray,
+                       batch_size: int, num_batches: int):
+        # sampled_walkers enter flattened along the first two axes.
+        # ie. num_samples_per_block == num_steps_per_block * num_walkers
+        # sampled_walkers.shape
+        #   == (num_steps_per_block * num_walkers, nelec, 3)
+        # local_energies.shape == (num_steps_per_block, num_walkers)
+        num_samples_per_block = sampled_walkers.shape[0]
+
+        single_frag_combos = self.single_frag_combos
+        ofname_grd = self.ofname_grd
+        vmc_gradient_batch = self.vmc_gradient_batch
+        _log_psi_batch = self._log_psi_batch
+        _local_energy_batch = self._local_energy_batch
+        _apply_single_frag_symmop = self._apply_single_frag_symmop
+
+        # Reference gradient accumulators
+        w_grd_ee_en = []
+        w_grd_ke = []
+        w_grd_logpsi = []
+
+        # Per-combo accumulators
+        combo_grd_ee_en = {label: [] for _, _, label in single_frag_combos}
+        combo_grd_ke = {label: [] for _, _, label in single_frag_combos}
+        combo_grd_logpsi = {label: [] for _, _, label in single_frag_combos}
+        combo_weights = {label: [] for _, _, label in single_frag_combos}
+        combo_E_local = {label: [] for _, _, label in single_frag_combos}
+
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_samples_per_block)
+            batch_orig = sampled_walkers[start_idx:end_idx, :, :]
+
+            # Reference: gradients at original (untransformed) positions
+            g_ee, g_en, g_ke, g_logpsi = vmc_gradient_batch(batch_orig)
+            w_grd_ee_en.append(g_ee + g_en)
+            w_grd_ke.append(g_ke)
+            w_grd_logpsi.append(g_logpsi)
+
+            # Evaluate log|ψ| at original positions (once per batch)
+            log_psi_orig = _log_psi_batch(batch_orig)  # (batch_size,)
+
+            # Single-fragment operation combos
+            for frag_pos, op, label in single_frag_combos:
+                batch_trans = _apply_single_frag_symmop(
+                    batch_orig, frag_pos,
+                    symmetry_operations_map[op])
+
+                # Screen: fall back to original where |ψ|² drops
+                log_psi_trans = _log_psi_batch(batch_trans)
+                psi2_ratio = jnp.exp(
+                    2.0 * (log_psi_trans - log_psi_orig))
+                safe = psi2_ratio > PSI2_RATIO_THRESHOLD
+                batch_trans = jnp.where(
+                    safe[:, None, None], batch_trans, batch_orig)
+
+                # Weight: J * |ψ(r')|² / |ψ(r)|²
+                # J = 1 for orthogonal point group operations
+                weight = jnp.where(safe, psi2_ratio, 1.0)
+
+                g_ee, g_en, g_ke, g_logpsi \
+                    = vmc_gradient_batch(batch_trans)
+                combo_grd_ee_en[label].append(g_ee + g_en)
+                combo_grd_ke[label].append(g_ke)
+                combo_grd_logpsi[label].append(g_logpsi)
+                combo_weights[label].append(weight)
+
+                E_trans = _local_energy_batch(batch_trans)
+                combo_E_local[label].append(E_trans)
+
+        # Stack all batches
+        w_grd_ee_en = jnp.vstack(w_grd_ee_en)
+        w_grd_ke = jnp.vstack(w_grd_ke)
+        w_grd_logpsi = jnp.vstack(w_grd_logpsi)
+
+        # Save to HDF5
+        with h5py.File(ofname_grd, "a") as f:
+            block_cnt_str = f'{block_cnt}'
+
+            # Ensure top-level groups exist
+            grp_names = ['grd_ee_en', 'grd_ke', 'grd_logpsi',
+                         'local_energies']
+            if single_frag_combos:
+                grp_names.append('fragment_weights')
+            for k in grp_names:
+                if k not in f.keys():
+                    f.create_group(k)
+
+            # Clean up existing block data (restart case)
+            if block_cnt_str in f['grd_ee_en'].keys():
+                del f['grd_ee_en'][block_cnt_str]
+                del f['grd_ke'][block_cnt_str]
+                del f['grd_logpsi'][block_cnt_str]
+                del f['local_energies'][block_cnt_str]
+                for _, _, label in single_frag_combos:
+                    if label in f['grd_ee_en'] \
+                            and block_cnt_str in f['grd_ee_en'][label]:
+                        del f['grd_ee_en'][label][block_cnt_str]
+                        del f['grd_ke'][label][block_cnt_str]
+                        del f['grd_logpsi'][label][block_cnt_str]
+                        del f['fragment_weights'][label][block_cnt_str]
+                    if label in f['local_energies'] \
+                            and block_cnt_str in f['local_energies'][label]:
+                        del f['local_energies'][label][block_cnt_str]
+
+            # A. Reference gradients
+            f['grd_ee_en'].create_dataset(block_cnt_str,
+                                          data=w_grd_ee_en)
+            f['grd_ke'].create_dataset(block_cnt_str, data=w_grd_ke)
+            f['grd_logpsi'].create_dataset(block_cnt_str,
+                                           data=w_grd_logpsi)
+            f['local_energies'].create_dataset(block_cnt_str,
+                                               data=local_energies)
+
+            # B. Per-combo secondary gradients and weights
+            for _, _, label in single_frag_combos:
+                c_ee_en = jnp.vstack(combo_grd_ee_en[label])
+                c_ke = jnp.vstack(combo_grd_ke[label])
+                c_logpsi = jnp.vstack(combo_grd_logpsi[label])
+                c_w = jnp.concatenate(combo_weights[label])
+
+                for grp, data in [('grd_ee_en', c_ee_en),
+                                  ('grd_ke', c_ke),
+                                  ('grd_logpsi', c_logpsi)]:
+                    if label not in f[grp]:
+                        f[grp].create_group(label)
+                    f[grp][label].create_dataset(block_cnt_str,
+                                                 data=data)
+
+                if label not in f['fragment_weights']:
+                    f['fragment_weights'].create_group(label)
+                f['fragment_weights'][label].create_dataset(
+                    block_cnt_str, data=c_w)
+
+                c_E = jnp.concatenate(combo_E_local[label])
+                if label not in f['local_energies']:
+                    f['local_energies'].create_group(label)
+                f['local_energies'][label].create_dataset(
+                    block_cnt_str, data=c_E)
+
+        # Return per-combo weighted-mean block energies
+        combo_weights_all = {
+            label: jnp.concatenate(combo_weights[label])
+            for _, _, label in single_frag_combos
+        }
+        combo_block_E = {}
+        for _, _, label in single_frag_combos:
+            c_E = jnp.concatenate(combo_E_local[label])
+            w = combo_weights_all[label]
+            combo_block_E[label] = float(jnp.sum(w * c_E) / jnp.sum(w))
+        return combo_block_E
 
     def __call__(self, rng_key: int | jnp.ndarray,
                  num_walkers: int = 1000,
@@ -779,15 +991,15 @@ class _VMCDriverGTO:
             and continue accumulating blocks.  Default ``False``.
         compute_gradients : bool, optional
             If ``True``, accumulate and save nuclear-force gradient data
-            needed by :func:`~OmegaQMC.observables.force.postproc_h5_pgcs`.
+            needed by :func:`~OmegaQMC.utils.vmc_forces_with_pgcs`.
             Default ``False``.
 
         Returns
         -------
         None
             All output is written to disk.  Use
-            :func:`~OmegaQMC.observables.force.postproc_h5_pgcs` to
-            post-process the gradient file.
+            :func:`~OmegaQMC.utils.vmc_forces_with_pgcs` to post-process
+            the gradient file.
         """
         # tolerance_enr_std_per_elec=CHEMICAL_ACCURACY,
         mf = self.mf
@@ -809,7 +1021,6 @@ class _VMCDriverGTO:
 
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
-        rng_key_to_restart = rng_key.copy()
 
         # Initialize electron positions more efficiently
         rng_key, init_key = jax.random.split(rng_key)
@@ -849,16 +1060,16 @@ class _VMCDriverGTO:
         if mode_restart:
             with h5py.File(ofname_chkpt, 'r') as f:
                 # Load metadata
-                block_cnt_start = int(f['block_count'][()])
+                block_cnt_start = int(f['block_count'][()]) + 1
                 mc_stepsize = f['mc_stepsize'][()]
                 mc_timestep = mc_stepsize * mc_stepsize / 3
-                rng_key = jax.random.key(int(f['rng_key'][()]))
-                rng_key_to_restart = rng_key.copy()
-                rng_key, init_key = jax.random.split(rng_key)
+                rng_key = jax.random.wrap_key_data(
+                    jnp.array(f['rng_key'][:], dtype=jnp.uint32))
                 walkers = jnp.array(f['walkers'][:])
                 if walkers_sharding is not None:
                     walkers = jax.device_put(walkers, walkers_sharding)
                 E_b = list(f['E_blocks'][:])
+                E_cs_b = []
                 print("Restarting ...")
 
             # for _ in range(num_blocks_equil):
@@ -881,9 +1092,9 @@ class _VMCDriverGTO:
             E_cs_b = []    # CS-averaged block energies
             # std_E_b = []
 
-        ratio = ratios[-1]
-
-        print(f"ℹ️\tEquilibration acceptance rate: {ratio:.2f}")
+        if not mode_restart:
+            ratio = ratios[-1]
+            print(f"ℹ️\tEquilibration acceptance rate: {ratio:.2f}")
         print(f"ℹ️\tAdjusted step size: {mc_stepsize:.4f} bohr "
               f"~ {mc_timestep:.4f} Ha⁻¹ in Brownian time")
 
@@ -930,37 +1141,18 @@ class _VMCDriverGTO:
         else:
             fout = open(fname_log, 'w', 1)
 
-        # could turn this into a one-liner if requirement becomes Python 3.8+
-        p = pathlib.Path(ofname_chkpt)
-        if p.exists():
-            p.unlink()
-        with h5py.File(ofname_chkpt, 'a') as f:
-            f.create_dataset("version", data="0.1.0")
-            # TODO: take versionm info from pyproject.toml using tomli/tomllib
+        asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
+        aobs = [mf.mol.basis] * num_nuc \
+            if isinstance(mf.mol.basis, str) \
+            else [mf.mol.basis[asym[i]] for i in range(num_nuc)]
 
-            g = f.create_group("timestamps")
-            g.create_dataset("start",
-                             data=str(timestamp_init))
-
-            g = f.create_group("system")
-            asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
-            g.create_dataset("atom_symbols", data=" ".join(asym))
-            g.create_dataset("atom_coords", data=mf.mol.atom_coords())
-            aobs = [mf.mol.basis] * num_nuc \
-                if isinstance(mf.mol.basis, str) \
-                else [mf.mol.basis[asym[i]] for i in range(num_nuc)]
-            # TODO: add pseudopotentials ~"atom_pp" here as needed
-            g.create_dataset("ao_basis", data=" ".join(aobs))
-            g.create_dataset("units", data=mf.mol.unit.upper())
-
-        if compute_gradients:
+        if compute_gradients and not mode_restart:
             p = pathlib.Path(ofname_grd)
             if p.exists():
                 p.unlink()
             with h5py.File(ofname_grd, 'a') as f:
                 f.create_dataset('grd_nn', data=grd_nn)
                 g = f.create_group("system")
-                asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
                 g.create_dataset("atom_symbols", data=" ".join(asym))
                 g.create_dataset("atom_coords", data=mf.mol.atom_coords())
                 g.create_dataset("units", data=mf.mol.unit.upper())
@@ -969,7 +1161,7 @@ class _VMCDriverGTO:
 
         base_batch_size = 500
         memory_factor = max(1, nelec * num_nuc // 1000)
-        batch_size = min(50, base_batch_size // memory_factor)
+        batch_size = min(10, base_batch_size // memory_factor)
         num_batches = (num_steps_per_block * num_walkers + batch_size - 1) \
             // batch_size
         # mark_samples = ((jnp.arange(num_steps_per_block)+1) == 0)
@@ -1027,18 +1219,11 @@ class _VMCDriverGTO:
                         sampled_walkers,
                         NamedSharding(walkers_sharding.mesh,
                                       PartitionSpec(None, None, None, None)))
-                combo_E = save_gto_gradients(
+                combo_E = self._gradient_save(
                     block_cnt,
                     sampled_walkers.reshape(-1, nelec, 3),
                     E_loc_sw,
-                    batch_size, num_batches,
-                    self.single_frag_combos,
-                    self.ofname_grd,
-                    self.vmc_gradient_batch,
-                    self._log_psi_batch,
-                    self._local_energy_batch,
-                    self._apply_single_frag_symmop,
-                )
+                    batch_size, num_batches)
                 if combo_E:
                     all_E = [float(E_mean)] + list(combo_E.values())
                     E_cs_b.append(sum(all_E) / len(all_E))
@@ -1071,30 +1256,41 @@ class _VMCDriverGTO:
             print(f"ℹ️\tCS-averaged VMC energy: {ecs_mean:.8f} "
                   f"± {ecs_serr:.8f} Ha (N_eff = {ecs_neff:.1f})")
 
-        with h5py.File(ofname_chkpt, 'a') as f:
+        ofname_chkpt_tmp = ofname_chkpt + '.tmp'
+        with h5py.File(ofname_chkpt_tmp, 'w') as f:
+            f.create_dataset("version", data="0.1.0")
+            g = f.create_group("timestamps")
+            g.create_dataset("start", data=str(timestamp_init))
+            g.create_dataset("end", data=str(timestamp_fin))
+            g = f.create_group("system")
+            g.create_dataset("atom_symbols", data=" ".join(asym))
+            g.create_dataset("atom_coords", data=mf.mol.atom_coords())
+            g.create_dataset("ao_basis", data=" ".join(aobs))
+            g.create_dataset("units", data=mf.mol.unit.upper())
             f.create_dataset('E_blocks', data=E_b)
             f.create_dataset('rng_key',
-                             data=jax.random.key_data(rng_key_to_restart))
+                             data=jax.random.key_data(rng_key))
             f.create_dataset('block_count', data=block_cnt,
                              dtype=jnp.int32)
+            f.create_dataset('mc_stepsize', data=float(mc_stepsize))
             f.create_dataset('walkers', data=sampled_walkers[-1, :, :, :])
-            f["timestamps"].create_dataset("end", data=str(timestamp_fin))
+        pathlib.Path(ofname_chkpt_tmp).replace(ofname_chkpt)
 
 
-def get_vmc_gto_func(mf,
-                     params_corr: dict | None,
-                     cusp_scheme='Quady2025',
-                     gr_scheme='scheme1',
-                     prefix='vmc',
-                     symmop_list: str | list[str] | dict[int, list[str]] | None = None,
-                     cluster_idx: Collection[int] = None,
-                     mo_relax: bool = True,
-                     trial: dict | None = None,
-                     jastrow_config: dict | None = None):
+def get_vmc_func(mf,
+                 params_corr: dict | None,
+                 cusp_scheme='Quady2025',
+                 gr_scheme='scheme1',
+                 prefix='vmc',
+                 symmop_list: str | list[str] | dict[int, list[str]] | None = None,
+                 cluster_idx: Collection[int] = None,
+                 mo_relax: bool = True,
+                 trial: dict | None = None,
+                 bspline_config: dict | None = None):
     """Construct a callable VMC driver for the given mean-field object.
 
     Assembles the trial wave function (Slater determinant + Jastrow factor
-    with optional cusp corrections) and returns a :class:`_VMCDriverGTO`
+    with optional cusp corrections) and returns a :class:`_VMCDriver`
     instance that can be called directly to run a VMC simulation.
 
     Parameters
@@ -1130,19 +1326,18 @@ def get_vmc_gto_func(mf,
         If ``True`` (default), relax the MO coefficients
         to minimise the energy variance during the
         cusp-correction step.
-    jastrow_config : dict or None, optional
+    bspline_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::
 
             {"J1": {"H": {"r_cut": 5.0}},
-             "J2": {"r_cut": 10.0},
-             "J3": {"r_cut": 5.0, "N_eI": 3, "N_ee": 3}}
+             "J2": {"r_cut": 10.0}}
 
     Returns
     -------
-    driver : _VMCDriverGTO
+    driver : _VMCDriver
         A callable object.  Call it with ``driver(rng_key, ...)`` to run the
-        VMC simulation; see :meth:`_VMCDriverGTO.__call__` for parameters.
+        VMC simulation; see :meth:`_VMCDriver.__call__` for parameters.
     """
     # Build per-fragment symmetry operations dict
     if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
@@ -1187,12 +1382,12 @@ def get_vmc_gto_func(mf,
     timestamp_init = datetime.now()
     print("Begin time: {}".format(timestamp_init))
 
-    return _VMCDriverGTO(mf, params_corr, params_cusp, mo_relax,
-                         nuc_crds, frag_reflect_data,
-                         single_frag_combos,
-                         frag_symmops, frag_ops_sets, frag_ids,
-                         ofname_chkpt, ofname_grd,
-                         timestamp_init,
-                         gr_scheme=gr_scheme,
-                         trial=trial,
-                         jastrow_config=jastrow_config)
+    return _VMCDriver(mf, params_corr, params_cusp, mo_relax,
+                      nuc_crds, frag_reflect_data,
+                      single_frag_combos,
+                      frag_symmops, frag_ops_sets, frag_ids,
+                      ofname_chkpt, ofname_grd,
+                      timestamp_init,
+                      gr_scheme=gr_scheme,
+                      trial=trial,
+                      bspline_config=bspline_config)
