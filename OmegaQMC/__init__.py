@@ -2,7 +2,7 @@
 
 import OmegaQMC.config
 
-from OmegaQMC.vmc_gto import generate_molecular_orbitals, get_vmc_gto_func
+from OmegaQMC.vmc_gto import generate_molecular_orbitals, get_vmc_func
 from OmegaQMC.vmc_nn import get_vmc_nn_func
 from OmegaQMC.vmcopt_gto_linear import get_vmcopt_gto_func
 from OmegaQMC.vmcopt_gto_irsgd import get_vmcopt_gto_func as get_vmcopt_nn_irsgd_func

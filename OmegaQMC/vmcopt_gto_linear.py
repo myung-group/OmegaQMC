@@ -83,6 +83,36 @@ def _build_flat_mask(params_corr, frozen_keys):
 # Parameter validation
 # -----------------------------------------------------------
 
+def _format_params_compact(params):
+    """One-line-per-key formatter for Jastrow parameters.
+
+    Produces a compact, human-readable dump of a
+    (possibly nested) parameter dict.  Used by the
+    linear-method driver to log parameter evolution
+    across epochs so the user can see exactly how each
+    Jastrow coefficient moves.
+    """
+    lines = []
+    for top_key in sorted(params.keys()):
+        sub = params[top_key]
+        if isinstance(sub, dict):
+            for inner_key in sorted(sub.keys()):
+                arr = sub[inner_key]
+                vals = ", ".join(
+                    f"{float(v):+.6f}" for v in arr
+                )
+                lines.append(
+                    f"    {top_key}.{inner_key}:"
+                    f" [{vals}]"
+                )
+        else:
+            vals = ", ".join(
+                f"{float(v):+.6f}" for v in sub
+            )
+            lines.append(f"    {top_key}: [{vals}]")
+    return "\n".join(lines)
+
+
 def _check_pade_denominators(params_corr):
     """Error if any Padé denominator parameter is <= 0.
 
@@ -912,6 +942,10 @@ class _VMCOptDriverGTO_Linear:
                     f"\n--- Epoch {epoch + 1}"
                     f"/{num_epochs} ---"
                 )
+                print("  Current Jastrow params:")
+                print(
+                    _format_params_compact(curr_params)
+                )
                 print("  Equilibrating...")
             (rng_key, walkers, mc_stepsize, _), \
                 acc_ratios = run_equilibration(
@@ -1047,6 +1081,25 @@ class _VMCOptDriverGTO_Linear:
 
             flat_params_new = flat_params + delta_full
 
+            if verbose >= 1:
+                proposed_params = _unflatten(
+                    flat_params_new
+                )
+                delta_params = jax.tree_util.tree_map(
+                    lambda new, old: new - old,
+                    proposed_params, curr_params,
+                )
+                print("  Proposed Jastrow params:")
+                print(
+                    _format_params_compact(
+                        proposed_params
+                    )
+                )
+                print("  Proposed delta:")
+                print(
+                    _format_params_compact(delta_params)
+                )
+
             # 8. Accept/reject via correlated sampling
             # Compute log-psi at old and new params
             # on the full sample set.
@@ -1113,14 +1166,27 @@ class _VMCOptDriverGTO_Linear:
                     shift_s = shift_s / shift_s_base
                 if verbose >= 1:
                     print("  -> Accepted.")
-                if verbose >= 2:
-                    curr_params = _unflatten(flat_params)
-                    print(f"  Params: {curr_params}")
+                    accepted_params = _unflatten(flat_params)
+                    print("  Accepted Jastrow params:")
+                    print(
+                        _format_params_compact(
+                            accepted_params
+                        )
+                    )
             else:
                 # Reject: revert params, raise shift
                 shift_s = shift_s * shift_s_base
                 if verbose >= 1:
-                    print(f"  -> Rejected.  shift_s -> {shift_s:.4f}")
+                    print(
+                        f"  -> Rejected."
+                        f"  shift_s -> {shift_s:.4f}"
+                    )
+                    print(
+                        "  Jastrow params unchanged:"
+                    )
+                    print(
+                        _format_params_compact(curr_params)
+                    )
 
             if verbose >= 1:
                 print(f"  shift_i={shift_i:.4f}, shift_s={shift_s:.4f}")
@@ -1214,3 +1280,9 @@ def get_vmcopt_gto_func(
         mf, params_cusp,
         jastrow_config=jastrow_config,
     )
+
+
+# Backwards-compat alias — some downstream scripts
+# import ``get_vmcopt_func`` instead of the canonical
+# ``get_vmcopt_gto_func`` exposed in the docs.
+get_vmcopt_func = get_vmcopt_gto_func
