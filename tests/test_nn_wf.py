@@ -11,7 +11,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from OmegaQMC.psi.nn.wf import MoleculeInfo
+from OmegaQMC.utils import Mole_custom
 from OmegaQMC.psi.nn.adapter import make_nn_log_psi
 from OmegaQMC.psi.nn.config import (
     NNAnsatzConfig,
@@ -24,12 +24,12 @@ from OmegaQMC.psi.nn.physics import laplacian
 def h2_mol():
     """H2 molecule at 1.4 Bohr."""
     L = 1.4010
-    return MoleculeInfo(
-        charges=jnp.array([1.0, 1.0]),
-        coords=jnp.array([
+    return Mole_custom.from_arrays(
+        charges=[1, 1],
+        coords=[
             [0.0, 0.0, -L / 2],
             [0.0, 0.0, L / 2],
-        ]),
+        ],
         n_up=1,
         n_down=1,
     )

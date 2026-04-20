@@ -41,8 +41,7 @@ def save_nn_checkpoint(
         epoch: Completed epoch number (int).
         config_name: NN config name (str).
         mol_info:
-            :class:`~OmegaQMC.psi.nn.wf\
-.MoleculeInfo`.
+            :class:`~OmegaQMC.utils.Mole_custom`.
         energy: Optional energy estimate (float).
     """
     leaves = jax.tree.leaves(params)
@@ -50,10 +49,7 @@ def save_nn_checkpoint(
         pg = f.create_group('params')
         for i, leaf in enumerate(leaves):
             arr = np.asarray(leaf)
-            kw = (
-                {'compression': 'gzip'}
-                if arr.ndim > 0 else {}
-            )
+            kw = {'compression': 'gzip'} if arr.ndim > 0 else {}
             pg.create_dataset(
                 str(i), data=arr, **kw,
             )
@@ -97,23 +93,16 @@ def load_nn_checkpoint(filepath, template_params):
     with h5py.File(filepath, 'r') as f:
         pg = f['params']
         n = int(pg.attrs['num_leaves'])
-        leaves = [
-            jnp.asarray(pg[str(i)][()])
-            for i in range(n)
-        ]
+        leaves = [jnp.asarray(pg[str(i)][()]) for i in range(n)]
         meta = {}
         if 'meta' in f:
             mg = f['meta']
             for k in mg.attrs:
                 meta[k] = mg.attrs[k]
             if 'charges' in mg:
-                meta['charges'] = np.asarray(
-                    mg['charges']
-                )
+                meta['charges'] = np.asarray(mg['charges'])
             if 'coords' in mg:
-                meta['coords'] = np.asarray(
-                    mg['coords']
-                )
+                meta['coords'] = np.asarray(mg['coords'])
     return jax.tree.unflatten(treedef, leaves), meta
 
 
@@ -134,12 +123,8 @@ def append_vmc_results(filepath, results):
         if 'vmc' in f:
             del f['vmc']
         vg = f.create_group('vmc')
-        vg.attrs['E_mean'] = float(
-            results['E_mean']
-        )
-        vg.attrs['E_serr'] = float(
-            results['E_serr']
-        )
+        vg.attrs['E_mean'] = float(results['E_mean'])
+        vg.attrs['E_serr'] = float(results['E_serr'])
         if 'E_blocks' in results:
             vg.create_dataset(
                 'E_blocks',

@@ -328,7 +328,7 @@ class ElectronGNN(nnx.Module):
     repeated message passing on a molecular graph.
 
     Args:
-        mol_info: :class:`~..wf.MoleculeInfo`.
+        mol_info: :class:`~OmegaQMC.utils.Mole_custom`.
         embedding_dim: Electron embedding dimension.
         two_particle_stream_dim: Edge feature dim.
         n_interactions: Number of GNN layers.

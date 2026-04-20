@@ -11,7 +11,7 @@ from flax import nnx
 
 from .config import NNAnsatzConfig, load_nn_config
 from .types import PhysicalConfiguration
-from .wf import MoleculeInfo, NeuralNetworkWaveFunction
+from .wf import NeuralNetworkWaveFunction
 from .build import build_nn_wf
 
 
@@ -21,7 +21,8 @@ def make_nn_log_psi(config, mol_info, rng_key):
     Args:
         config: :class:`NNAnsatzConfig` or a string
             (built-in name or YAML path).
-        mol_info: :class:`MoleculeInfo` instance.
+        mol_info: :class:`~OmegaQMC.utils.Mole_custom`
+            instance.
         rng_key: JAX PRNG key for parameter init.
 
     Returns:

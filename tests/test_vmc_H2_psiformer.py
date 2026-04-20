@@ -9,7 +9,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from OmegaQMC.psi.nn.wf import MoleculeInfo
+from OmegaQMC.utils import Mole_custom
 from OmegaQMC.vmc_nn import get_vmc_nn_func
 
 
@@ -17,12 +17,12 @@ from OmegaQMC.vmc_nn import get_vmc_nn_func
 def h2_driver():
     """Build a PsiFormer VMC driver for H2."""
     L = 1.4010
-    mol = MoleculeInfo(
-        charges=jnp.array([1.0, 1.0]),
-        coords=jnp.array([
+    mol = Mole_custom.from_arrays(
+        charges=[1, 1],
+        coords=[
             [0.0, 0.0, -L / 2],
             [0.0, 0.0, L / 2],
-        ]),
+        ],
         n_up=1,
         n_down=1,
     )

@@ -213,8 +213,9 @@ PsiFormer) using Flax NNX.  All NN-related code lives under
 
 .. autofunction:: OmegaQMC.psi.nn.adapter.make_nn_log_psi
 
-.. autoclass:: OmegaQMC.psi.nn.wf.MoleculeInfo
-   :members:
+.. autoclass:: OmegaQMC.utils.Mole_custom
+   :members: n_up, n_down, charges, coords,
+             mol_shells, mol_ecp_shells, from_arrays
 
 .. autoclass:: OmegaQMC.psi.nn.wf.NeuralNetworkWaveFunction
    :members: __call__

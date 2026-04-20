@@ -35,7 +35,6 @@ from .nn_checkpoint import (
 )
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
-from .psi.nn.wf import MoleculeInfo
 from .constants import MIN_DIST_THRESHOLD
 from .vmcopt_gto_linear import _get_free_gpu_mb
 
@@ -74,24 +73,16 @@ def _autotune_nn_batch(
     bytes_per_walker = None
     try:
         probe = jnp.zeros((1, nelec, 3))
-        compiled = (
-            jax.jit(compute_energy_fn)
-            .lower(probe, params)
-            .compile()
-        )
+        compiled = jax.jit(compute_energy_fn) \
+            .lower(probe, params).compile()
         analysis = compiled.memory_analysis()
-        bytes_per_walker = (
-            analysis.alias_size
-            + analysis.temp_size
-        )
+        bytes_per_walker = analysis.alias_size + analysis.temp_size
     except Exception:
         pass
 
     if not bytes_per_walker:
         bytes_per_walker = 2.0e6  # 2 MB fallback
-    free_bytes = (
-        (free_mb or 4096.0) * 1e6 * mem_frac
-    )
+    free_bytes = (free_mb or 4096.0) * 1e6 * mem_frac
     bs = int(free_bytes / bytes_per_walker)
     return max(10, min(bs, 8192))
 
@@ -121,17 +112,16 @@ class _VMCOptDriverNN_IRAdam:
             mol_info.charges, dtype=jnp.float64,
         )
         nelec = mol_info.n_up + mol_info.n_down
-        n_up = mol_info.n_up
-        n_down = mol_info.n_down
+        # n_up = mol_info.n_up
+        # n_down = mol_info.n_down
 
         self.mol_info = mol_info
         self.nuc_crds = nuc_crds
         self.charges = charges
         self.nelec = nelec
-        self.config_name = (
-            config if isinstance(config, str)
+        self.config_name = \
+            config if isinstance(config, str) \
             else getattr(config, 'name', 'custom')
-        )
 
         log_psi, init_params, graphdef = make_nn_log_psi(
             config, mol_info, init_key,
@@ -146,9 +136,7 @@ class _VMCOptDriverNN_IRAdam:
                 rab = jnp.linalg.norm(
                     nuc_crds[a] - nuc_crds[b],
                 )
-                enr_nn = enr_nn + (
-                    charges[a] * charges[b] / rab
-                )
+                enr_nn = enr_nn + (charges[a] * charges[b] / rab)
         enr_nn = jnp.asarray(enr_nn, dtype=jnp.float64)
 
         i_e, j_e = jnp.triu_indices(nelec, k=1)
@@ -163,10 +151,7 @@ class _VMCOptDriverNN_IRAdam:
         # --- Electron-nucleus energy ---
         @jax.jit
         def energy_en(elec_crds):
-            diffs = (
-                elec_crds[:, None, :]
-                - nuc_crds[None, :, :]
-            )
+            diffs = elec_crds[:, None, :] - nuc_crds[None, :, :]
             dists = jnp.linalg.norm(diffs, axis=-1)
             return -jnp.sum(
                 charges[None, :] / dists,
@@ -181,19 +166,13 @@ class _VMCOptDriverNN_IRAdam:
             r_flat = elec_crds.reshape(-1)
             lap_fn = laplacian(f_flat)
             lap_val, grad_val = lap_fn(r_flat)
-            return -0.5 * (
-                lap_val + jnp.dot(grad_val, grad_val)
-            )
+            return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
         # --- Total local energy ---
         @jax.jit
         def total_local_energy(elec_crds, params):
-            return (
-                energy_ee(elec_crds)
-                + energy_en(elec_crds)
-                + energy_ke(elec_crds, params)
-                + enr_nn
-            )
+            return energy_ee(elec_crds) + energy_en(elec_crds) \
+                + energy_ke(elec_crds, params) + enr_nn
 
         # --- Metropolis move ---
         @jax.jit
@@ -212,17 +191,12 @@ class _VMCOptDriverNN_IRAdam:
             dists_ee = jnp.linalg.norm(
                 diffs_ee, axis=-1,
             )
-            diffs_en = (
-                proposed[:, None, :]
-                - nuc_crds[None, :, :]
-            )
+            diffs_en = proposed[:, None, :] - nuc_crds[None, :, :]
             dists_en = jnp.linalg.norm(
                 diffs_en, axis=-1,
             )
-            valid = (
-                (dists_en.min() > MIN_DIST_THRESHOLD)
+            valid = (dists_en.min() > MIN_DIST_THRESHOLD) \
                 & (dists_ee.min() > MIN_DIST_THRESHOLD)
-            )
             lp_old = log_psi(
                 elec_crds, nuc_crds, params,
             )
@@ -319,10 +293,7 @@ class _VMCOptDriverNN_IRAdam:
             energies = compute_batch_energy(
                 batch_walkers, params,
             )
-            return (
-                0.2 * energies.mean()
-                + 0.8 * energies.std()
-            )
+            return 0.2 * energies.mean() + 0.8 * energies.std()
 
         self.run_equilibration = run_equilibration
         self.run_production = run_production
@@ -348,13 +319,8 @@ class _VMCOptDriverNN_IRAdam:
         idx_cnt = idx_cnt[:total]
         idx_cnt = jnp.array(idx_cnt)
         centers = self.nuc_crds[idx_cnt]
-        return (
-            centers[None, :, :]
-            + 0.05 * jax.random.normal(
-                rng_key,
-                (num_walkers, self.nelec, 3),
-            )
-        )
+        return centers[None, :, :] \
+            + 0.05 * jax.random.normal(rng_key, (num_walkers, self.nelec, 3))
 
     def __call__(
         self,
@@ -441,74 +407,35 @@ class _VMCOptDriverNN_IRAdam:
                 with h5py.File(
                     chkpt_path, 'r',
                 ) as f:
-                    n_chk = int(
-                        f['params'].attrs[
-                            'num_leaves'
-                        ]
-                    )
+                    n_chk = int(f['params'].attrs['num_leaves'])
                     if n_chk != n_model:
-                        print(
-                            f"Error: checkpoint"
-                            f" '{chkpt_path}'"
-                            f" has {n_chk}"
-                            f" parameter leaves"
-                            f" but current model"
-                            f" has {n_model}."
-                            " Incompatible"
-                            " architecture"
-                            " — stopping."
-                        )
+                        print(f"Error: checkpoint '{chkpt_path}'"
+                              f" has {n_chk} parameter leaves"
+                              f" but current model has {n_model}."
+                              " Incompatible architecture — stopping.")
                         return None, {}
-                    for i, leaf in enumerate(
-                        template_leaves
-                    ):
-                        chk_shape = (
-                            f['params'][
-                                str(i)
-                            ].shape
-                        )
+                    for i, leaf in enumerate(template_leaves):
+                        chk_shape = f['params'][str(i)].shape
                         if chk_shape != leaf.shape:
-                            print(
-                                f"Error:"
-                                f" parameter"
-                                f" leaf {i}"
-                                f" shape"
-                                f" mismatch:"
-                                f" checkpoint"
-                                f" {chk_shape}"
-                                f" vs model"
-                                f" {leaf.shape}."
-                                " Incompatible"
-                                " architecture"
-                                " — stopping."
-                            )
+                            print(f"Error: parameter leaf {i} shape mismatch:"
+                                  f" checkpoint {chk_shape}"
+                                  f" vs model {leaf.shape}."
+                                  " Incompatible architecture — stopping.")
                             return None, {}
             except (KeyError, OSError) as exc:
-                print(
-                    f"Error reading checkpoint"
-                    f" '{chkpt_path}': {exc}"
-                    " — stopping."
-                )
+                print(f"Error reading checkpoint"
+                      f" '{chkpt_path}': {exc} — stopping.")
                 return None, {}
 
             params, meta = load_nn_checkpoint(
                 chkpt_path, params,
             )
-            start_iter = (
-                int(meta.get('epoch', -1)) + 1
-            )
+            start_iter = int(meta.get('epoch', -1)) + 1
             opt_state = optimizer.init(params)
             if verbose >= 1:
-                print(
-                    f"Resuming from"
-                    f" '{chkpt_path}'"
-                    f" (iteration"
-                    f" {start_iter - 1}"
-                    f" completed,"
-                    f" continuing from"
-                    f" iteration"
-                    f" {start_iter})"
-                )
+                print(f"Resuming from '{chkpt_path}'"
+                      f" (iteration {start_iter - 1} completed,"
+                      f" continuing from iteration {start_iter})")
 
         # Auto-tune walker count and iterations
         auto_walkers = num_walkers == 'auto'
@@ -524,25 +451,12 @@ class _VMCOptDriverNN_IRAdam:
             * num_walkers
             * num_sample_blocks
         )
-        updates_per_iter = num_epochs * max(
-            1,
-            -(-n_train_per_iter // batch_size),
-        )
+        updates_per_iter = num_epochs * max(1, n_train_per_iter // batch_size)
         if auto_iters:
-            num_iters = max(
-                1,
-                -(
-                    -_TARGET_UPDATES
-                    // updates_per_iter
-                ),
-            )
-        if (auto_walkers or auto_iters) \
-                and verbose >= 1:
-            print(
-                f"  Auto-tuned:"
-                f" num_walkers={num_walkers},"
-                f" num_iters={num_iters}"
-            )
+            num_iters = max(1, _TARGET_UPDATES // updates_per_iter)
+        if (auto_walkers or auto_iters) and verbose >= 1:
+            print(f"  Auto-tuned:"
+                  f" num_walkers={num_walkers}, num_iters={num_iters}")
 
         # Initialize walkers
         rng_key, rng = jax.random.split(rng_key)
@@ -555,33 +469,16 @@ class _VMCOptDriverNN_IRAdam:
         if verbose >= 1:
             print("Running equilibration...")
         (rng_key, walkers, mc_stepsize, _), \
-            acc = (
-                self.run_equilibration(
-                    rng_key, walkers,
-                    mc_stepsize, params,
-                    num_blocks_equil,
-                    num_steps_per_block,
+            acc = self.run_equilibration(
+                    rng_key, walkers, mc_stepsize, params,
+                    num_blocks_equil, num_steps_per_block,
                 )
-            )
         if verbose >= 1:
-            print(
-                f"  acceptance rate:"
-                f" {acc[-1]:.2f}"
-            )
-            print(
-                f"  step size:"
-                f" {mc_stepsize:.4f}"
-            )
-            total_updates = (
-                num_iters * updates_per_iter
-            )
-            print(
-                f"\nStarting {num_iters}"
-                f" iterations"
-                f" (~{total_updates}"
-                f" param updates,"
-                f" lr={lr})...\n"
-            )
+            print(f"  acceptance rate: {acc[-1]:.2f}")
+            print(f"  step size: {mc_stepsize:.4f}")
+            total_updates = num_iters * updates_per_iter
+            print(f"\nStarting {num_iters} iterations"
+                  f" (~{total_updates} param updates, lr={lr})...\n")
 
         # ===== Main iterative loop =====
         for iteration in range(
@@ -612,9 +509,7 @@ class _VMCOptDriverNN_IRAdam:
             idx = jax.random.permutation(
                 rng1, jnp.arange(n_samples),
             )
-            n_train = int(
-                train_split * n_samples
-            )
+            n_train = int(train_split * n_samples)
             train_w = sampled[idx[:n_train]]
             valid_w = sampled[idx[n_train:]]
 
@@ -661,24 +556,13 @@ class _VMCOptDriverNN_IRAdam:
                 )
             all_e = jnp.concatenate(v_energies)
             iter_e = float(all_e.mean())
-            iter_err = (
-                float(all_e.std())
-                / all_e.size ** 0.5
-            )
+            iter_err = float(all_e.std()) / all_e.size ** 0.5
 
             if verbose >= 1:
-                iter_loss = float(
-                    jnp.array(
-                        epoch_losses
-                    ).mean()
-                )
-                print(
-                    f"Iter {iteration:5d}"
-                    f" | E = {iter_e:.8f}"
-                    f" +/- {iter_err:.8f}"
-                    f" | Loss:"
-                    f" {iter_loss:.6f}"
-                )
+                iter_loss = float(jnp.array(epoch_losses).mean())
+                print(f"Iter {iteration:5d}"
+                      f" | E = {iter_e:.8f} +/- {iter_err:.8f}"
+                      f" | Loss: {iter_loss:.6f}")
 
             # (d) Checkpoint
             if os.path.exists(chkpt_path):
@@ -695,9 +579,7 @@ class _VMCOptDriverNN_IRAdam:
 
         # ===== Final energy estimate =====
         if verbose >= 1:
-            print(
-                "\nFinal energy evaluation..."
-            )
+            print("\nFinal energy evaluation...")
         (rng_key, walkers, mc_stepsize, _), \
             acc = (
                 self.run_equilibration(
@@ -722,18 +604,9 @@ class _VMCOptDriverNN_IRAdam:
         final_err = final_std / neff ** 0.5
 
         if verbose >= 1:
-            print(
-                f"Final energy:"
-                f" {final_e:.8f}"
-                f" +/- {final_err:.8f}"
-            )
+            print(f"Final energy: {final_e:.8f} +/- {final_err:.8f}")
 
-        return params, {
-            'energy': {
-                'mean': final_e,
-                'stderr': final_err,
-            },
-        }
+        return params, {'energy': {'mean': final_e, 'stderr': final_err}}
 
 
 def get_vmcopt_nn_func(mol_info, config, init_key):
@@ -745,7 +618,7 @@ def get_vmcopt_nn_func(mol_info, config, init_key):
     function, and returns a callable driver.
 
     Args:
-        mol_info: :class:`~OmegaQMC.psi.nn.wf.MoleculeInfo`
+        mol_info: :class:`~OmegaQMC.utils.Mole_custom`
             instance.
         config: :class:`~OmegaQMC.psi.nn.config.NNAnsatzConfig`
             or a string (built-in name or YAML path).
@@ -779,6 +652,4 @@ def pretrain_to_hf(nn_trial, mf, rng_key, steps=1000):
     Raises:
         NotImplementedError: Always.
     """
-    raise NotImplementedError(
-        "pretrain_to_hf is not yet implemented"
-    )
+    raise NotImplementedError("pretrain_to_hf is not yet implemented")

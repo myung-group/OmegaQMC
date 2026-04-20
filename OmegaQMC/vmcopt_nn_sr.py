@@ -42,7 +42,6 @@ from .nn_checkpoint import (
 )
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
-# from .psi.nn.wf import MoleculeInfo
 from .constants import MIN_DIST_THRESHOLD
 # from .utils import do_binning_analysis
 
@@ -117,9 +116,7 @@ def _autotune_jac_batch(
 
     if not bytes_per_walker:
         bytes_per_walker = 20.0e6  # 20 MB fallback
-    free_bytes = (
-        (free_mb or 4096.0) * 1e6 * mem_frac
-    )
+    free_bytes = (free_mb or 4096.0) * 1e6 * mem_frac
     bs = int(free_bytes / bytes_per_walker)
     return max(1, min(bs, 256))
 
@@ -156,13 +153,9 @@ def _autotune_sr_walkers(
     """
     if free_mb is None:
         free_mb = 4096.0
-    available_mb = (
-        free_mb * mem_frac - jac_batch_mem_mb
-    )
+    available_mb = free_mb * mem_frac - jac_batch_mem_mb
     bytes_budget = max(available_mb, 100.0) * 1e6
-    nw = int(
-        bytes_budget / (4 * max(n_params, 1))
-    )
+    nw = int(bytes_budget / (4 * max(n_params, 1)))
     return max(256, min(nw, 4096))
 
 
@@ -212,9 +205,7 @@ class _VMCOptDriverNN_SR:
                 rab = jnp.linalg.norm(
                     nuc_crds[a] - nuc_crds[b],
                 )
-                enr_nn = enr_nn + (
-                    charges[a] * charges[b] / rab
-                )
+                enr_nn = enr_nn + (charges[a] * charges[b] / rab)
         enr_nn = jnp.asarray(
             enr_nn, dtype=jnp.float64,
         )
@@ -224,9 +215,7 @@ class _VMCOptDriverNN_SR:
         # --- Electron-electron energy ---
         @jax.jit
         def energy_ee(elec_crds):
-            diffs = (
-                elec_crds[i_e] - elec_crds[j_e]
-            )
+            diffs = (elec_crds[i_e] - elec_crds[j_e])
             dists = jnp.linalg.norm(
                 diffs, axis=-1,
             )
@@ -235,10 +224,7 @@ class _VMCOptDriverNN_SR:
         # --- Electron-nucleus energy ---
         @jax.jit
         def energy_en(elec_crds):
-            diffs = (
-                elec_crds[:, None, :]
-                - nuc_crds[None, :, :]
-            )
+            diffs = (elec_crds[:, None, :] - nuc_crds[None, :, :])
             dists = jnp.linalg.norm(
                 diffs, axis=-1,
             )
@@ -255,54 +241,34 @@ class _VMCOptDriverNN_SR:
             r_flat = elec_crds.reshape(-1)
             lap_fn = laplacian(f_flat)
             lap_val, grad_val = lap_fn(r_flat)
-            return -0.5 * (
-                lap_val
-                + jnp.dot(grad_val, grad_val)
-            )
+            return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
         # --- Total local energy ---
         @jax.jit
         def total_local_energy(elec_crds, params):
-            return (
-                energy_ee(elec_crds)
-                + energy_en(elec_crds)
-                + energy_ke(elec_crds, params)
-                + enr_nn
-            )
+            return (energy_ee(elec_crds) + energy_en(elec_crds)
+                    + energy_ke(elec_crds, params) + enr_nn)
 
         # --- Metropolis move ---
         @jax.jit
-        def metropolis_move(
-            rng_key, elec_crds, step_size, params,
-        ):
-            key_prop, key_accept = (
-                jax.random.split(rng_key)
-            )
+        def metropolis_move(rng_key, elec_crds, step_size, params):
+            key_prop, key_accept = jax.random.split(rng_key)
             proposed = elec_crds + step_size * (
                 jax.random.normal(
                     key_prop, elec_crds.shape,
                 )
             )
-            diffs_ee = (
-                proposed[i_e] - proposed[j_e]
-            )
+            diffs_ee = proposed[i_e] - proposed[j_e]
             dists_ee = jnp.linalg.norm(
                 diffs_ee, axis=-1,
             )
-            diffs_en = (
-                proposed[:, None, :]
-                - nuc_crds[None, :, :]
-            )
+            diffs_en = proposed[:, None, :] - nuc_crds[None, :, :]
             dists_en = jnp.linalg.norm(
                 diffs_en, axis=-1,
             )
-            valid = (
-                (dists_en.min() > MIN_DIST_THRESHOLD)
-                & (
-                    dists_ee.min()
-                    > MIN_DIST_THRESHOLD
-                )
-            )
+            valid = \
+                (dists_en.min() > MIN_DIST_THRESHOLD) \
+                & (dists_ee.min() > MIN_DIST_THRESHOLD)
             lp_old = log_psi(
                 elec_crds, nuc_crds, params,
             )
@@ -398,9 +364,7 @@ class _VMCOptDriverNN_SR:
         self.metropolis_move = metropolis_move
         self.run_equilibration = run_equilibration
         self.run_production = run_production
-        self.compute_batch_energy = (
-            compute_batch_energy
-        )
+        self.compute_batch_energy = compute_batch_energy
 
     def initialize_walkers(
         self, rng_key, num_walkers,
@@ -417,10 +381,7 @@ class _VMCOptDriverNN_SR:
         idx_cnt = []
         for ia, iz in enumerate(self.charges):
             idx_cnt.extend([ia] * int(iz))
-        total = (
-            self.mol_info.n_up
-            + self.mol_info.n_down
-        )
+        total = self.mol_info.n_up + self.mol_info.n_down
         while len(idx_cnt) < total:
             idx_cnt.append(0)
         idx_cnt = idx_cnt[:total]
@@ -518,73 +479,34 @@ class _VMCOptDriverNN_SR:
                 with h5py.File(
                     chkpt_path, 'r',
                 ) as f:
-                    n_chk = int(
-                        f['params'].attrs[
-                            'num_leaves'
-                        ]
-                    )
+                    n_chk = int(f['params'].attrs['num_leaves'])
                     if n_chk != n_model:
-                        print(
-                            f"Error: checkpoint"
-                            f" '{chkpt_path}'"
-                            f" has {n_chk}"
-                            f" parameter leaves"
-                            f" but current model"
-                            f" has {n_model}."
-                            " Incompatible"
-                            " architecture"
-                            " — stopping."
-                        )
+                        print(f"Error: checkpoint '{chkpt_path}'"
+                              f" has {n_chk} parameter leaves"
+                              f" but current model has {n_model}."
+                              " Incompatible architecture — stopping.")
                         return None, {}
-                    for i, leaf in enumerate(
-                        template_leaves
-                    ):
-                        chk_shape = (
-                            f['params'][
-                                str(i)
-                            ].shape
-                        )
+                    for i, leaf in enumerate(template_leaves):
+                        chk_shape = f['params'][str(i)].shape
                         if chk_shape != leaf.shape:
-                            print(
-                                f"Error:"
-                                f" parameter"
-                                f" leaf {i}"
-                                f" shape"
-                                f" mismatch:"
-                                f" checkpoint"
-                                f" {chk_shape}"
-                                f" vs model"
-                                f" {leaf.shape}."
-                                " Incompatible"
-                                " architecture"
-                                " — stopping."
-                            )
+                            print(f"Error: parameter leaf {i} shape mismatch:"
+                                  f" checkpoint {chk_shape} "
+                                  f"vs model {leaf.shape}."
+                                  " Incompatible architecture — stopping.")
                             return None, {}
             except (KeyError, OSError) as exc:
-                print(
-                    f"Error reading checkpoint"
-                    f" '{chkpt_path}': {exc}"
-                    " — stopping."
-                )
+                print(f"Error reading checkpoint"
+                      f" '{chkpt_path}': {exc} — stopping.")
                 return None, {}
 
             params, meta = load_nn_checkpoint(
                 chkpt_path, params,
             )
-            start_iter = (
-                int(meta.get('epoch', -1)) + 1
-            )
+            start_iter = int(meta.get('epoch', -1)) + 1
             if verbose >= 1:
-                print(
-                    f"Resuming from"
-                    f" '{chkpt_path}'"
-                    f" (iteration"
-                    f" {start_iter - 1}"
-                    f" completed,"
-                    f" continuing from"
-                    f" iteration"
-                    f" {start_iter})"
-                )
+                print(f"Resuming from '{chkpt_path}' "
+                      f"(iteration {start_iter - 1} completed,"
+                      f" continuing from iteration {start_iter})")
 
         # --- Flatten params ---
         flat_params, unravel_fn = ravel_pytree(
@@ -592,10 +514,7 @@ class _VMCOptDriverNN_SR:
         )
         n_params = flat_params.shape[0]
         if verbose >= 1:
-            print(
-                f"SR optimizer:"
-                f" {n_params} parameters"
-            )
+            print(f"SR optimizer: {n_params} parameters")
 
         # --- Jacobian function ---
         def log_psi_of_flat(fp, r):
@@ -634,33 +553,21 @@ class _VMCOptDriverNN_SR:
         if auto_walkers:
             # Reserve peak memory for one
             # Jacobian batch computation.
-            jac_batch_mem_mb = (
-                jac_batch_size * 20.0
-            )  # 20 MB/walker fallback
+            jac_batch_mem_mb = jac_batch_size * 20.0
+            # 20 MB/walker fallback
             try:
                 probe = jnp.zeros(
                     (1, self.nelec, 3),
                 )
-                compiled = (
-                    jax.jit(jac_batch_fn)
-                    .lower(probe, flat_params)
-                    .compile()
-                )
-                analysis = (
-                    compiled.memory_analysis()
-                )
-                per_w = (
-                    analysis.alias_size
-                    + analysis.temp_size
-                )
-                jac_batch_mem_mb = (
-                    jac_batch_size * per_w / 1e6
-                )
+                compiled = jax.jit(jac_batch_fn) \
+                    .lower(probe, flat_params).compile()
+                analysis = compiled.memory_analysis()
+                per_w = analysis.alias_size + analysis.temp_size
+                jac_batch_mem_mb = jac_batch_size * per_w / 1e6
             except Exception:
                 pass
             num_walkers = _autotune_sr_walkers(
-                n_params, jac_batch_mem_mb,
-                free_mb,
+                n_params, jac_batch_mem_mb, free_mb,
             )
         if auto_iters:
             num_iters = _TARGET_UPDATES_SR
@@ -737,29 +644,17 @@ class _VMCOptDriverNN_SR:
         if verbose >= 1:
             print("Running equilibration...")
         (rng_key, walkers, mc_stepsize, _), \
-            acc = (
-                self.run_equilibration(
+            acc = self.run_equilibration(
                     rng_key, walkers,
                     mc_stepsize, params,
                     num_blocks_equil,
                     num_steps_per_block,
-                )
-            )
+                    )
         if verbose >= 1:
-            print(
-                f"  acceptance rate:"
-                f" {acc[-1]:.2f}"
-            )
-            print(
-                f"  step size:"
-                f" {mc_stepsize:.4f}"
-            )
-            print(
-                f"\nStarting {num_iters}"
-                f" SR iterations"
-                f" (lr={lr},"
-                f" damping={damping})...\n"
-            )
+            print(f"  acceptance rate: {acc[-1]:.2f}")
+            print(f"  step size: {mc_stepsize:.4f}")
+            print(f"\nStarting {num_iters} SR iterations (lr={lr},"
+                  f" damping={damping})...\n")
 
         # --- Main SR loop ---
         prev_delta = jnp.zeros(n_params, dtype=jnp.float32)
@@ -822,36 +717,24 @@ class _VMCOptDriverNN_SR:
             prev_delta = delta_p
 
             # (f) Clip and apply update
-            max_dp = float(
-                jnp.max(jnp.abs(delta_p))
-            )
+            max_dp = float(jnp.max(jnp.abs(delta_p)))
             scale = min(
                 1.0,
                 max_param_change / max(max_dp, 1e-30),
             )
-            flat_params = (
-                flat_params
-                - lr * scale * delta_p
-            )
+            flat_params = flat_params - lr * scale * delta_p
             params = unravel_fn(flat_params)
 
             # (g) Logging
             if verbose >= 1:
                 now = datetime.now()
-                dt = (
-                    now - timestamp_prev
-                ).total_seconds()
+                dt = (now - timestamp_prev).total_seconds()
                 timestamp_prev = now
                 ar_last = float(ars[-1])
-                print(
-                    f"Iter {iteration:5d}"
-                    f" | E = {E_mean:.8f}"
-                    f" +/- {E_std / num_walkers**0.5:.8f}"
-                    f" | max_dp = {max_dp:.4e}"
-                    f" | scale = {scale:.3f}"
-                    f" | ar = {ar_last:.2f}"
-                    f" | dt = {dt:.1f}s"
-                )
+                print(f"Iter {iteration:5d} | E = {E_mean:.8f}"
+                      f" +/- {E_std / num_walkers**0.5:.8f}"
+                      f" | max_dp = {max_dp:.4e} | scale = {scale:.3f}"
+                      f" | ar = {ar_last:.2f} | dt = {dt:.1f}s")
 
             # (h) Checkpoint (every _CHK_EVERY_SR iters
             # plus always at the last iteration)
@@ -898,18 +781,9 @@ class _VMCOptDriverNN_SR:
         final_err = final_std / neff ** 0.5
 
         if verbose >= 1:
-            print(
-                f"Final energy:"
-                f" {final_e:.8f}"
-                f" +/- {final_err:.8f}"
-            )
+            print(f"Final energy: {final_e:.8f} +/- {final_err:.8f}")
 
-        return params, {
-            'energy': {
-                'mean': final_e,
-                'stderr': final_err,
-            },
-        }
+        return params, {'energy': {'mean': final_e, 'stderr': final_err}}
 
 
 def get_vmcopt_nn_func(
@@ -926,7 +800,7 @@ def get_vmcopt_nn_func(
 
     Args:
         mol_info:
-            :class:`~OmegaQMC.psi.nn.wf.MoleculeInfo`
+            :class:`~OmegaQMC.utils.Mole_custom`
             instance.
         config:
             :class:`~OmegaQMC.psi.nn.config.NNAnsatzConfig`

@@ -269,6 +269,27 @@ def _length_in_au(unit):
     return unit
 
 
+def get_shell(z):
+    """Number of (partially) occupied shells for *z*.
+
+    Ported from ``deepqmc/hamil.py``.
+
+    Args:
+        z: Number of electrons (integer).
+
+    Returns:
+        Shell count ``n`` such that the first *n*
+        shells can hold at least *z* electrons.
+    """
+    from itertools import count as _count
+    max_elec = 0
+    for n in _count():
+        if z <= max_elec:
+            break
+        max_elec += 2 * (1 + n) ** 2
+    return n
+
+
 class Mole_custom(gto.Mole):
     def format_atom(self, atoms, origin=0, axes=None,
                     unit=getattr(__config__, 'UNIT', 'Ang')):
@@ -466,6 +487,107 @@ class Mole_custom(gto.Mole):
                 int(k): v for k, v in self.map_frag_symmops.items()
             }
         return self
+
+    # ----- NN-compatible properties -----
+
+    @property
+    def n_up(self):
+        """Number of spin-up electrons."""
+        return self.nelec[0]
+
+    @property
+    def n_down(self):
+        """Number of spin-down electrons."""
+        return self.nelec[1]
+
+    @property
+    def charges(self):
+        """Nuclear charges as a JAX array."""
+        return jnp.asarray(
+            self.atom_charges(),
+            dtype=jnp.float64,
+        )
+
+    @property
+    def coords(self):
+        """Nuclear coordinates (Bohr), JAX array."""
+        return jnp.asarray(
+            self.atom_coords(),
+            dtype=jnp.float64,
+        )
+
+    @property
+    def mol_shells(self):
+        """Occupied shell counts per nucleus."""
+        return [
+            get_shell(int(z))
+            for z in self.atom_charges()
+        ]
+
+    @property
+    def mol_ecp_shells(self):
+        """ECP shell indices per nucleus."""
+        return [0] * self.natm
+
+    @classmethod
+    def from_arrays(
+        cls, charges, coords,
+        n_up=None, n_down=None,
+        spin=0, charge=0,
+        unit='Bohr',
+    ):
+        """Build from arrays of charges and coords.
+
+        Parameters
+        ----------
+        charges : array-like, shape ``(natom,)``
+            Nuclear charges (atomic numbers).
+        coords : array-like, shape ``(natom, 3)``
+            Nuclear coordinates.
+        n_up, n_down : int, optional
+            Electron counts.  When both are given,
+            *spin* and *charge* are inferred from
+            them (overriding the explicit values).
+        spin : int
+            Total spin 2S (default 0).
+        charge : int
+            Molecular charge (default 0).
+        unit : str
+            Coordinate unit (default ``'Bohr'``).
+
+        Returns
+        -------
+        Mole_custom
+            A built molecule instance.
+        """
+        import numpy as np
+        from pyscf.data.elements import ELEMENTS
+        charges_np = np.asarray(
+            charges, dtype=int,
+        )
+        coords_np = np.asarray(
+            coords, dtype=float,
+        )
+        if n_up is not None and n_down is not None:
+            spin = n_up - n_down
+            charge = (
+                int(charges_np.sum())
+                - n_up - n_down
+            )
+        atom_list = [
+            (ELEMENTS[int(z)], c.tolist())
+            for z, c in zip(
+                charges_np, coords_np,
+            )
+        ]
+        mol = cls()
+        mol.build(
+            atom=atom_list,
+            spin=spin,
+            charge=charge,
+            unit=unit,
+        )
+        return mol
 
 
 def compute_torque(mol, grd):

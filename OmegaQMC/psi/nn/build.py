@@ -29,7 +29,6 @@ from .layers import (
 from .omni import Backflow, Jastrow, OmniNet
 from .wf import (
     BackflowOp,
-    MoleculeInfo,
     NeuralNetworkWaveFunction,
 )
 
@@ -58,7 +57,7 @@ def _ne_feat_dim(config):
 
 def build_nn_wf(
     config: NNAnsatzConfig,
-    mol_info: MoleculeInfo,
+    mol_info,
     rngs: nnx.Rngs,
 ) -> NeuralNetworkWaveFunction:
     """Construct the full NN wavefunction from config.

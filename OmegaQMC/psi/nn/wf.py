@@ -5,8 +5,6 @@ Top-level module combining envelopes, GNN, backflow,
 cusp corrections, and Slater determinant(s).
 """
 
-from dataclasses import dataclass, field
-from itertools import count
 from typing import Literal
 
 import jax
@@ -20,57 +18,6 @@ from .physics import (
 from .types import Psi
 from .utils import flatten, triu_flat
 
-
-# ----------------------------------------------------------------
-# Lightweight molecule info (replaces DeepQMC Hamiltonian)
-# ----------------------------------------------------------------
-
-def get_shell(z):
-    """Number of (partially) occupied shells for *z*
-    electrons. Ported from ``deepqmc/hamil.py``.
-
-    Args:
-        z: Number of electrons (integer).
-
-    Returns:
-        Shell count ``n`` such that the first *n* shells
-        can hold at least *z* electrons.
-    """
-    max_elec = 0
-    for n in count():
-        if z <= max_elec:
-            break
-        max_elec += 2 * (1 + n) ** 2
-    return n
-
-
-@dataclass
-class MoleculeInfo:
-    """Lightweight molecular specification.
-
-    Provides the subset of ``MolecularHamiltonian``
-    attributes that the NN wavefunction needs.
-    """
-
-    charges: jnp.ndarray
-    coords: jnp.ndarray
-    n_up: int
-    n_down: int
-    spin: int = 0
-    charge: int = 0
-    mol_shells: list = field(default_factory=list)
-    mol_ecp_shells: list = field(default_factory=list)
-
-    def __post_init__(self):
-        if not self.mol_shells:
-            self.mol_shells = [
-                get_shell(int(z))
-                for z in self.charges
-            ]
-        if not self.mol_ecp_shells:
-            self.mol_ecp_shells = [0] * len(
-                self.charges
-            )
 
 
 # ----------------------------------------------------------------
@@ -175,7 +122,8 @@ class NeuralNetworkWaveFunction(nnx.Module):
     determinant(s) into a single differentiable model.
 
     Args:
-        mol_info: :class:`MoleculeInfo` instance.
+        mol_info: :class:`~OmegaQMC.utils.Mole_custom`
+            instance.
         omni: :class:`OmniNet` instance (or None).
         envelope: Envelope module.
         backflow_op: :class:`BackflowOp` (or None).

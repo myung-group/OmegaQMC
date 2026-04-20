@@ -1,19 +1,22 @@
 """VMC driver for neural network trial wavefunctions.
 
-Runs Metropolis-Hastings Monte Carlo sampling of an NN trial
-wavefunction built via :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`.
-Local energies are accumulated block by block and analysed
-with binning to produce a statistical error estimate.
+Runs Metropolis-Hastings Monte Carlo sampling of an NN
+trial wavefunction built via
+:func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`.
+Local energies are accumulated block by block and
+analysed with binning to produce a statistical error
+estimate.
 
-Unlike :mod:`vmc_gto`, this driver has no PySCF dependency,
-no fragment symmetry operations, no MO relaxation, and no
-gradient computation.  It takes a :class:`MoleculeInfo`
+Unlike :mod:`vmc_gto`, this driver has no fragment
+symmetry operations, no MO relaxation, and no
+gradient computation.  It takes a
+:class:`~OmegaQMC.utils.Mole_custom` instance
 directly.
 """
 
-import sys
+# import sys
 from datetime import datetime
-from functools import partial
+# from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +24,6 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
-from .psi.nn.wf import MoleculeInfo
 from .constants import MIN_DIST_THRESHOLD
 from .utils import do_binning_analysis, _make_sharding
 
@@ -32,11 +34,8 @@ STEP_SIZE_ADAPTATION_RATE = 0.05
 
 def _adapt_step_size(step_size, acceptance_rate):
     """Adapt Metropolis step size toward target."""
-    return step_size * (
-        1.0
-        + STEP_SIZE_ADAPTATION_RATE
-        * (acceptance_rate - TARGET_ACCEPTANCE_RATE)
-    )
+    return step_size * (1.0 + STEP_SIZE_ADAPTATION_RATE
+                        * (acceptance_rate - TARGET_ACCEPTANCE_RATE))
 
 
 class _VMCDriverNN:
@@ -65,9 +64,8 @@ class _VMCDriverNN:
         self.ofname_chkpt = ofname_chkpt
         self.ofname_grd = ofname_grd
 
-        log_psi, init_params, graphdef = (
-            make_nn_log_psi(config, mol_info, init_key)
-        )
+        log_psi, init_params, graphdef \
+            = make_nn_log_psi(config, mol_info, init_key)
         self.log_psi = log_psi
         self.params = init_params
 
@@ -76,12 +74,8 @@ class _VMCDriverNN:
             enr = jnp.float64(0.0)
             for a in range(n_nuc):
                 for b in range(a + 1, n_nuc):
-                    rab = jnp.linalg.norm(
-                        R[a] - R[b],
-                    )
-                    enr = enr + (
-                        charges[a] * charges[b] / rab
-                    )
+                    rab = jnp.linalg.norm(R[a] - R[b])
+                    enr = enr + (charges[a] * charges[b] / rab)
             return enr
 
         self.enr_nn = jnp.asarray(
@@ -103,10 +97,7 @@ class _VMCDriverNN:
 
         @jax.jit
         def energy_en(elec_crds):
-            diffs = (
-                elec_crds[:, None, :]
-                - nuc_crds[None, :, :]
-            )
+            diffs = elec_crds[:, None, :] - nuc_crds[None, :, :]
             dists = jnp.linalg.norm(diffs, axis=-1)
             return -jnp.sum(
                 charges[None, :] / dists,
@@ -120,10 +111,7 @@ class _VMCDriverNN:
             r_flat = elec_crds.reshape(-1)
             lap_fn = laplacian(f_flat)
             lap_val, grad_val = lap_fn(r_flat)
-            return -0.5 * (
-                lap_val
-                + jnp.dot(grad_val, grad_val)
-            )
+            return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
         self.energy_ee = energy_ee
         self.energy_en = energy_en
@@ -277,9 +265,7 @@ class _VMCDriverNN:
         energy_ee = self.energy_ee
         energy_en = self.energy_en
         energy_ke = self.energy_ke
-        metropolis_move_allw = (
-            self._metropolis_move_allw
-        )
+        metropolis_move_allw = self._metropolis_move_allw
 
         timestamp_init = datetime.now()
 
@@ -369,15 +355,9 @@ class _VMCDriverNN:
         mc_timestep = mc_stepsize * mc_stepsize / 3
         if verbose >= 1:
             ratio = ratios[-1]
-            print(
-                f"Equilibration acceptance rate:"
-                f" {ratio:.2f}"
-            )
-            print(
-                f"Adjusted step size:"
-                f" {mc_stepsize:.4f} bohr"
-                f" ~ {mc_timestep:.4f} Ha^-1"
-            )
+            print(f"Equilibration acceptance rate: {ratio:.2f}")
+            print(f"Adjusted step size:"
+                  f" {mc_stepsize:.4f} bohr ~ {mc_timestep:.4f} Ha^-1")
 
         # --- Production ---
         if compute_gradients:
@@ -467,8 +447,7 @@ class _VMCDriverNN:
             rng_key, walkers, _ = state
 
             if compute_gradients:
-                (ratios, e_ee, e_en,
-                 e_ke, sampled_w) = result
+                (ratios, e_ee, e_en, e_ke, sampled_w) = result
             else:
                 ratios, e_ee, e_en, e_ke = result
 
@@ -485,8 +464,7 @@ class _VMCDriverNN:
                 en_m = e_en.mean()
                 ke_m = e_ke.mean()
                 now = datetime.now()
-                dt = (now - timestamp_prev
-                      ).total_seconds()
+                dt = (now - timestamp_prev).total_seconds()
                 print(
                     f"{blk:>7d}"
                     f"{E_mean:>16.8e}"
@@ -511,14 +489,8 @@ class _VMCDriverNN:
                             ),
                         ),
                     )
-                n_samples = (
-                    num_steps_per_block
-                    * num_walkers
-                )
-                num_batches = (
-                    (n_samples + batch_size - 1)
-                    // batch_size
-                )
+                n_samples = num_steps_per_block * num_walkers
+                num_batches = (n_samples + batch_size - 1) // batch_size
                 save_nn_forces(
                     blk,
                     sampled_w.reshape(
@@ -534,25 +506,16 @@ class _VMCDriverNN:
 
         # --- Binning analysis ---
         E_arr = jnp.array(E_blocks)
-        e_mean, e_serr, _, e_kappa = (
-            do_binning_analysis(E_arr)
-        )
+        e_mean, e_serr, _, e_kappa = do_binning_analysis(E_arr)
         e_neff = E_arr.shape[0] / e_kappa
 
         timestamp_fin = datetime.now()
-        elapsed = (
-            timestamp_fin - timestamp_init
-        ).total_seconds()
+        elapsed = (timestamp_fin - timestamp_init).total_seconds()
 
         if verbose >= 1:
-            print(
-                f"\nVMC energy: {e_mean:.8f}"
-                f" +/- {e_serr:.8f} Ha"
-                f" (N_eff = {e_neff:.1f})"
-            )
-            print(
-                f"Total time: {elapsed:.2f} seconds"
-            )
+            print(f"\nVMC energy: {e_mean:.8f} +/- {e_serr:.8f} Ha"
+                  f" (N_eff = {e_neff:.1f})")
+            print(f"Total time: {elapsed:.2f} seconds")
 
         result = {
             'E_mean': float(e_mean),
@@ -563,10 +526,7 @@ class _VMCDriverNN:
         from .nn_checkpoint import append_vmc_results
         append_vmc_results(self.ofname_chkpt, result)
         if verbose >= 1:
-            print(
-                f"VMC results written to"
-                f" {self.ofname_chkpt}"
-            )
+            print(f"VMC results written to {self.ofname_chkpt}")
 
         return result
 
@@ -581,7 +541,7 @@ def get_vmc_nn_func(
     functions, and returns a callable driver.
 
     Args:
-        mol_info: :class:`~OmegaQMC.psi.nn.wf.MoleculeInfo`
+        mol_info: :class:`~OmegaQMC.utils.Mole_custom`
             instance describing the molecule.
         config: :class:`~OmegaQMC.psi.nn.config.NNAnsatzConfig`
             or a string (built-in name or YAML path).
