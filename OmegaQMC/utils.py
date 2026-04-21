@@ -621,6 +621,8 @@ def vmc_forces_with_pgcs(
         else:
             atom_frag_map = None
 
+        # Keep per-block arrays on host (numpy); upload to GPU per-block
+        # inside the force loop to bound peak device memory.
         dict_grd_samples = {}
         for key, val in f.items():
             if isinstance(val, h5py.Group):
@@ -634,15 +636,15 @@ def vmc_forces_with_pgcs(
                                     = val3[()].decode()
                             else:
                                 dict_grd_samples[key][key2][key3] \
-                                    = jnp.array(val3)
+                                    = np.asarray(val3)
                     elif not val2.shape:
                         dict_grd_samples[key][key2] = val2[()].decode()
                     else:
-                        dict_grd_samples[key][key2] = jnp.array(val2)
+                        dict_grd_samples[key][key2] = np.asarray(val2)
             elif val.ndim == 0:
                 dict_grd_samples[key] = val[()]    # scalar
             else:
-                dict_grd_samples[key] = jnp.array(val[:])
+                dict_grd_samples[key] = np.asarray(val[:])
 
         block_nums = [int(k)
                       for k in dict_grd_samples["local_energies"].keys()
@@ -651,15 +653,19 @@ def vmc_forces_with_pgcs(
         # num_blocks = len(block_nums)
         # block_cnt_start = block_nums[0]
 
-        loc_e_list = []
+        # Streaming mean over blocks — avoids stacking all local energies
+        # (which is what was OOM-ing on the GPU for large grd.h5 files).
+        _sum = 0.0
+        _cnt = 0
         for block_cnt in block_nums:
             local_energies \
                 = dict_grd_samples["local_energies"][f'{block_cnt}']
-            loc_e_list.append(jnp.array(local_energies))
-        enr_mean = jnp.vstack(loc_e_list).mean()
+            _sum += float(np.asarray(local_energies).sum(dtype=np.float64))
+            _cnt += local_energies.size
+        enr_mean = _sum / _cnt
 
         # enr_std = dict_grd_samples['enr_std']
-        grd_nn = dict_grd_samples['grd_nn']
+        grd_nn = jnp.asarray(dict_grd_samples['grd_nn'])
 
         # Identify combo labels from fragment_weights
         combo_labels = []
@@ -689,27 +695,26 @@ def vmc_forces_with_pgcs(
             grd_err_list = []
 
             for block_cnt in block_nums:
+                # Per-block GPU upload: arrays sit on host as numpy; we
+                # transfer one block at a time to cap peak device memory.
                 if state_label is None:
-                    grd_ee_en \
-                        = dict_grd_samples['grd_ee_en'][f'{block_cnt}']
-                    grd_ke \
-                        = dict_grd_samples['grd_ke'][f'{block_cnt}']
-                    grd_logpsi \
-                        = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
+                    grd_ee_en = jnp.asarray(
+                        dict_grd_samples['grd_ee_en'][f'{block_cnt}'])
+                    grd_ke = jnp.asarray(
+                        dict_grd_samples['grd_ke'][f'{block_cnt}'])
+                    grd_logpsi = jnp.asarray(
+                        dict_grd_samples['grd_logpsi'][f'{block_cnt}'])
                 else:
-                    grd_ee_en \
-                        = dict_grd_samples['grd_ee_en'][
-                            state_label
-                            ][f'{block_cnt}']
-                    grd_ke \
-                        = dict_grd_samples['grd_ke'][
-                            state_label
-                            ][f'{block_cnt}']
-                    grd_logpsi \
-                        = dict_grd_samples['grd_logpsi'][
-                            state_label
-                            ][f'{block_cnt}']
-                local_energies = jnp.array(
+                    grd_ee_en = jnp.asarray(
+                        dict_grd_samples['grd_ee_en'][
+                            state_label][f'{block_cnt}'])
+                    grd_ke = jnp.asarray(
+                        dict_grd_samples['grd_ke'][
+                            state_label][f'{block_cnt}'])
+                    grd_logpsi = jnp.asarray(
+                        dict_grd_samples['grd_logpsi'][
+                            state_label][f'{block_cnt}'])
+                local_energies = jnp.asarray(
                     dict_grd_samples['local_energies'][f'{block_cnt}'])
 
                 # Pulay force contribution
@@ -739,8 +744,8 @@ def vmc_forces_with_pgcs(
 
                 # Load fragment weights for secondary states
                 if state_label is not None:
-                    frag_w = dict_grd_samples[
-                        'fragment_weights'][state_label][f'{block_cnt}']
+                    frag_w = jnp.asarray(dict_grd_samples[
+                        'fragment_weights'][state_label][f'{block_cnt}'])
                     frag_w = frag_w.reshape(num_steps_per_block, num_walkers)
                 else:
                     frag_w = None
