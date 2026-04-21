@@ -1,15 +1,18 @@
 """Nuclear force gradient computation, storage, and
 PGCS post-processing.
 
-:func:`vmc_gto_gradients` builds a JIT-compiled
-callable that evaluates Hellmann-Feynman, kinetic-energy,
-and Pulay gradient components for a batch of walkers.
+:func:`vmc_gto_gradients` / :func:`vmc_nn_gradients_zvzb`
+build JIT-compiled callables that evaluate the
+decomposed per-walker gradient components
+(Hellmann-Feynman, kinetic, :math:`\\log|\\psi|`) for
+GTO and NN trial wavefunctions respectively.
 
-:func:`save_gto_gradients` accumulates and writes
-per-block gradient data (reference + symmetry-related
-secondary configurations) to HDF5 during a VMC run.
+:func:`save_gto_gradients` / :func:`save_nn_gradients`
+accumulate and write per-block gradient data
+(reference + optional symmetry-related secondary
+configurations) to HDF5 using a shared schema.
 
-:func:`postproc_h5_pgcs` reads that HDF5 file and
+:func:`postproc_h5_pgcs` reads either HDF5 file and
 applies Point Group Correlated Sampling (PGCS) to
 obtain symmetry-averaged nuclear force estimates.
 """
@@ -339,21 +342,46 @@ def _build_param_response_fns(
     return param_response_batch, n_flat
 
 
-def vmc_nn_forces_zvzb(
+def vmc_nn_gradients_zvzb(
     log_psi,
     nuc_crds,
     charges,
     nelec,
     params,
 ):
-    """Build a JIT-compiled ZVZB force batch function.
+    """Build a JIT-compiled ZVZB gradient batch function.
 
     Implements the zero-variance zero-bias (ZVZB)
     nuclear force estimator of Assaraf, Caffarel &
-    Khelif :cite:`Assaraf2003`, following the formulation
-    in :cite:`Pathak2022`.  Designed for use with NN
-    wavefunctions where autodiff through the entire
-    wavefunction is available.
+    Khelif :cite:`Assaraf2003`, but returns the
+    *negated* force decomposed into the same three
+    per-walker components produced by
+    :func:`vmc_gto_gradients`, so that both backends
+    feed the same downstream postprocessing
+    (:func:`postproc_h5_pgcs`).
+
+    Per-walker decomposition (no E-dependence):
+
+    * ``grd_ee_en = -F_en``: bare nuclear-electron
+      Coulomb-potential gradient (the ee piece is
+      identically zero — V_ee has no nuclear
+      coordinate dependence — and is folded in only
+      to keep the GTO-side group name).
+    * ``grd_ke = (KE_dpsi - KE_psi) * grad_lp``: ZV
+      kinetic correction.  Uses the identity
+      :math:`\\log|\\partial\\psi/\\partial R_{ia,k}|
+      = \\log|\\psi| + \\log|h_{ia,k}|` with
+      :math:`h = \\partial\\log|\\psi|/\\partial R`
+      (product rule), so the same autodiff-Laplacian
+      machinery is reused for every ``(ia, k)``.
+    * ``grd_logpsi = grad_lp``: nuclear gradient of
+      :math:`\\log|\\psi|`; consumed downstream as
+      the Pulay/ZB coefficient
+      :math:`2(E_L - \\bar E)\\,\\nabla_R\\log|\\psi|`.
+
+    The nuclear-nuclear gradient is stored separately
+    by the driver (``grd_nn``) and added in the
+    postprocessing sum.
 
     Parameters
     ----------
@@ -373,12 +401,10 @@ def vmc_nn_forces_zvzb(
     Returns
     -------
     callable
-        ``(batch_walkers, e_loc_batch, e_bar)
-        -> force_zvzb`` where *batch_walkers* has shape
-        ``(batch, nelec, 3)``, *e_loc_batch* has shape
-        ``(batch,)``, *e_bar* is a scalar mean energy,
-        and *force_zvzb* has shape
-        ``(batch, natom, 3)``.
+        ``(batch_walkers) -> (grd_ee_en, grd_ke,
+        grd_logpsi)`` where *batch_walkers* has shape
+        ``(batch, nelec, 3)`` and each output has
+        shape ``(batch, natom, 3)``.
     """
     from ..psi.nn.physics import laplacian
 
@@ -408,18 +434,13 @@ def vmc_nn_forces_zvzb(
             force = force * mask[..., None]
         return force.sum(-2)
 
-    # --- Bare Hellmann-Feynman force (single walker) ---
+    # --- Nuclear-electron HF force (single walker) ---
     @jax.jit
-    def _force_bare(elec_crds):
-        f_nn = _coulomb_force(
-            nuc_crds, nuc_crds,
-            charges, charges, True,
-        )
-        f_en = _coulomb_force(
+    def _force_en_bare(elec_crds):
+        return _coulomb_force(
             nuc_crds, elec_crds,
             charges, charges_elec, False,
         )
-        return f_nn + f_en
 
     # --- Grad of log|psi| w.r.t. nuclear coords ---
     @jax.jit
@@ -460,12 +481,14 @@ def vmc_nn_forces_zvzb(
         r_flat = elec_crds.reshape(-1)
         lap_fn = laplacian(_log_abs_dpsi)
         lap_val, grad_val = lap_fn(r_flat)
-        return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
+        return -0.5 * (
+            lap_val + jnp.dot(grad_val, grad_val)
+        )
 
-    # --- Full ZVZB force (single walker) ---
+    # --- Decomposed ZVZB gradient (single walker) ---
     @jax.jit
-    def _force_zvzb(elec_crds, e_loc, e_bar):
-        f_bare = _force_bare(elec_crds)
+    def _grd_zvzb(elec_crds):
+        f_en = _force_en_bare(elec_crds)
         grad_lp = _grad_nuc_log_psi(elec_crds)
         ke_psi = _ke_psi(elec_crds)
 
@@ -483,43 +506,67 @@ def vmc_nn_forces_zvzb(
             jnp.zeros((n_nuc, 3)),
         )
 
-        # ZV: F_bare - (KE_dpsi - KE_psi) * grad_log_psi
-        # (potential terms cancel in the difference)
-        f_zv = f_bare - ((ke_dpsi_all - ke_psi) * grad_lp)
-
-        # ZB: -2 * (E_loc - E_bar) * grad_log_psi
-        f_zb = -2.0 * (e_loc - e_bar) * grad_lp
-
-        return f_zv + f_zb
+        # gradient = -force; bare HF: grd_ee_en = -f_en
+        # (V_ee has no R-dependence, so the ee piece
+        # is identically zero)
+        grd_ee_en = -f_en
+        # ZV kinetic correction (gradient sign)
+        grd_ke = (ke_dpsi_all - ke_psi) * grad_lp
+        # Pulay/ZB coefficient: stored bare, multiplied
+        # by 2*(E_L - <E>) downstream
+        grd_logpsi = grad_lp
+        return grd_ee_en, grd_ke, grd_logpsi
 
     # --- Batched version ---
     @jax.jit
-    def _force_zvzb_batch(
-        batch_walkers, e_loc_batch, e_bar,
-    ):
-        return jax.vmap(
-            _force_zvzb, in_axes=(0, 0, None),
-        )(batch_walkers, e_loc_batch, e_bar)
+    def _grd_zvzb_batch(batch_walkers):
+        return jax.vmap(_grd_zvzb)(batch_walkers)
 
-    return _force_zvzb_batch
+    return _grd_zvzb_batch
 
 
-def save_nn_forces(
+def save_nn_gradients(
     block_cnt,
     sampled_walkers,
     local_energies,
-    e_bar,
     batch_size,
     num_batches,
+    single_frag_combos,
     ofname_grd,
-    zvzb_force_batch,
+    nn_gradient_batch,
+    log_psi_batch=None,
+    local_energy_batch=None,
+    apply_single_frag_symmop=None,
 ):
-    """Save per-block ZVZB force data to HDF5.
+    """Save per-block NN ZVZB gradient data.
 
-    Evaluates the ZVZB nuclear force estimator on
-    batches of walker positions and writes the
-    per-sample forces and local energies to the
-    gradient HDF5 file.
+    Evaluates the decomposed ZVZB gradient
+    components built by
+    :func:`vmc_nn_gradients_zvzb` on batches of walker
+    positions and writes them to the gradient HDF5
+    file using the same schema as
+    :func:`save_gto_gradients`, so that
+    :func:`postproc_h5_pgcs` works on either backend.
+
+    HDF5 layout (per block ``<blk>``):
+
+    * ``grd_ee_en/<blk>``, ``grd_ke/<blk>``,
+      ``grd_logpsi/<blk>``: per-walker gradient
+      components, shape ``(num_samples, natom, 3)``.
+    * ``local_energies/<blk>``: local energies, shape
+      ``(num_steps_per_block, num_walkers)`` so the
+      downstream postproc can recover the (steps,
+      walkers) layout.
+    * ``grd_ee_en/<label>/<blk>``,
+      ``grd_ke/<label>/<blk>``,
+      ``grd_logpsi/<label>/<blk>``,
+      ``local_energies/<label>/<blk>``,
+      ``fragment_weights/<label>/<blk>``: per-combo
+      secondary data, written when
+      *single_frag_combos* is non-empty.
+
+    Block-level restart logic deletes any existing
+    datasets at ``<blk>`` before writing.
 
     Parameters
     ----------
@@ -527,119 +574,223 @@ def save_nn_forces(
         Current production-block index.
     sampled_walkers : jnp.ndarray
         Walker positions, shape
-        ``(num_samples, nelec, 3)``.
+        ``(num_samples, nelec, 3)`` where
+        ``num_samples == num_steps_per_block *
+        num_walkers``.
     local_energies : jnp.ndarray
-        Per-walker local energies, shape
-        ``(num_samples,)``.
-    e_bar : float
-        Running mean energy for zero-bias term.
+        Local energies, shape
+        ``(num_steps_per_block, num_walkers)``.
     batch_size : int
         Number of walkers per gradient batch.
     num_batches : int
         Number of batches.
+    single_frag_combos : iterable
+        Sequence of ``(frag_pos, op, label)`` tuples
+        describing fragment symmetry operations.
+        Empty for the current NN driver.
     ofname_grd : str
         Path to the gradient HDF5 file.
-    zvzb_force_batch : callable
-        JIT-compiled ``(walkers, e_loc, e_bar)
-        -> forces`` with shapes
-        ``(batch, nelec, 3)``, ``(batch,)``,
-        scalar, and ``(batch, natom, 3)``.
+    nn_gradient_batch : callable
+        JIT-compiled ``(walkers) -> (grd_ee_en,
+        grd_ke, grd_logpsi)`` with each output shape
+        ``(batch, natom, 3)``.
+    log_psi_batch, local_energy_batch,
+    apply_single_frag_symmop : callable, optional
+        Required only when *single_frag_combos* is
+        non-empty (combo screening + secondary
+        evaluation).
+
+    Returns
+    -------
+    dict
+        Per-combo weighted-mean block energies, or
+        empty dict if *single_frag_combos* is empty.
     """
     num_samples = sampled_walkers.shape[0]
+    has_combos = bool(single_frag_combos)
+    if has_combos:
+        from ..symm.operations import (
+            symmetry_operations_map,
+        )
+        if (
+            apply_single_frag_symmop is None
+            or log_psi_batch is None
+            or local_energy_batch is None
+        ):
+            raise ValueError(
+                "single_frag_combos requires "
+                "apply_single_frag_symmop, "
+                "log_psi_batch, and "
+                "local_energy_batch."
+            )
 
-    force_accum = []
+    # Reference accumulators
+    w_grd_ee_en = []
+    w_grd_ke = []
+    w_grd_logpsi = []
+
+    # Per-combo accumulators
+    combo_grd_ee_en = {
+        label: [] for _, _, label in single_frag_combos
+    }
+    combo_grd_ke = {
+        label: [] for _, _, label in single_frag_combos
+    }
+    combo_grd_logpsi = {
+        label: [] for _, _, label in single_frag_combos
+    }
+    combo_weights = {
+        label: [] for _, _, label in single_frag_combos
+    }
+    combo_E_local = {
+        label: [] for _, _, label in single_frag_combos
+    }
+
     for batch_idx in range(num_batches):
         start = batch_idx * batch_size
         end = min(start + batch_size, num_samples)
         batch_w = sampled_walkers[start:end]
-        batch_e = local_energies[start:end]
 
-        forces = zvzb_force_batch(
-            batch_w, batch_e, e_bar,
-        )
-        force_accum.append(forces)
+        g_ee_en, g_ke, g_lp = nn_gradient_batch(batch_w)
+        w_grd_ee_en.append(g_ee_en)
+        w_grd_ke.append(g_ke)
+        w_grd_logpsi.append(g_lp)
 
-    all_forces = jnp.concatenate(
-        force_accum, axis=0,
-    )
+        if has_combos:
+            log_psi_orig = log_psi_batch(batch_w)
+            for frag_pos, op, label in single_frag_combos:
+                batch_trans = apply_single_frag_symmop(
+                    batch_w, frag_pos,
+                    symmetry_operations_map[op],
+                )
+                log_psi_trans = log_psi_batch(batch_trans)
+                psi2_ratio = jnp.exp(
+                    2.0 * (log_psi_trans - log_psi_orig)
+                )
+                safe = (psi2_ratio > PSI2_RATIO_THRESHOLD)
+                batch_trans = jnp.where(
+                    safe[:, None, None],
+                    batch_trans, batch_w,
+                )
+                weight = jnp.where(safe, psi2_ratio, 1.0)
+
+                g_ee_en_t, g_ke_t, g_lp_t = (
+                    nn_gradient_batch(batch_trans)
+                )
+                combo_grd_ee_en[label].append(g_ee_en_t)
+                combo_grd_ke[label].append(g_ke_t)
+                combo_grd_logpsi[label].append(g_lp_t)
+                combo_weights[label].append(weight)
+
+                E_trans = local_energy_batch(batch_trans)
+                combo_E_local[label].append(E_trans)
+
+    w_grd_ee_en = jnp.vstack(w_grd_ee_en)
+    w_grd_ke = jnp.vstack(w_grd_ke)
+    w_grd_logpsi = jnp.vstack(w_grd_logpsi)
 
     with h5py.File(ofname_grd, 'a') as f:
-        grp = f.require_group('force_zvzb')
-        grp.create_dataset(
-            str(block_cnt), data=all_forces,
+        block_cnt_str = f'{block_cnt}'
+
+        grp_names = [
+            'grd_ee_en', 'grd_ke',
+            'grd_logpsi', 'local_energies',
+        ]
+        if has_combos:
+            grp_names.append('fragment_weights')
+        for k in grp_names:
+            if k not in f.keys():
+                f.create_group(k)
+
+        # Restart cleanup
+        if block_cnt_str in f['grd_ee_en'].keys():
+            del f['grd_ee_en'][block_cnt_str]
+            del f['grd_ke'][block_cnt_str]
+            del f['grd_logpsi'][block_cnt_str]
+            del f['local_energies'][block_cnt_str]
+            for _, _, label in single_frag_combos:
+                if (
+                    label in f['grd_ee_en']
+                    and block_cnt_str
+                    in f['grd_ee_en'][label]
+                ):
+                    del f['grd_ee_en'][label][
+                        block_cnt_str
+                    ]
+                    del f['grd_ke'][label][block_cnt_str]
+                    del f['grd_logpsi'][label][
+                        block_cnt_str
+                    ]
+                    del f['fragment_weights'][label][
+                        block_cnt_str
+                    ]
+                if (
+                    label in f['local_energies']
+                    and block_cnt_str
+                    in f['local_energies'][label]
+                ):
+                    del f['local_energies'][label][
+                        block_cnt_str
+                    ]
+
+        # A. Reference gradients
+        f['grd_ee_en'].create_dataset(
+            block_cnt_str, data=w_grd_ee_en,
         )
-        grp2 = f.require_group('local_energies')
-        grp2.create_dataset(
-            str(block_cnt),
-            data=local_energies[:num_samples],
+        f['grd_ke'].create_dataset(
+            block_cnt_str, data=w_grd_ke,
+        )
+        f['grd_logpsi'].create_dataset(
+            block_cnt_str, data=w_grd_logpsi,
+        )
+        f['local_energies'].create_dataset(
+            block_cnt_str, data=local_energies,
         )
 
+        # B. Per-combo secondary data
+        for _, _, label in single_frag_combos:
+            c_ee_en = jnp.vstack(
+                combo_grd_ee_en[label],
+            )
+            c_ke = jnp.vstack(combo_grd_ke[label])
+            c_logpsi = jnp.vstack(
+                combo_grd_logpsi[label],
+            )
+            c_w = jnp.concatenate(combo_weights[label])
+            c_E = jnp.concatenate(combo_E_local[label])
 
-def postproc_nn_forces(prefix='nnvmc'):
-    """Post-process NN ZVZB force data from HDF5.
+            for grp, data in [
+                ('grd_ee_en', c_ee_en),
+                ('grd_ke', c_ke),
+                ('grd_logpsi', c_logpsi),
+            ]:
+                if label not in f[grp]:
+                    f[grp].create_group(label)
+                f[grp][label].create_dataset(
+                    block_cnt_str, data=data,
+                )
 
-    Reads per-block ZVZB force data written by
-    :func:`save_nn_forces`, adds the nuclear-nuclear
-    gradient, and performs binning analysis to obtain
-    mean forces with statistical errors.
-
-    Parameters
-    ----------
-    prefix : str, optional
-        File-name stem.  The function looks for
-        ``<prefix>.grd.h5``; trailing ``.chk.h5`` or
-        ``.grd.h5`` suffixes are stripped.  Default
-        is ``"nnvmc"``.
-
-    Returns
-    -------
-    forces : jnp.ndarray, shape ``(natom, 3)``
-        Mean nuclear forces (Hartree / Bohr).
-    errors : jnp.ndarray, shape ``(natom, 3)``
-        Standard error of each force component.
-    """
-    from ..utils import do_binning_analysis
-
-    suffixes = [".chk.h5", ".grd.h5"]
-    for s in suffixes:
-        if prefix.endswith(s):
-            prefix = prefix[:-len(s)]
-    ofname_grd = prefix + ".grd.h5"
-
-    with h5py.File(ofname_grd, 'r') as f:
-        grd_nn = jnp.array(f['grd_nn'][:])
-        grp = f['force_zvzb']
-        block_keys = sorted(
-            grp.keys(), key=int,
-        )
-
-        # Per-block mean forces
-        block_forces = []
-        for key in block_keys:
-            # (num_samples, natom, 3)
-            fdata = jnp.array(grp[key][:])
-            block_forces.append(
-                fdata.mean(axis=0),
+            if label not in f['fragment_weights']:
+                f['fragment_weights'].create_group(label)
+            f['fragment_weights'][label].create_dataset(
+                block_cnt_str, data=c_w,
             )
 
-    block_forces = jnp.stack(block_forces, axis=0)
-    # block_forces: (num_blocks, natom, 3)
+            if label not in f['local_energies']:
+                f['local_energies'].create_group(label)
+            f['local_energies'][label].create_dataset(
+                block_cnt_str, data=c_E,
+            )
 
-    natom = block_forces.shape[1]
-    forces = jnp.zeros((natom, 3))
-    errors = jnp.zeros((natom, 3))
-
-    for ia in range(natom):
-        for k in range(3):
-            component = block_forces[:, ia, k]
-            mean, serr, _, _ = do_binning_analysis(component)
-            forces = forces.at[ia, k].set(mean)
-            errors = errors.at[ia, k].set(serr)
-
-    # Add nuclear-nuclear gradient
-    forces = forces + grd_nn
-
-    return forces, errors
+    # Per-combo weighted-mean block energies
+    combo_block_E = {}
+    for _, _, label in single_frag_combos:
+        c_E = jnp.concatenate(combo_E_local[label])
+        w = jnp.concatenate(combo_weights[label])
+        combo_block_E[label] = float(
+            jnp.sum(w * c_E) / jnp.sum(w)
+        )
+    return combo_block_E
 
 
 def save_gto_gradients(

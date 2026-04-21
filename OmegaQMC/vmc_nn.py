@@ -274,14 +274,15 @@ class _VMCDriverNN:
             import h5py
             import pathlib
             from .observables.force import (
-                vmc_nn_forces_zvzb,
-                save_nn_forces,
+                vmc_nn_gradients_zvzb,
+                save_nn_gradients,
             )
 
             ofname_grd = self.ofname_grd
             grd_nn = self.grd_nn
+            mol_info = self.mol_info
 
-            zvzb_force_batch = vmc_nn_forces_zvzb(
+            nn_gradient_batch = vmc_nn_gradients_zvzb(
                 self.log_psi, nuc_crds, charges,
                 nelec, params,
             )
@@ -294,11 +295,23 @@ class _VMCDriverNN:
                     'grd_nn', data=grd_nn,
                 )
                 g = f.create_group("system")
+                asym = [
+                    mol_info.atom_symbol(i)
+                    for i in range(self.n_nuc)
+                ]
+                g.create_dataset(
+                    "atom_symbols",
+                    data=" ".join(asym),
+                )
+                g.create_dataset(
+                    "atom_coords", data=nuc_crds,
+                )
                 g.create_dataset(
                     "charges", data=charges,
                 )
                 g.create_dataset(
-                    "atom_coords", data=nuc_crds,
+                    "units",
+                    data=mol_info.unit.upper(),
                 )
 
             n_nuc = self.n_nuc
@@ -491,17 +504,17 @@ class _VMCDriverNN:
                     )
                 n_samples = num_steps_per_block * num_walkers
                 num_batches = (n_samples + batch_size - 1) // batch_size
-                save_nn_forces(
+                save_nn_gradients(
                     blk,
                     sampled_w.reshape(
                         -1, nelec, 3,
                     ),
-                    E_loc.reshape(-1),
-                    float(E_mean),
+                    E_loc,
                     batch_size,
                     num_batches,
+                    (),
                     ofname_grd,
-                    zvzb_force_batch,
+                    nn_gradient_batch,
                 )
 
         # --- Binning analysis ---
