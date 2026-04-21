@@ -228,5 +228,119 @@ def test_vmc_nn_h2_gradients(tmp_path):
         )
 
 
+def test_vmc_nn_h2_gradients_pgcs(tmp_path):
+    """PGCS combo data is recorded correctly when
+    ``symmop_list`` is non-trivial.
+
+    Uses the same tilted H2 geometry as
+    ``test_vmc_nn_h2_gradients`` but activates Point
+    Group Correlated Sampling via
+    ``symmop_list=['E', 'C2z', 'i']``.  Verifies:
+
+    1. ``system/atom_fragment_map`` is written.
+    2. Per-combo subgroups appear under ``grd_ee_en``,
+       ``grd_ke``, ``grd_logpsi``,
+       ``fragment_weights``, and ``local_energies``
+       with one dataset per block.
+    3. Gradient combo datasets have shape
+       ``(num_samples, 2, 3)``; fragment weights have
+       shape ``(num_samples,)`` and are finite and
+       non-negative.
+    """
+    r0 = np.array([0.1, 0.0, -0.7])
+    r1 = np.array([0.0, 0.1, 0.7])
+    mol = Mole_custom.from_arrays(
+        charges=[1, 1],
+        coords=[r0.tolist(), r1.tolist()],
+        n_up=1,
+        n_down=1,
+    )
+    init_key = jax.random.key(99)
+    prefix = str(tmp_path / 'h2_pgcs')
+    vmc_run = get_vmc_nn_func(
+        mol, 'psiformer', init_key, prefix=prefix,
+        symmop_list=['E', 'C2z', 'i'],
+    )
+    expected_combos = [c[2] for c in vmc_run.single_frag_combos]
+    assert len(expected_combos) == 2, (
+        f"Expected 2 non-E combos for "
+        f"['E', 'C2z', 'i'], got {expected_combos}"
+    )
+
+    n_blocks = 2
+    num_walkers = 50
+    num_steps_per_block = 10
+    run_key = jax.random.key(77)
+    vmc_run(
+        run_key,
+        num_walkers=num_walkers,
+        num_steps_per_block=num_steps_per_block,
+        num_blocks=n_blocks,
+        num_blocks_equil=2,
+        mc_timestep=0.1,
+        compute_gradients=True,
+        verbose=0,
+    )
+
+    grd_path = prefix + '.grd.h5'
+    expected_samples = num_steps_per_block * num_walkers
+    with h5py.File(grd_path, 'r') as f:
+        assert 'atom_fragment_map' in f['system'], (
+            "atom_fragment_map missing from system group"
+        )
+        afmap = f['system']['atom_fragment_map'][:]
+        assert list(afmap) == [0, 0]
+
+        for label in expected_combos:
+            for grp in (
+                'grd_ee_en', 'grd_ke',
+                'grd_logpsi', 'fragment_weights',
+                'local_energies',
+            ):
+                assert label in f[grp], (
+                    f"combo '{label}' missing from "
+                    f"'{grp}'"
+                )
+                block_keys = sorted(
+                    f[grp][label].keys(), key=int,
+                )
+                assert len(block_keys) == n_blocks, (
+                    f"{grp}/{label}: expected "
+                    f"{n_blocks} blocks, got "
+                    f"{len(block_keys)}"
+                )
+
+            for blk_key in sorted(
+                f['grd_ee_en'][label].keys(), key=int,
+            ):
+                for grp in (
+                    'grd_ee_en', 'grd_ke', 'grd_logpsi',
+                ):
+                    g = f[grp][label][blk_key][:]
+                    assert g.shape == (
+                        expected_samples, 2, 3,
+                    ), (
+                        f"{grp}/{label}/{blk_key}: "
+                        f"shape {g.shape} != "
+                        f"({expected_samples}, 2, 3)"
+                    )
+                w = f['fragment_weights'][label][
+                    blk_key
+                ][:]
+                assert w.shape == (expected_samples,), (
+                    f"fragment_weights/{label}/"
+                    f"{blk_key}: shape {w.shape} != "
+                    f"({expected_samples},)"
+                )
+                assert np.all(np.isfinite(w)), (
+                    f"fragment_weights/{label}/"
+                    f"{blk_key}: non-finite"
+                )
+                assert np.all(w >= 0.0), (
+                    f"fragment_weights/{label}/"
+                    f"{blk_key}: negative weight"
+                )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -21,6 +21,12 @@ from .utils import (parse_molecular_inspheres,
                     _make_sharding)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import populate_fragment_symmops
+from .symm.fragments import (
+    build_frag_reflect_data,
+    build_frag_symmops,
+    build_single_frag_combos,
+    make_apply_single_frag_symmop,
+)
 from .observables.force import (
     vmc_gto_gradients,
     _build_param_response_fns,
@@ -34,59 +40,6 @@ from .constants import MIN_DIST_THRESHOLD
 # VMC hyperparameters
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
-
-
-def _get_electron_displacement_fn(Z_charges: jnp.ndarray,
-                                  nuc_crds: jnp.ndarray,
-                                  cluster_idx: Collection[int] | None,
-                                  mol=None) -> tuple:
-    """Precompute per-fragment data for Metropolis moves.
-
-    Returns:
-        frag_reflect_data: (frag_centroids, frag_inradii, frag_Vh,
-        frag_is_planar) — always a 4-tuple of JAX arrays.
-    """
-    if mol is not None and hasattr(mol, 'map_frag_symmops'):
-        frag_ids = sorted(mol.map_frag_ctr.keys())
-
-        centroids_list = []
-        inradii_list = []
-        Vh_list = []
-        is_planar_list = []
-
-        for fid in frag_ids:
-            frag_ops = mol.map_frag_symmops.get(fid, ['E'])
-            frag_atom_indices = [i for i, f in enumerate(mol.map_nuc_frag)
-                                 if f == fid]
-            is_planar = (frag_ops != ['E'] and len(frag_atom_indices) >= 3)
-
-            centroid = jnp.array(mol.map_frag_ctr[fid])
-            centroids_list.append(centroid)
-            inradii_list.append(mol.inradii[fid])
-
-            if is_planar:
-                frag_nuc = nuc_crds[jnp.array(frag_atom_indices)]
-                centered = frag_nuc - centroid
-                _, _, Vh = jnp.linalg.svd(centered, full_matrices=True)
-                Vh_list.append(Vh)
-            else:
-                Vh_list.append(jnp.eye(3))
-            is_planar_list.append(is_planar)
-    else:
-        # Fallback: single pseudo-fragment covering entire molecule
-        centroids_list = [jnp.mean(nuc_crds, axis=0)]
-        inradii_list = [jnp.inf]
-        Vh_list = [jnp.eye(3)]
-        is_planar_list = [False]
-
-    frag_reflect_data = (
-        jnp.stack(centroids_list),                  # (num_frags, 3)
-        jnp.array(inradii_list),                    # (num_frags,)
-        jnp.stack(Vh_list),                         # (num_frags, 3, 3)
-        jnp.array(is_planar_list, dtype=jnp.bool_)  # (num_frags,)
-    )
-
-    return frag_reflect_data
 
 
 def _initialize_walkers(rng_key: jax.Array,
@@ -292,82 +245,6 @@ def generate_molecular_orbitals(astr: str,
 # ---------------------------------------------------------------------------
 # Module-level helpers (no JAX, called once during get_vmc_gto_func setup)
 # ---------------------------------------------------------------------------
-
-def _build_frag_symmops(mf, symmop_list, frag_ids) -> dict:
-    """Process symmop_list (None / "auto" / list / dict)
-    into per-fragment dict."""
-    if symmop_list is None:
-        # Default: identity only (no correlated sampling overhead)
-        frag_symmops = {fid: ['E'] for fid in frag_ids}
-    elif symmop_list == "auto":
-        # Auto-derive: use all allowed operations for each fragment
-        if hasattr(mf.mol, 'map_frag_symmops') and mf.mol.map_frag_symmops:
-            frag_symmops = {fid: list(mf.mol.map_frag_symmops.get(fid, ['E']))
-                            for fid in frag_ids}
-        else:
-            frag_symmops = {fid: ['E'] for fid in frag_ids}
-        if mf.mol.verbose >= 2:
-            print(f"Auto-derived symmetry operations: {frag_symmops}")
-    elif isinstance(symmop_list, list):
-        # List of strings: intersect with each fragment's allowed operations
-        frag_symmops = {}
-        for fid in frag_ids:
-            allowed = set(mf.mol.map_frag_symmops.get(fid, ['E'])
-                          if hasattr(mf.mol, 'map_frag_symmops') else ['E'])
-            requested = set(symmop_list)
-            invalid = requested - allowed - {'E'}
-            if invalid:
-                warnings.warn(
-                    f"Fragment {fid}: operations {invalid} are not "
-                    "valid symmetry operations and will be removed",
-                    stacklevel=2)
-            frag_symmops[fid] = sorted(requested & allowed)
-            if 'E' not in frag_symmops[fid]:
-                frag_symmops[fid].insert(0, 'E')
-        if mf.mol.verbose >= 2:
-            print(f"Symmetry operations filtered from input: {frag_symmops}")
-    elif isinstance(symmop_list, dict):
-        # Dict: per-fragment specification
-        frag_symmops = {}
-        for fid in frag_ids:
-            if fid in symmop_list:
-                allowed = set(mf.mol.map_frag_symmops.get(fid, ['E'])
-                              if hasattr(mf.mol, 'map_frag_symmops')
-                              else ['E'])
-                requested = set(symmop_list[fid])
-                invalid = requested - allowed - {'E'}
-                if invalid:
-                    warnings.warn(
-                        f"Fragment {fid}: operations {invalid} are not "
-                        "valid symmetry operations and will be removed",
-                        stacklevel=2)
-                frag_symmops[fid] = sorted(requested & allowed)
-            else:
-                frag_symmops[fid] = ['E']
-            if 'E' not in frag_symmops[fid]:
-                frag_symmops[fid].insert(0, 'E')
-        if mf.mol.verbose >= 2:
-            print(f"Input-specified symmetry operations: {frag_symmops}")
-    else:
-        raise TypeError(
-            f"symmop_list must be None, \"auto\", list[str], or "
-            f"dict[int, list[str]], got {type(symmop_list)}")
-    return frag_symmops
-
-
-def _build_single_frag_combos(frag_ids, frag_symmops) -> list:
-    """Enumerate (frag_pos, op, label) tuples for correlated sampling."""
-    single_frag_combos = []
-    for frag_pos, fid in enumerate(frag_ids):
-        for op in frag_symmops[fid]:
-            if op == 'E':
-                continue
-            parts = [f"{fid2}:{op if fid2 == fid else 'E'}"
-                     for fid2 in frag_ids]
-            label = ",".join(parts)
-            single_frag_combos.append((frag_pos, op, label))
-    return single_frag_combos
-
 
 def _validate_params_corr(params_corr, mf) -> dict:
     """Validate and clean params_corr in-place; return it."""
@@ -733,31 +610,11 @@ class _VMCDriverGTO:
                                              in_axes=(0, 0, None, None))
 
         # --- Per-fragment symmetry operation for gradient batches ---
-        def _apply_single_frag_symmop(batch_samples, frag_pos, s_op_fn):
-            """Apply a symmetry operation to a single fragment only.
-
-            Args:
-                batch_samples: (batch_size, nelec, 3)
-                frag_pos: fragment array index (position in frag_ids)
-                s_op_fn: JAX function implementing the symmetry operation
-
-            Returns:
-                Transformed coordinates with only the target fragment modified.
-            """
-            centroid = frag_centroids[frag_pos]
-            Vh = frag_Vh[frag_pos]
-            inradius = frag_inradii[frag_pos]
-
-            centered = batch_samples - centroid
-            rotated = centered @ Vh.T
-            operated = s_op_fn(rotated)
-            proposed = operated @ Vh + centroid
-
-            dist = jnp.linalg.norm(centered, axis=-1)
-            mask = dist <= inradius
-            return jnp.where(mask[:, :, None], proposed, batch_samples)
-
-        self._apply_single_frag_symmop = _apply_single_frag_symmop
+        self._apply_single_frag_symmop = (
+            make_apply_single_frag_symmop(
+                frag_centroids, frag_Vh, frag_inradii,
+            )
+        )
 
     def __call__(self, rng_key: int | jnp.ndarray,
                  num_walkers: int = 1000,
@@ -862,10 +719,8 @@ class _VMCDriverGTO:
             # Only use Gaussian acceptance for step size adaptation
             n_gauss = jnp.sum(is_gaussian)
             gauss_accept_sum = jnp.where(is_gaussian, accepted, 0.0).sum()
-            gauss_ratio = jnp.where(
-                n_gauss > 0,
-                gauss_accept_sum / n_gauss,
-                TARGET_ACCEPTANCE_RATE)
+            gauss_ratio = jnp.where(n_gauss > 0, gauss_accept_sum / n_gauss,
+                                    TARGET_ACCEPTANCE_RATE)
             new_step_size = _adapt_step_size(step_size, gauss_ratio)
 
             return (rng_key, new_walkers, new_step_size), gauss_ratio
@@ -961,7 +816,7 @@ class _VMCDriverGTO:
             p.unlink()
         with h5py.File(ofname_chkpt, 'a') as f:
             f.create_dataset("version", data="0.1.0")
-            # TODO: take versionm info from pyproject.toml using tomli/tomllib
+            # TODO: take version info from pyproject.toml using tomli/tomllib
 
             g = f.create_group("timestamps")
             g.create_dataset("start",
@@ -1002,8 +857,7 @@ class _VMCDriverGTO:
               f"{batch_size}, {num_batches}")
         print("# block_cnt        E_loc_mean      E_loc_std"
               "       eePotential     enPotential     Kinetic"
-              "          ∆t_block",
-              file=fout)
+              "          ∆t_block", file=fout)
 
         timestamp_prev = datetime.now()
         # Main sampling phase with pre-allocated arrays
@@ -1043,8 +897,7 @@ class _VMCDriverGTO:
             tdelta_block = (timestamp_curr - timestamp_prev).total_seconds()
             print(f"{block_cnt:>8d}{E_mean:>24.8e}{std_E_s:>16.8e}"
                   f"{enr_ee:>16.8e}{enr_en:>16.8e}{enr_ke:>16.8e}"
-                  f"{tdelta_block:>16.6f}",
-                  file=fout)
+                  f"{tdelta_block:>16.6f}", file=fout)
 
             if compute_gradients:
                 if walkers_sharding is not None:
@@ -1185,8 +1038,8 @@ def get_vmc_gto_func(mf,
     else:
         frag_ids = [0]
 
-    frag_symmops = _build_frag_symmops(mf, symmop_list, frag_ids)
-    single_frag_combos = _build_single_frag_combos(frag_ids, frag_symmops)
+    frag_symmops = build_frag_symmops(mf.mol, symmop_list, frag_ids)
+    single_frag_combos = build_single_frag_combos(frag_ids, frag_symmops)
     frag_ops_sets = [set(frag_symmops[fid]) for fid in frag_ids]
 
     if mf.mol.groupname == 'C1' \
@@ -1216,8 +1069,7 @@ def get_vmc_gto_func(mf,
     params_cusp = _build_cusp_params(mf, cusp_scheme, mf.mol.natm)
 
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
-    frag_reflect_data = _get_electron_displacement_fn(
-        mf.mol.atom_charges(), nuc_crds, cluster_idx, mol=mf.mol)
+    frag_reflect_data = build_frag_reflect_data(mf.mol, nuc_crds)
 
     timestamp_init = datetime.now()
     print("Begin time: {}".format(timestamp_init))

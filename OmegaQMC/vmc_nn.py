@@ -14,7 +14,7 @@ gradient computation.  It takes a
 directly.
 """
 
-# import sys
+import sys
 from datetime import datetime
 # from functools import partial
 
@@ -25,7 +25,18 @@ from jax.sharding import NamedSharding, PartitionSpec
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.physics import laplacian
 from .constants import MIN_DIST_THRESHOLD
-from .utils import do_binning_analysis, _make_sharding
+from .utils import (
+    do_binning_analysis,
+    _make_sharding,
+    parse_molecular_inspheres,
+)
+from .symm.operations import populate_fragment_symmops
+from .symm.fragments import (
+    build_frag_reflect_data,
+    build_frag_symmops,
+    build_single_frag_combos,
+    make_apply_single_frag_symmop,
+)
 
 # VMC hyperparameters (matching vmc_gto)
 TARGET_ACCEPTANCE_RATE = 0.4
@@ -46,7 +57,18 @@ class _VMCDriverNN:
     def __init__(
         self, mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
+        symmop_list=None,
     ):
+        # Populate fragment metadata lazily for Mole_custom
+        # instances that did not come through the GTO
+        # factory (e.g. from Mole_custom.from_arrays).
+        if not hasattr(mol_info, 'map_nuc_frag'):
+            if not hasattr(mol_info, 'ignore_hydrogen_mass'):
+                mol_info.ignore_hydrogen_mass = False
+            parse_molecular_inspheres(mol_info)
+        if not hasattr(mol_info, 'map_frag_symmops'):
+            populate_fragment_symmops(mol_info)
+
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
         )
@@ -63,6 +85,31 @@ class _VMCDriverNN:
         self.n_nuc = n_nuc
         self.ofname_chkpt = ofname_chkpt
         self.ofname_grd = ofname_grd
+
+        # --- PGCS fragment plumbing ---
+        if mol_info.map_frag_symmops:
+            frag_ids = sorted(mol_info.map_frag_ctr.keys())
+        else:
+            frag_ids = [0]
+        frag_symmops = build_frag_symmops(
+            mol_info, symmop_list, frag_ids,
+        )
+        self.frag_ids = frag_ids
+        self.frag_symmops = frag_symmops
+        self.single_frag_combos = (
+            build_single_frag_combos(
+                frag_ids, frag_symmops,
+            )
+        )
+        (frag_centroids, frag_inradii,
+         frag_Vh, _is_planar) = build_frag_reflect_data(
+            mol_info, nuc_crds,
+        )
+        self._apply_single_frag_symmop = (
+            make_apply_single_frag_symmop(
+                frag_centroids, frag_Vh, frag_inradii,
+            )
+        )
 
         log_psi, init_params, graphdef \
             = make_nn_log_psi(config, mol_info, init_key)
@@ -116,6 +163,30 @@ class _VMCDriverNN:
         self.energy_ee = energy_ee
         self.energy_en = energy_en
         self.energy_ke = energy_ke
+
+        # --- Batched log-ψ and total local-energy for PGCS ---
+        params_here = self.params
+        enr_nn_val = self.enr_nn
+
+        @jax.jit
+        def _log_psi_batch(batch):
+            return jax.vmap(
+                lambda r: log_psi(
+                    r, nuc_crds, params_here,
+                ),
+            )(batch)
+
+        @jax.jit
+        def _local_energy_batch(batch):
+            ee = jax.vmap(energy_ee)(batch)
+            en = jax.vmap(energy_en)(batch)
+            ke = jax.vmap(
+                energy_ke, in_axes=(0, None),
+            )(batch, params_here)
+            return ee + en + ke + enr_nn_val
+
+        self._log_psi_batch = _log_psi_batch
+        self._local_energy_batch = _local_energy_batch
 
         # --- Metropolis move ---
         @jax.jit
@@ -227,14 +298,14 @@ class _VMCDriverNN:
         num_blocks_equil=10,
         mc_timestep=0.1,
         compute_gradients=False,
+        fname_log=None,
         verbose=1,
     ):
         """Execute a VMC run with fixed NN parameters.
 
-        Runs Metropolis-Hastings sampling and
-        accumulates local energies block by block.
-        VMC results are appended to the checkpoint
-        file set by :func:`get_vmc_nn_func`.
+        Runs Metropolis-Hastings sampling and accumulates local energies
+        block by block. VMC results are appended to the checkpoint file
+        set by :func:`get_vmc_nn_func`.
 
         Args:
             rng_key: JAX PRNG key (int or array).
@@ -244,10 +315,13 @@ class _VMCDriverNN:
             num_blocks: Total production blocks.
             num_blocks_equil: Equilibration blocks.
             mc_timestep: Initial MC timestep.
-            compute_gradients: If ``True``, evaluate
-                ZVZB nuclear force estimator each
-                block and write to the gradient
-                file set by :func:`get_vmc_nn_func`.
+            compute_gradients: If ``True``,
+                evaluate ZVZB nuclear force estimator each block
+                and write to the gradient file set by :func:`get_vmc_nn_func`.
+            fname_log: Optional path for the plain-text
+                per-block log.  ``None`` or ``""`` writes
+                to stdout; any other string opens that
+                file in line-buffered mode.
             verbose: Verbosity (0 = silent).
 
         Returns:
@@ -256,6 +330,13 @@ class _VMCDriverNN:
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
+
+        if fname_log is None \
+                or (isinstance(fname_log, str)
+                    and fname_log == ""):
+            fout = sys.stdout
+        else:
+            fout = open(fname_log, 'w', 1)
 
         nelec = self.nelec
         nuc_crds = self.nuc_crds
@@ -312,6 +393,10 @@ class _VMCDriverNN:
                 g.create_dataset(
                     "units",
                     data=mol_info.unit.upper(),
+                )
+                g.create_dataset(
+                    "atom_fragment_map",
+                    data=mol_info.map_nuc_frag,
                 )
 
             n_nuc = self.n_nuc
@@ -438,17 +523,15 @@ class _VMCDriverNN:
                     (ar, e_ee, e_en, e_ke),
                 )
 
-        if verbose >= 1:
-            print(
-                "# block     E_mean"
-                "          E_std"
-                "         ee_pot"
-                "         en_pot"
-                "        kinetic"
-                "      dt_block"
-            )
+        print(
+            "# block_cnt        E_loc_mean      E_loc_std"
+            "       eePotential     enPotential     Kinetic"
+            "          ∆t_block",
+            file=fout,
+        )
 
         E_blocks = []
+        E_cs_b = []
         timestamp_prev = datetime.now()
 
         for blk in range(1, num_blocks + 1):
@@ -472,22 +555,18 @@ class _VMCDriverNN:
             E_std = E_step.std()
             E_blocks.append(float(E_mean))
 
-            if verbose >= 1:
-                ee_m = e_ee.mean()
-                en_m = e_en.mean()
-                ke_m = e_ke.mean()
-                now = datetime.now()
-                dt = (now - timestamp_prev).total_seconds()
-                print(
-                    f"{blk:>7d}"
-                    f"{E_mean:>16.8e}"
-                    f"{E_std:>14.8e}"
-                    f"{ee_m:>14.8e}"
-                    f"{en_m:>14.8e}"
-                    f"{ke_m:>14.8e}"
-                    f"{dt:>14.4f}"
-                )
-                timestamp_prev = now
+            ee_m = e_ee.mean()
+            en_m = e_en.mean()
+            ke_m = e_ke.mean()
+            now = datetime.now()
+            dt = (now - timestamp_prev).total_seconds()
+            print(
+                f"{blk:>8d}{E_mean:>24.8e}{E_std:>16.8e}"
+                f"{ee_m:>16.8e}{en_m:>16.8e}{ke_m:>16.8e}"
+                f"{dt:>16.6f}",
+                file=fout,
+            )
+            timestamp_prev = now
 
             if compute_gradients:
                 # sampled_w: (steps, walkers, nel, 3)
@@ -504,7 +583,7 @@ class _VMCDriverNN:
                     )
                 n_samples = num_steps_per_block * num_walkers
                 num_batches = (n_samples + batch_size - 1) // batch_size
-                save_nn_gradients(
+                combo_E = save_nn_gradients(
                     blk,
                     sampled_w.reshape(
                         -1, nelec, 3,
@@ -512,10 +591,30 @@ class _VMCDriverNN:
                     E_loc,
                     batch_size,
                     num_batches,
-                    (),
+                    self.single_frag_combos,
                     ofname_grd,
                     nn_gradient_batch,
+                    log_psi_batch=self._log_psi_batch,
+                    local_energy_batch=(
+                        self._local_energy_batch
+                    ),
+                    apply_single_frag_symmop=(
+                        self._apply_single_frag_symmop
+                    ),
                 )
+                if combo_E:
+                    all_E = (
+                        [float(E_mean)]
+                        + list(combo_E.values())
+                    )
+                    E_cs_b.append(
+                        sum(all_E) / len(all_E),
+                    )
+
+        if not (fname_log is None
+                or (isinstance(fname_log, str)
+                    and fname_log == "")):
+            fout.close()
 
         # --- Binning analysis ---
         E_arr = jnp.array(E_blocks)
@@ -528,6 +627,18 @@ class _VMCDriverNN:
         if verbose >= 1:
             print(f"\nVMC energy: {e_mean:.8f} +/- {e_serr:.8f} Ha"
                   f" (N_eff = {e_neff:.1f})")
+            if compute_gradients and E_cs_b:
+                E_cs_blocks = jnp.array(E_cs_b)
+                ecs_mean, ecs_serr, _, ecs_kappa = (
+                    do_binning_analysis(E_cs_blocks)
+                )
+                ecs_neff = E_cs_blocks.shape[0] / ecs_kappa
+                print(
+                    f"CS-averaged VMC energy: "
+                    f"{ecs_mean:.8f} "
+                    f"+/- {ecs_serr:.8f} Ha "
+                    f"(N_eff = {ecs_neff:.1f})"
+                )
             print(f"Total time: {elapsed:.2f} seconds")
 
         result = {
@@ -546,6 +657,7 @@ class _VMCDriverNN:
 
 def get_vmc_nn_func(
     mol_info, config, init_key, prefix='vmc',
+    symmop_list=None,
 ):
     """Construct a VMC driver for NN wavefunctions.
 
@@ -564,6 +676,13 @@ def get_vmc_nn_func(
             (``<prefix>.chk.h5``,
             ``<prefix>.grd.h5``).
             Default is ``"vmc"``.
+        symmop_list: Fragment symmetry operations to
+            use for Point Group Correlated Sampling
+            (PGCS).  ``None`` (default) disables PGCS;
+            ``"auto"`` enables all detected operations;
+            a list of strings or per-fragment dict
+            restricts the set.  Matches the GTO
+            driver's *symmop_list* semantics.
 
     Returns:
         :class:`_VMCDriverNN` instance.  Call it with
@@ -579,4 +698,5 @@ def get_vmc_nn_func(
     return _VMCDriverNN(
         mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
+        symmop_list=symmop_list,
     )

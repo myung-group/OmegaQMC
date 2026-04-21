@@ -352,8 +352,8 @@ def vmc_nn_gradients_zvzb(
     """Build a JIT-compiled ZVZB gradient batch function.
 
     Implements the zero-variance zero-bias (ZVZB)
-    nuclear force estimator of Assaraf, Caffarel &
-    Khelif :cite:`Assaraf2003`, but returns the
+    nuclear force estimator of Assaraf & Caffarel
+    :cite:`Assaraf2003`, but returns the
     *negated* force decomposed into the same three
     per-walker components produced by
     :func:`vmc_gto_gradients`, so that both backends
