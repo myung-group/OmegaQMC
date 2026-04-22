@@ -21,6 +21,7 @@ import sys
 
 import jax
 import h5py
+import numpy as np
 import jax.numpy as jnp
 
 from ..utils import (
@@ -1315,39 +1316,33 @@ nuclear forces using PGCS.
         else:
             atom_frag_map = None
 
+        # Keep per-block arrays on host (numpy); upload
+        # to the device per-block inside the force loop
+        # to bound peak device memory.
         dict_grd_samples = {}
         for key, val in f.items():
             if isinstance(val, h5py.Group):
                 dict_grd_samples[key] = {}
                 for key2, val2 in val.items():
-                    if isinstance(
-                        val2, h5py.Group
-                    ):
-                        dict_grd_samples[key][key2] \
-                            = {}
-                        for key3, val3 in (
-                            val2.items()
-                        ):
+                    if isinstance(val2, h5py.Group):
+                        dict_grd_samples[key][key2] = {}
+                        for key3, val3 in val2.items():
                             if not val3.shape:
-                                dict_grd_samples[
-                                    key][key2][key3] \
+                                dict_grd_samples[key][key2][key3] \
                                     = val3[()].decode()
                             else:
-                                dict_grd_samples[
-                                    key][key2][key3] \
-                                    = jnp.array(val3)
+                                dict_grd_samples[key][key2][key3] \
+                                    = np.asarray(val3)
                     elif not val2.shape:
                         dict_grd_samples[key][key2] \
                             = val2[()].decode()
                     else:
                         dict_grd_samples[key][key2] \
-                            = jnp.array(val2)
+                            = np.asarray(val2)
             elif val.ndim == 0:
                 dict_grd_samples[key] = val[()]
             else:
-                dict_grd_samples[key] = (
-                    jnp.array(val[:])
-                )
+                dict_grd_samples[key] = np.asarray(val[:])
 
         block_nums = [
             int(k) for k in
@@ -1357,29 +1352,28 @@ nuclear forces using PGCS.
         ]
         block_nums.sort()
 
-        loc_e_list = []
+        # Streaming mean over blocks — avoids stacking
+        # every block's local energies on device just to
+        # compute one scalar.
+        _sum = 0.0
+        _cnt = 0
         for block_cnt in block_nums:
-            local_energies = dict_grd_samples[
-                "local_energies"
-            ][f'{block_cnt}']
-            loc_e_list.append(
-                jnp.array(local_energies)
-            )
-        enr_mean = jnp.vstack(loc_e_list).mean()
+            local_energies = dict_grd_samples["local_energies"][f'{block_cnt}']
+            _sum += float(np.asarray(local_energies).sum(dtype=np.float64))
+            _cnt += local_energies.size
+        enr_mean = _sum / _cnt
 
-        grd_nn = dict_grd_samples['grd_nn']
+        grd_nn = jnp.asarray(
+            dict_grd_samples['grd_nn']
+        )
 
         # Identify combo labels from fragment_weights
         combo_labels = []
         if 'fragment_weights' in dict_grd_samples:
             combo_labels = sorted(
-                k for k in dict_grd_samples[
-                    'fragment_weights'
-                ]
+                k for k in dict_grd_samples['fragment_weights']
                 if isinstance(
-                    dict_grd_samples[
-                        'fragment_weights'
-                    ][k],
+                    dict_grd_samples['fragment_weights'][k],
                     dict,
                 )
             )
@@ -1413,21 +1407,36 @@ nuclear forces using PGCS.
             grd_err_list = []
 
             for block_cnt in block_nums:
+                # Per-block GPU upload: arrays sit on
+                # host as numpy; we transfer one block
+                # at a time to cap peak device memory.
                 if state_label is None:
-                    grd_ee_en = dict_grd_samples['grd_ee_en'][f'{block_cnt}']
-                    grd_ke = dict_grd_samples['grd_ke'][f'{block_cnt}']
-                    grd_logpsi = dict_grd_samples['grd_logpsi'][f'{block_cnt}']
+                    grd_ee_en = jnp.asarray(
+                        dict_grd_samples['grd_ee_en'][f'{block_cnt}']
+                    )
+                    grd_ke = jnp.asarray(
+                        dict_grd_samples['grd_ke'][f'{block_cnt}']
+                    )
+                    grd_logpsi = jnp.asarray(
+                        dict_grd_samples['grd_logpsi'][f'{block_cnt}']
+                    )
                 else:
-                    grd_ee_en = dict_grd_samples[
-                        'grd_ee_en'
-                    ][state_label][f'{block_cnt}']
-                    grd_ke = dict_grd_samples[
-                        'grd_ke'
-                    ][state_label][f'{block_cnt}']
-                    grd_logpsi = dict_grd_samples[
-                        'grd_logpsi'
-                    ][state_label][f'{block_cnt}']
-                local_energies = jnp.array(
+                    grd_ee_en = jnp.asarray(
+                        dict_grd_samples[
+                            'grd_ee_en'
+                        ][state_label][f'{block_cnt}']
+                    )
+                    grd_ke = jnp.asarray(
+                        dict_grd_samples[
+                            'grd_ke'
+                        ][state_label][f'{block_cnt}']
+                    )
+                    grd_logpsi = jnp.asarray(
+                        dict_grd_samples[
+                            'grd_logpsi'
+                        ][state_label][f'{block_cnt}']
+                    )
+                local_energies = jnp.asarray(
                     dict_grd_samples['local_energies'][f'{block_cnt}']
                 )
 
@@ -1468,8 +1477,12 @@ nuclear forces using PGCS.
 
                 # Parameter-response correction
                 if dp_dR is not None and state_label is None:
-                    O_p = dict_grd_samples['O_params'][f'{block_cnt}']
-                    dEL_p = dict_grd_samples['dEL_dparams'][f'{block_cnt}']
+                    O_p = jnp.asarray(
+                        dict_grd_samples['O_params'][f'{block_cnt}']
+                    )
+                    dEL_p = jnp.asarray(
+                        dict_grd_samples['dEL_dparams'][f'{block_cnt}']
+                    )
                     # n_s = num_steps_per_block * num_walkers
                     n_jp = O_p.shape[-1]
                     O_p = O_p.reshape(
@@ -1492,9 +1505,11 @@ nuclear forces using PGCS.
                 # Load fragment weights for
                 # secondary states
                 if state_label is not None:
-                    frag_w = dict_grd_samples[
-                        'fragment_weights'
-                    ][state_label][f'{block_cnt}']
+                    frag_w = jnp.asarray(
+                        dict_grd_samples[
+                            'fragment_weights'
+                        ][state_label][f'{block_cnt}']
+                    )
                     frag_w = frag_w.reshape(
                         num_steps_per_block,
                         num_walkers,
@@ -1667,15 +1682,10 @@ nuclear forces using PGCS.
                 errors = jnp.stack([all_state_results[s][1][i]
                                     for s in relevant_states])
                 N = len(relevant_states)
-                avg_grd_tot = avg_grd_tot.at[i] .set(forces.mean(axis=0))
+                avg_grd_tot = avg_grd_tot.at[i].set(forces.mean(axis=0))
                 avg_grd_err = (
                     avg_grd_err.at[i].set(
-                        jnp.sqrt(
-                            jnp.sum(
-                                errors**2, axis=0,
-                            )
-                        )
-                        / N
+                        jnp.sqrt(jnp.sum(errors**2, axis=0)) / N
                     )
                 )
 
