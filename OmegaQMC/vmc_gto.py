@@ -729,16 +729,20 @@ class _VMCDriverGTO:
         if mode_restart:
             with h5py.File(ofname_chkpt, 'r') as f:
                 # Load metadata
-                block_cnt_start = int(f['block_count'][()])
+                block_cnt_start = int(f['block_count'][()]) + 1
                 mc_stepsize = f['mc_stepsize'][()]
                 mc_timestep = mc_stepsize * mc_stepsize / 3
-                rng_key = jax.random.key(int(f['rng_key'][()]))
+                rng_key = jax.random.wrap_key_data(
+                    jnp.array(f['rng_key'][:],
+                              dtype=jnp.uint32))
                 rng_key_to_restart = rng_key.copy()
                 rng_key, init_key = jax.random.split(rng_key)
                 walkers = jnp.array(f['walkers'][:])
                 if walkers_sharding is not None:
                     walkers = jax.device_put(walkers, walkers_sharding)
                 E_b = list(f['E_blocks'][:])
+                E_cs_b = list(f['E_cs_blocks'][:]) \
+                    if 'E_cs_blocks' in f else []
                 print("Restarting ...")
 
             # for _ in range(num_blocks_equil):
@@ -761,9 +765,10 @@ class _VMCDriverGTO:
             E_cs_b = []    # CS-averaged block energies
             # std_E_b = []
 
-        ratio = ratios[-1]
-
-        print(f"ℹ️\tEquilibration acceptance rate: {ratio:.2f}")
+        if not mode_restart:
+            ratio = ratios[-1]
+            print(f"ℹ️\tEquilibration acceptance rate: "
+                  f"{ratio:.2f}")
         print(f"ℹ️\tAdjusted step size: {mc_stepsize:.4f} bohr "
               f"~ {mc_timestep:.4f} Ha⁻¹ in Brownian time")
 
@@ -833,7 +838,7 @@ class _VMCDriverGTO:
             g.create_dataset("ao_basis", data=" ".join(aobs))
             g.create_dataset("units", data=mf.mol.unit.upper())
 
-        if compute_gradients:
+        if compute_gradients and not mode_restart:
             p = pathlib.Path(ofname_grd)
             if p.exists():
                 p.unlink()
@@ -954,10 +959,14 @@ class _VMCDriverGTO:
 
         with h5py.File(ofname_chkpt, 'a') as f:
             f.create_dataset('E_blocks', data=E_b)
+            if E_cs_b:
+                f.create_dataset('E_cs_blocks', data=E_cs_b)
             f.create_dataset('rng_key',
                              data=jax.random.key_data(rng_key_to_restart))
             f.create_dataset('block_count', data=block_cnt,
                              dtype=jnp.int32)
+            f.create_dataset('mc_stepsize',
+                             data=float(mc_stepsize))
             f.create_dataset('walkers', data=sampled_walkers[-1, :, :, :])
             f["timestamps"].create_dataset("end", data=str(timestamp_fin))
 
