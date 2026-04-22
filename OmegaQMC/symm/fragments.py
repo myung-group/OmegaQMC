@@ -16,6 +16,8 @@ import warnings
 import jax
 import jax.numpy as jnp
 
+from .operations import POINT_GROUP_OP_ALIASES
+
 
 def build_frag_reflect_data(mol, nuc_crds):
     """Precompute per-fragment data for reflections/rotations.
@@ -116,18 +118,38 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
 
     if isinstance(symmop_list, list):
         frag_symmops = {}
+        # Normalize user-supplied aliases to the
+        # canonical ``POINT_GROUP_OPS`` spelling so
+        # equivalent synonyms (e.g. 'sigma_x' vs 'sx',
+        # '-1' vs 'i') compare correctly below.
+        normalized = []
+        for op in symmop_list:
+            canon = POINT_GROUP_OP_ALIASES.get(op, op)
+            if canon != op:
+                warnings.warn(
+                    'Normalizing point group operation symbol '
+                    f'"{op}" → "{canon}"',
+                    stacklevel=2,
+                )
+            normalized.append(canon)
         for fid in frag_ids:
             allowed = set(
                 mol.map_frag_symmops.get(fid, ['E'])
                 if has_map else ['E']
             )
-            requested = set(symmop_list)
-            invalid = requested - allowed - {'E'}
-            if invalid:
+            requested = set(normalized)
+            rejected = requested - allowed - {'E'}
+            if rejected:
+                rejected_raw = {
+                    raw for raw, norm
+                    in zip(symmop_list, normalized)
+                    if norm in rejected
+                }
                 warnings.warn(
                     f"Fragment {fid}: operations "
-                    f"{invalid} are not valid symmetry "
-                    "operations and will be removed",
+                    f"{rejected_raw} are not valid "
+                    "symmetry operations and will be "
+                    "removed",
                     stacklevel=2,
                 )
             frag_symmops[fid] = sorted(requested & allowed)
@@ -148,12 +170,29 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
                     mol.map_frag_symmops.get(fid, ['E'])
                     if has_map else ['E']
                 )
-                requested = set(symmop_list[fid])
-                invalid = requested - allowed - {'E'}
-                if invalid:
+                raw = list(symmop_list[fid])
+                normalized = []
+                for op in raw:
+                    canon = POINT_GROUP_OP_ALIASES.get(
+                        op, op,
+                    )
+                    if canon != op:
+                        warnings.warn(
+                            'Normalizing point group operation symbol '
+                            f'"{op}" → "{canon}"',
+                            stacklevel=2,
+                        )
+                    normalized.append(canon)
+                requested = set(normalized)
+                rejected = requested - allowed - {'E'}
+                if rejected:
+                    rejected_raw = {
+                        r for r, n in zip(raw, normalized)
+                        if n in rejected
+                    }
                     warnings.warn(
                         f"Fragment {fid}: operations "
-                        f"{invalid} are not valid "
+                        f"{rejected_raw} are not valid "
                         "symmetry operations and will be "
                         "removed",
                         stacklevel=2,

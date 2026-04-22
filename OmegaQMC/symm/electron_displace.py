@@ -12,20 +12,20 @@ from collections.abc import Callable
 
 from .operations import symmetry_operations_map, apply_reflection_z
 
-# Canonical ordering of symmetry operations.
-# This list includes all operations from symmetry_operations_map that might
-# be used in symmop_list (from POINT_GROUP_OPS).
+# Canonical ordering of symmetry operations.  Keys
+# must match the canonical symbols in
+# ``symmetry_operations_map`` / ``POINT_GROUP_OPS``.
 SYMM_OP_LABELS = [
-    'E',      # 0: Identity (PySCF style)
-    'x',      # 1: Reflect across yz-plane (sx)
-    'y',      # 2: Reflect across xz-plane (sy)
-    'z',      # 3: Reflect across xy-plane (sz, sh)
+    'E',      # 0: Identity
+    'sx',     # 1: Reflect across yz-plane
+    'sy',     # 2: Reflect across xz-plane
+    'sz',     # 3: Reflect across xy-plane
     'Rz90',   # 4: 90° rotation about z
-    'Rz180',  # 5: 180° rotation about z (C2, C2z)
+    'Rz180',  # 5: 180° rotation about z
     'Rz270',  # 6: 270° rotation about z
     'i',      # 7: Inversion
-    'C2x',    # 8: 180° rotation about x
-    'C2y',    # 9: 180° rotation about y
+    'Rx180',  # 8: 180° rotation about x
+    'Ry180',  # 9: 180° rotation about y
     'S4',     # 10: S4 improper rotation
     'S4_3',   # 11: S4^3 improper rotation
     'C2xy',   # 12: 180° rotation about xy diagonal
@@ -34,24 +34,18 @@ SYMM_OP_LABELS = [
     'sxmy',   # 15: Diagonal mirror (x,-y plane)
 ]
 
-# Tuple of symmetry-operation functions corresponding to SYMM_OP_LABELS.
+# Tuple of symmetry-operation functions corresponding
+# to SYMM_OP_LABELS.
 _SYMM_OP_FUNCS = tuple(symmetry_operations_map[label]
                        for label in SYMM_OP_LABELS)
 
-# Mapping from operation string labels to integer indices.
-# Includes aliases for PySCF-style labels (E, C2, C2z, sx, sy, sz, sh).
-SYMM_OP_STRING_TO_ID = {label: i for i, label in enumerate(SYMM_OP_LABELS)}
-# Add aliases
-SYMM_OP_STRING_TO_ID.update({
-    'I': 0,       # Alias for E
-    'C2': 5,      # Alias for Rz180
-    'C2z': 5,     # Alias for Rz180
-    'sx': 1,      # Alias for x
-    'sy': 2,      # Alias for y
-    'sz': 3,      # Alias for z
-    'sh': 3,      # Alias for z (horizontal mirror)
-    'xy': 5,      # Alias for Rz180
-})
+# Mapping from operation string labels to integer
+# indices.  Aliases are resolved via
+# ``POINT_GROUP_OP_ALIASES``; only canonical symbols
+# are stored here.
+SYMM_OP_STRING_TO_ID = {
+    label: i for i, label in enumerate(SYMM_OP_LABELS)
+}
 
 
 def _apply_symmetry_operation(
@@ -467,7 +461,7 @@ if __name__ == "__main__":
     print("=" * 70)
 
     # C2v water operations to test
-    test_ops = {'E': 0, 'x': 1, 'y': 2, 'C2': 5}
+    test_ops = {'E': 0, 'sx': 1, 'sy': 2, 'Rz180': 5}
 
     # --- Single water molecule ---
     r_O = jnp.array([0.0, 0.0, 0.0])
@@ -524,7 +518,7 @@ if __name__ == "__main__":
     assigned_before = dist_before_O1 < dist_before_O4
 
     reflected_y = reflect_dimer(walkers_dimer,
-                                rescale_dimer, SYMM_OP_STRING_TO_ID['y'])
+                                rescale_dimer, SYMM_OP_STRING_TO_ID['sy'])
     dist_after_O1 = jnp.linalg.norm(reflected_y - r_O1, axis=-1)
     dist_after_O4 = jnp.linalg.norm(reflected_y - r_O4, axis=-1)
     assigned_after = dist_after_O1 < dist_after_O4
