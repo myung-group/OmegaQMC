@@ -291,6 +291,16 @@ def get_shell(z):
 
 
 class Mole_custom(gto.Mole):
+    # Default symmetrization level; overridden by
+    # callers such as
+    # :func:`OmegaQMC.vmc_gto.generate_molecular_orbitals`.
+    # Downstream helpers (e.g.
+    # :func:`OmegaQMC.symm.operations.populate_fragment_symmops`,
+    # :func:`OmegaQMC.symm.fragments.build_frag_symmops`)
+    # may consult this to decide how strictly to trust
+    # detected point-group operations.
+    symmetrization_level = 1
+
     def format_atom(self, atoms, origin=0, axes=None,
                     unit=getattr(__config__, 'UNIT', 'Ang')):
         def str2atm(line):

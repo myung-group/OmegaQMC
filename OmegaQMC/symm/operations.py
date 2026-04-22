@@ -107,55 +107,98 @@ def apply_reflection_xmy_diagonal(coords):
 
 
 # see also: pyscf.symm.param.OPERATOR_TABLE
+# Keys are the canonical operation symbols used in
+# ``POINT_GROUP_OPS``.  User-facing call sites should
+# normalize through ``POINT_GROUP_OP_ALIASES`` before
+# looking up a function here.
 symmetry_operations_map = {
-    'I': apply_identity,
     'E': apply_identity,
-    '1': apply_identity,
     'i': apply_inversion,
-    '-I': apply_inversion,
-    '-1': apply_inversion,
-    'x': apply_reflection_x,
-    'y': apply_reflection_y,
-    'z': apply_reflection_z,
     'sx': apply_reflection_x,
     'sy': apply_reflection_y,
     'sz': apply_reflection_z,
-    'sh': apply_reflection_z,
-    'Cp4': apply_rotation_z90,
-    'Rz90': apply_rotation_z90,
-    'Cm4': apply_rotation_z270,
-    'Rz270': apply_rotation_z270,
-    'C2x': apply_rotation_x180,
-    'C2y': apply_rotation_y180,
-    'S4': apply_S4,
-    'S4_3': apply_S4_3,
-    'C2xy': apply_rotation_xy_diagonal,
-    'C2xmy': apply_rotation_xmy_diagonal,
     'sxy': apply_reflection_xy_diagonal,
     'sxmy': apply_reflection_xmy_diagonal,
-    'xy': apply_rotation_z180,
+    'Rz90': apply_rotation_z90,
     'Rz180': apply_rotation_z180,
-    'C2z': apply_rotation_z180,
-    'C2': apply_rotation_z180
+    'Rz270': apply_rotation_z270,
+    'Rx180': apply_rotation_x180,
+    'Ry180': apply_rotation_y180,
+    'C2xy': apply_rotation_xy_diagonal,
+    'C2xmy': apply_rotation_xmy_diagonal,
+    'S4': apply_S4,
+    'S4_3': apply_S4_3,
 }
 
 
 # Map point groups to symmetry operation lists
 POINT_GROUP_OPS = {
     'C1': ['E'],
-    'Cs': ['E', 'z'],           # σ_h (horizontal mirror in xy-plane)
-    'C2v': ['E', 'C2', 'x', 'y'],  # C2(z), σ_v(yz), σ_v(xz)
-    'C2h': ['E', 'C2', 'i', 'z'],  # C2(z), inversion, σ_h
-    'D2h': ['E', 'C2z', 'C2x', 'C2y', 'x', 'y', 'z', 'i'],  # Full D2h
+    'Cs': ['E', 'sz'],           # σ_h (horizontal mirror in xy-plane)
+    'C2v': ['E', 'Rz180', 'sx', 'sy'],  # C2(z), σ_v(yz), σ_v(xz)
+    'C2h': ['E', 'Rz180', 'i', 'sz'],  # C2(z), inversion, σ_h
+    'D2h': ['E', 'Rz180', 'Rx180', 'Ry180', 'sx', 'sy', 'sz', 'i'],  # Full D2h
     # Linear molecule approximations
-    'C4v': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
-    'D4h': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
-            'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
-    'Coov': ['E', 'Rz90', 'C2z', 'Rz270', 'x', 'y', 'sxy', 'sxmy'],
+    'C4v': ['E', 'Rz90', 'Rz180', 'Rz270', 'sx', 'sy', 'sxy', 'sxmy'],
+    'D4h': ['E', 'Rz90', 'Rz180', 'Rz270', 'i', 'S4_3', 'sz', 'S4',
+            'Rx180', 'Ry180', 'C2xy', 'C2xmy', 'sx', 'sy', 'sxy', 'sxmy'],
+    'Coov': ['E', 'Rz90', 'Rz180', 'Rz270', 'sx', 'sy', 'sxy', 'sxmy'],
     # → C4v
-    'Dooh': ['E', 'Rz90', 'C2z', 'Rz270', 'i', 'S4_3', 'z', 'S4',
-             'C2x', 'C2y', 'C2xy', 'C2xmy', 'x', 'y', 'sxy', 'sxmy'],
+    'Dooh': ['E', 'Rz90', 'Rz180', 'Rz270', 'i', 'S4_3', 'sz', 'S4',
+             'Rx180', 'Ry180', 'C2xy', 'C2xmy', 'sx', 'sy', 'sxy', 'sxmy'],
     # → D4h
+}
+
+
+# Aliases for the canonical operation symbols that
+# appear in ``POINT_GROUP_OPS``.  Each key is an
+# additional spelling a user might type in
+# ``symmop_list``; each value is the canonical symbol
+# found in some ``POINT_GROUP_OPS`` entry.  Callers
+# that accept user input (e.g.
+# ``build_frag_symmops``) can normalize through this
+# map before comparing against a fragment's allowed
+# ops.
+POINT_GROUP_OP_ALIASES = {
+    # Identity
+    'I': 'E',
+    '1': 'E',
+    'identity': 'E',
+
+    # Inversion
+    '-I': 'i',
+    '-1': 'i',
+    'inv': 'i',
+    'inverse': 'i',
+    'inversion': 'i',
+
+    # Mirror planes.  ``POINT_GROUP_OPS`` uses the
+    # bare axis symbol for the reflection that
+    # negates that Cartesian coordinate.
+    'x': 'sx',
+    'sigma_x': 'sx',
+    'sigma_v_x': 'sx',
+    'y': 'sy',
+    'sigma_y': 'sy',
+    'sigma_v_y': 'sy',
+    'z': 'sz',
+    'sh': 'sz',
+    'sigma_z': 'sz',
+    'sigma_h': 'sz',
+
+    # Proper rotations about z
+    'C2': 'Rz180',
+    'C2z': 'Rz180',
+    'Cp4': 'Rz90',
+    'Cm4': 'Rz270',
+    'C2x': 'Rx180',
+    'C2y': 'Ry180',
+
+    # Diagonal σ_d reflections in D4h / C4v
+    'sd_xy': 'sxy',
+    'sigma_d_xy': 'sxy',
+    'sd_xmy': 'sxmy',
+    'sigma_d_xmy': 'sxmy',
 }
 
 
@@ -170,7 +213,8 @@ def get_global_symmops(mol: gto.Mole) -> list[str]:
         mol: PySCF Mole object with map_frag_symmops attribute
 
     Returns:
-        List of symmetry operation strings (e.g., ['E', 'C2', 'x', 'y'])
+        List of symmetry operation strings (e.g.,
+        ['E', 'Rz180', 'sx', 'sy'])
     """
     if not hasattr(mol, 'map_frag_symmops') or not mol.map_frag_symmops:
         return ['E']
