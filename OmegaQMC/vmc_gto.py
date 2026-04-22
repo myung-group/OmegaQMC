@@ -214,6 +214,7 @@ def generate_molecular_orbitals(astr: str,
         # mol.atom in input units
 
     mol.ignore_hydrogen_mass = ignore_hydrogen_mass
+    mol.symmetrization_level = symmetrization_level
     parse_molecular_inspheres(mol)
     assert hasattr(mol, "map_nuc_frag")
     assert hasattr(mol, "map_frag_ctr") and isinstance(mol.map_frag_ctr, dict)

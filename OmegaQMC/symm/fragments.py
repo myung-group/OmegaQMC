@@ -13,10 +13,19 @@ and
 
 import warnings
 
-import jax
 import jax.numpy as jnp
 
-from .operations import POINT_GROUP_OP_ALIASES
+from .operations import (
+    POINT_GROUP_OP_ALIASES,
+    POINT_GROUP_OPS,
+)
+
+# Union of all canonical ops across supported point
+# groups.  Used to distinguish "invalid symbol" from
+# "valid symbol, but outside this fragment's PG".
+_ALL_PG_OPS = frozenset(
+    op for ops in POINT_GROUP_OPS.values() for op in ops
+)
 
 
 def build_frag_reflect_data(mol, nuc_crds):
@@ -132,13 +141,20 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
                     stacklevel=2,
                 )
             normalized.append(canon)
+        symm_level = getattr(
+            mol, 'symmetrization_level', 1,
+        )
         for fid in frag_ids:
             allowed = set(
                 mol.map_frag_symmops.get(fid, ['E'])
                 if has_map else ['E']
             )
             requested = set(normalized)
-            rejected = requested - allowed - {'E'}
+            elements_pg = requested & allowed
+            nonelements_pg = (
+                (requested - allowed) & _ALL_PG_OPS
+            )
+            rejected = requested - _ALL_PG_OPS
             if rejected:
                 rejected_raw = {
                     raw for raw, norm
@@ -146,13 +162,32 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
                     if norm in rejected
                 }
                 warnings.warn(
-                    f"Fragment {fid}: operations "
-                    f"{rejected_raw} are not valid "
-                    "symmetry operations and will be "
-                    "removed",
+                    f"Fragment {fid}: operations {rejected_raw} are not valid "
+                    "symmetry operations and will be removed",
                     stacklevel=2,
                 )
-            frag_symmops[fid] = sorted(requested & allowed)
+            if nonelements_pg:
+                if symm_level < 2:
+                    print(
+                        f"ℹ️\tFragment {fid}: "
+                        "including operations outside its point group "
+                        f"{sorted(nonelements_pg)} (symmetrization_level < 2)"
+                    )
+                    frag_symmops[fid] = sorted(
+                        elements_pg | nonelements_pg,
+                    )
+                else:
+                    warnings.warn(
+                        f"Fragment {fid}: operations {sorted(nonelements_pg)} "
+                        "are not in the fragment's point group "
+                        "and will be dropped (symmetrization_level >= 2)",
+                        stacklevel=2,
+                    )
+                    frag_symmops[fid] = sorted(
+                        elements_pg,
+                    )
+            else:
+                frag_symmops[fid] = sorted(elements_pg)
             if 'E' not in frag_symmops[fid]:
                 frag_symmops[fid].insert(0, 'E')
         if mol.verbose >= 2:
@@ -164,6 +199,9 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
 
     if isinstance(symmop_list, dict):
         frag_symmops = {}
+        symm_level = getattr(
+            mol, 'symmetrization_level', 1,
+        )
         for fid in frag_ids:
             if fid in symmop_list:
                 allowed = set(
@@ -184,22 +222,46 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
                         )
                     normalized.append(canon)
                 requested = set(normalized)
-                rejected = requested - allowed - {'E'}
+                elements_pg = requested & allowed
+                nonelements_pg = (
+                    (requested - allowed) & _ALL_PG_OPS
+                )
+                rejected = requested - _ALL_PG_OPS
                 if rejected:
                     rejected_raw = {
                         r for r, n in zip(raw, normalized)
                         if n in rejected
                     }
                     warnings.warn(
-                        f"Fragment {fid}: operations "
-                        f"{rejected_raw} are not valid "
-                        "symmetry operations and will be "
-                        "removed",
-                        stacklevel=2,
+                        f"Fragment {fid}: operations {rejected_raw} "
+                        "are not valid symmetry operations "
+                        "and will be removed", stacklevel=2,
                     )
-                frag_symmops[fid] = sorted(
-                    requested & allowed,
-                )
+                if nonelements_pg:
+                    if symm_level < 2:
+                        print(
+                            f"ℹ️\tFragment {fid}: including operations "
+                            "outside its point group {sorted(nonelements_pg)} "
+                            "(symmetrization_level < 2)"
+                        )
+                        frag_symmops[fid] = sorted(
+                            elements_pg | nonelements_pg,
+                        )
+                    else:
+                        warnings.warn(
+                            f"Fragment {fid}: "
+                            f"operations {sorted(nonelements_pg)} "
+                            "are not in the fragment's "
+                            "point group and will be dropped "
+                            "(symmetrization_level >= 2)", stacklevel=2,
+                        )
+                        frag_symmops[fid] = sorted(
+                            elements_pg,
+                        )
+                else:
+                    frag_symmops[fid] = sorted(
+                        elements_pg,
+                    )
             else:
                 frag_symmops[fid] = ['E']
             if 'E' not in frag_symmops[fid]:
