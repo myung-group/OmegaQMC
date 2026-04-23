@@ -29,6 +29,7 @@ from .utils import (
     do_binning_analysis,
     _make_sharding,
     parse_molecular_inspheres,
+    _autotune_prod_walkers,
 )
 from .symm.operations import populate_fragment_symmops
 from .symm.fragments import (
@@ -347,6 +348,22 @@ class _VMCDriverNN:
         energy_en = self.energy_en
         energy_ke = self.energy_ke
         metropolis_move_allw = self._metropolis_move_allw
+
+        # --- Informational GPU capacity estimate ---
+        # Does NOT modify num_walkers.
+        try:
+            from .vmcopt_gto_linear import _get_free_gpu_mb
+            free_mb = _get_free_gpu_mb()
+            n_rec, bpw = _autotune_prod_walkers(
+                self._local_energy_batch, nelec, free_mb)
+            free_txt = (f"{free_mb:.0f} MiB free"
+                        if free_mb is not None
+                        else "free GPU mem unknown")
+            print(f"ℹ️\tEst. GPU capacity: {n_rec} walkers "
+                  f"(user requested {num_walkers}; "
+                  f"{bpw / 1e6:.2f} MB/walker, {free_txt})")
+        except Exception as e:
+            print(f"ℹ️\tGPU capacity estimate unavailable: {e}")
 
         timestamp_init = datetime.now()
 

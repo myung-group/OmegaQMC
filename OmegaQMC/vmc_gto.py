@@ -18,7 +18,8 @@ from .utils import (parse_molecular_inspheres,
                     Mole_custom,
                     _length_in_au,
                     do_binning_analysis,
-                    _make_sharding)
+                    _make_sharding,
+                    _autotune_prod_walkers)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import populate_fragment_symmops
 from .symm.fragments import (
@@ -76,53 +77,6 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
         acceptance_ratio - TARGET_ACCEPTANCE_RATE
     )
     return jnp.exp(log_step)
-
-
-def _autotune_prod_walkers(local_energy_ee, local_energy_en,
-                           local_energy_ke, nuc_crds, params_corr,
-                           nelec, free_mb, mem_frac=0.75):
-    """Estimate num_walkers the production kernel can fit.
-
-    Compiles a vmapped single-walker probe of
-    ``local_energy_ee + local_energy_en + local_energy_ke`` to
-    measure per-walker GPU memory via JAX AOT analysis.  Falls
-    back to a 0.5 MB/walker heuristic when analysis is
-    unavailable.  The caller prints the result as a diagnostic
-    — this helper never mutates driver state.
-
-    Returns
-    -------
-    (int, float)
-        ``(n_rec, bytes_per_walker)`` — recommended walker count
-        at *mem_frac* of free GPU memory, plus the per-walker
-        byte estimate that produced it.
-    """
-    bytes_per_walker = None
-    try:
-        probe = jnp.zeros((1, nelec, 3))
-
-        def _prod_probe(w):
-            ee = jax.vmap(local_energy_ee)(w)
-            en = jax.vmap(local_energy_en,
-                          in_axes=(0, None))(w, nuc_crds)
-            ke = jax.vmap(local_energy_ke,
-                          in_axes=(0, None, None))(w, nuc_crds,
-                                                   params_corr)
-            return ee + en + ke
-
-        compiled = jax.jit(_prod_probe).lower(probe).compile()
-        analysis = compiled.memory_analysis()
-        bytes_per_walker = (analysis.alias_size
-                            + analysis.temp_size)
-    except Exception:
-        pass
-
-    if not bytes_per_walker:
-        bytes_per_walker = 0.5e6  # 0.5 MB fallback
-
-    free_bytes = (free_mb or 4096.0) * 1e6 * mem_frac
-    n_rec = int(free_bytes / bytes_per_walker)
-    return max(10, n_rec), bytes_per_walker
 
 
 def generate_molecular_orbitals(astr: str,
@@ -743,9 +697,7 @@ class _VMCDriverGTO:
             from .vmcopt_gto_linear import _get_free_gpu_mb
             free_mb = _get_free_gpu_mb()
             n_rec, bpw = _autotune_prod_walkers(
-                local_energy_ee, local_energy_en,
-                local_energy_ke, nuc_crds, params_corr,
-                nelec, free_mb)
+                self._local_energy_batch, nelec, free_mb)
             free_txt = (f"{free_mb:.0f} MiB free"
                         if free_mb is not None
                         else "free GPU mem unknown")

@@ -702,3 +702,51 @@ def _make_sharding(num_walkers: int):
     ws  = NamedSharding(mesh, PartitionSpec('w', None, None))  # (w, nelec, 3)
     wks = NamedSharding(mesh, PartitionSpec('w',))             # (w,) typed keys
     return ws, wks
+
+
+def _autotune_prod_walkers(prod_batch, nelec, free_mb, mem_frac=0.75):
+    """Estimate walker count a batched production kernel fits.
+
+    Compiles *prod_batch* for a single-walker input and reads
+    ``alias_size + temp_size`` from JAX's memory analysis to
+    estimate bytes per walker.  Falls back to 0.5 MB/walker
+    when AOT analysis is unavailable.  Informational only — the
+    caller prints the result and does not mutate driver state.
+
+    Parameters
+    ----------
+    prod_batch : callable
+        ``(n_walkers, nelec, 3) -> ...`` — typically the driver's
+        batched local-energy evaluator (already vmapped + jit).
+        Both ``_VMCDriverGTO`` and ``_VMCDriverNN`` pass their
+        ``_local_energy_batch`` closure.
+    nelec : int
+        Number of electrons.
+    free_mb : float or None
+        Free GPU memory in MiB; ``None`` assumes 4096.
+    mem_frac : float
+        Fraction of free memory to target (default 0.75).
+
+    Returns
+    -------
+    (int, float)
+        ``(n_rec, bytes_per_walker)`` — recommended walker count
+        at *mem_frac* of free GPU memory, and the per-walker
+        byte estimate that produced it.
+    """
+    bytes_per_walker = None
+    try:
+        probe = jnp.zeros((1, nelec, 3))
+        compiled = jax.jit(prod_batch).lower(probe).compile()
+        analysis = compiled.memory_analysis()
+        bytes_per_walker = (analysis.alias_size
+                            + analysis.temp_size)
+    except Exception:
+        pass
+
+    if not bytes_per_walker:
+        bytes_per_walker = 0.5e6  # 0.5 MB fallback
+
+    free_bytes = (free_mb or 4096.0) * 1e6 * mem_frac
+    n_rec = int(free_bytes / bytes_per_walker)
+    return max(10, n_rec), bytes_per_walker
