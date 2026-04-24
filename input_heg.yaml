@@ -11,7 +11,7 @@
 #     summary.json    — key energies and correlation percentages
 # -------------------------------------------------------------------
 
-project: phase_C                       # -> runs/phase_C/
+project: rs2N14unpol                       # -> runs/phase_C/
 
 system:
   rs: 2.0                              # Wigner-Seitz radius (Bohr)
@@ -75,7 +75,3 @@ ewald:
   n_real: 3                            # real-space lattice cutoff (shells)
   n_recip: 6                           # reciprocal cutoff (integer G units)
 
-# Seed: omit (or set to null / 'random') to draw a fresh OS-random
-# seed each run.  The chosen seed is printed and saved to summary.json
-# so any run can be reproduced by pasting its seed back in here.
-# seed: 1231
