@@ -192,6 +192,7 @@ class PlaneWaveEnvelope(nnx.Module):
         *,
         spin_restricted: bool = True,
         init_pw_count: Optional[int] = None,
+        det_jitter: float = 0.0,
     ):
         if init_pw_count is None:
             init_pw_count = max(n_up, n_down, 1)
@@ -202,18 +203,22 @@ class PlaneWaveEnvelope(nnx.Module):
         self.n_det = n_det
         self.spin_restricted = spin_restricted
         self.n_pw = int(basis.kvecs.shape[0])
+        self._det_jitter = float(det_jitter)
 
         # Static: k-vectors (wrapped for NNX pytree compliance).
         self.kvecs = nnx.data(basis.kvecs)
 
-        # Coefficients: (n_det, n_orb_spin, n_pw)
-        # Initialized so orbital i of the first determinant is the
-        # i-th free-electron basis function.
+        # Coefficients: (n_det, n_orb_spin, n_pw).  ``det_jitter``
+        # adds a Gaussian perturbation to dets d≥1 so the multi-det
+        # expansion is not structurally degenerate — see the class
+        # docstring and :class:`HEGPsiFormerConfig` notes for why
+        # this matters even when ``init_pw_count`` > the Fermi
+        # shell.  Det 0 stays at the pure Fermi-sea reference.
         coeff_cos_up = self._init_coeffs(
-            n_det, n_up, basis,
+            n_det, n_up, basis, det_jitter=det_jitter,
         )
         coeff_sin_up = self._init_coeffs(
-            n_det, n_up, basis, take_sin=True,
+            n_det, n_up, basis, take_sin=True, det_jitter=det_jitter,
         )
 
         self.coeff_cos_up = nnx.Param(coeff_cos_up)
@@ -225,20 +230,22 @@ class PlaneWaveEnvelope(nnx.Module):
             # for the down channel so SR can break symmetry.
             if n_down > 0:
                 coeff_cos_dn = self._init_coeffs(
-                    n_det, n_down, basis,
+                    n_det, n_down, basis, det_jitter=det_jitter,
                 )
                 coeff_sin_dn = self._init_coeffs(
                     n_det, n_down, basis, take_sin=True,
+                    det_jitter=det_jitter,
                 )
                 self.coeff_cos_dn = nnx.Param(coeff_cos_dn)
                 self.coeff_sin_dn = nnx.Param(coeff_sin_dn)
         else:
             if n_down > 0:
                 coeff_cos_dn = self._init_coeffs(
-                    n_det, n_down, basis,
+                    n_det, n_down, basis, det_jitter=det_jitter,
                 )
                 coeff_sin_dn = self._init_coeffs(
                     n_det, n_down, basis, take_sin=True,
+                    det_jitter=det_jitter,
                 )
                 self.coeff_cos_dn = nnx.Param(coeff_cos_dn)
                 self.coeff_sin_dn = nnx.Param(coeff_sin_dn)
@@ -248,23 +255,41 @@ class PlaneWaveEnvelope(nnx.Module):
     @staticmethod
     def _init_coeffs(
         n_det: int, n_orb: int, basis: RealPWBasis,
-        *, take_sin: bool = False, jitter: float = 0.0,
+        *, take_sin: bool = False,
+        jitter: float = 0.0,
+        det_jitter: float = 0.0,
     ) -> jax.Array:
         """Initialise coefficients to free-electron basis functions.
 
         Places a 1 at the entry corresponding to each orbital's
-        natural plane wave (cos or sin) and zeros elsewhere.  The
-        initial ansatz is therefore *exactly* the non-interacting
-        Fermi sea for all determinants.  Per-determinant symmetry
-        breaking in multi-det runs is delegated to the caller via
-        *jitter*; at the default ``jitter=0`` the initial
-        wavefunction is guaranteed to be the free-electron Slater
-        determinant so the Hartree–Fock energy can be verified
-        exactly.
+        natural plane wave (cos or sin) and zeros elsewhere.  Det
+        0 is the exact free-electron (Fermi sea) Slater determinant
+        — so the non-interacting energy is reproducible.
 
         For orbital ``i`` with ``basis_is_sin[i] == 0``: the cos
         tensor gets a 1 at column ``basis_idx[i]`` and the sin
         tensor stays zero.  Inverted for ``basis_is_sin[i] == 1``.
+
+        Args:
+            n_det: Number of determinants.
+            n_orb: Number of occupied orbitals per determinant.
+            basis: Precomputed real-PW basis.
+            take_sin: Selects the sin channel of coefficient
+                storage (otherwise cos).
+            jitter: Global Gaussian noise applied to *all*
+                determinants, including det 0.  Default 0; mostly
+                useful for numerical-robustness tests.
+            det_jitter: Gaussian noise applied *only* to
+                determinants ``d ≥ 1``.  Det 0 stays at exact HF.
+                Breaks the multi-det symmetry — without this (and
+                without the jitter path below), all dets are
+                identical at init, move in lockstep, and are
+                equivalent to ``n_det = 1``.  A value of ``~0.02``
+                is enough to seed distinct trajectories;
+                larger values drive the higher dets further from
+                the Fermi sea.  Random state is seeded by
+                ``take_sin`` so cos and sin channels get
+                independent noise.
         """
         n_pw = basis.kvecs.shape[0]
         coeff = np.zeros((n_det, n_orb, n_pw), dtype=np.float64)
@@ -275,9 +300,26 @@ class PlaneWaveEnvelope(nnx.Module):
                 coeff[:, i, idx[i]] = 1.0
             elif (not take_sin) and is_sin[i] == 0:
                 coeff[:, i, idx[i]] = 1.0
+        # Per-determinant symmetry breaking.  Det 0 is preserved as
+        # the exact Fermi-sea reference; dets d≥1 get a Gaussian
+        # perturbation of size ``det_jitter``.  When ``n_pw > n_orb``
+        # (i.e. the basis includes virtual PWs above the Fermi
+        # shell) this perturbation mixes occupied with virtual
+        # orbitals — a particle-hole-like excitation.  When
+        # ``n_pw == n_orb`` it only rotates within the occupied
+        # subspace, which is equivalent to HF up to a constant
+        # and relies on downstream backflow/Jastrow to carry the
+        # diversity; in that case set a larger ``init_pw_count``
+        # in :class:`PlaneWaveEnvelope` so this jitter has virtual
+        # room to excite into.
+        if det_jitter > 0.0 and n_det > 1:
+            rng = np.random.default_rng(17 + int(take_sin))
+            coeff[1:] += det_jitter * rng.normal(
+                size=(n_det - 1, n_orb, n_pw),
+            )
         if jitter > 0.0:
             coeff += jitter * np.random.default_rng(
-                17 + int(take_sin),
+                23 + int(take_sin),
             ).normal(size=coeff.shape)
         return jnp.asarray(coeff, dtype=jnp.float64)
 
@@ -364,6 +406,207 @@ class PlaneWaveEnvelope(nnx.Module):
         # Padded matrices that align rows and columns.
         # orb_up_padded: (n_det, n_elec, n_up) — up electrons active,
         #                down rows are zero (unused after col-split).
+        orb_up_padded = jnp.zeros(
+            (n_det, n_elec, n_up), dtype=orb_up.dtype,
+        )
+        orb_up_padded = orb_up_padded.at[:, :n_up, :].set(orb_up)
+
+        orb_dn_padded = jnp.zeros(
+            (n_det, n_elec, n_dn), dtype=orb_up.dtype,
+        )
+        if n_dn > 0:
+            orb_dn_padded = orb_dn_padded.at[:, n_up:, :].set(orb_dn)
+
+        return jnp.concatenate(
+            [orb_up_padded, orb_dn_padded], axis=-1,
+        )
+
+
+# ---------------------------------------------------------------------
+# Complex plane-wave basis and envelope (for twist-averaged BC)
+# ---------------------------------------------------------------------
+
+class ComplexPWBasis(NamedTuple):
+    """Complex plane-wave basis at an arbitrary twist ``κ``.
+
+    Attributes:
+        kvecs: ``(n_orb, 3)`` Cartesian k-vectors
+            ``k_m = (n_m + κ) · 2π/L``.
+        k_sq: ``(n_orb,)`` squared magnitudes of ``kvecs``.
+        n_ints: ``(n_orb, 3)`` integer triples of the selected orbitals.
+        kappa: ``(3,)`` twist angle in fractional coordinates.
+    """
+
+    kvecs: jax.Array
+    k_sq: jax.Array
+    n_ints: jax.Array
+    kappa: jax.Array
+
+
+def enumerate_complex_pw_basis(
+    n_orb: int, L: float,
+    kappa=(0.0, 0.0, 0.0),
+) -> ComplexPWBasis:
+    """Enumerate the lowest-|k+κ|² complex plane waves on a cubic cell.
+
+    At κ = 0 the function reproduces the non-interacting Γ-point
+    Fermi-sea ordering: orbital 0 is k=0, then the six first-shell
+    vectors ``±e_x, ±e_y, ±e_z`` (any closed-shell fill of 7, 19,
+    27, … electrons per spin is returned correctly).  At κ ≠ 0 the
+    shell degeneracy is broken and each orbital has a unique
+    ``|k|²``.
+
+    Args:
+        n_orb: Number of k-vectors to return.
+        L: Cubic simulation-cell side length.
+        kappa: Twist angle (3,) in fractional coordinates
+            ``[-0.5, 0.5)``.
+
+    Returns:
+        :class:`ComplexPWBasis`.
+    """
+    if n_orb < 1:
+        raise ValueError(f"n_orb must be ≥ 1, got {n_orb}")
+    kappa = np.asarray(kappa, dtype=np.float64)
+    if kappa.shape != (3,):
+        raise ValueError(f"kappa must have shape (3,), got {kappa.shape}")
+
+    dk = 2.0 * np.pi / L
+    # Enumerate integer triples inside a generous shell.
+    # |n + κ|² grows ∝ (max |n|)², so take nmax ≈ (n_orb)^{1/3} + buffer.
+    nmax = int(np.ceil(n_orb ** (1.0 / 3.0))) + 4
+    rng = np.arange(-nmax, nmax + 1)
+    nx, ny, nz = np.meshgrid(rng, rng, rng, indexing='ij')
+    n_ints = np.stack([nx.ravel(), ny.ravel(), nz.ravel()], axis=1)
+    # Shifted magnitudes in units of (2π/L).
+    shifted = n_ints + kappa[None, :]
+    shifted_sq = np.sum(shifted ** 2, axis=-1)
+
+    # Stable sort: primary by |n+κ|², secondary by lexicographic n for
+    # reproducibility when the twist is exactly zero and many triples
+    # share |n|².
+    lex_key = (
+        n_ints[:, 0] * (2 * nmax + 1) ** 2
+        + n_ints[:, 1] * (2 * nmax + 1)
+        + n_ints[:, 2]
+    )
+    order = np.lexsort((lex_key, shifted_sq))
+    order = order[:n_orb]
+
+    selected_n = n_ints[order]
+    kvecs = (selected_n.astype(np.float64) + kappa[None, :]) * dk
+    k_sq = np.sum(kvecs ** 2, axis=-1)
+
+    return ComplexPWBasis(
+        kvecs=jnp.asarray(kvecs, dtype=jnp.float64),
+        k_sq=jnp.asarray(k_sq, dtype=jnp.float64),
+        n_ints=jnp.asarray(selected_n, dtype=jnp.int32),
+        kappa=jnp.asarray(kappa, dtype=jnp.float64),
+    )
+
+
+class ComplexPlaneWaveEnvelope(nnx.Module):
+    """Complex plane-wave envelope at an arbitrary twist ``κ``.
+
+    Each orbital is
+
+        φ_{d,i}(r) = Σ_m c_{d,i,m} · exp(i k_m · r)
+
+    with ``k_m = (n_m + κ) · 2π/L`` and complex coefficients
+    ``c_{d,i,m}`` initialised to the identity — orbital ``i`` of every
+    determinant is exactly the ``i``-th single-particle plane wave of
+    the twisted Fermi sea.  At κ = 0 the corresponding Slater
+    determinant is equivalent (up to an overall global phase) to that
+    of the real :class:`PlaneWaveEnvelope`, so the physical |ψ|² and
+    all observables match to floating-point precision.
+
+    Output shape: ``(n_det, n_elec, n_up + n_down)`` complex, matching
+    the layout consumed by :class:`~.wf.NeuralNetworkWaveFunction`
+    with ``full_determinant=False``.
+
+    Args:
+        n_up: Number of spin-up electrons.
+        n_down: Number of spin-down electrons.
+        n_det: Number of determinants.
+        L: Cubic simulation-cell side length.
+        kappa: Twist ``(3,)`` in fractional coords ``[-0.5, 0.5)``.
+            Default ``(0, 0, 0)`` (Γ point).
+    """
+
+    def __init__(
+        self,
+        n_up: int,
+        n_down: int,
+        n_det: int,
+        L: float,
+        *,
+        kappa=(0.0, 0.0, 0.0),
+    ):
+        self.n_up = n_up
+        self.n_down = n_down
+        self.n_det = n_det
+        self.L = float(L)
+
+        n_pw = max(n_up, n_down, 1)
+        basis = enumerate_complex_pw_basis(n_pw, L, kappa=kappa)
+        self.n_pw = int(basis.kvecs.shape[0])
+        self.kvecs = nnx.data(basis.kvecs)
+        self.k_sq = nnx.data(basis.k_sq)
+        self.kappa_vec = nnx.data(basis.kappa)
+        self._has_down = n_down > 0
+
+        # Identity-init complex coefficients.
+        coeff_up_init = np.zeros(
+            (n_det, n_up, self.n_pw), dtype=np.complex128,
+        )
+        for i in range(n_up):
+            coeff_up_init[:, i, i] = 1.0 + 0.0j
+        self.coeff_up = nnx.Param(jnp.asarray(coeff_up_init))
+
+        if n_down > 0:
+            coeff_dn_init = np.zeros(
+                (n_det, n_down, self.n_pw), dtype=np.complex128,
+            )
+            for i in range(n_down):
+                coeff_dn_init[:, i, i] = 1.0 + 0.0j
+            self.coeff_dn = nnx.Param(jnp.asarray(coeff_dn_init))
+
+    def __call__(self, phys_conf, nuc_params=None):
+        """Evaluate the complex envelope at ``phys_conf.r``.
+
+        Returns a complex ``(n_det, n_elec, n_up + n_down)`` tensor;
+        the first ``n_up`` columns are the up-spin orbital basis and
+        the remaining columns are the down-spin basis.
+        """
+        del nuc_params
+        r = phys_conf.r  # (n_elec, 3), real
+
+        # k·r for every walker electron and every k-vector.
+        kr = r @ self.kvecs.T  # (n_elec, n_pw) real
+        exp_ikr = jnp.exp(1j * kr)  # (n_elec, n_pw) complex
+
+        # Up-spin orbitals: only evaluate on the up electrons.
+        exp_up = exp_ikr[:self.n_up]  # (n_up, n_pw)
+        orb_up = jnp.einsum(
+            'dim,em->dei',
+            param_value(self.coeff_up), exp_up,
+        )  # (n_det, n_up, n_up)
+
+        if self._has_down:
+            exp_dn = exp_ikr[self.n_up:]  # (n_dn, n_pw)
+            orb_dn = jnp.einsum(
+                'dim,em->dei',
+                param_value(self.coeff_dn), exp_dn,
+            )  # (n_det, n_dn, n_dn)
+        else:
+            orb_dn = jnp.zeros(
+                (self.n_det, 0, self.n_up), dtype=orb_up.dtype,
+            )
+
+        # Pad into the ``(n_det, n_elec, n_up + n_down)`` layout.
+        n_det, n_up, n_dn = self.n_det, self.n_up, self.n_down
+        n_elec = n_up + n_dn
+
         orb_up_padded = jnp.zeros(
             (n_det, n_elec, n_up), dtype=orb_up.dtype,
         )

@@ -91,8 +91,16 @@ def build_ewald_tables(
 
     Args:
         L: Cubic simulation-cell side length.
-        eta: Ewald splitting parameter.  Default ``√π / L`` gives
-            balanced real/reciprocal convergence.
+        eta: Ewald splitting parameter ``η`` such that
+            ``γ = η² = (2.8 / V^{1/3})²`` by default — the CASINO /
+            FermiNet recommendation (Cassella et al. 2022 §B.1,
+            CASINO manual, FermiNet ``pbc/hamiltonian.py``).  This
+            is ~1.58× the previous ``√π / L`` default, giving a
+            narrower real-space Gaussian and faster real-space
+            convergence.  With the asymmetric default cutoffs
+            ``(n_real=3, n_recip=6)`` both sums are well converged
+            at N=14, rs=2–10.  Passing ``eta`` explicitly overrides
+            this default.
         n_real: Real-space cutoff in lattice-vector units
             (shells with ``|n_i| ≤ n_real`` are summed).
         n_recip: Reciprocal-space cutoff in integer-G units.
@@ -101,7 +109,9 @@ def build_ewald_tables(
         :class:`EwaldTables`.
     """
     if eta is None:
-        eta = np.sqrt(np.pi) / L
+        # CASINO / FermiNet γ = (2.8 / V^{1/3})² → η = 2.8 / V^{1/3}.
+        # For a cubic cell V^{1/3} = L exactly.
+        eta = 2.8 / L
     volume = L ** 3
 
     R_vecs = _cubic_lattice_vectors(L, n_real, include_origin=False)
@@ -158,13 +168,21 @@ def ewald_pair_potential(
     shifted = diff[..., None, :] + tables.R_vecs  # (..., N_real, 3)
     r = jnp.sqrt(jnp.sum(shifted ** 2, axis=-1) + 1e-300)
     real_sum = jnp.sum(erfc(eta * r) / r, axis=-1)
-    # Origin image (R=0) — handled separately to avoid division by
-    # zero when two electrons coincide under MCMC proposal jitter.
-    r0 = jnp.sqrt(jnp.sum(diff ** 2, axis=-1))
-    real_origin = jnp.where(
-        r0 > 0.0, erfc(eta * r0) / jnp.where(r0 > 0, r0, 1.0),
-        0.0,
-    )
+    # Origin image (R=0).  Apply the same machine-eps floor that
+    # :func:`~OmegaQMC.psi.nn.heg_psiformer._pair_distances_mi_full`
+    # uses for the Kato cusp.  This keeps the 1/r regularization
+    # *consistent* between the Coulomb potential and the cusp's
+    # Laplacian so they cancel at coincidence — the Kato
+    # cancellation that makes the local energy finite.
+    # Previously ``r0`` had no eps floor and the coincidence term
+    # was masked to 0 via ``jnp.where(r0>0, ...)``, while the
+    # cusp still saw a regularized ``sqrt(eps)`` distance.  That
+    # mismatch produced a spurious ~−1/√eps kinetic contribution
+    # at near-coincident walkers and showed up as ``⟨E⟩ < E_DMC``
+    # (variationally invalid) whenever the cusp was enabled.
+    eps = jnp.finfo(diff.dtype).eps
+    r0 = jnp.sqrt(jnp.sum(diff ** 2, axis=-1) + eps)
+    real_origin = erfc(eta * r0) / r0
     real = real_sum + real_origin
 
     # Reciprocal-space contribution.

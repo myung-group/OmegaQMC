@@ -71,6 +71,11 @@ venv.bak/
 *.swo
 *~
 
+# Local run outputs / Claude working dir / large references
+.claude/
+references/
+runs_auto/
+
 # macOS
 .DS_Store
 

@@ -143,30 +143,40 @@ def periodic_sincos_features(
     )
 
 
+_INV_FOUR_PI_SQ = 1.0 / (4.0 * jnp.pi * jnp.pi)
+_INV_TWO_PI = 1.0 / (2.0 * jnp.pi)
+
+
 def periodic_norm_sq(
     diff: jax.Array, lattice: PeriodicLattice,
 ) -> jax.Array:
-    """Squared periodic norm on the torus.
+    """Squared smooth periodic norm in **Bohr² units**.
 
-    Implements the Cassella–Sutterud formula
+    Implements the Cassella–Sutterud formula with the 1/(2π)²
+    normalisation used by FermiNet (pbc/feature_layer.py) — i.e.
+    the output is in Bohr², matching Euclidean distances at
+    short range rather than ``(2π)² |r|²``.  This lets the Kato
+    cusp coefficients (which are defined in Bohr units) be used
+    directly with the smooth norm, without the ``2π`` rescale
+    that previously forced us to fall back to the minimum-image
+    Euclidean distance for the cusp.
 
     .. math::
 
-        \\|s\\|_p^2 = \\sum_{ij} \\left[
+        \\|s\\|_p^2 = \\frac{1}{(2\\pi)^2} \\sum_{ij} \\left[
             (1-\\cos 2\\pi s_i) S_{ij} (1-\\cos 2\\pi s_j)
           + \\sin(2\\pi s_i) S_{ij} \\sin(2\\pi s_j) \\right]
 
-    with metric tensor ``S_{ij} = a_i · a_j``.  The expression is
-    smooth on the torus (no minimum-image kink) and reduces to
-    ``(2π)² |diff|²`` as ``diff → 0``, preserving the short-range
-    structure needed for electron-electron cusps.
+    with metric tensor ``S_{ij} = a_i · a_j``.  Smooth on the
+    torus (no minimum-image kink) and reduces to ``|diff|²``
+    (Bohr²) as ``diff → 0``.
 
     Args:
         diff: ``(..., 3)`` Cartesian differences.
         lattice: :class:`PeriodicLattice`.
 
     Returns:
-        ``(...,)`` array of squared periodic norms.
+        ``(...,)`` array of squared periodic norms in Bohr².
     """
     s = fractional_coords(diff, lattice)
     two_pi_s = 2.0 * jnp.pi * s
@@ -180,13 +190,20 @@ def periodic_norm_sq(
     )
     # sin^T S sin
     t2 = jnp.einsum('...i,ij,...j->...', sin_s, S, sin_s)
-    return t1 + t2
+    return _INV_FOUR_PI_SQ * (t1 + t2)
 
 
 def periodic_norm(
     diff: jax.Array, lattice: PeriodicLattice, *, safe: bool = True,
 ) -> jax.Array:
-    """Smooth periodic norm ``sqrt(periodic_norm_sq)``.
+    """Smooth periodic norm in **Bohr units**, matching FermiNet.
+
+    Equal to ``sqrt(periodic_norm_sq)``; short-range behaviour is
+    ``|diff|`` (Bohr), *not* the ``2π |diff|`` of the un-normalised
+    Cassella formula.  The Bohr-unit convention lets the Kato cusp
+    (which assumes Bohr-scaled ``r``) consume this distance
+    directly, removing the need for a separate minimum-image
+    Euclidean helper for the cusp.
 
     Args:
         diff: ``(..., 3)`` Cartesian differences.

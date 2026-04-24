@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from .psi.nn.heg_wf import HEGConfig, make_heg_log_psi
+from .psi.nn.heg_wf import HEGConfig, make_heg_log_psi_any as make_heg_log_psi
 from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy
@@ -62,6 +62,7 @@ class _HEGAdamOptimizer:
         init_key,
         *,
         lr: float = 1e-3,
+        var_weight: float = 0.0,
         ewald_n_real: int = 3,
         ewald_n_recip: int = 6,
         ewald_eta: Optional[float] = None,
@@ -73,6 +74,7 @@ class _HEGAdamOptimizer:
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
         self.lr = lr
+        self.var_weight = float(var_weight)
         self.ofname_chkpt = ofname_chkpt
 
         self.lattice = make_cubic_lattice(self.L)
@@ -92,17 +94,24 @@ class _HEGAdamOptimizer:
         lattice = self.lattice
         nelec = self.nelec
 
-        @jax.jit
-        def local_energy(r, params):
+        # The Ewald reciprocal-sum at (n_real=3, n_recip=6) has 2196
+        # G-vectors.  Under ``jax.vmap`` over walkers, XLA's fusion
+        # heuristic on the first-ever compile in a Python process
+        # takes ~130 s.  A direct batched call (no vmap — the
+        # function broadcasts over leading dims natively) compiles
+        # in ~0.6 s.  We therefore compute kinetic *per-walker with
+        # vmap* and potential *in one batched call*, then add.
+        def kin_only(r, params):
             def f_flat(r_flat):
                 return log_psi(r_flat.reshape(nelec, 3), params)
             lap_fn = laplacian(f_flat)
             lap_val, grad_val = lap_fn(r.reshape(-1))
-            kin = -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
-            pot = ewald_pair_energy(r, tables)
-            return kin + pot
+            return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
-        @jax.jit
+        def local_energy(r, params):
+            """Per-walker local energy (kept for external callers)."""
+            return kin_only(r, params) + ewald_pair_energy(r, tables)
+
         def metropolis_move(rng_key, r, step_size, params):
             key_prop, key_acc = jax.random.split(rng_key)
             proposed = r + step_size * jax.random.normal(
@@ -117,48 +126,93 @@ class _HEGAdamOptimizer:
             new = jnp.where(accept, proposed, r)
             return new, accept
 
-        self._metropolis_move_allw = jax.vmap(
+        self._metropolis_move_allw = jax.jit(jax.vmap(
             metropolis_move, in_axes=(0, 0, None, None),
-        )
+        ))
         self.local_energy = local_energy
 
-        # Gradient of <E> via the standard VMC identity.  For
-        # params p and sampled walkers r_k ~ |ψ|²,
-        #   ∂<E>/∂p = 2 ⟨(E_L(r) - ⟨E_L⟩) · ∂ log|ψ|/∂p⟩
-        # which is an unbiased estimator of the analytic gradient.
+        # Gradient of the *mixed* VMC objective
+        #
+        #   L(θ) = ⟨E⟩(θ)  +  β · Var(E_L)(θ)
+        #
+        # via the standard reweighting identities.  At β=0 this is
+        # the plain energy gradient (bit-identical to the previous
+        # implementation); at β>0 it adds an Umrigar-style variance
+        # penalty.
+        #
+        # Derivation.  Applying the VMC identity
+        #   ∇_θ ⟨f(r)⟩_{|ψ|²} = ⟨∂f/∂θ⟩ + 2 ⟨(f − ⟨f⟩) · O⟩
+        # where O = ∇ log|ψ|, and dropping the direct ∂E_L/∂θ term
+        # (requires an expensive second derivative and is small when
+        # E_L is close to a local eigenvalue):
+        #   ∇⟨E⟩  ≈ 2 ⟨(E − ⟨E⟩) · O⟩
+        #   ∇Var ≈ 2 ⟨((E − ⟨E⟩)² − Var) · O⟩
+        #        ≡ 2 ⟨(δE² − ⟨δE²⟩) · O⟩
+        # so
+        #   ∇L ≈ 2 ⟨ [δE + β·(δE² − ⟨δE²⟩)] · O ⟩
+        # The bracket is computed once per walker and used as a
+        # single weight in a per-leaf reweighted-average.
+        #
+        # Pipeline split into four small JITs to avoid the XLA
+        # fusion bomb that fires if ``vmap(ewald_pair_energy)`` is
+        # compiled anywhere (130 s cold-compile vs 0.6 s for the
+        # un-vmapped direct batched call).
         log_psi_grad = jax.grad(log_psi, argnums=1)
 
-        @jax.jit
-        def e_loc_batch(walkers, params):
-            return jax.vmap(local_energy, in_axes=(0, None))(
-                walkers, params,
-            )
+        _kin_batch = jax.jit(jax.vmap(kin_only, in_axes=(0, None)))
+        _grads_batch = jax.jit(
+            jax.vmap(log_psi_grad, in_axes=(0, None)),
+        )
+
+        # Chunk the Ewald pot to avoid a ~130 s cold-compile.  At
+        # (n_real=3, n_recip=6) XLA's fusion heuristic on a full
+        # 128-walker batch takes ~130 s, while a 32-walker chunk
+        # compiles in ~3 s and is reused across all chunks.
+        _pot_chunk_size = 32
+        _pot_chunk = jax.jit(lambda w: ewald_pair_energy(w, tables))
+
+        def _pot_batch(w):
+            n = w.shape[0]
+            if n <= _pot_chunk_size:
+                return _pot_chunk(w)
+            return jnp.concatenate([
+                _pot_chunk(w[k:k + _pot_chunk_size])
+                for k in range(0, n, _pot_chunk_size)
+            ], axis=0)
 
         @jax.jit
-        def vmc_grad(walkers, params):
-            e_loc = e_loc_batch(walkers, params)
+        def _combine(e_loc, o_grads, var_weight_scalar):
             e_mean = jnp.mean(e_loc)
             de = e_loc - e_mean
+            var = jnp.mean(de ** 2)
 
-            def single_grad(r):
-                return log_psi_grad(r, params)
-            # per-walker ∂log|ψ|/∂p pytree with leading walker axis.
-            o_grads = jax.vmap(single_grad)(walkers)
+            # Per-walker weight for the mixed gradient.  At β = 0
+            # this collapses to ``de`` so the pure-energy path is
+            # recovered exactly.
+            w_per_walker = de + var_weight_scalar * (de ** 2 - var)
 
-            # Weighted mean: <(E_L - <E>) · O> over walkers, then × 2.
             def weighted_mean(g):
-                # g shape: (n_walkers, *param_shape)
-                axes_reduce = tuple(range(1, g.ndim))
-                # multiply de along walker axis; broadcast as needed.
-                de_expand = de.reshape(
+                w_expand = w_per_walker.reshape(
                     (-1,) + (1,) * (g.ndim - 1),
                 )
-                return jnp.mean(2.0 * de_expand * g, axis=0)
+                return jnp.mean(2.0 * w_expand * g, axis=0)
 
             g_pytree = jax.tree_util.tree_map(
                 weighted_mean, o_grads,
             )
-            return g_pytree, e_mean, jnp.var(e_loc)
+            return g_pytree, e_mean, var
+
+        # Pass var_weight as a traced scalar so one JIT compilation
+        # handles all values (including 0.0 which recovers the
+        # pure-energy gradient).
+        var_weight_arr = jnp.asarray(self.var_weight, dtype=jnp.float64)
+
+        def vmc_grad(walkers, params):
+            e_kin = _kin_batch(walkers, params)
+            e_pot = _pot_batch(walkers)
+            e_loc = e_kin + e_pot
+            o_grads = _grads_batch(walkers, params)
+            return _combine(e_loc, o_grads, var_weight_arr)
 
         self._vmc_grad = vmc_grad
 
@@ -228,11 +282,17 @@ class _HEGAdamOptimizer:
             step_size = _adapt_step_size(step_size, float(jnp.mean(acc)))
 
         if verbose >= 1:
-            print(
+            header = (
                 "# iter       <E>/N            var(E)          "
-                "|g|             step          dt",
-                file=fout,
+                "|g|             step          dt"
             )
+            if self.var_weight > 0.0:
+                header = (
+                    f"# iter       <E>/N            var(E)"
+                    f"         L/N (β={self.var_weight:.3g})     "
+                    f"|g|             step          dt"
+                )
+            print(header, file=fout)
         e_history = []
         timestamp_prev = datetime.now()
 
@@ -263,14 +323,30 @@ class _HEGAdamOptimizer:
             timestamp_prev = now
             e_history.append(float(e_mean) / self.nelec)
             if verbose >= 1 and (it <= 10 or it % 10 == 0):
-                print(
-                    f"{it:>6d}  {float(e_mean)/self.nelec:>14.8e}  "
-                    f"{float(e_var):>12.4e}  "
-                    f"{float(g_norm):>12.4e}  "
-                    f"{float(step_size):>10.4f}  "
-                    f"{dt:>8.3f}",
-                    file=fout,
-                )
+                e_per = float(e_mean) / self.nelec
+                if self.var_weight > 0.0:
+                    loss_per = (
+                        e_per + self.var_weight * float(e_var)
+                        / self.nelec
+                    )
+                    print(
+                        f"{it:>6d}  {e_per:>14.8e}  "
+                        f"{float(e_var):>12.4e}  "
+                        f"{loss_per:>14.8e}  "
+                        f"{float(g_norm):>12.4e}  "
+                        f"{float(step_size):>10.4f}  "
+                        f"{dt:>8.3f}",
+                        file=fout,
+                    )
+                else:
+                    print(
+                        f"{it:>6d}  {e_per:>14.8e}  "
+                        f"{float(e_var):>12.4e}  "
+                        f"{float(g_norm):>12.4e}  "
+                        f"{float(step_size):>10.4f}  "
+                        f"{dt:>8.3f}",
+                        file=fout,
+                    )
 
         if not (fname_log is None
                 or (isinstance(fname_log, str) and fname_log == "")):
@@ -291,6 +367,7 @@ def get_vmcopt_nn_heg_func(
     *,
     prefix: str = "heg_vmcopt",
     lr: float = 1e-3,
+    var_weight: float = 0.0,
     ewald_n_real: int = 3,
     ewald_n_recip: int = 6,
     ewald_eta: Optional[float] = None,
@@ -302,6 +379,15 @@ def get_vmcopt_nn_heg_func(
         init_key: JAX PRNG key.
         prefix: Checkpoint stem.
         lr: Adam learning rate.
+        var_weight: Weight β of the Umrigar-style variance term in
+            the mixed objective ``L = ⟨E⟩ + β · Var(E_L)``.  Default
+            0.0 (pure energy, bit-identical to earlier runs).
+            Typical values: 0.01-0.1 for stabilisation.  The exact
+            eigenstate has both ``⟨E⟩ → E_0`` and ``Var(E_L) → 0``,
+            so adding the variance term does not shift the true
+            minimum — it reshapes the loss landscape to favour
+            solutions that are simultaneously low-energy and
+            low-variance, which usually converges faster.
         ewald_n_real, ewald_n_recip, ewald_eta: Ewald tuning.
 
     Returns:
@@ -313,6 +399,7 @@ def get_vmcopt_nn_heg_func(
     return _HEGAdamOptimizer(
         config, init_key,
         lr=lr,
+        var_weight=var_weight,
         ewald_n_real=ewald_n_real,
         ewald_n_recip=ewald_n_recip,
         ewald_eta=ewald_eta,
