@@ -1,6 +1,7 @@
 import os
 import sys
 import warnings
+from collections.abc import Callable
 import h5py
 import numpy as np
 from pyscf import __config__, gto
@@ -750,3 +751,37 @@ def _autotune_prod_walkers(prod_batch, nelec, free_mb, mem_frac=0.75):
     free_bytes = (free_mb or 4096.0) * 1e6 * mem_frac
     n_rec = int(free_bytes / bytes_per_walker)
     return max(10, n_rec), bytes_per_walker
+
+
+def laplacian_linearize(
+    f: Callable[[jax.Array], jax.Array],
+) -> Callable[
+    [jax.Array], tuple[jax.Array, jax.Array]
+]:
+    """O(N) Laplacian via ``jax.linearize`` + ``fori_loop``.
+
+    Given a scalar function *f* of a flat coordinate vector,
+    returns a function that computes ``(nabla^2 f, grad f)``.
+
+    This is more efficient than the full Hessian approach
+    ``jax.hessian`` which scales as O(N^2).
+
+    Args:
+        f: Scalar function of a 1-D coordinate array.
+
+    Returns:
+        Function ``(x) -> (laplacian, gradient)``.
+    """
+    def lap(x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        n_coord = len(x)
+        grad_f = jax.grad(f)
+        df, grad_f_jvp = jax.linearize(grad_f, x)
+        eye = jnp.eye(n_coord)
+        d2f = (
+            lambda i, val: val + grad_f_jvp(eye[i])[i]
+        )
+        d2f_sum = jax.lax.fori_loop(
+            0, n_coord, d2f, 0.0,
+        )
+        return d2f_sum, df
+    return lap
