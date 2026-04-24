@@ -171,7 +171,19 @@ def _run(cfg, project, run_dir, prefix):
     rs = float(_get(cfg, 'system.rs', 2.0))
     N = int(_get(cfg, 'system.N', 14))
     polarization = _get(cfg, 'system.polarization', 'unpolarized')
-    seed = int(_get(cfg, 'seed', 42))
+
+    # --- Seed ---
+    # Omitted, null, or 'random' → draw one from OS entropy so repeat
+    # runs aren't bit-identical.  The chosen seed is printed and
+    # persisted to summary.json so any run can still be reproduced.
+    raw_seed = _get(cfg, 'seed', None)
+    if raw_seed is None or (isinstance(raw_seed, str)
+                            and raw_seed.lower() == 'random'):
+        seed = int.from_bytes(os.urandom(4), 'little')
+        seed_auto = True
+    else:
+        seed = int(raw_seed)
+        seed_auto = False
 
     sys_info = build_3deg_system(
         rs, N_elec=N, N_pw=N // 2, polarization=polarization,
@@ -186,6 +198,8 @@ def _run(cfg, project, run_dir, prefix):
     print(f"  Cell L={L:.4f} Bohr   V={sys_info['volume']:.4f} Bohr³")
     print(f"  n_up={n_up}  n_down={n_down}")
     print(f"  Run dir: {run_dir}")
+    print(f"  Seed:    {seed}"
+          f"{'  (auto: os.urandom)' if seed_auto else ''}")
     print("=" * 70)
 
     # --- Reference energies ---
@@ -365,6 +379,8 @@ def _run(cfg, project, run_dir, prefix):
 
     summary = {
         'project': project,
+        'seed': int(seed),
+        'seed_auto': bool(seed_auto),
         'system': {'rs': rs, 'N': N, 'polarization': polarization,
                    'L': float(L), 'n_up': int(n_up),
                    'n_down': int(n_down)},

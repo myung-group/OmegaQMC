@@ -75,4 +75,7 @@ ewald:
   n_real: 3                            # real-space lattice cutoff (shells)
   n_recip: 6                           # reciprocal cutoff (integer G units)
 
-seed: 1231
+# Seed: omit (or set to null / 'random') to draw a fresh OS-random
+# seed each run.  The chosen seed is printed and saved to summary.json
+# so any run can be reproduced by pasting its seed back in here.
+# seed: 1231
