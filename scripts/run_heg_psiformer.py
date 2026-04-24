@@ -254,6 +254,7 @@ def _run(cfg, project, run_dir, prefix):
                   f"lr={pre_lr}")
             pretrain_result = pretrain_heg_psiformer(
                 config, init_key,
+                mcmc_key=pretrain_key,
                 num_iters=pretrain_iters,
                 num_walkers=pre_walkers,
                 lr=pre_lr, verbose=1,

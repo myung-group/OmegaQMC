@@ -375,6 +375,7 @@ def pretrain_heg_psiformer(
     config: HEGPsiFormerConfig,
     init_key,
     *,
+    mcmc_key=None,
     num_iters: int = 500,
     num_walkers: int = 256,
     lr: float = 1e-3,
@@ -390,7 +391,14 @@ def pretrain_heg_psiformer(
 
     Args:
         config: :class:`HEGPsiFormerConfig`.
-        init_key: JAX PRNG key for the network init.
+        init_key: JAX PRNG key for the network parameter init.
+        mcmc_key: JAX PRNG key for the pretraining MCMC chain.
+            Defaults to a deterministic split from ``init_key`` so
+            the pretraining stage is fully seeded by the caller's
+            seed — with both keys derived from the user's YAML
+            ``seed:``, changing the seed changes every random
+            quantity in the pretraining stage (NN params and MCMC
+            walker trajectories).
         num_iters: Adam iterations on the MSE loss.
         num_walkers: MCMC walkers (sampled from |ψ_HF|²).
         lr: Adam learning rate.
@@ -403,9 +411,11 @@ def pretrain_heg_psiformer(
         Dict with ``'params'`` (trained pytree), ``'loss_history'``,
         ``'final_loss'``, ``'graphdef'``.
     """
+    if mcmc_key is None:
+        init_key, mcmc_key = jax.random.split(init_key)
     drv = _HEGPreTrainDriver(config, init_key, lr=lr)
     return drv(
-        jax.random.key(0),  # deterministic MCMC seed
+        mcmc_key,
         num_iters=num_iters,
         num_walkers=num_walkers,
         num_equil_steps=num_equil_steps,
