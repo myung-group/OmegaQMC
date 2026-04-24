@@ -1,0 +1,78 @@
+# -------------------------------------------------------------------
+# HEG PsiFormer input file (template)
+#
+# Usage:
+#     python scripts/run_heg_psiformer.py input_heg.yaml
+#
+# Creates runs/<project>/ containing:
+#     config.yaml     — snapshot of this file
+#     train.log       — full stdout (pretrain + opt + eval traces)
+#     <project>.chk.h5 — trained wavefunction parameters
+#     summary.json    — key energies and correlation percentages
+# -------------------------------------------------------------------
+
+project: phase_C                       # -> runs/phase_C/
+
+system:
+  rs: 2.0                              # Wigner-Seitz radius (Bohr)
+  N: 14                                # electron count (closed shell: 14, 38, 54)
+  polarization: unpolarized            # or 'polarized'
+
+ansatz:
+  type: psiformer                      # or 'slater_jastrow'
+  # --- PsiFormer architecture ---
+  embedding_dim: 64                    # one-particle embedding dim
+  layers: 2                            # attention/GNN layers
+  heads: 2                             # attention heads (must divide emb-dim)
+  two_particle_dim: 32                 # edge / two-particle stream dim
+  n_det: 16                            # number of determinants
+  full_determinant: false              # block-diagonal vs full n_elec×n_elec
+  # --- Correlation adds-ons ---
+  use_cusp: true                       # Kato e-e cusp (periodic, softplus α)
+  deep_jastrow: true                   # GNN-side scalar Jastrow head
+  pair_jastrow: false                  # extra explicit two-body Jastrow
+  jas_activation: tanh                 # tanh | ssp | silu | none
+  jas_bias: true
+  jas_zero_init_last: true             # Jastrow starts at 0 contribution
+  # --- Multi-det diversity ---
+  n_virt_pw: 12                        # virtual PWs beyond Fermi shell (N=14: 12 = next shell)
+  det_jitter: 0.02                     # Gaussian perturbation of dets d≥1 at init
+  use_ghost_atom: true                 # ghost-atom positional fingerprint (on is FermiNet default)
+
+pretrain:
+  iters: 200                           # 0 disables. ~200 usually enough for n_det=16
+  walkers: 512
+  lr: 3.0e-3
+
+optimize:
+  type: sr                             # 'sr' (natural gradient) or 'adam'
+  iters: 5000
+  walkers: 2048
+  lr: 0.05
+  var_weight: 0.01                     # β in L = ⟨E⟩ + β·Var(E). 0.0 = pure energy
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  # SR-only:
+  sr_damping: 1.0e-3
+  sr_n_cg: 30
+  skip: false                          # set true to only evaluate at init
+
+eval:
+  walkers: 2048
+  blocks: 60
+  equil_blocks: 20
+  steps_per_block: 30
+  # mc_timestep: 0.1                   # (inherits optimize.mc_timestep if omitted)
+
+# Twist-averaged boundary conditions — set n_twists > 0 to enable.
+twist:
+  n_twists: 0
+  walkers: 512
+  blocks: 40
+  equil_blocks: 15
+
+ewald:
+  n_real: 3                            # real-space lattice cutoff (shells)
+  n_recip: 6                           # reciprocal cutoff (integer G units)
+
+seed: 1231

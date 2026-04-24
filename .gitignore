@@ -74,6 +74,7 @@ venv.bak/
 # Local run outputs / Claude working dir / large references
 .claude/
 references/
+runs/
 runs_auto/
 
 # macOS
