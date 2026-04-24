@@ -189,10 +189,12 @@ def main():
     p.add_argument('base_yaml', type=Path,
                    help='Base input YAML (project + all settings)')
     p.add_argument('--rs', type=float, nargs='+',
-                   default=[0.5, 1.0, 2.0, 5.0],
+                   default=[0.5, 1.0, 2.0, 5.0, 10.0],
                    help='List of rs values to scan. '
-                        'Default: 0.5 1 2 5 (matches Cassella 2023 '
-                        'Table I). Example: --rs 1 2 5')
+                        'Default: 0.5 1 2 5 10.  rs ≤ 5 are tabulated '
+                        'in Cassella 2023 Table I; rs=10 has no '
+                        'FermiNet benchmark so its table row shows '
+                        '"—" for the reference columns.')
     p.add_argument('--generate-only', action='store_true',
                    help='Write per-rs YAMLs but do not run')
     p.add_argument('--collect', action='store_true',
