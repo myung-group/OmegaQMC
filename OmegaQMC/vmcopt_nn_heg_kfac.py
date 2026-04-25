@@ -41,9 +41,32 @@ Other features
   Kronecker factors.  Auto-fallback to single-device when only one
   GPU is visible.
 
-* **Adaptive Levenberg-Marquardt damping** — track average energy
-  trend over a look-back window and adjust ε by ×0.95 / ÷0.95.
-  Bounded by ``[damping_min, damping_max]``.
+* **Adaptive Levenberg-Marquardt damping** with two response
+  timescales:
+
+    1. *Slow trend mode* — every ``damping_lookback`` iters look
+       at the energy trend and adjust damping by ×0.95 (descent)
+       or ÷0.95 (ascent).  Symmetric so noise doesn't ramp damping
+       unboundedly.
+    2. *Fast panic mode* — every iter, compare ``‖step‖`` to its
+       running median.  If the current step is more than
+       ``damping_overshoot_threshold`` × the median (default 10×),
+       multiply damping by ``damping_overshoot_factor`` (default 2).
+       This catches geometric blowup within 1-2 iters and is the
+       safety net you want when ``fixed_scale=True``.
+
+  All damping values are bounded by ``[damping_min, damping_max]``.
+
+* **Optional FermiNet ``fixed_scale=n_e`` step convention** — the
+  per-electron factors ``A``, ``G`` use ``1/(W·n_e)`` normalisation
+  but ``dW_loss`` is per-walker-summed, so the textbook KFAC
+  derivation calls for an ``n_e`` multiplier on the natural-
+  gradient step.  Set ``fixed_scale=True`` to enable.  At our
+  default damping (0.1) this overshoots the trust region; reduce
+  ``lr`` by ~``n_e_typical`` (e.g. 0.1 → 0.005) and consider
+  setting ``norm_constraint`` for added safety.  The math is right
+  but stable training requires care — FermiNet's adaptive LM
+  damping schedule and 1e-4 norm-constraint give this for free.
 
 Algorithm
 ---------
@@ -595,10 +618,13 @@ class _HEGKFACOptimizer:
         damping_min: float = 1.0e-4,
         damping_max: float = 1.0e2,
         damping_lookback: int = 10,
+        damping_overshoot_threshold: float = 10.0,
+        damping_overshoot_factor: float = 2.0,
         ema_decay: float = 0.0,
         norm_constraint: Optional[float] = None,
         var_weight: float = 0.0,
         capture_activations: bool = False,
+        fixed_scale: bool = False,
         ewald_n_real: int = 3,
         ewald_n_recip: int = 6,
         ewald_eta: Optional[float] = None,
@@ -633,6 +659,11 @@ class _HEGKFACOptimizer:
         self.damping_min = float(damping_min)
         self.damping_max = float(damping_max)
         self.damping_lookback = int(damping_lookback)
+        self.damping_overshoot_threshold = float(
+            damping_overshoot_threshold
+        )
+        self.damping_overshoot_factor = float(damping_overshoot_factor)
+        self.fixed_scale = bool(fixed_scale)
         self.ema_decay = float(ema_decay)
         self.norm_constraint = (None if norm_constraint is None
                                 else float(norm_constraint))
@@ -775,6 +806,7 @@ class _HEGKFACOptimizer:
         norm_clip = (None if norm_constraint is None
                      else jnp.asarray(norm_constraint, dtype=jnp.float64))
         var_weight_arr = jnp.asarray(var_weight, dtype=jnp.float64)
+        fixed_scale = self.fixed_scale       # closure-captured
 
         pmean_axis = self._pmap_axis           # 'devices' or None
         # Per-walker grad must be vmap'd here so it works on the
@@ -837,18 +869,16 @@ class _HEGKFACOptimizer:
                         A = jax.lax.pmean(A, pmean_axis)
                         G = jax.lax.pmean(G, pmean_axis)
                         dW_loss = jax.lax.pmean(dW_loss, pmean_axis)
-                    # Note on FermiNet's ``fixed_scale = n_e``:
-                    # mathematically correct (since A, G are
-                    # ``1/(W·n_e)``-normalised but ``dW_loss`` is
-                    # per-walker-summed), but at our default damping
-                    # (0.1) the n_e×14 multiplier blows the step up.
-                    # FermiNet's adaptive LM damping handles this
-                    # automatically; our gentler ×0.95/÷0.95
-                    # heuristic doesn't.  Keep ``kernel_scale=1`` —
-                    # the natural-gradient *direction* matches
-                    # FermiNet exactly, the magnitude is absorbed
-                    # by lr.
-                    kernel_scale[layer] = 1.0
+                    # Optional FermiNet-style fixed-scale: A, G are
+                    # 1/(W·n_e)-normalised but dW_loss is per-walker
+                    # -summed, so multiplying the step by n_e matches
+                    # textbook KFAC magnitude.  Set ``kfac_fixed_scale``
+                    # in the YAML to enable; lr typically needs to
+                    # drop by ~n_e_typical (e.g. 0.1 → 0.005) to keep
+                    # the effective step in the trust region.
+                    kernel_scale[layer] = (
+                        float(n_e) if fixed_scale else 1.0
+                    )
                 else:
                     A, G, dW_loss = _extract_kron_factors(
                         pw_dW, de_eff, pmean_axis=pmean_axis,
@@ -1089,8 +1119,9 @@ class _HEGKFACOptimizer:
         var_history = []
         timestamp_prev = datetime.now()
         damping_now = self.damping
-        # Look-back window for adaptive damping.
+        # Look-back windows for adaptive damping.
         e_window: list = []
+        step_norm_window: list = []
 
         for it in range(1, num_iters + 1):
             # Decorrelate walkers under |ψ_θ|² with the current params.
@@ -1199,27 +1230,54 @@ class _HEGKFACOptimizer:
                     file=fout,
                 )
 
-            # Adaptive Levenberg-Marquardt damping (heuristic).
-            # Every `damping_lookback` iters, look at the energy
-            # trend over the last window:
-            #   avg trend > 0  → step is too aggressive → ε ← ε × 1.5
-            #   avg trend << 0 (descending) → ε ← ε × 0.95
-            #   else            → keep ε
-            # Bound by [damping_min, damping_max].
+            # Adaptive Levenberg-Marquardt damping (heuristic) —
+            # two response timescales:
+            #
+            # 1. Fast "panic mode" — every iter, check if ‖step‖ has
+            #    blown up beyond ``damping_overshoot_threshold`` ×
+            #    its running median.  If so, ramp damping by
+            #    ``damping_overshoot_factor`` (default 2×) immediately.
+            #    Catches geometric blowup within 1-2 iters; essential
+            #    when ``fixed_scale=True`` puts the step magnitude
+            #    near the trust-region boundary.
+            #
+            # 2. Slow trend mode — every ``damping_lookback`` iters,
+            #    look at the energy trend over the window.  If
+            #    energy went up: damping /= 0.95.  Down: damping *=
+            #    0.95.  Else keep.  Symmetric multiplier avoids
+            #    runaway damping when the LM signal is noisy.
+            #
+            # Bound by ``[damping_min, damping_max]``.
             if self.damping_adapt:
+                step_norm_val = float(step_norm)
+                step_norm_window.append(step_norm_val)
+                if len(step_norm_window) > self.damping_lookback:
+                    step_norm_window.pop(0)
+                # Panic mode: detect step-norm overshoot vs running
+                # median.  Need ≥ ``damping_lookback`` history entries
+                # before the comparison fires, to avoid spurious
+                # triggers from the natural variance of the step
+                # norm during early iterations.
+                if len(step_norm_window) >= self.damping_lookback:
+                    median_norm = float(np.median(step_norm_window[:-1]))
+                    if (median_norm > 0 and step_norm_val
+                            > self.damping_overshoot_threshold
+                            * median_norm):
+                        damping_now *= self.damping_overshoot_factor
+                        damping_now = float(np.clip(
+                            damping_now,
+                            self.damping_min, self.damping_max,
+                        ))
+
+                # Slow trend mode (every damping_lookback iters).
                 e_window.append(e_per)
                 if len(e_window) >= self.damping_lookback:
                     half = self.damping_lookback // 2
                     early = float(np.mean(e_window[:half]))
                     late = float(np.mean(e_window[-half:]))
                     trend = late - early
-                    # Use the running variance to set "noise floor" so
-                    # we don't react to MCMC noise.
                     noise = float(np.std(e_window) /
                                   np.sqrt(self.damping_lookback))
-                    # FermiNet/Martens schedule: symmetric ×1/0.95
-                    # for non-descent, ×0.95 for descent.  Avoids
-                    # runaway damping when the LM signal is noisy.
                     if trend > noise:
                         damping_now /= 0.95
                     elif trend < -noise:
@@ -1254,10 +1312,13 @@ def get_vmcopt_nn_heg_kfac_func(
     damping_min: float = 1.0e-4,
     damping_max: float = 1.0e2,
     damping_lookback: int = 10,
+    damping_overshoot_threshold: float = 10.0,
+    damping_overshoot_factor: float = 2.0,
     ema_decay: float = 0.0,
     norm_constraint: Optional[float] = None,
     var_weight: float = 0.0,
     capture_activations: bool = False,
+    fixed_scale: bool = False,
     ewald_n_real: int = 3,
     ewald_n_recip: int = 6,
     ewald_eta: Optional[float] = None,
@@ -1279,10 +1340,13 @@ def get_vmcopt_nn_heg_kfac_func(
         damping_min=damping_min,
         damping_max=damping_max,
         damping_lookback=damping_lookback,
+        damping_overshoot_threshold=damping_overshoot_threshold,
+        damping_overshoot_factor=damping_overshoot_factor,
         ema_decay=ema_decay,
         norm_constraint=norm_constraint,
         var_weight=var_weight,
         capture_activations=capture_activations,
+        fixed_scale=fixed_scale,
         ewald_n_real=ewald_n_real,
         ewald_n_recip=ewald_n_recip,
         ewald_eta=ewald_eta,

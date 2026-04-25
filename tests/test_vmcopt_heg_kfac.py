@@ -248,6 +248,55 @@ def test_eager_capture_records_layer_inputs():
         assert jnp.all(jnp.isfinite(arr))
 
 
+def test_overshoot_threshold_param_accepted():
+    """The new damping_overshoot_threshold and damping_overshoot_factor
+    constructor args plumb through and don't break smoke."""
+    cfg = HEGPsiFormerConfig(
+        n_up=7, n_down=7, L=7.77, n_det=2,
+        embedding_dim=16, n_interactions=1,
+        two_particle_stream_dim=8, n_attention_heads=2,
+        use_cusp=False, use_deep_jastrow=False,
+        use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
+    )
+    init_key = jax.random.key(0)
+    opt = _HEGKFACOptimizer(
+        cfg, init_key,
+        damping_overshoot_threshold=3.0,
+        damping_overshoot_factor=4.0,
+    )
+    assert opt.damping_overshoot_threshold == 3.0
+    assert opt.damping_overshoot_factor == 4.0
+    res = opt(jax.random.key(1), num_iters=8, num_walkers=32,
+              mcmc_decorr_steps=2, num_equil_steps=10, verbose=0)
+    assert np.all(np.isfinite(res['E_per_elec_history']))
+
+
+def test_fixed_scale_param_accepted():
+    """``fixed_scale=True`` plumbs through; we don't assert the run
+    converges (it requires careful lr/damping calibration), only
+    that it runs without raising."""
+    cfg = HEGPsiFormerConfig(
+        n_up=7, n_down=7, L=7.77, n_det=2,
+        embedding_dim=16, n_interactions=1,
+        two_particle_stream_dim=8, n_attention_heads=2,
+        use_cusp=False, use_deep_jastrow=False,
+        use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
+    )
+    init_key = jax.random.key(0)
+    opt = _HEGKFACOptimizer(
+        cfg, init_key,
+        capture_activations=True,
+        fixed_scale=True,
+        lr=1e-4,                # very small to avoid blowup
+        damping=1.0,            # large enough to stabilise
+    )
+    assert opt.fixed_scale is True
+    res = opt(jax.random.key(1), num_iters=5, num_walkers=16,
+              mcmc_decorr_steps=2, num_equil_steps=5, verbose=0)
+    # At small lr the run should not NaN.
+    assert np.all(np.isfinite(res['E_per_elec_history']))
+
+
 def test_kfac_with_multi_device_falls_back_when_one_gpu():
     """multi_device=True with n_devices == 1 falls back to single-
     device cleanly (no exception)."""
