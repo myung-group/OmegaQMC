@@ -837,11 +837,17 @@ class _HEGKFACOptimizer:
                         A = jax.lax.pmean(A, pmean_axis)
                         G = jax.lax.pmean(G, pmean_axis)
                         dW_loss = jax.lax.pmean(dW_loss, pmean_axis)
-                    # No ``n_e`` scale — our ``dW_loss`` is already
-                    # per-walker-summed (Σ_e g_we a_we^T), matching the
-                    # M^T M path's scale; FermiNet's ``fixed_scale=n_e``
-                    # exists because their loss is per-(walker,electron)
-                    # averaged, which we don't do.
+                    # Note on FermiNet's ``fixed_scale = n_e``:
+                    # mathematically correct (since A, G are
+                    # ``1/(W·n_e)``-normalised but ``dW_loss`` is
+                    # per-walker-summed), but at our default damping
+                    # (0.1) the n_e×14 multiplier blows the step up.
+                    # FermiNet's adaptive LM damping handles this
+                    # automatically; our gentler ×0.95/÷0.95
+                    # heuristic doesn't.  Keep ``kernel_scale=1`` —
+                    # the natural-gradient *direction* matches
+                    # FermiNet exactly, the magnitude is absorbed
+                    # by lr.
                     kernel_scale[layer] = 1.0
                 else:
                     A, G, dW_loss = _extract_kron_factors(
