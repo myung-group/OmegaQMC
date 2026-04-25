@@ -22,6 +22,8 @@ import json
 import os
 import shutil
 import sys
+import time
+from datetime import timedelta
 from pathlib import Path
 
 os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')
@@ -149,8 +151,14 @@ def main():
     sys.stdout = _Tee(sys.__stdout__, log_file)
     sys.stderr = _Tee(sys.__stderr__, log_file)
 
+    t_start = time.monotonic()
     try:
         result = _run(cfg, project, run_dir, prefix)
+        elapsed = time.monotonic() - t_start
+        result['elapsed_seconds'] = float(elapsed)
+        print(f"\nTotal elapsed time: "
+              f"{str(timedelta(seconds=int(elapsed)))}  "
+              f"({elapsed:.1f} s)")
     finally:
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
