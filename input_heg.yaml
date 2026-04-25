@@ -55,12 +55,16 @@ optimize:
   # SR-only:
   sr_damping: 1.0e-3
   sr_n_cg: 30
-  # KFAC-only (FermiNet defaults shown):
+  # KFAC-only:
   lr_decay: 1.0e4                      # lr_t = lr / (1 + t/lr_decay).  null → constant lr
-  kfac_damping: 1.0e-3                 # Tikhonov damping ε on (A + π√λ·I), (G + (1/π)√λ·I)
-  kfac_ema_decay: 0.95                 # exponential-moving-average for A, G factors
-  kfac_norm_constraint: 1.0e-3         # trust-region clip on ‖step‖.  null → disable
-  multi_device: false                  # KFAC pmap across local GPUs (set true on multi-GPU host)
+  kfac_damping: 0.1                    # initial Tikhonov damping ε
+  kfac_damping_adapt: true             # adaptive Levenberg-Marquardt schedule (recommended)
+  kfac_damping_min: 1.0e-4
+  kfac_damping_max: 1.0e2
+  kfac_damping_lookback: 10            # iters between LM adjustments
+  kfac_ema_decay: 0.0                  # EMA on A, G factors (0 = use only current iter, 0.95 = FermiNet)
+  kfac_norm_constraint: null           # trust-region clip on ‖step‖. null → disable
+  multi_device: false                  # KFAC pmap across local GPUs — NOT YET WIRED
   skip: false                          # set true to only evaluate at init
 
 eval:
