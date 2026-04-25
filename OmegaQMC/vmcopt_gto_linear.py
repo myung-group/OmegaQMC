@@ -724,7 +724,20 @@ class _VMCOptDriverGTO_Linear:
                 elec_crds, nuc_crds, _unflatten(fp),
             )
 
-        # Auto-tune batch sizes to fit GPU memory
+        # Auto-tune batch sizes to fit GPU memory.
+        # Snap num_walkers to a multiple of the device
+        # count *before* deriving deriv_batch_size and
+        # num_opt_samples from it, so the latter two are
+        # already aligned and we don't waste a block of
+        # MC sampling that gets truncated later.
+        n_devices = len(jax.devices())
+
+        def _snap(x):
+            return max(
+                n_devices,
+                (x // n_devices) * n_devices,
+            )
+
         _need_auto = (
             num_walkers == 'auto'
             or num_opt_samples == 'auto'
@@ -739,6 +752,18 @@ class _VMCOptDriverGTO_Linear:
             )
             if num_walkers == 'auto':
                 num_walkers = auto_bs
+
+        if n_devices > 1 and num_walkers % n_devices != 0:
+            snapped = _snap(num_walkers)
+            if verbose >= 1:
+                print(
+                    f"  num_walkers snapped to"
+                    f" {snapped} (divisible by"
+                    f" {n_devices} devices)"
+                )
+            num_walkers = snapped
+
+        if _need_auto:
             if deriv_batch_size == 'auto':
                 deriv_batch_size = num_walkers
             if num_opt_samples == 'auto':
@@ -753,27 +778,9 @@ class _VMCOptDriverGTO_Linear:
                     f"{num_opt_samples}"
                 )
 
-        # Snap num_walkers / deriv_batch_size to
-        # multiples of device count for sharding
-        n_devices = len(jax.devices())
-        if n_devices > 1:
-            def _snap(x):
-                return max(
-                    n_devices,
-                    (x // n_devices) * n_devices,
-                )
-            if num_walkers % n_devices != 0:
-                num_walkers = _snap(num_walkers)
-                if verbose >= 1:
-                    print(
-                        f"  num_walkers snapped to"
-                        f" {num_walkers} (divisible"
-                        f" by {n_devices} devices)"
-                    )
-            if deriv_batch_size % n_devices != 0:
-                deriv_batch_size = _snap(
-                    deriv_batch_size
-                )
+        if (n_devices > 1
+                and deriv_batch_size % n_devices != 0):
+            deriv_batch_size = _snap(deriv_batch_size)
 
         # Sharding objects (None, None on single GPU)
         walkers_sharding, walker_keys_sharding = (

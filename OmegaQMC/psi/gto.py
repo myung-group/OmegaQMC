@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 # from functools import partial
 from OmegaQMC.shell import (
     read_shell, evaluate_cusp_s, evaluate_cusp_s_vgl,
@@ -58,6 +59,61 @@ def _bspline_eval(r, coefs, delta_r_inv, max_index):
     c3 = coefs[i + 3]
 
     return w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3
+
+
+def _bspline_eval_vgl(r, coefs, delta_r_inv, max_index):
+    """Evaluate cubic B-spline value, first and second derivative.
+
+    Returns ``(u(r), u'(r), u''(r))`` — derivatives are with
+    respect to the scalar distance ``r``.  Uses the same uniform-
+    knot cubic basis as :func:`_bspline_eval` and shares the
+    ``i / t / coefs[i+k]`` gather, so the work overlaps with the
+    value-only path.
+
+    Coefficient layout from :func:`_build_bspline_coefs` enforces
+    ``coefs[N+1] = coefs[N+2] = coefs[N+3] = 0``, which makes
+    the evaluated ``(u, u', u'')`` go to zero at ``r = r_cut``;
+    callers are still expected to apply a ``cutoff_mask = (r <
+    r_cut)`` to clip the polynomial extrapolation past the
+    cutoff.
+    """
+    u = r * delta_r_inv
+    i = jnp.clip(
+        jnp.floor(u).astype(jnp.int32), 0, max_index
+    )
+    t = u - i
+    one = jnp.ones_like(t)
+    zero = jnp.zeros_like(t)
+
+    tp_v = jnp.stack([t * t * t,         t * t,    t,    one])
+    tp_d1 = jnp.stack([3.0 * t * t,      2.0 * t,  one,  zero])
+    tp_d2 = jnp.stack([6.0 * t,          2.0 * one, zero, zero])
+    basis = jnp.array([
+        [-1,  3, -3, 1],
+        [ 3, -6,  3, 0],
+        [-3,  0,  3, 0],
+        [ 1,  4,  1, 0],
+    ], dtype=r.dtype) / 6.0
+
+    w = basis.T @ tp_v                    # (4, len(r))
+    wd1 = basis.T @ tp_d1
+    wd2 = basis.T @ tp_d2
+
+    c0 = coefs[i]
+    c1 = coefs[i + 1]
+    c2 = coefs[i + 2]
+    c3 = coefs[i + 3]
+
+    val = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3
+    d1 = (
+        wd1[0] * c0 + wd1[1] * c1
+        + wd1[2] * c2 + wd1[3] * c3
+    ) * delta_r_inv
+    d2 = (
+        wd2[0] * c0 + wd2[1] * c1
+        + wd2[2] * c2 + wd2[3] * c3
+    ) * (delta_r_inv * delta_r_inv)
+    return val, d1, d2
 
 
 def _compute_eeI_num_params(N_eI, N_ee):
@@ -1140,6 +1196,23 @@ class _PsiGTO:
         _bs_j2_cfg = self._bs_j2_cfg
         _bs_j1_cfgs = self._bs_j1_cfgs
 
+        # Precompute per-element J1 cusp values as Python
+        # floats so the closure body never has to materialize
+        # them under jit.  Without this, the existing
+        # ``Z_charges[atom_to_elem_idx == ie][0]`` pattern
+        # tracers under jit because ``atom_to_elem_idx`` is a
+        # jnp.array.
+        _ate_np = np.asarray(atom_to_elem_idx)
+        _Z_np = np.asarray(Z_charges)
+        _bs_j1_cusp_vals = []
+        for _ie, _sym in enumerate(unique_elements):
+            if l_cgto:
+                _bs_j1_cusp_vals.append(0.0)
+            else:
+                _bs_j1_cusp_vals.append(
+                    -float(_Z_np[_ate_np == _ie][0])
+                )
+
         @jax.jit
         def J2_bspline_aa(elec_crds, curr_params):
             """Two-body B-spline Jastrow, like-spin pairs."""
@@ -1217,9 +1290,7 @@ class _PsiGTO:
                 delta_r = r_cut / (n + 1)
                 delta_r_inv = 1.0 / delta_r
                 max_index = n
-                cusp_val = 0.0 if l_cgto else -float(
-                    Z_charges[atom_to_elem_idx == ie][0]
-                )
+                cusp_val = _bs_j1_cusp_vals[ie]
                 coefs = _build_bspline_coefs(
                     p, delta_r, cusp_val
                 )
@@ -1240,9 +1311,157 @@ class _PsiGTO:
                 )
             return total
 
+        @jax.jit
+        def J2_bspline_aa_vgl(elec_crds, curr_params):
+            """Per-electron (grad, lap) of like-spin B-spline J2.
+
+            Returns ``(grad_e, lap_e)`` of shapes ``(n_e, 3)``
+            and ``(n_e,)``, mirroring :func:`_J2_pade_vgl`.  The
+            cutoff mask is applied to value, gradient and
+            Laplacian — by C² continuity at ``r = r_cut`` the
+            spline and its first two derivatives vanish there,
+            so the masked function remains C².
+            """
+            n = curr_params["like"].shape[0]
+            r_cut = _bs_j2_cfg["r_cut"]
+            delta_r = r_cut / (n + 1)
+            delta_r_inv = 1.0 / delta_r
+            max_index = n
+            coefs = _build_bspline_coefs(
+                curr_params["like"], delta_r, 0.25
+            )
+            n_e = elec_crds.shape[0]
+            i_idx, j_idx = jnp.triu_indices(n_e, k=1)
+            diffs = elec_crds[i_idx] - elec_crds[j_idx]
+            r_ij = jnp.sqrt(
+                jnp.sum(diffs * diffs, axis=-1)
+            )
+            same_spin = (
+                (i_idx % 2) == (j_idx % 2)
+            ).astype(r_ij.dtype)
+            cutoff_mask = (r_ij < r_cut).astype(r_ij.dtype)
+            mask = same_spin * cutoff_mask
+            _, up, upp = _bspline_eval_vgl(
+                r_ij, coefs, delta_r_inv, max_index
+            )
+            grad_pair = (up / r_ij)[:, None] * diffs
+            lap_pair = upp + 2.0 * up / r_ij
+
+            grad_e = jnp.zeros(
+                (n_e, 3), dtype=elec_crds.dtype
+            )
+            grad_e = grad_e.at[i_idx].add(
+                grad_pair * mask[:, None]
+            )
+            grad_e = grad_e.at[j_idx].add(
+                -grad_pair * mask[:, None]
+            )
+            lap_e = jnp.zeros(n_e, dtype=elec_crds.dtype)
+            lap_e = lap_e.at[i_idx].add(lap_pair * mask)
+            lap_e = lap_e.at[j_idx].add(lap_pair * mask)
+            return grad_e, lap_e
+
+        @jax.jit
+        def J2_bspline_ab_vgl(elec_crds, curr_params):
+            """Per-electron (grad, lap) of unlike-spin B-spline J2."""
+            n = curr_params["unlike"].shape[0]
+            r_cut = _bs_j2_cfg["r_cut"]
+            delta_r = r_cut / (n + 1)
+            delta_r_inv = 1.0 / delta_r
+            max_index = n
+            coefs = _build_bspline_coefs(
+                curr_params["unlike"], delta_r, 0.5
+            )
+            n_e = elec_crds.shape[0]
+            i_idx, j_idx = jnp.triu_indices(n_e, k=1)
+            diffs = elec_crds[i_idx] - elec_crds[j_idx]
+            r_ij = jnp.sqrt(
+                jnp.sum(diffs * diffs, axis=-1)
+            )
+            opp_spin = (
+                (i_idx % 2) != (j_idx % 2)
+            ).astype(r_ij.dtype)
+            cutoff_mask = (r_ij < r_cut).astype(r_ij.dtype)
+            mask = opp_spin * cutoff_mask
+            _, up, upp = _bspline_eval_vgl(
+                r_ij, coefs, delta_r_inv, max_index
+            )
+            grad_pair = (up / r_ij)[:, None] * diffs
+            lap_pair = upp + 2.0 * up / r_ij
+
+            grad_e = jnp.zeros(
+                (n_e, 3), dtype=elec_crds.dtype
+            )
+            grad_e = grad_e.at[i_idx].add(
+                grad_pair * mask[:, None]
+            )
+            grad_e = grad_e.at[j_idx].add(
+                -grad_pair * mask[:, None]
+            )
+            lap_e = jnp.zeros(n_e, dtype=elec_crds.dtype)
+            lap_e = lap_e.at[i_idx].add(lap_pair * mask)
+            lap_e = lap_e.at[j_idx].add(lap_pair * mask)
+            return grad_e, lap_e
+
+        @jax.jit
+        def J1_bspline_vgl(elec_crds, nuc_crds, curr_params):
+            """Per-electron (grad, lap) of one-body B-spline J1.
+
+            Mirrors :func:`J1_bspline_fn` shell loop over unique
+            element symbols, accumulating into per-electron
+            ``grad_e`` and ``lap_e``.
+            """
+            n_e = elec_crds.shape[0]
+            grad_e = jnp.zeros(
+                (n_e, 3), dtype=elec_crds.dtype
+            )
+            lap_e = jnp.zeros(n_e, dtype=elec_crds.dtype)
+            for ie, sym in enumerate(unique_elements):
+                if sym not in _bs_j1_cfgs:
+                    continue
+                r_cut = _bs_j1_cfgs[sym]["r_cut"]
+                p = curr_params[sym]
+                n = p.shape[0]
+                delta_r = r_cut / (n + 1)
+                delta_r_inv = 1.0 / delta_r
+                max_index = n
+                cusp_val = _bs_j1_cusp_vals[ie]
+                coefs = _build_bspline_coefs(
+                    p, delta_r, cusp_val
+                )
+                elem_mask = (
+                    atom_to_elem_idx == ie
+                ).astype(elec_crds.dtype)
+                # diffs[a, e, x] = elec[e, x] - nuc[a, x]
+                diffs = (
+                    elec_crds[None, :, :]
+                    - nuc_crds[:, None, :]
+                )
+                r = jnp.linalg.norm(diffs, axis=-1)
+                cutoff = (r < r_cut).astype(r.dtype)
+                mask = cutoff * elem_mask[:, None]
+                _, up, upp = _bspline_eval_vgl(
+                    r.ravel(), coefs, delta_r_inv, max_index
+                )
+                up = up.reshape(r.shape)
+                upp = upp.reshape(r.shape)
+                # grad contribution to electron e from atom a
+                grad_contrib = (up / r)[..., None] * diffs
+                grad_e = grad_e + jnp.sum(
+                    grad_contrib * mask[..., None], axis=0,
+                )
+                lap_contrib = upp + 2.0 * up / r
+                lap_e = lap_e + jnp.sum(
+                    lap_contrib * mask, axis=0,
+                )
+            return grad_e, lap_e
+
         self.J2_bspline_aa = J2_bspline_aa
         self.J2_bspline_ab = J2_bspline_ab
         self.J1_bspline_fn = J1_bspline_fn
+        self._J2_bspline_aa_vgl = J2_bspline_aa_vgl
+        self._J2_bspline_ab_vgl = J2_bspline_ab_vgl
+        self._J1_bspline_vgl = J1_bspline_vgl
 
     def _build_eeI_jastrow_fns(self):
         """Build the three-body eeI Jastrow closure.
@@ -1357,6 +1576,9 @@ class _PsiGTO:
         )
         _J1_pade_vgl = self._J1_pade_vgl
         _J2_pade_vgl = self._J2_pade_vgl
+        _J1_bspline_vgl = self._J1_bspline_vgl
+        _J2_bspline_aa_vgl = self._J2_bspline_aa_vgl
+        _J2_bspline_ab_vgl = self._J2_bspline_ab_vgl
         trial = self.trial
         J1 = self.J1
         J2_aa = self.J2_aa
@@ -1503,40 +1725,39 @@ class _PsiGTO:
                 grad_flat = grad_flat + g.reshape(-1)
                 lap_total = lap_total + jnp.sum(L)
 
-            has_other = (
-                "J1_bspline" in curr_params
-                or "J2_bspline" in curr_params
-                or "J3_eeI" in curr_params
-            )
-            if has_other:
-                def _other_flat(p):
-                    elec = p.reshape(p_flat_shape)
-                    acc = 0.0
-                    if "J1_bspline" in curr_params:
-                        acc = acc + J1_bspline_fn(
-                            elec, nuc_crds,
-                            curr_params["J1_bspline"],
-                        )
-                    if "J2_bspline" in curr_params:
-                        acc = (
-                            acc
-                            + J2_bspline_aa(
-                                elec,
-                                curr_params["J2_bspline"],
-                            )
-                            + J2_bspline_ab(
-                                elec,
-                                curr_params["J2_bspline"],
-                            )
-                        )
-                    if "J3_eeI" in curr_params:
-                        acc = acc + J3_eeI_fn(
-                            elec, nuc_crds,
-                            curr_params["J3_eeI"],
-                        )
-                    return acc
+            # B-spline J1 / J2 — closed-form VGL.
+            if "J1_bspline" in curr_params:
+                g, L = _J1_bspline_vgl(
+                    elec_crds, nuc_crds,
+                    curr_params["J1_bspline"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
+            if "J2_bspline" in curr_params:
+                g_aa, L_aa = _J2_bspline_aa_vgl(
+                    elec_crds, curr_params["J2_bspline"],
+                )
+                g_ab, L_ab = _J2_bspline_ab_vgl(
+                    elec_crds, curr_params["J2_bspline"],
+                )
+                grad_flat = (
+                    grad_flat
+                    + g_aa.reshape(-1)
+                    + g_ab.reshape(-1)
+                )
+                lap_total = (
+                    lap_total + jnp.sum(L_aa) + jnp.sum(L_ab)
+                )
+
+            if "J3_eeI" in curr_params:
+                def _j3_flat(p):
+                    return J3_eeI_fn(
+                        p.reshape(p_flat_shape),
+                        nuc_crds,
+                        curr_params["J3_eeI"],
+                    )
                 lap_o, grad_o = laplacian_linearize(
-                    _other_flat
+                    _j3_flat
                 )(elec_crds.flatten())
                 grad_flat = grad_flat + grad_o
                 lap_total = lap_total + lap_o
@@ -1618,10 +1839,10 @@ class _PsiGTO:
             kernel used in the hot path.  Slater gradient /
             Laplacian via the closed-form
             :func:`_slater_det_assemble`; Padé J1/J2 via the
-            ``_J{1,2}_pade_vgl`` helpers; B-spline and J3_eeI
-            folded into a single O(N) ``laplacian_linearize``
-            call, so their per-walker temp memory remains
-            linear in ``n_elec``.
+            ``_J{1,2}_pade_vgl`` helpers; B-spline J1/J2 via
+            the matching ``_J{1,2}_bspline*_vgl`` helpers.  Only
+            ``J3_eeI`` (when present) still routes through the
+            O(N) ``laplacian_linearize`` fallback.
           * ``_local_energy_ke_hessian`` — the prior
             ``jax.hessian(_log_psi_flat)`` kernel, retained
             verbatim for regression and debug.
@@ -1631,9 +1852,9 @@ class _PsiGTO:
         _log_slater = self._log_slater
         _J1_pade_vgl = self._J1_pade_vgl
         _J2_pade_vgl = self._J2_pade_vgl
-        J1_bspline_fn = self.J1_bspline_fn
-        J2_bspline_aa = self.J2_bspline_aa
-        J2_bspline_ab = self.J2_bspline_ab
+        _J1_bspline_vgl = self._J1_bspline_vgl
+        _J2_bspline_aa_vgl = self._J2_bspline_aa_vgl
+        _J2_bspline_ab_vgl = self._J2_bspline_ab_vgl
         J3_eeI_fn = self.J3_eeI_fn
 
         @jax.jit
@@ -1693,45 +1914,41 @@ class _PsiGTO:
                 grad_flat = grad_flat + g.reshape(-1)
                 lap_total = lap_total + jnp.sum(L)
 
-            # B-spline + J3_eeI via O(N) linearize.  These are
-            # all additive in log ψ, so one combined call
-            # suffices — the per-walker temp then scales with
-            # n_elec instead of (3 n_elec)² as with the old
-            # jax.hessian path.
-            has_other = (
-                "J1_bspline" in curr_params
-                or "J2_bspline" in curr_params
-                or "J3_eeI" in curr_params
-            )
-            if has_other:
-                def _other_flat(p):
-                    elec = p.reshape(p_flat_shape)
-                    acc = 0.0
-                    if "J1_bspline" in curr_params:
-                        acc = acc + J1_bspline_fn(
-                            elec, nuc_crds,
-                            curr_params["J1_bspline"],
-                        )
-                    if "J2_bspline" in curr_params:
-                        acc = (
-                            acc
-                            + J2_bspline_aa(
-                                elec,
-                                curr_params["J2_bspline"],
-                            )
-                            + J2_bspline_ab(
-                                elec,
-                                curr_params["J2_bspline"],
-                            )
-                        )
-                    if "J3_eeI" in curr_params:
-                        acc = acc + J3_eeI_fn(
-                            elec, nuc_crds,
-                            curr_params["J3_eeI"],
-                        )
-                    return acc
+            # B-spline J1 / J2 — closed-form VGL.
+            if "J1_bspline" in curr_params:
+                g, L = _J1_bspline_vgl(
+                    elec_crds, nuc_crds,
+                    curr_params["J1_bspline"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
+            if "J2_bspline" in curr_params:
+                g_aa, L_aa = _J2_bspline_aa_vgl(
+                    elec_crds, curr_params["J2_bspline"],
+                )
+                g_ab, L_ab = _J2_bspline_ab_vgl(
+                    elec_crds, curr_params["J2_bspline"],
+                )
+                grad_flat = (
+                    grad_flat
+                    + g_aa.reshape(-1)
+                    + g_ab.reshape(-1)
+                )
+                lap_total = (
+                    lap_total + jnp.sum(L_aa) + jnp.sum(L_ab)
+                )
+
+            # J3_eeI: still on the O(N) linearize fallback —
+            # three-body polynomial functor, separate follow-up.
+            if "J3_eeI" in curr_params:
+                def _j3_flat(p):
+                    return J3_eeI_fn(
+                        p.reshape(p_flat_shape),
+                        nuc_crds,
+                        curr_params["J3_eeI"],
+                    )
                 lap_o, grad_o = laplacian_linearize(
-                    _other_flat
+                    _j3_flat
                 )(elec_crds.flatten())
                 grad_flat = grad_flat + grad_o
                 lap_total = lap_total + lap_o
