@@ -26,12 +26,11 @@ Known limitations
    FermiNet's KFAC convergence speed-up, instrument the model to
    expose layer activations and output cotangents (~1 day of work).
 
-2. **Multi-device pmap is a stub**.  ``multi_device=True`` is
-   accepted but raises ``NotImplementedError``.  Single-device
-   only for now.  The factor-extraction code is already
-   pmean-aware (see ``_extract_kron_factors`` ``pmean_axis``);
-   the remaining work is replicating params/state and pmapping
-   the step.
+2. **Multi-device pmap is wired**.  ``multi_device=True`` shards
+   walkers across all visible local devices and ``pmean``-aggregates
+   the Kronecker factors so each device computes the same KFAC
+   step.  When only one device is visible the optimizer falls
+   back to single-device automatically.
 
 3. **Adaptive damping is heuristic Levenberg-Marquardt** — track
    the average energy trend over a look-back window and adjust ε
@@ -304,31 +303,48 @@ def _damped_kron_inverse(A: jax.Array, G: jax.Array, damping: float) -> Tuple[
 # Generic block: damped Fisher solve over the flat tail of params
 # ---------------------------------------------------------------------
 
-def _generic_natural_gradient(de, per_walker_grads_flat, damping):
+def _generic_natural_gradient(
+    de, per_walker_grads_flat, damping, pmean_axis: Optional[str] = None,
+):
     """Damped Fisher solve for the flat 'generic' tail of params.
 
     Args:
-        de: ``(W,)`` energy residual.
-        per_walker_grads_flat: ``(W, P_g)`` per-walker gradients of
-            ``log|ψ|`` wrt the generic params, flattened.
+        de: ``(W_local,)`` energy residual.
+        per_walker_grads_flat: ``(W_local, P_g)`` per-walker grads.
         damping: Tikhonov ε.
+        pmean_axis: If set, average across devices via ``lax.pmean``.
 
     Returns:
         ``(P_g,)`` natural-gradient direction.
     """
     W = per_walker_grads_flat.shape[0]
-    f = jnp.einsum('w,wp->p', de, per_walker_grads_flat) / W
-    # Centered Jacobian.
-    do = per_walker_grads_flat - per_walker_grads_flat.mean(axis=0, keepdims=True)
+
+    def _maybe_pmean(x):
+        if pmean_axis is not None:
+            return jax.lax.pmean(x, pmean_axis)
+        return x
+
+    f = _maybe_pmean(
+        jnp.einsum('w,wp->p', de, per_walker_grads_flat) / W
+    )
+    # Centred Jacobian: cross-device mean for the column means.
+    g_mean = _maybe_pmean(per_walker_grads_flat.mean(axis=0, keepdims=True))
+    do = per_walker_grads_flat - g_mean
     # S·v = (1/W)·doᵀ·(do·v) + λ·v
-    # Solve via a small CG (P_g is typically << W).
+    # Inside pmap we have to pmean the do.T @ do contribution since
+    # each device has only its shard.
+    def _matvec(v):
+        prod_local = (do.T @ (do @ v)) / W
+        prod = _maybe_pmean(prod_local)
+        return prod + damping * v
+
     n_iters = 20
     x = jnp.zeros_like(f)
-    r = f - ((do.T @ (do @ x)) / W + damping * x)
+    r = f - _matvec(x)
     p = r
     rr = jnp.dot(r, r)
     for _ in range(n_iters):
-        Ap = (do.T @ (do @ p)) / W + damping * p
+        Ap = _matvec(p)
         alpha = rr / (jnp.dot(p, Ap) + 1e-30)
         x = x + alpha * p
         r = r - alpha * Ap
@@ -394,12 +410,21 @@ class _HEGKFACOptimizer:
         # x64 is already enabled by OmegaQMC.config; KFAC's matrix
         # inverses and EMA accumulators rely on it for numerical
         # conditioning.
-        if multi_device:
-            raise NotImplementedError(
-                "multi_device=True is not yet wired up in our KFAC. "
-                "Run on a single device for now or open an issue."
-            )
         self.config = config
+        # Detect multi-device setup.
+        self._n_devices = jax.local_device_count() if multi_device else 1
+        if multi_device and self._n_devices < 2:
+            # User asked for multi-device but only one is visible.
+            # Fall back gracefully.
+            multi_device = False
+            self._n_devices = 1
+        if multi_device:
+            # Per-walker grad + step are pmap'd; pmean_axis='devices'
+            # is threaded into _extract_kron_factors so each device
+            # ends up with the same global Fisher factors.
+            self._pmap_axis = 'devices'
+        else:
+            self._pmap_axis = None
         self.L = float(config.L)
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
@@ -498,15 +523,36 @@ class _HEGKFACOptimizer:
                      else jnp.asarray(norm_constraint, dtype=jnp.float64))
         var_weight_arr = jnp.asarray(var_weight, dtype=jnp.float64)
 
-        @jax.jit
-        def kfac_step_core(params, e_loc, walkers, A_state, G_state,
-                           lr_now, damping_arr):
-            # Per-walker pytree grad of log|ψ|.
-            pw_grad = self._per_walker_grad(walkers, params)
+        pmean_axis = self._pmap_axis           # 'devices' or None
+        # Per-walker grad must be vmap'd here so it works on the
+        # device's local walker shard inside pmap.
+        per_walker_grad_vmap = jax.vmap(
+            jax.grad(log_psi_per_walker, argnums=1),
+            in_axes=(0, None),
+        )
 
-            e_mean = jnp.mean(e_loc)
+        def step_body(params, e_loc, walkers, A_state, G_state,
+                      lr_now, damping_arr):
+            """Body shared between single-device JIT and pmap paths.
+
+            When run under ``jax.pmap`` with ``axis_name='devices'``
+            the local averages are converted to global averages via
+            ``jax.lax.pmean``; under plain ``jax.jit`` the
+            ``pmean_axis=None`` path keeps them local.
+            """
+            pw_grad = per_walker_grad_vmap(walkers, params)
+
+            e_mean_local = jnp.mean(e_loc)
+            if pmean_axis is not None:
+                e_mean = jax.lax.pmean(e_mean_local, pmean_axis)
+            else:
+                e_mean = e_mean_local
             de = e_loc - e_mean
-            var = jnp.mean(de ** 2)
+            var_local = jnp.mean(de ** 2)
+            if pmean_axis is not None:
+                var = jax.lax.pmean(var_local, pmean_axis)
+            else:
+                var = var_local
 
             # Mixed-objective weighting (Umrigar β).
             de_eff = de + var_weight_arr * (de ** 2 - var)
@@ -517,7 +563,9 @@ class _HEGKFACOptimizer:
             # Per Linear layer: extract Kronecker factors, damp, step.
             for layer, (kpath, bpath) in layer_paths.items():
                 pw_dW = _get_at_path(pw_grad, kpath)            # (W, out, in)
-                A, G, dW_loss = _extract_kron_factors(pw_dW, de_eff)
+                A, G, dW_loss = _extract_kron_factors(
+                    pw_dW, de_eff, pmean_axis=pmean_axis,
+                )
 
                 # EMA over iters.
                 A_prev = A_state[layer]
@@ -554,7 +602,10 @@ class _HEGKFACOptimizer:
             ) if generic_pw_flat_list else jnp.zeros((walkers.shape[0], 0))
 
             generic_step_flat = (
-                _generic_natural_gradient(de_eff, generic_pw_flat, damping_arr)
+                _generic_natural_gradient(
+                    de_eff, generic_pw_flat, damping_arr,
+                    pmean_axis=pmean_axis,
+                )
                 if generic_pw_flat.shape[1] > 0
                 else jnp.zeros(0)
             )
@@ -605,7 +656,12 @@ class _HEGKFACOptimizer:
 
             return new_params, new_A, new_G, e_mean, var, total_norm
 
-        self._kfac_step_core = kfac_step_core
+        if multi_device:
+            self._kfac_step_core = jax.pmap(
+                step_body, axis_name=pmean_axis,
+            )
+        else:
+            self._kfac_step_core = jax.jit(step_body)
 
     # -----------------------------------------------------
     # Walker management
@@ -664,9 +720,43 @@ class _HEGKFACOptimizer:
         kin_batch = self._kin_batch
         kfac_step_core = self._kfac_step_core
 
+        # For multi-device runs the per-iter step is pmap'd; shard
+        # walkers across devices and replicate params/state.
+        n_dev = self._n_devices
+        if n_dev > 1 and num_walkers % n_dev != 0:
+            raise ValueError(
+                f"num_walkers={num_walkers} must be divisible by "
+                f"n_devices={n_dev} for multi-device KFAC."
+            )
+        walkers_per_dev = num_walkers // n_dev
+
         rng_key, init_key = jax.random.split(rng_key)
         walkers = self.initialize_walkers(init_key, num_walkers)
         step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
+
+        def _shard_walkers(w):
+            """Reshape (W, N, 3) → (n_dev, W//n_dev, N, 3)."""
+            if n_dev == 1:
+                return w
+            return w.reshape((n_dev, walkers_per_dev) + w.shape[1:])
+
+        def _unshard_walkers(w):
+            if n_dev == 1:
+                return w
+            return w.reshape((-1,) + w.shape[2:])
+
+        def _replicate(x):
+            if n_dev == 1:
+                return x
+            return jax.tree.map(
+                lambda y: jnp.broadcast_to(y[None], (n_dev,) + y.shape),
+                x,
+            )
+
+        def _take_first_device(x):
+            if n_dev == 1:
+                return x
+            return jax.tree.map(lambda y: y[0], x)
 
         # Equilibration.
         ar = 0.0
@@ -737,12 +827,45 @@ class _HEGKFACOptimizer:
             else:
                 lr_now = self.lr
 
-            params, A_state, G_state, e_mean, var, step_norm = kfac_step_core(
-                params, e_loc, walkers,
-                A_state, G_state,
-                jnp.asarray(lr_now, dtype=jnp.float64),
-                jnp.asarray(damping_now, dtype=jnp.float64),
-            )
+            if n_dev > 1:
+                # Shard walkers + e_loc across devices; replicate
+                # params and EMA state.  The step_body returns
+                # replicated outputs (each device runs the same
+                # update on the same averaged factors), so device 0
+                # is canonical.
+                w_sh = _shard_walkers(walkers)
+                e_loc_sh = e_loc.reshape((n_dev, walkers_per_dev))
+                p_rep = _replicate(params)
+                A_rep = _replicate(A_state)
+                G_rep = _replicate(G_state)
+                lr_rep = jnp.broadcast_to(
+                    jnp.asarray(lr_now, dtype=jnp.float64), (n_dev,),
+                )
+                damp_rep = jnp.broadcast_to(
+                    jnp.asarray(damping_now, dtype=jnp.float64),
+                    (n_dev,),
+                )
+                p_out, A_out, G_out, e_mean_o, var_o, step_norm_o = (
+                    kfac_step_core(
+                        p_rep, e_loc_sh, w_sh,
+                        A_rep, G_rep, lr_rep, damp_rep,
+                    )
+                )
+                params = _take_first_device(p_out)
+                A_state = _take_first_device(A_out)
+                G_state = _take_first_device(G_out)
+                e_mean = _take_first_device(e_mean_o)
+                var = _take_first_device(var_o)
+                step_norm = _take_first_device(step_norm_o)
+            else:
+                params, A_state, G_state, e_mean, var, step_norm = (
+                    kfac_step_core(
+                        params, e_loc, walkers,
+                        A_state, G_state,
+                        jnp.asarray(lr_now, dtype=jnp.float64),
+                        jnp.asarray(damping_now, dtype=jnp.float64),
+                    )
+                )
 
             # Logging.
             now = datetime.now()

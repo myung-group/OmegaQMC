@@ -172,7 +172,9 @@ def test_kfac_classifies_params_into_linear_and_generic():
     assert opt._linear_params > 0.5 * opt.n_params
 
 
-def test_kfac_with_multi_device_raises():
+def test_kfac_with_multi_device_falls_back_when_one_gpu():
+    """multi_device=True with n_devices == 1 falls back to single-
+    device cleanly (no exception)."""
     cfg = HEGPsiFormerConfig(
         n_up=7, n_down=7, L=7.77, n_det=2,
         embedding_dim=16, n_interactions=1,
@@ -181,5 +183,10 @@ def test_kfac_with_multi_device_raises():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    with pytest.raises(NotImplementedError):
-        _HEGKFACOptimizer(cfg, init_key, multi_device=True)
+    n_dev = jax.local_device_count()
+    opt = _HEGKFACOptimizer(cfg, init_key, multi_device=True)
+    if n_dev < 2:
+        # Auto-fallback to single-device.
+        assert opt._n_devices == 1
+    else:
+        assert opt._n_devices == n_dev
