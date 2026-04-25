@@ -1081,6 +1081,7 @@ class _PsiGTO:
             ci_coeffs = self.ci_coeffs
             occ_up = self.occ_up
             occ_dn = self.occ_dn
+            cgs_sph_vgl = self.cgs_sph_vgl
 
             @jax.jit
             def log_slater_multidet(elec_crds, nuc_crds):
@@ -1120,11 +1121,138 @@ class _PsiGTO:
                 )
                 return jnp.log(jnp.abs(sum_val)) + logmax
 
+            @jax.jit
+            def log_slater_multidet_analytic(
+                elec_crds, nuc_crds,
+            ):
+                """Analytical (log|ψ|, ∇_e, ∇²_e) for multi-det.
+
+                Returns ``(log_val, grad_e, lap_e)`` with shapes
+                ``()``, ``(n_e, 3)``, ``(n_e,)``.  Closed form
+                via the per-determinant Slater identity plus
+                the log-Laplacian reduction
+                ``∇² log f = ∇²f / f − |∇f / f|²`` applied to
+                ``ψ = Σ_d c_d |D_a^d| |D_b^d|``.
+
+                For each determinant ``d`` and each spin block
+                ``σ ∈ {a, b}``, the inverse Slater matrix
+                ``A_σ^d = inv(S_σ^d)`` is contracted with the
+                MO grad and Laplacian to give
+                ``Γ_σ^d`` and ``ℓ_σ^d`` (per-electron, intra-
+                block).  Signed log-sum-exp weights
+                ``w_d = sign(A_d) · exp(log|A_d| − logmax) /
+                sum_v`` (summing to 1) give
+
+                  ∇log|ψ|  = Σ_d w_d · Γ_σ^d[i_e]
+                  ∇²log|ψ| = Σ_d w_d · (|Γ_σ^d[i_e]|² + ℓ_σ^d
+                             [i_e])  − |∇log|ψ||²
+
+                where ``i_e`` is the intra-block electron index
+                of electron ``e`` (``e // 2`` for either spin).
+                """
+                ao_val, ao_grad, ao_lap = jax.vmap(
+                    cgs_sph_vgl, in_axes=(0, None),
+                )(elec_crds, nuc_crds)
+                mo_val = jnp.einsum(
+                    'ena,am->em', ao_val, mo_coeff_full,
+                )
+                mo_grad = jnp.einsum(
+                    'enax,am->emx',
+                    ao_grad, mo_coeff_full,
+                )
+                mo_lap = jnp.einsum(
+                    'ena,am->em', ao_lap, mo_coeff_full,
+                )
+                mo_alpha = mo_val[::2, :]
+                mo_beta = mo_val[1::2, :]
+                mog_alpha = mo_grad[::2, :, :]
+                mog_beta = mo_grad[1::2, :, :]
+                mol_alpha = mo_lap[::2, :]
+                mol_beta = mo_lap[1::2, :]
+
+                def per_det_block(M, G, L, occ):
+                    S = M[:, occ]
+                    Gd = G[:, occ, :]
+                    Ld = L[:, occ]
+                    sign_d, logdet_d = jnp.linalg.slogdet(S)
+                    A = jnp.linalg.inv(S)
+                    Gamma = jnp.einsum('ji,ijx->ix', A, Gd)
+                    ell = (
+                        jnp.einsum('ji,ij->i', A, Ld)
+                        - jnp.sum(Gamma * Gamma, axis=-1)
+                    )
+                    return sign_d, logdet_d, Gamma, ell
+
+                def per_det(occ_a, occ_b):
+                    sa, la, Ga, ea = per_det_block(
+                        mo_alpha, mog_alpha, mol_alpha, occ_a,
+                    )
+                    sb, lb, Gb, eb = per_det_block(
+                        mo_beta, mog_beta, mol_beta, occ_b,
+                    )
+                    return sa, la, Ga, ea, sb, lb, Gb, eb
+
+                (signs_a, logdets_a, Gamma_a, ell_a,
+                 signs_b, logdets_b, Gamma_b, ell_b) = \
+                    jax.vmap(per_det)(occ_up, occ_dn)
+                # Shapes: signs_*, logdets_* — (ndet,);
+                #         Gamma_a — (ndet, n_α, 3);
+                #         ell_a   — (ndet, n_α);
+                #         likewise for beta.
+
+                log_abs_dets = logdets_a + logdets_b
+                phase_signs = (
+                    signs_a * signs_b
+                    * jnp.sign(ci_coeffs)
+                )
+                log_abs_ci = jnp.log(jnp.abs(ci_coeffs))
+                log_contributions = log_abs_ci + log_abs_dets
+                logmax = jnp.max(log_contributions)
+                shifted = phase_signs * jnp.exp(
+                    log_contributions - logmax,
+                )
+                sum_val = jnp.sum(shifted)
+                log_val = jnp.log(jnp.abs(sum_val)) + logmax
+                w = shifted / sum_val   # signed weights, Σ = 1
+
+                # Per-electron weighted reduction over dets.
+                # grad_α[i, x]   = Σ_d w[d] · Gamma_a[d, i, x]
+                # second_α[i]    = Σ_d w[d] · (|Γ|² + ℓ)
+                # lap_α[i]       = second_α[i] − |grad_α[i]|²
+                grad_a = jnp.einsum('d,dix->ix', w, Gamma_a)
+                grad_b = jnp.einsum('d,dix->ix', w, Gamma_b)
+                gsq_a = jnp.sum(Gamma_a * Gamma_a, axis=-1)
+                gsq_b = jnp.sum(Gamma_b * Gamma_b, axis=-1)
+                second_a = jnp.einsum(
+                    'd,di->i', w, gsq_a + ell_a,
+                )
+                second_b = jnp.einsum(
+                    'd,di->i', w, gsq_b + ell_b,
+                )
+                lap_a = second_a - jnp.sum(
+                    grad_a * grad_a, axis=-1,
+                )
+                lap_b = second_b - jnp.sum(
+                    grad_b * grad_b, axis=-1,
+                )
+
+                n_e = elec_crds.shape[0]
+                grad_e = jnp.zeros(
+                    (n_e, 3), dtype=elec_crds.dtype,
+                )
+                grad_e = grad_e.at[::2].set(grad_a)
+                grad_e = grad_e.at[1::2].set(grad_b)
+                lap_e = jnp.zeros(
+                    (n_e,), dtype=elec_crds.dtype,
+                )
+                lap_e = lap_e.at[::2].set(lap_a)
+                lap_e = lap_e.at[1::2].set(lap_b)
+                return log_val, grad_e, lap_e
+
             self._log_slater = log_slater_multidet
-            # Multi-det analytical path is a v2 follow-up;
-            # the KE driver falls back to linearize for
-            # self.trial is not None.
-            self._log_slater_analytic = None
+            self._log_slater_analytic = (
+                log_slater_multidet_analytic
+            )
         else:
             self._log_slater = log_slater_determinant
             self._log_slater_analytic = log_slater_det_analytic
