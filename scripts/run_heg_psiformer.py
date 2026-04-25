@@ -23,8 +23,24 @@ import os
 import shutil
 import sys
 import time
-from datetime import timedelta
 from pathlib import Path
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as e.g. '2d 3h 14m 7s' (drops leading zero units)."""
+    secs = int(seconds)
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, sec = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or parts:
+        parts.append(f"{hours}h")
+    if minutes or parts:
+        parts.append(f"{minutes}m")
+    parts.append(f"{sec}s")
+    return ' '.join(parts)
 
 os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')
 os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
@@ -156,8 +172,7 @@ def main():
         result = _run(cfg, project, run_dir, prefix)
         elapsed = time.monotonic() - t_start
         result['elapsed_seconds'] = float(elapsed)
-        print(f"\nTotal elapsed time: "
-              f"{str(timedelta(seconds=int(elapsed)))}  "
+        print(f"\nTotal elapsed time: {_fmt_elapsed(elapsed)}  "
               f"({elapsed:.1f} s)")
     finally:
         sys.stdout = sys.__stdout__
