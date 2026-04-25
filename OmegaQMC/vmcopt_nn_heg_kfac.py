@@ -16,26 +16,22 @@ a. **M^T M / M M^T (default, fast, biased).**  No model
    to FermiNet's strict per-(walker,electron) factorisation, but
    numerically very stable and ~0.2 s/iter at our scale.
 
-b. **Per-electron capture (FermiNet-style, slow, exact).**  Set
-   ``capture_activations=True`` to monkey-patch ``nnx.Linear`` to
-   record its input each forward, then run an eager Python loop
-   over walkers to populate per-(walker,electron) activations.  We
-   recover ``g_we`` per walker via a small ``(n_e, n_e)`` linear
-   solve and accumulate ``A``, ``G`` over ``W·n_e`` flattened
-   samples — exactly FermiNet's RepeatedDenseBlock semantics.
-   Mathematically equivalent to FermiNet's KFAC but ~25× slower
-   per iter at our scale because the eager loop runs ~25 ms per
-   walker (Python dispatch overhead).  Empirically at N=14 rs=2
-   with 200 iters / 128 walkers, capture and M^T M both reach
-   ~51-52 % PZ (within run-to-run noise) — capture's "exact"
-   factors don't decisively win at this scale because the
-   per-iter cost dominates the natural-gradient improvement.
+b. **Per-electron capture (FermiNet-style, exact).**  Set
+   ``capture_activations=True`` to use a **capturing twin** of the
+   model: every ``nnx.Linear`` is replaced with a ``CapturingLinear``
+   (a subclass with an ``nnx.Intermediate`` slot for its input) at
+   build time via :func:`OmegaQMC._kfac_capture.use_capturing_linears`.
+   A single ``jax.jit(jax.vmap(apply))`` call now returns
+   ``(log_psi_W, ∇params_W, captured_inputs_W)`` in one batched
+   pass — the captures flow through standard NNX state machinery,
+   so JIT/vmap handle them natively (no eager Python loop).
+   We then recover ``g_we`` per walker via a small ``(n_e, n_e)``
+   linear solve and accumulate ``A``, ``G`` over ``W·n_e``
+   flattened samples — exactly FermiNet's RepeatedDenseBlock.
 
-Use case guidance:
-  * Production runs (W=2048+) → ``capture_activations=False``.
-    M^T M is fast enough and reaches comparable accuracy.
-  * Research / ablation / matching FermiNet exactly →
-    ``capture_activations=True``.
+   Performance: ~equal per-iter cost to the M^T M path (both
+   bottlenecked by the same forward + grad).  Recommended for
+   accurate KFAC.
 
 Other features
 --------------
@@ -663,22 +659,60 @@ class _HEGKFACOptimizer:
             p.size for p in jax.tree.leaves(init_params)
         ))
 
-        # Build a live model + linear-path map for direct activation
-        # capture (used when capture_activations=True).  Only available
-        # for PsiFormer configs — Slater-Jastrow has no Linears.
-        self._live_model = None
-        self._linear_id_to_path: Dict[int, str] = {}
-        self._other_state = None
+        # Build a *capturing* twin of the model when activation
+        # capture is requested.  This twin uses ``CapturingLinear``
+        # in place of every ``nnx.Linear`` so that each forward pass
+        # writes the layer's input into an ``nnx.Intermediate`` slot.
+        # The twin's ``Param`` pytree has the SAME structure as the
+        # standard model's, so we feed in ``self.params`` unchanged;
+        # only the extra Intermediate slots distinguish the two.
+        self._cap_graphdef = None
+        self._cap_inters_init = None
+        self._cap_other = None
+        self._cap_grad_fn = None
         if self.capture_activations and isinstance(
             config, HEGPsiFormerConfig,
         ):
-            rngs = nnx.Rngs(init_key)
-            model = build_heg_psiformer_wf(config, rngs)
-            self._live_model = model
-            # Extract `other` (non-Param) state for nnx.merge later.
-            _, _, other = nnx.split(model, nnx.Param, ...)
-            self._other_state = other
-            self._linear_id_to_path = _discover_linear_ids(model)
+            from ._kfac_capture import (
+                use_capturing_linears, captures_to_path_dict,
+            )
+            self._captures_to_path_dict = captures_to_path_dict
+            cap_rngs = nnx.Rngs(init_key)
+            with use_capturing_linears():
+                cap_model = build_heg_psiformer_wf(config, cap_rngs)
+            (cap_graphdef, _cap_params, cap_inters_init,
+             cap_other) = nnx.split(
+                cap_model, nnx.Param, nnx.Intermediate, ...,
+            )
+            self._cap_graphdef = cap_graphdef
+            self._cap_inters_init = cap_inters_init
+            self._cap_other = cap_other
+
+            # Define the JIT-vmap'd forward that returns
+            # (log_psi_w, ∂log|psi_w|/∂params, captured_intermediates_w)
+            # for a single walker; vmap over walkers gives batched
+            # log_psi, grad, captures all in one compiled call.
+            def _apply_with_capture(
+                params, inters, other, walker,
+            ):
+                m = nnx.merge(cap_graphdef, params, inters, other)
+                psi = m(walker)
+                _, _, new_inters, _ = nnx.split(
+                    m, nnx.Param, nnx.Intermediate, ...,
+                )
+                return psi.log, new_inters
+
+            def _grad_and_capture_one(params, inters, other, walker):
+                # Differentiate wrt params; aux carries new_inters.
+                (log_psi, new_inters), grad = jax.value_and_grad(
+                    _apply_with_capture, argnums=0, has_aux=True,
+                )(params, inters, other, walker)
+                return log_psi, grad, new_inters
+
+            self._cap_grad_fn = jax.jit(jax.vmap(
+                _grad_and_capture_one,
+                in_axes=(None, None, None, 0),
+            ))
 
         # Split params into Linear-kernel layers vs generic tail.
         self._layers, self._kernel_shapes, _generic_leaves = _classify_params(
@@ -1070,23 +1104,27 @@ class _HEGKFACOptimizer:
             e_loc = e_kin + e_pot
 
             # ---- Direct activation capture (FermiNet-style) ----
-            # Eager Python loop over walkers.  Slow at large W but
-            # gives mathematically correct KFAC factors for per-
-            # electron Linears.  Skipped if disabled or unavailable.
+            # JIT-vmap'd forward through the *capturing* twin model:
+            # every Linear writes its input to an Intermediate slot
+            # which flows out as an aux output of the function.
+            # Single batched call instead of W eager forwards.
             captured_inputs: Dict[str, jax.Array] = {}
             if (self.capture_activations
-                    and self._other_state is not None):
-                # Build a fresh live model from the current params
-                # so the Linears' id()s belong to THIS model.
-                # (nnx.merge returns a new Module; we re-discover
-                # paths to keep ids consistent within the iter.)
-                live = nnx.merge(
-                    self.graphdef, params, self._other_state,
+                    and self._cap_grad_fn is not None):
+                _, _, ints_W = self._cap_grad_fn(
+                    params, self._cap_inters_init,
+                    self._cap_other, walkers,
                 )
-                live_id_to_path = _discover_linear_ids(live)
-                captured_inputs = _eager_capture_per_walker(
-                    live, walkers, live_id_to_path,
-                )
+                raw = self._captures_to_path_dict(ints_W)
+                # Drop captures whose Linear never fired (its slot
+                # still holds the scalar zero default → flat shape
+                # ``(W,)``).  ``_per_electron_factors`` expects
+                # ``(W, n_e_layer, in_dim)``; ``(W, in_dim)`` is
+                # also fine (treated as n_e_layer=1).
+                for path, arr in raw.items():
+                    if arr.ndim < 2:
+                        continue
+                    captured_inputs[path] = arr
 
             # KFAC step.
             if self.lr_decay is not None:
