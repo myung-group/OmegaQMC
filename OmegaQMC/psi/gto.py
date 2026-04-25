@@ -385,6 +385,101 @@ def _eval_eeI_poly(r_12, r_1I, r_2I,
     return P * envelope
 
 
+def _eval_eeI_poly_vgl(r_12, r_1I, r_2I,
+                       gamma_3d, L, N_eI, N_ee):
+    """Evaluate ``u = P · E`` and the nine derivatives of ``u``.
+
+    Returns ``(u, u_d1I, u_d2I, u_d12, u_d1I_1I, u_d2I_2I,
+    u_d12_12, u_d1I_12, u_d2I_12)`` — each shape ``(T,)``.
+
+    The mixed ``∂²u/(∂r_1I ∂r_2I)`` is *not* returned: it does
+    not appear in either electron's per-electron Laplacian since
+    ``r_1I`` depends only on electron 1 and ``r_2I`` only on
+    electron 2.
+
+    Parameters
+    ----------
+    r_12, r_1I, r_2I : shape (T,)
+    gamma_3d : shape (N_eI+1, N_eI+1, N_ee+1)
+    L : half-cutoff (envelope vanishes at ``r_1I, r_2I = L``)
+    N_eI, N_ee : polynomial orders
+    """
+    p1 = _power_table(r_1I, N_eI)
+    p2 = _power_table(r_2I, N_eI)
+    p12 = _power_table(r_12, N_ee)
+
+    # Shifted-index power tables for analytical polynomial
+    # derivatives:
+    #   pd1[k] = k · r^{k-1}        (k ≥ 1, else 0)
+    #   pd2[k] = k(k-1) · r^{k-2}   (k ≥ 2, else 0)
+    ks_eI = jnp.arange(N_eI + 1, dtype=p1.dtype)
+    ks_ee = jnp.arange(N_ee + 1, dtype=p12.dtype)
+    z1 = jnp.zeros_like(p1[:1])
+    z2 = jnp.zeros_like(p12[:1])
+    p1_s1 = jnp.concatenate([z1, p1[:-1]], axis=0)
+    p2_s1 = jnp.concatenate([z1, p2[:-1]], axis=0)
+    p12_s1 = jnp.concatenate([z2, p12[:-1]], axis=0)
+    p1_s2 = jnp.concatenate([z1, z1, p1[:-2]], axis=0)
+    p2_s2 = jnp.concatenate([z1, z1, p2[:-2]], axis=0)
+    p12_s2 = jnp.concatenate([z2, z2, p12[:-2]], axis=0)
+    pd1_a = ks_eI[:, None] * p1_s1
+    pd1_b = ks_eI[:, None] * p2_s1
+    pd1_c = ks_ee[:, None] * p12_s1
+    pd2_a = (ks_eI * (ks_eI - 1.0))[:, None] * p1_s2
+    pd2_b = (ks_eI * (ks_eI - 1.0))[:, None] * p2_s2
+    pd2_c = (ks_ee * (ks_ee - 1.0))[:, None] * p12_s2
+
+    # Polynomial value and its nine derivatives.
+    es = 'lmn,lt,mt,nt->t'
+    P_val = jnp.einsum(es, gamma_3d, p1, p2, p12)
+    P_d1I = jnp.einsum(es, gamma_3d, pd1_a, p2, p12)
+    P_d2I = jnp.einsum(es, gamma_3d, p1, pd1_b, p12)
+    P_d12 = jnp.einsum(es, gamma_3d, p1, p2, pd1_c)
+    P_d1I_1I = jnp.einsum(es, gamma_3d, pd2_a, p2, p12)
+    P_d2I_2I = jnp.einsum(es, gamma_3d, p1, pd2_b, p12)
+    P_d12_12 = jnp.einsum(es, gamma_3d, p1, p2, pd2_c)
+    P_d1I_12 = jnp.einsum(es, gamma_3d, pd1_a, p2, pd1_c)
+    P_d2I_12 = jnp.einsum(es, gamma_3d, p1, pd1_b, pd1_c)
+
+    # Envelope (s_1 s_2)^3 and its derivatives.  Only the
+    # five derivatives that actually appear in the per-
+    # electron Laplacian are needed.
+    s1 = r_1I - L
+    s2 = r_2I - L
+    s1_2 = s1 * s1
+    s1_3 = s1_2 * s1
+    s2_2 = s2 * s2
+    s2_3 = s2_2 * s2
+    E = s1_3 * s2_3
+    E_d1I = 3.0 * s1_2 * s2_3
+    E_d2I = 3.0 * s1_3 * s2_2
+    E_d1I_1I = 6.0 * s1 * s2_3
+    E_d2I_2I = 6.0 * s1_3 * s2
+
+    # u = P · E and its nine derivatives via Leibniz.
+    u = P_val * E
+    u_d1I = P_d1I * E + P_val * E_d1I
+    u_d2I = P_d2I * E + P_val * E_d2I
+    u_d12 = P_d12 * E
+    u_d1I_1I = (
+        P_d1I_1I * E
+        + 2.0 * P_d1I * E_d1I
+        + P_val * E_d1I_1I
+    )
+    u_d2I_2I = (
+        P_d2I_2I * E
+        + 2.0 * P_d2I * E_d2I
+        + P_val * E_d2I_2I
+    )
+    u_d12_12 = P_d12_12 * E
+    u_d1I_12 = P_d1I_12 * E + P_d12 * E_d1I
+    u_d2I_12 = P_d2I_12 * E + P_d12 * E_d2I
+
+    return (u, u_d1I, u_d2I, u_d12,
+            u_d1I_1I, u_d2I_2I, u_d12_12,
+            u_d1I_12, u_d2I_12)
+
+
 def _angular_cartesian(am, dr, rad_s):
     """Return GTO angular part for angular momentum am.
 
@@ -1565,7 +1660,168 @@ class _PsiGTO:
                     )
             return -total
 
+        def _eeI_element_spin_vgl(
+            elec_crds, nuc_crds, gamma_3d,
+            ie, same_spin,
+        ):
+            """Per-electron (grad, lap) of one (element,spin)
+            block of J3_eeI, *before* the sign flip applied in
+            ``J3_eeI_vgl``.
+            """
+            n_elec = elec_crds.shape[0]
+            n_atoms = nuc_crds.shape[0]
+            i_idx, j_idx = jnp.triu_indices(n_elec, k=1)
+            n_pairs = i_idx.shape[0]
+
+            if same_spin:
+                sm = (i_idx % 2) == (j_idx % 2)
+            else:
+                sm = (i_idx % 2) != (j_idx % 2)
+            spin_f = sm.astype(elec_crds.dtype)
+
+            # Difference vectors and distances.
+            diff_eI = (
+                elec_crds[None, :, :] - nuc_crds[:, None, :]
+            )
+            diff_1I = diff_eI[:, i_idx, :]
+            diff_2I = diff_eI[:, j_idx, :]
+            diff_12 = elec_crds[i_idx] - elec_crds[j_idx]
+            r_eI = jnp.linalg.norm(diff_eI, axis=-1)
+            r_1I = r_eI[:, i_idx]
+            r_2I = r_eI[:, j_idx]
+            r_12 = jnp.linalg.norm(diff_12, axis=-1)
+
+            # Masks (n_atoms, n_pairs).
+            cutoff = (
+                (r_1I < L) & (r_2I < L)
+            ).astype(elec_crds.dtype)
+            elem = (
+                atom_to_elem_idx == ie
+            ).astype(elec_crds.dtype)[:, None]
+            mask = cutoff * elem * spin_f[None, :]
+
+            # Polynomial-× envelope derivatives at every triplet.
+            r_12_b = jnp.broadcast_to(
+                r_12[None, :], (n_atoms, n_pairs),
+            )
+            (_u, u_d1I, u_d2I, u_d12,
+             u_d1I_1I, u_d2I_2I, u_d12_12,
+             u_d1I_12, u_d2I_12) = _eval_eeI_poly_vgl(
+                r_12_b.ravel(),
+                r_1I.ravel(),
+                r_2I.ravel(),
+                gamma_3d, L, N_eI, N_ee,
+            )
+            shp = (n_atoms, n_pairs)
+            u_d1I = u_d1I.reshape(shp)
+            u_d2I = u_d2I.reshape(shp)
+            u_d12 = u_d12.reshape(shp)
+            u_d1I_1I = u_d1I_1I.reshape(shp)
+            u_d2I_2I = u_d2I_2I.reshape(shp)
+            u_d12_12 = u_d12_12.reshape(shp)
+            u_d1I_12 = u_d1I_12.reshape(shp)
+            u_d2I_12 = u_d2I_12.reshape(shp)
+
+            # Unit vectors.
+            ehat_1I = diff_1I / r_1I[..., None]
+            ehat_2I = diff_2I / r_2I[..., None]
+            ehat_12 = diff_12 / r_12[..., None]
+
+            # Cosines for cross terms.
+            cos_1_12 = jnp.einsum(
+                'apk,pk->ap', ehat_1I, ehat_12,
+            )
+            cos_2_12 = jnp.einsum(
+                'apk,pk->ap', ehat_2I, ehat_12,
+            )
+
+            # Per-triplet grad / lap, masked.
+            m_b = mask[..., None]
+            ehat_12_b = jnp.broadcast_to(
+                ehat_12[None, :, :], (n_atoms, n_pairs, 3),
+            )
+            grad_i_t = m_b * (
+                u_d1I[..., None] * ehat_1I
+                + u_d12[..., None] * ehat_12_b
+            )
+            grad_j_t = m_b * (
+                u_d2I[..., None] * ehat_2I
+                - u_d12[..., None] * ehat_12_b
+            )
+            inv_r_12_b = 1.0 / r_12_b
+            lap_i_t = mask * (
+                u_d1I_1I + 2.0 * u_d1I / r_1I
+                + u_d12_12 + 2.0 * u_d12 * inv_r_12_b
+                + 2.0 * u_d1I_12 * cos_1_12
+            )
+            lap_j_t = mask * (
+                u_d2I_2I + 2.0 * u_d2I / r_2I
+                + u_d12_12 + 2.0 * u_d12 * inv_r_12_b
+                - 2.0 * u_d2I_12 * cos_2_12
+            )
+
+            # Scatter (n_atoms, n_pairs) triplets onto the
+            # n_elec electrons via the pair-electron index map.
+            i_flat = jnp.broadcast_to(
+                i_idx[None, :], shp,
+            ).ravel()
+            j_flat = jnp.broadcast_to(
+                j_idx[None, :], shp,
+            ).ravel()
+            grad_e = jnp.zeros(
+                (n_elec, 3), dtype=elec_crds.dtype,
+            )
+            grad_e = grad_e.at[i_flat].add(
+                grad_i_t.reshape(-1, 3),
+            )
+            grad_e = grad_e.at[j_flat].add(
+                grad_j_t.reshape(-1, 3),
+            )
+            lap_e = jnp.zeros(
+                (n_elec,), dtype=elec_crds.dtype,
+            )
+            lap_e = lap_e.at[i_flat].add(lap_i_t.ravel())
+            lap_e = lap_e.at[j_flat].add(lap_j_t.ravel())
+            return grad_e, lap_e
+
+        @jax.jit
+        def J3_eeI_vgl(elec_crds, nuc_crds, curr_params):
+            """Per-electron (grad, lap) of log J₃_{eeI}.
+
+            Returns ``(grad_e, lap_e)`` with shapes
+            ``(n_e, 3)`` and ``(n_e,)``.  Sign-flipped to
+            match the ``-total`` convention of
+            :func:`J3_eeI_fn`.
+            """
+            n_e = elec_crds.shape[0]
+            grad_e = jnp.zeros(
+                (n_e, 3), dtype=elec_crds.dtype,
+            )
+            lap_e = jnp.zeros(
+                (n_e,), dtype=elec_crds.dtype,
+            )
+            for ie, sym in enumerate(unique_elements):
+                for prefix, same in [
+                    ("like+", True),
+                    ("unlike+", False),
+                ]:
+                    key = prefix + sym
+                    if key not in curr_params:
+                        continue
+                    gamma_vec = A @ curr_params[key]
+                    gamma_3d = _vec_to_gamma_3d(
+                        gamma_vec, ls, ms, ns, g_shape,
+                    )
+                    g, L_ = _eeI_element_spin_vgl(
+                        elec_crds, nuc_crds,
+                        gamma_3d, ie, same,
+                    )
+                    grad_e = grad_e + g
+                    lap_e = lap_e + L_
+            return -grad_e, -lap_e
+
         self.J3_eeI_fn = J3_eeI_fn
+        self._J3_eeI_vgl = J3_eeI_vgl
 
     def _build_trial_wf_fns(self):
         """Build log_trial_wavefunction and _C variant."""
@@ -1579,6 +1835,7 @@ class _PsiGTO:
         _J1_bspline_vgl = self._J1_bspline_vgl
         _J2_bspline_aa_vgl = self._J2_bspline_aa_vgl
         _J2_bspline_ab_vgl = self._J2_bspline_ab_vgl
+        _J3_eeI_vgl = self._J3_eeI_vgl
         trial = self.trial
         J1 = self.J1
         J2_aa = self.J2_aa
@@ -1749,18 +2006,14 @@ class _PsiGTO:
                     lap_total + jnp.sum(L_aa) + jnp.sum(L_ab)
                 )
 
+            # J3_eeI three-body — closed-form VGL.
             if "J3_eeI" in curr_params:
-                def _j3_flat(p):
-                    return J3_eeI_fn(
-                        p.reshape(p_flat_shape),
-                        nuc_crds,
-                        curr_params["J3_eeI"],
-                    )
-                lap_o, grad_o = laplacian_linearize(
-                    _j3_flat
-                )(elec_crds.flatten())
-                grad_flat = grad_flat + grad_o
-                lap_total = lap_total + lap_o
+                g, L = _J3_eeI_vgl(
+                    elec_crds, nuc_crds,
+                    curr_params["J3_eeI"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
 
             return -0.5 * (
                 lap_total + jnp.sum(grad_flat * grad_flat)
@@ -1840,9 +2093,11 @@ class _PsiGTO:
             Laplacian via the closed-form
             :func:`_slater_det_assemble`; Padé J1/J2 via the
             ``_J{1,2}_pade_vgl`` helpers; B-spline J1/J2 via
-            the matching ``_J{1,2}_bspline*_vgl`` helpers.  Only
-            ``J3_eeI`` (when present) still routes through the
-            O(N) ``laplacian_linearize`` fallback.
+            the matching ``_J{1,2}_bspline*_vgl`` helpers;
+            J3_eeI via :func:`J3_eeI_vgl`.  All paths are now
+            closed-form; the only remaining
+            ``laplacian_linearize`` site is the multi-determinant
+            Slater fallback (``trial is not None``).
           * ``_local_energy_ke_hessian`` — the prior
             ``jax.hessian(_log_psi_flat)`` kernel, retained
             verbatim for regression and debug.
@@ -1855,7 +2110,7 @@ class _PsiGTO:
         _J1_bspline_vgl = self._J1_bspline_vgl
         _J2_bspline_aa_vgl = self._J2_bspline_aa_vgl
         _J2_bspline_ab_vgl = self._J2_bspline_ab_vgl
-        J3_eeI_fn = self.J3_eeI_fn
+        _J3_eeI_vgl = self._J3_eeI_vgl
 
         @jax.jit
         def _local_energy_ke_hessian(
@@ -1938,20 +2193,14 @@ class _PsiGTO:
                     lap_total + jnp.sum(L_aa) + jnp.sum(L_ab)
                 )
 
-            # J3_eeI: still on the O(N) linearize fallback —
-            # three-body polynomial functor, separate follow-up.
+            # J3_eeI three-body — closed-form VGL.
             if "J3_eeI" in curr_params:
-                def _j3_flat(p):
-                    return J3_eeI_fn(
-                        p.reshape(p_flat_shape),
-                        nuc_crds,
-                        curr_params["J3_eeI"],
-                    )
-                lap_o, grad_o = laplacian_linearize(
-                    _j3_flat
-                )(elec_crds.flatten())
-                grad_flat = grad_flat + grad_o
-                lap_total = lap_total + lap_o
+                g, L = _J3_eeI_vgl(
+                    elec_crds, nuc_crds,
+                    curr_params["J3_eeI"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
 
             return -0.5 * (
                 lap_total + jnp.sum(grad_flat * grad_flat)
