@@ -13,6 +13,10 @@ from OmegaQMC.vmcopt_nn_heg_kfac import (
     _extract_kron_factors,
     _rank1_decompose,
     _damped_kron_inverse,
+    _per_electron_factors,
+    _capture_linear_inputs,
+    _discover_linear_ids,
+    _eager_capture_per_walker,
 )
 
 
@@ -170,6 +174,78 @@ def test_kfac_classifies_params_into_linear_and_generic():
     assert opt._linear_count >= 6
     # Linear params should dominate.
     assert opt._linear_params > 0.5 * opt.n_params
+
+
+def test_per_electron_factors_recovers_g_we_for_synthetic_input():
+    """For a constructed (a_we, g_we) ground-truth, ``_per_electron_factors``
+    must reconstruct factors to within numerical precision.
+
+    NNX ``Linear.kernel`` is shape ``(in, out)``, so ``per_walker_dW``
+    is ``(W, in, out) = (W, in_dim, out_dim)``.  This module's
+    convention returns the (out, out) Fisher first, then the (in, in)
+    Fisher — matching ``_extract_kron_factors``'s naming so that
+    ``ΔW = G_in_inv @ dW @ A_out_inv`` holds with ``dW`` of shape
+    (in, out).
+    """
+    rng = np.random.default_rng(7)
+    W, n_e, in_, out = 64, 5, 7, 3
+    a = jnp.asarray(rng.standard_normal((W, n_e, in_)))
+    g = jnp.asarray(rng.standard_normal((W, n_e, out)))
+    # per-walker dW = sum_e a_we · g_we^T  (shape (in, out))
+    M = jnp.einsum('wei,weo->wio', a, g)
+    de = jnp.zeros(W)
+
+    # Use solve_damping=0 so recovery is exact up to machine eps.
+    A_out, G_in, _, n_rec = _per_electron_factors(
+        a, M, de, solve_damping=0.0,
+    )
+    assert n_rec == n_e
+    assert A_out.shape == (out, out)
+    assert G_in.shape == (in_, in_)
+
+    # Ground-truth factors over the (W·n_e) flattened sample set.
+    a_flat = a.reshape(W * n_e, in_)
+    g_flat = g.reshape(W * n_e, out)
+    A_kfac_in = jnp.einsum('si,sj->ij', a_flat, a_flat) / (W * n_e)
+    G_kfac_out = jnp.einsum('so,sp->op', g_flat, g_flat) / (W * n_e)
+
+    # Our return: A_out (output-side) corresponds to KFAC's G;
+    # G_in (input-side) corresponds to KFAC's A.
+    np.testing.assert_allclose(np.asarray(A_out),
+                               np.asarray(G_kfac_out), atol=1e-7)
+    np.testing.assert_allclose(np.asarray(G_in),
+                               np.asarray(A_kfac_in), atol=1e-9)
+
+
+def test_eager_capture_records_layer_inputs():
+    """Smoke test for ``_eager_capture_per_walker``: one walker
+    in, one entry per Linear out, with the recorded array equal to
+    that Linear's input."""
+    from flax import nnx
+    from OmegaQMC.psi.nn.heg_psiformer import build_heg_psiformer_wf
+    cfg = HEGPsiFormerConfig(
+        n_up=7, n_down=7, L=7.77, n_det=2,
+        embedding_dim=16, n_interactions=1,
+        two_particle_stream_dim=8, n_attention_heads=2,
+        use_cusp=False, use_deep_jastrow=False,
+        use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
+    )
+    rng = nnx.Rngs(jax.random.key(0))
+    model = build_heg_psiformer_wf(cfg, rng)
+    id_to_path = _discover_linear_ids(model)
+    assert len(id_to_path) >= 6      # at least the attention QKVO
+
+    walkers = jnp.asarray(
+        np.random.default_rng(0).random((4, 14, 3)) * cfg.L,
+    )
+    captures = _eager_capture_per_walker(model, walkers, id_to_path)
+    # Most discovered Linears get called during forward (some may be
+    # skipped on conditional code paths, e.g. an unused spin block).
+    assert len(captures) >= len(id_to_path) - 2
+    # Each stacked array has W as the leading axis.
+    for path, arr in captures.items():
+        assert arr.shape[0] == 4
+        assert jnp.all(jnp.isfinite(arr))
 
 
 def test_kfac_with_multi_device_falls_back_when_one_gpu():

@@ -74,21 +74,208 @@ Multi-device parallelism via ``jax.pmap`` is supported and toggled by
 
 from __future__ import annotations
 
+import contextlib
 import sys
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from .psi.nn.heg_wf import (
     HEGConfig,
+    HEGPsiFormerConfig,
     make_heg_log_psi_any as make_heg_log_psi,
 )
+from .psi.nn.heg_psiformer import build_heg_psiformer_wf
 from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy
+
+
+# ---------------------------------------------------------------------
+# Per-electron activation capture (FermiNet RepeatedDenseBlock approach)
+#
+# FermiNet's open-source KFAC handles per-electron Linears by treating
+# each (walker, electron) pair as a separate Fisher sample.  Their
+# kfac-jax integration relies on graph-pattern matching to expose
+# layer inputs (a) and output cotangents (g) via ``register_dense``.
+# We don't have that; instead we monkey-patch ``nnx.Linear.__call__``
+# to record its INPUT into a thread-local bucket whenever an outer
+# ``capture_linear_inputs`` context is active.  Outside the context
+# (e.g. during the JIT'd grad pass) the patch is a no-op.
+#
+# Once we have the per-walker captured inputs ``a_we`` (shape
+# ``(W, n_sample_layer, in_dim)``), we recover ``g_we`` via a per-
+# walker linear solve from
+#
+#     ∂log|ψ_w|/∂W = G_w · A_w   where  G_w = (out, n_e),
+#                                       A_w = (n_e, in)
+#
+# i.e. ``G_w = dW_w · A_w^T · (A_w · A_w^T + λI)^{-1}``.  Then KFAC
+# factors are accumulated over the flattened ``(W·n_e)`` population
+# exactly as FermiNet's RepeatedDenseBlock does.
+# ---------------------------------------------------------------------
+
+_capture_state = threading.local()
+_capture_state.bucket = None
+
+_orig_linear_call = nnx.Linear.__call__
+
+
+def _patched_linear_call(self, x):
+    bucket = getattr(_capture_state, 'bucket', None)
+    if bucket is not None:
+        bucket.append((id(self), x))
+    return _orig_linear_call(self, x)
+
+
+nnx.Linear.__call__ = _patched_linear_call
+
+
+@contextlib.contextmanager
+def _capture_linear_inputs():
+    prev = getattr(_capture_state, 'bucket', None)
+    bag: List[Tuple[int, jax.Array]] = []
+    _capture_state.bucket = bag
+    try:
+        yield bag
+    finally:
+        _capture_state.bucket = prev
+
+
+def _discover_linear_ids(model: nnx.Module) -> Dict[int, str]:
+    """Walk a live ``nnx.Module`` → ``{id(linear) → string path}``."""
+    out: Dict[int, str] = {}
+
+    def _r(obj, prefix: str):
+        if isinstance(obj, nnx.Linear):
+            out[id(obj)] = prefix.rstrip('/')
+            return
+        if isinstance(obj, nnx.Module):
+            for k, v in obj.__dict__.items():
+                if k.startswith('_'):
+                    continue
+                _r(v, prefix + str(k) + '/')
+        elif isinstance(obj, (list, tuple)):
+            for i, v in enumerate(obj):
+                _r(v, prefix + str(i) + '/')
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                _r(v, prefix + str(k) + '/')
+
+    _r(model, '')
+    return out
+
+
+def _eager_capture_per_walker(
+    model: nnx.Module,
+    walkers: jax.Array,
+    id_to_path: Dict[int, str],
+) -> Dict[str, jax.Array]:
+    """Run ``model(walker)`` for each walker, capture each Linear's
+    input, return ``{path → (W, *input_shape)}``."""
+    bag_per_path: Dict[str, List[jax.Array]] = {
+        p: [] for p in id_to_path.values()
+    }
+    for w in range(walkers.shape[0]):
+        with _capture_linear_inputs() as bucket:
+            _ = model(walkers[w])
+        for layer_id, x in bucket:
+            path = id_to_path.get(layer_id)
+            if path is not None:
+                bag_per_path[path].append(x)
+    return {
+        p: jnp.stack(xs, axis=0)
+        for p, xs in bag_per_path.items()
+        if xs
+    }
+
+
+def _per_electron_factors(
+    captured_input: jax.Array,
+    per_walker_dW: jax.Array,
+    de: jax.Array,
+    solve_damping: float = 1.0e-6,
+) -> Tuple[jax.Array, jax.Array, jax.Array, int]:
+    """Compute exact KFAC factors for a per-electron Linear.
+
+    Treats each (walker, electron) pair as a separate sample, à la
+    FermiNet's ``RepeatedDenseBlock``.
+
+    Args:
+        captured_input: ``(W, n_e_layer, in_dim)`` per-walker per-
+            electron Linear inputs.  If the layer is "global"
+            (n_e_layer effectively 1) the caller may pass shape
+            ``(W, in_dim)``; we'll add an axis.
+        per_walker_dW: ``(W, in_dim, out_dim)`` from the JIT'd grad —
+            ``Σ_e a_we · g_we^T`` per walker.  (NNX's ``Linear``
+            stores ``kernel`` as ``(in, out)``, so the gradient
+            inherits that layout.)
+        de: ``(W,)`` energy residual for the de-weighted dW_loss.
+        solve_damping: small Tikhonov on the per-walker
+            ``(A_w · A_w^T + λI)`` solve that recovers ``g_we``.
+
+    Returns:
+        ``(A_out, G_in, dW_loss, n_e_layer)``.
+
+        Following the convention used elsewhere in this module
+        (``_extract_kron_factors`` and ``_init_factor_state``), the
+        first returned matrix is the *output*-side cov ``E[g g^T]``
+        (shape ``(out, out)``) — i.e. the right-multiplier in the
+        KFAC step ``ΔW = G_in_inv @ dW @ A_out_inv`` — and the
+        second is the *input*-side cov ``E[a a^T]`` (shape
+        ``(in, in)``) — the left-multiplier.
+
+        ``A_out`` and ``G_in`` are accumulated over the flattened
+        ``(W · n_e_layer)`` population.  The caller must apply a
+        ``scale = n_e_layer`` multiplier to the natural-gradient
+        step (see FermiNet's ``fixed_scale``) to match the per-
+        walker gradient magnitude.
+    """
+    a_we = captured_input
+    if a_we.ndim == 2:                             # (W, in) — global Linear
+        a_we = a_we[:, None, :]
+    W, n_e, in_dim = a_we.shape
+    out_dim = per_walker_dW.shape[2]
+
+    # Recover g_we from a_we and per_walker_dW.
+    # Per walker: dW_w = a_w^T @ g_w   (shapes (in, out) = (in, n_e) @ (n_e, out))
+    # Solve: g_w = (a_w @ a_w^T + λI)^{-1} @ a_w @ dW_w
+    #   AAT[w, e, f] = (a_w @ a_w^T)[e, f]
+    #   a_dW[w, e, o] = (a_w @ dW_w)[e, o]
+    #   g_we[w, e, o] = AAT_inv[w] @ a_dW[w]
+    AAT = jnp.einsum('wei,wfi->wef', a_we, a_we)
+    AAT = AAT + solve_damping * jnp.eye(
+        n_e, dtype=AAT.dtype,
+    )[None]
+    AAT_inv = jnp.linalg.inv(AAT)
+    a_dW = jnp.einsum('wei,wio->weo', a_we, per_walker_dW)    # (W, n_e, out)
+    g_we = jnp.einsum('wef,wfo->weo', AAT_inv, a_dW)          # (W, n_e, out)
+
+    # Flatten per-(walker, electron) populations.
+    a_flat = a_we.reshape(W * n_e, in_dim)
+    g_flat = g_we.reshape(W * n_e, out_dim)
+
+    # KFAC-textbook factors:
+    #   A_kfac = E[a a^T]  (shape (in, in))   — the LEFT-side factor
+    #                                            in ΔW = A^-1 dW G^-1
+    #   G_kfac = E[g g^T]  (shape (out, out)) — the RIGHT-side factor
+    A_kfac = jnp.einsum('si,sj->ij', a_flat, a_flat) / (W * n_e)
+    G_kfac = jnp.einsum('so,sp->op', g_flat, g_flat) / (W * n_e)
+
+    # Map onto this module's naming convention (preserves the existing
+    # step formula ``step = G_inv @ dW @ A_inv``):
+    #   A_out (returned first) is the (out, out) RIGHT-side factor
+    #   G_in  (returned second) is the (in, in)  LEFT-side factor
+    A_out = G_kfac
+    G_in = A_kfac
+
+    dW_loss = jnp.einsum('w,wio->io', de, per_walker_dW) / W
+    return A_out, G_in, dW_loss, n_e
 
 
 TARGET_ACCEPTANCE_RATE = 0.5
@@ -402,6 +589,7 @@ class _HEGKFACOptimizer:
         ema_decay: float = 0.0,
         norm_constraint: Optional[float] = None,
         var_weight: float = 0.0,
+        capture_activations: bool = False,
         ewald_n_real: int = 3,
         ewald_n_recip: int = 6,
         ewald_eta: Optional[float] = None,
@@ -440,6 +628,7 @@ class _HEGKFACOptimizer:
         self.norm_constraint = (None if norm_constraint is None
                                 else float(norm_constraint))
         self.var_weight = float(var_weight)
+        self.capture_activations = bool(capture_activations)
         self.multi_device = bool(multi_device)
 
         self.lattice = make_cubic_lattice(self.L)
@@ -460,6 +649,23 @@ class _HEGKFACOptimizer:
         self.n_params = int(sum(
             p.size for p in jax.tree.leaves(init_params)
         ))
+
+        # Build a live model + linear-path map for direct activation
+        # capture (used when capture_activations=True).  Only available
+        # for PsiFormer configs — Slater-Jastrow has no Linears.
+        self._live_model = None
+        self._linear_id_to_path: Dict[int, str] = {}
+        self._other_state = None
+        if self.capture_activations and isinstance(
+            config, HEGPsiFormerConfig,
+        ):
+            rngs = nnx.Rngs(init_key)
+            model = build_heg_psiformer_wf(config, rngs)
+            self._live_model = model
+            # Extract `other` (non-Param) state for nnx.merge later.
+            _, _, other = nnx.split(model, nnx.Param, ...)
+            self._other_state = other
+            self._linear_id_to_path = _discover_linear_ids(model)
 
         # Split params into Linear-kernel layers vs generic tail.
         self._layers, self._kernel_shapes, _generic_leaves = _classify_params(
@@ -532,13 +738,21 @@ class _HEGKFACOptimizer:
         )
 
         def step_body(params, e_loc, walkers, A_state, G_state,
-                      lr_now, damping_arr):
+                      lr_now, damping_arr, captured_inputs):
             """Body shared between single-device JIT and pmap paths.
 
             When run under ``jax.pmap`` with ``axis_name='devices'``
             the local averages are converted to global averages via
             ``jax.lax.pmean``; under plain ``jax.jit`` the
             ``pmean_axis=None`` path keeps them local.
+
+            ``captured_inputs`` is a (possibly empty) dict mapping
+            layer-path strings to ``(W, n_e_layer, in_dim)`` per-
+            (walker, electron) Linear inputs.  When provided for a
+            layer, we use FermiNet-style RepeatedDenseBlock factor
+            extraction (treat each (w, e) as a sample); otherwise we
+            fall back to the un-decomposed ``M^T M`` / ``M M^T``
+            formula in :func:`_extract_kron_factors`.
             """
             pw_grad = per_walker_grad_vmap(walkers, params)
 
@@ -559,13 +773,34 @@ class _HEGKFACOptimizer:
 
             new_A, new_G = {}, {}
             update_kernels: Dict[str, jax.Array] = {}
+            # FermiNet-style per-layer scale (n_e_layer for layers
+            # where we used RepeatedDenseBlock-style extraction; 1 for
+            # the M^T M fallback so the natural-gradient step has
+            # the same effective magnitude as before).
+            kernel_scale: Dict[str, float] = {}
 
             # Per Linear layer: extract Kronecker factors, damp, step.
             for layer, (kpath, bpath) in layer_paths.items():
                 pw_dW = _get_at_path(pw_grad, kpath)            # (W, out, in)
-                A, G, dW_loss = _extract_kron_factors(
-                    pw_dW, de_eff, pmean_axis=pmean_axis,
-                )
+                if layer in captured_inputs:
+                    A, G, dW_loss, n_e = _per_electron_factors(
+                        captured_inputs[layer], pw_dW, de_eff,
+                    )
+                    if pmean_axis is not None:
+                        A = jax.lax.pmean(A, pmean_axis)
+                        G = jax.lax.pmean(G, pmean_axis)
+                        dW_loss = jax.lax.pmean(dW_loss, pmean_axis)
+                    # No ``n_e`` scale — our ``dW_loss`` is already
+                    # per-walker-summed (Σ_e g_we a_we^T), matching the
+                    # M^T M path's scale; FermiNet's ``fixed_scale=n_e``
+                    # exists because their loss is per-(walker,electron)
+                    # averaged, which we don't do.
+                    kernel_scale[layer] = 1.0
+                else:
+                    A, G, dW_loss = _extract_kron_factors(
+                        pw_dW, de_eff, pmean_axis=pmean_axis,
+                    )
+                    kernel_scale[layer] = 1.0
 
                 # EMA over iters.
                 A_prev = A_state[layer]
@@ -579,9 +814,9 @@ class _HEGKFACOptimizer:
                 A_inv, G_inv = _damped_kron_inverse(
                     A_new, G_new, damping_arr,
                 )
-                # ΔW = -lr · G_inv · dW_loss · A_inv
-                step = G_inv @ dW_loss @ A_inv
-                update_kernels[layer] = step    # the *direction*, not yet scaled
+                # ΔW = -lr · scale · G_inv · dW_loss · A_inv
+                step = kernel_scale[layer] * (G_inv @ dW_loss @ A_inv)
+                update_kernels[layer] = step    # *direction*, not yet scaled
 
             # ---- Generic block: damped natural gradient ----
             # Collect per-walker grads of log|ψ| for all generic leaves.
@@ -821,6 +1056,25 @@ class _HEGKFACOptimizer:
             e_pot = self._pot_batch(walkers)
             e_loc = e_kin + e_pot
 
+            # ---- Direct activation capture (FermiNet-style) ----
+            # Eager Python loop over walkers.  Slow at large W but
+            # gives mathematically correct KFAC factors for per-
+            # electron Linears.  Skipped if disabled or unavailable.
+            captured_inputs: Dict[str, jax.Array] = {}
+            if (self.capture_activations
+                    and self._other_state is not None):
+                # Build a fresh live model from the current params
+                # so the Linears' id()s belong to THIS model.
+                # (nnx.merge returns a new Module; we re-discover
+                # paths to keep ids consistent within the iter.)
+                live = nnx.merge(
+                    self.graphdef, params, self._other_state,
+                )
+                live_id_to_path = _discover_linear_ids(live)
+                captured_inputs = _eager_capture_per_walker(
+                    live, walkers, live_id_to_path,
+                )
+
             # KFAC step.
             if self.lr_decay is not None:
                 lr_now = self.lr / (1.0 + (it - 1) / self.lr_decay)
@@ -849,6 +1103,7 @@ class _HEGKFACOptimizer:
                     kfac_step_core(
                         p_rep, e_loc_sh, w_sh,
                         A_rep, G_rep, lr_rep, damp_rep,
+                        captured_inputs,
                     )
                 )
                 params = _take_first_device(p_out)
@@ -864,6 +1119,7 @@ class _HEGKFACOptimizer:
                         A_state, G_state,
                         jnp.asarray(lr_now, dtype=jnp.float64),
                         jnp.asarray(damping_now, dtype=jnp.float64),
+                        captured_inputs,
                     )
                 )
 
@@ -944,6 +1200,7 @@ def get_vmcopt_nn_heg_kfac_func(
     ema_decay: float = 0.0,
     norm_constraint: Optional[float] = None,
     var_weight: float = 0.0,
+    capture_activations: bool = False,
     ewald_n_real: int = 3,
     ewald_n_recip: int = 6,
     ewald_eta: Optional[float] = None,
@@ -968,6 +1225,7 @@ def get_vmcopt_nn_heg_kfac_func(
         ema_decay=ema_decay,
         norm_constraint=norm_constraint,
         var_weight=var_weight,
+        capture_activations=capture_activations,
         ewald_n_real=ewald_n_real,
         ewald_n_recip=ewald_n_recip,
         ewald_eta=ewald_eta,

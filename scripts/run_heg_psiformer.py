@@ -345,6 +345,9 @@ def _run(cfg, project, run_dir, prefix):
                 norm_constraint=_get(cfg,
                                      'optimize.kfac_norm_constraint', None),
                 var_weight=var_weight,
+                capture_activations=bool(_get(
+                    cfg, 'optimize.kfac_capture_activations', False,
+                )),
                 ewald_n_real=ewald_n_real,
                 ewald_n_recip=ewald_n_recip,
                 multi_device=bool(_get(cfg, 'optimize.multi_device', False)),
