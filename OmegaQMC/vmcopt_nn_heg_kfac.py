@@ -6,35 +6,48 @@ with our jax 0.10 stack).  Mirrors ``vmcopt_nn_heg_sr.py`` 's
 constructor and ``__call__`` signatures so ``run_heg_psiformer.py``
 dispatches to it on ``optimize.type: kfac``.
 
-Known limitations
------------------
+Two factor-extraction paths are available:
 
-1. **Per-electron Linear layers are approximated**.  In our HEG
-   PsiFormer, most ``nnx.Linear`` layers are applied per-electron
-   (n_elec independent applications sharing the same kernel ``W``).
-   For these the per-walker gradient
-   ``∂log|ψ_w|/∂W = Σ_e g_we x_we^T`` is *not* a single rank-1
-   outer product but a sum of n_elec rank-1 matrices.  Proper
-   KFAC needs the per-electron ``(x_we, g_we)`` pairs; recovering
-   them requires model surgery (exposing each layer's input AND
-   output cotangent as auxiliary outputs of the forward pass).
-   This implementation instead extracts the leading rank-1 SVD
-   component, which gives a reasonable natural-gradient *direction*
-   but is biased relative to FermiNet's exact KFAC.  Empirically:
-   on a 500-iter N=14 rs=2 test our KFAC reaches ~57% PZ correlation
-   versus SR's ~63% at the same iter budget.  For a clean port of
-   FermiNet's KFAC convergence speed-up, instrument the model to
-   expose layer activations and output cotangents (~1 day of work).
+a. **M^T M / M M^T (default, fast, biased).**  No model
+   instrumentation — uses the per-walker pytree gradient directly.
+   For a per-electron Linear with ``∂log|ψ_w|/∂W = Σ_e a_we ⊗ g_we``
+   (rank-N), this gives ``A = E_w[M_w^T M_w]`` and ``G = E_w[M_w M_w^T]``
+   which are biased by per-walker ``‖a‖`` / ‖g‖`` weights compared
+   to FermiNet's strict per-(walker,electron) factorisation, but
+   numerically very stable and ~0.2 s/iter at our scale.
 
-2. **Multi-device pmap is wired**.  ``multi_device=True`` shards
-   walkers across all visible local devices and ``pmean``-aggregates
-   the Kronecker factors so each device computes the same KFAC
-   step.  When only one device is visible the optimizer falls
-   back to single-device automatically.
+b. **Per-electron capture (FermiNet-style, slow, exact).**  Set
+   ``capture_activations=True`` to monkey-patch ``nnx.Linear`` to
+   record its input each forward, then run an eager Python loop
+   over walkers to populate per-(walker,electron) activations.  We
+   recover ``g_we`` per walker via a small ``(n_e, n_e)`` linear
+   solve and accumulate ``A``, ``G`` over ``W·n_e`` flattened
+   samples — exactly FermiNet's RepeatedDenseBlock semantics.
+   Mathematically equivalent to FermiNet's KFAC but ~25× slower
+   per iter at our scale because the eager loop runs ~25 ms per
+   walker (Python dispatch overhead).  Empirically at N=14 rs=2
+   with 200 iters / 128 walkers, capture and M^T M both reach
+   ~51-52 % PZ (within run-to-run noise) — capture's "exact"
+   factors don't decisively win at this scale because the
+   per-iter cost dominates the natural-gradient improvement.
 
-3. **Adaptive damping is heuristic Levenberg-Marquardt** — track
-   the average energy trend over a look-back window and adjust ε
-   by ×0.95 / ÷0.95.  Bounded by ``[damping_min, damping_max]``.
+Use case guidance:
+  * Production runs (W=2048+) → ``capture_activations=False``.
+    M^T M is fast enough and reaches comparable accuracy.
+  * Research / ablation / matching FermiNet exactly →
+    ``capture_activations=True``.
+
+Other features
+--------------
+
+* **Multi-device pmap** — ``multi_device=True`` shards walkers
+  across all visible local devices and ``pmean``-aggregates the
+  Kronecker factors.  Auto-fallback to single-device when only one
+  GPU is visible.
+
+* **Adaptive Levenberg-Marquardt damping** — track average energy
+  trend over a look-back window and adjust ε by ×0.95 / ÷0.95.
+  Bounded by ``[damping_min, damping_max]``.
 
 Algorithm
 ---------
