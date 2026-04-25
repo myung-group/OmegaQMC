@@ -74,6 +74,47 @@ def test_extract_kron_factors_dW_loss_matches_naive_average():
                                np.asarray(dW_naive), atol=1e-12)
 
 
+def test_extract_kron_factors_uses_undecomposed_M():
+    """A = E[M^T M], G = E[M M^T] — direct from M, no SVD needed."""
+    rng = np.random.default_rng(3)
+    W, out, in_ = 16, 4, 5
+    M = jnp.asarray(rng.standard_normal((W, out, in_)))
+    de = jnp.zeros(W)
+    A, G, _ = _extract_kron_factors(M, de)
+    A_expected = jnp.einsum('woi,woj->ij', M, M) / W
+    G_expected = jnp.einsum('woi,wpi->op', M, M) / W
+    np.testing.assert_allclose(np.asarray(A), np.asarray(A_expected),
+                               atol=1e-12)
+    np.testing.assert_allclose(np.asarray(G), np.asarray(G_expected),
+                               atol=1e-12)
+
+
+def test_extract_kron_factors_recovers_true_for_rank1():
+    """When M_w = g_w · x_w^T (single rank-1), the unscaled formula
+    E[M^T M] reduces to E[‖g_w‖² x_w x_w^T] which equals E[x x^T]
+    times a constant if ‖g‖ is constant across walkers.  Verify that
+    *up to a scale factor*."""
+    rng = np.random.default_rng(4)
+    W, out, in_ = 64, 5, 6
+    g = jnp.asarray(rng.standard_normal((W, out)))
+    x = jnp.asarray(rng.standard_normal((W, in_)))
+    M = jnp.einsum('wo,wi->woi', g, x)
+
+    A, G, _ = _extract_kron_factors(M, jnp.zeros(W))
+    # Compare A direction with E[x x^T] direction.
+    A_true = jnp.einsum('wi,wj->ij', x, x) / W
+    cos_A = (jnp.sum(A * A_true) /
+             (jnp.linalg.norm(A) * jnp.linalg.norm(A_true)))
+    G_true = jnp.einsum('wo,wp->op', g, g) / W
+    cos_G = (jnp.sum(G * G_true) /
+             (jnp.linalg.norm(G) * jnp.linalg.norm(G_true)))
+    # Should be highly aligned (>0.9) — the per-walker ‖g‖²/‖x‖²
+    # weighting introduces some bias but for random inputs at
+    # decent W the cos is close to 1.
+    assert float(cos_A) > 0.85
+    assert float(cos_G) > 0.85
+
+
 # ---------------------------------------------------------------
 # End-to-end smoke
 # ---------------------------------------------------------------

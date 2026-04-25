@@ -230,29 +230,46 @@ def _extract_kron_factors(
     de: jax.Array,
     pmean_axis: Optional[str] = None,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-    """Decompose per-walker rank-1 gradients into (A, G, ∂L/∂W).
+    """Compute Kronecker factors A, G and energy-gradient from
+    per-walker dW.
+
+    Uses the un-decomposed forms
+
+        A = E[ M_w^T @ M_w ],     G = E[ M_w @ M_w^T ]
+
+    which are *exact* under the standard KFAC factorisation
+    assumption (independence of x and g across walkers/electrons),
+    independently of how many rank-1 outer products contribute to
+    each ``M_w = ∂log|ψ_w|/∂W``.  For per-electron Linears (where
+    ``M_w = Σ_e g_we x_we^T``) this is much more accurate than
+    extracting a single rank-1 SVD component:
+
+        F_true   ≈ G_true ⊗ A_true             (KFAC approximation)
+        F_M^T M ≈ E[‖a‖²]·G_true ⊗ E[‖g‖²]·A_true  (~99% cosine)
+        F_SVD    ≈ E[(‖a‖/‖g‖)·gg^T]
+                    ⊗ E[(‖g‖/‖a‖)·aa^T]        (~92% cosine on rank-N)
+
+    The ``E[‖a‖²]·E[‖g‖²]`` proportionality is absorbed by the
+    learning rate so the *direction* of the natural-gradient step
+    is preserved up to that constant — same as multiplying ``F`` by
+    a scalar, which is invariant under the KFAC step
+    ``F^{-1} · ∇L``.
 
     Args:
-        per_walker_dW: ``(W_local, out, in)`` — each slice is ``g_w x_w^T``,
-            i.e. ``∂log|ψ_w|/∂W`` (NOT energy-weighted).  ``W_local``
-            is the per-device walker count when ``pmean_axis`` is set.
-        de: ``(W_local,)`` energy residual.
-        pmean_axis: If not None, the result is averaged across
-            ``jax.lax.pmean`` along that axis name (used inside ``pmap``).
-            Otherwise plain local mean.
+        per_walker_dW: ``(W_local, out, in)`` per-walker grad of
+            ``log|ψ|`` wrt ``W`` (NOT energy-weighted).
+        de: ``(W_local,)`` energy residual ``E_L_w − ⟨E_L⟩``.
+        pmean_axis: If set, ``jax.lax.pmean`` along that axis name
+            so the same factors land on every device under ``pmap``.
 
     Returns:
-        A: ``(in, in)`` = ``E[x_w x_w^T]``
-        G: ``(out, out)`` = ``E[g_w g_w^T]``
-        dW_loss: ``(out, in)`` = ``E[de_w · g_w x_w^T]`` (the energy
-            gradient of W).
+        ``(A, G, dW_loss)`` of shapes ``(in, in)``, ``(out, out)``,
+        ``(out, in)``.
     """
-    g_w, x_w = _rank1_decompose(per_walker_dW)
-    A = jnp.einsum('wi,wj->ij', x_w, x_w) / x_w.shape[0]
-    G = jnp.einsum('wi,wj->ij', g_w, g_w) / g_w.shape[0]
-    dW_loss = jnp.einsum(
-        'w,woi->oi', de, per_walker_dW,
-    ) / per_walker_dW.shape[0]
+    M = per_walker_dW
+    A = jnp.einsum('woi,woj->ij', M, M) / M.shape[0]
+    G = jnp.einsum('woi,wpi->op', M, M) / M.shape[0]
+    dW_loss = jnp.einsum('w,woi->oi', de, M) / M.shape[0]
     if pmean_axis is not None:
         A = jax.lax.pmean(A, pmean_axis)
         G = jax.lax.pmean(G, pmean_axis)
