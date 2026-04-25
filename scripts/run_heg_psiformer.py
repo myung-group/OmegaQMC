@@ -324,6 +324,23 @@ def _run(cfg, project, run_dir, prefix):
                 ewald_n_real=ewald_n_real,
                 ewald_n_recip=ewald_n_recip,
             )
+        elif opt_type == 'kfac':
+            from OmegaQMC.vmcopt_nn_heg_kfac import (
+                get_vmcopt_nn_heg_kfac_func,
+            )
+            opt = get_vmcopt_nn_heg_kfac_func(
+                config, init_key,
+                lr=opt_lr,
+                lr_decay=_get(cfg, 'optimize.lr_decay', 1.0e4),
+                damping=float(_get(cfg, 'optimize.kfac_damping', 1e-3)),
+                ema_decay=float(_get(cfg, 'optimize.kfac_ema_decay', 0.95)),
+                norm_constraint=_get(cfg,
+                                     'optimize.kfac_norm_constraint', 1e-3),
+                var_weight=var_weight,
+                ewald_n_real=ewald_n_real,
+                ewald_n_recip=ewald_n_recip,
+                multi_device=bool(_get(cfg, 'optimize.multi_device', False)),
+            )
         else:
             raise ValueError(f"Unknown optimize.type: {opt_type!r}")
 

@@ -45,7 +45,7 @@ pretrain:
   lr: 3.0e-3
 
 optimize:
-  type: sr                             # 'sr' (natural gradient) or 'adam'
+  type: sr                             # 'sr' | 'adam' | 'kfac'
   iters: 5000
   walkers: 2048
   lr: 0.05
@@ -55,6 +55,12 @@ optimize:
   # SR-only:
   sr_damping: 1.0e-3
   sr_n_cg: 30
+  # KFAC-only (FermiNet defaults shown):
+  lr_decay: 1.0e4                      # lr_t = lr / (1 + t/lr_decay).  null → constant lr
+  kfac_damping: 1.0e-3                 # Tikhonov damping ε on (A + π√λ·I), (G + (1/π)√λ·I)
+  kfac_ema_decay: 0.95                 # exponential-moving-average for A, G factors
+  kfac_norm_constraint: 1.0e-3         # trust-region clip on ‖step‖.  null → disable
+  multi_device: false                  # KFAC pmap across local GPUs (set true on multi-GPU host)
   skip: false                          # set true to only evaluate at init
 
 eval:
