@@ -570,14 +570,31 @@ def _angular_cartesian_vgl(am, dr):
     (solid harmonics are harmonic), so only ``(value, grad)``
     are returned.
 
-    ``jax.jacobian`` unrolls at trace time because the
-    dispatch in :func:`_angular_cartesian_poly` is a Python
-    ``if`` on the constant ``am``.  For a small ``(2 am + 1,
-    3)`` output this costs a negligible amount of memory.
+    For ``am ∈ {0, 1, 2}`` the gradient is hand-rolled (s: zero,
+    p: identity, d: the explicit 5×3 form derived from
+    :func:`_angular_cartesian` at ``rad_s = 1``).  For
+    ``am ≥ 3`` we fall back to ``jax.jacobian`` — the f / g
+    polynomial gradients are verbose enough that the trace
+    cost is acceptable for shells that rarely appear in
+    molecular VMC.
     """
     Y = _angular_cartesian_poly(am, dr)
     if am == 0:
         return Y, jnp.zeros((1, 3))
+    if am == 1:
+        return Y, jnp.eye(3)
+    if am == 2:
+        cd1 = jnp.sqrt(3.0)
+        x, y, z = dr
+        zero = jnp.zeros_like(x)
+        grad_Y = jnp.array([
+            [cd1 * y, cd1 * x, zero],
+            [zero,    cd1 * z, cd1 * y],
+            [-x,      -y,      2.0 * z],
+            [cd1 * z, zero,    cd1 * x],
+            [cd1 * x, -cd1 * y, zero],
+        ])
+        return Y, grad_Y
     grad_Y = jax.jacobian(
         lambda d: _angular_cartesian_poly(am, d)
     )(dr)
