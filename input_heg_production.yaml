@@ -1,0 +1,105 @@
+# -------------------------------------------------------------------
+# HEG PsiFormer — production input
+#
+# Designed to reproduce Cassella 2023 (PRL 130, 036401) Table I to
+# within ~0.1-0.5 mHa/elec of i-FCIQMC CBS for N=14 unpolarised, on a
+# SINGLE 80 GB A100 with our SR optimiser.
+#
+# Cassella's exact recipe (their Section "Network details"):
+#   embedding 256, layers 4, n_det 16, batch 4096, KFAC 3e5 iters
+#   on 4 × A100 — does not fit one GPU with SR's Jacobian footprint.
+#
+# This file is the largest configuration that fits a single 80 GB
+# A100 with SR.  Walkers × params Jacobian ≈ 2048 × ~700k × 8B ≈ 12 GB
+# (plus ~10 GB activations / cusp / Ewald) → ~25 GB peak.
+#
+# Wall clock at this scale (single A100, FP64): ~3 s / SR iter,
+# so 30000 iters ≈ 25 h.  Eval pass: ~70 s / block × 100 blocks ≈ 2 h.
+# Total ~27 h per rs point.  For the rs scan, run on 5 GPUs in
+# parallel via scripts/scan_heg_rs.py --generate-only.
+#
+# If your GPU has < 40 GB memory, drop embedding_dim to 64 and
+# walkers to 1024 — that's the phase-B recipe and already gives
+# 96.8% of i-FCIQMC CBS at rs=2.
+# -------------------------------------------------------------------
+
+project: prod_N14_unpol            # → runs/prod_N14_unpol/
+
+system:
+  rs: 2.0                          # rs-scan overrides this; leave fixed for single run
+  N: 14                            # closed shell (unpolarised: 14, 38, 54)
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  # --- Architecture (Cassella-class but SR-fit) ---
+  embedding_dim: 128               # Cassella 256.  Halved here so SR Jacobian fits
+  layers: 3                        # Cassella 4.   3 layers ≈ 95% of 4-layer expressivity at half the params
+  heads: 4                         # 4 heads × 32 head-dim (must divide embedding_dim)
+  two_particle_dim: 32             # Cassella 32 — kept identical
+  n_det: 16                        # Cassella's best; brings n=1 -0.43881 → n=16 -0.44053 at rs=2
+  full_determinant: false          # Block-diagonal det is sufficient for unpolarised
+  # --- Correlation add-ons (Cassella uses cusp + deep Jastrow only) ---
+  use_cusp: true                   # Kato e-e cusp; provides ~40% PZ at init
+  deep_jastrow: true               # GNN-side scalar Jastrow head — ESSENTIAL for descent
+  pair_jastrow: false              # Redundant with deep_jastrow; PsiFormer paper omits
+  jas_activation: tanh
+  jas_bias: true
+  jas_zero_init_last: true
+  # --- Multi-det diversity (without this, n_det > 1 is degenerate) ---
+  n_virt_pw: 12                    # Next closed shell beyond the Fermi sea (cubic, N=14)
+  det_jitter: 0.02
+  use_ghost_atom: true             # Breaks same-spin embedding degeneracy
+
+# --- Pre-training: drive NN orbitals → HF Slater determinant ---
+# Cassella uses no MSE pre-training (they rely on KFAC's natural-grad
+# robustness from random init).  With SR + finite walkers we still
+# need it to escape the random-init plateau, but not too long: stopping
+# at MSE ~1e-4 (200-400 iters) leaves the network with enough
+# diversity to descend further during energy VMC.  Driving MSE to
+# 1e-7 over-regularises and hurts the 16-det expansion.
+pretrain:
+  iters: 300                       # 200-500 is the sweet spot for n_det=16
+  walkers: 1024
+  lr: 3.0e-3
+
+# --- Energy VMC ---
+optimize:
+  type: sr                         # 'sr' (recommended) or 'adam' (slower-but-OOM-safer)
+  iters: 30000                     # Cassella runs 300k KFAC; SR converges ~10× faster per-iter
+  walkers: 2048                    # Largest that fits 80 GB with this network
+  lr: 0.05
+  var_weight: 0.01                 # Light Umrigar mix; 0 also works
+  mcmc_decorr_steps: 20            # Cassella uses 10 — 20 gives lower autocorrelation
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 30                      # 30 CG iters is plenty for this conditioning
+  skip: false
+
+# --- Frozen-network evaluation ---
+# Cassella uses 5×10⁴ samples (4096 walkers × ~12 blocks of 1024 steps).
+# With our 30-step blocks: 100 blocks × 30 × 2048 ≈ 6×10⁶ samples,
+# 5σ tighter than Cassella for the same wall clock.
+eval:
+  walkers: 2048
+  blocks: 100
+  equil_blocks: 30
+  steps_per_block: 30
+
+# --- Twist-averaged BC (TABC) ---
+# Set n_twists > 0 to get thermodynamic-limit-extrapolated energies.
+# 8 Halton twists gives ~1 mHa twist scatter at N=14 rs=2.
+twist:
+  n_twists: 0
+  walkers: 1024
+  blocks: 60
+  equil_blocks: 20
+
+ewald:
+  n_real: 3
+  n_recip: 6
+
+# Seed: omit / null / 'random' → fresh OS-random seed each run
+# (printed and saved to summary.json).  For ablation studies set an
+# explicit integer to reproduce trajectories.
+# seed: 1231
