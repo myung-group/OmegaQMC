@@ -39,7 +39,7 @@ def vmc_gto_gradients(
     log_trial_wavefunction,
     nuc_crds,
     params_corr,
-    get_psi_mo,
+    get_psi_mo_partition_vg,
     eps,
     gr_scheme,
     mo_relax=False,
@@ -74,8 +74,13 @@ def vmc_gto_gradients(
         Nuclear coordinates, shape ``(natom, 3)``.
     params_corr : pytree
         Jastrow / correlation parameters.
-    get_psi_mo : callable
-        MO evaluator (used by redistribution scheme 1).
+    get_psi_mo_partition_vg : callable
+        Partitioned MO value+gradient evaluator
+        ``(elec_crds, nuc_crds) -> (mo_val_s, mo_grad_s)``
+        with shapes ``(n_nuc, n_e, n_mo)`` and
+        ``(n_nuc, n_e, n_mo, 3)``.  Used by redistribution
+        scheme 1 to compute closed-form value and
+        electron-diagonal gradient of the SWCT weights.
     eps : float
         Machine epsilon for the coordinate dtype.
     gr_scheme : str
@@ -104,34 +109,63 @@ def vmc_gto_gradients(
         grd_ke, grd_logpsi)`` where each component
         has shape ``(batch, natom, 3)``.
     """
-    # --- Space-warping redistribution schemes ---
+    # --- Space-warping redistribution: closed-form value and
+    # electron-diagonal gradient.
+    #
+    # Both schemes return ``(w, diag_grad)`` where
+    #   w[e, n]              = SWCT weight (Σ_n w[e,n] = 1 ∀ e)
+    #   diag_grad[e, n, K]   = ∂w[e,n] / ∂r[e,K]
+    # The downstream code only ever consumes the per-electron
+    # diagonal of the rescale Jacobian (see the
+    # ``'benK->bnK'`` einsum in ``_vmc_gradient_batch``), so
+    # off-diagonal entries are never built — that's the v6
+    # memory win.  Off-diagonal entries are zero anyway by
+    # chain rule (each electron's weight depends only on its
+    # own coordinate), so this is exact, not an approximation.
     @jax.jit
-    def _redistribute_scheme1(elec_crds):
-        _, mo_val_s = get_psi_mo(elec_crds, nuc_crds)
-        weight = jnp.einsum(
-            'neo,neo->en', mo_val_s, mo_val_s,
+    def _redistribute_scheme1_vg(elec_crds):
+        mo_val_s, mo_grad_s = get_psi_mo_partition_vg(
+            elec_crds, nuc_crds,
         )
-        return weight / jnp.sum(
-            weight, axis=-1, keepdims=True,
+        # Per-atom MO densities and totals.
+        q = jnp.einsum('nem,nem->en', mo_val_s, mo_val_s)
+        Q = jnp.sum(q, axis=-1, keepdims=True)
+        w = q / Q
+        # ∂q[e,n] / ∂r[e,K] = 2 Σ_o φ^n_{e,o} ∂φ^n_{e,o}/∂r_{e,K}
+        dq = 2.0 * jnp.einsum(
+            'nem,nemx->enx', mo_val_s, mo_grad_s,
         )
+        # ∂Q[e]/∂r[e,K] = Σ_n ∂q[e,n]/∂r[e,K]
+        dQ = jnp.sum(dq, axis=1, keepdims=True)
+        # Quotient rule: ∂(q/Q) = (∂q − w · ∂Q) / Q
+        diag_grad = (dq - w[..., None] * dQ) / Q[..., None]
+        return w, diag_grad
 
     @jax.jit
-    def _redistribute_scheme2(elec_crds):
+    def _redistribute_scheme2_vg(elec_crds):
         diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
-        dist = jnp.sqrt(jnp.sum(diff**2, axis=-1))
-        dist = jnp.where(dist < eps, eps, dist)
-        weight = dist**(-4.0)
-        return weight / jnp.sum(
-            weight, axis=-1, keepdims=True,
-        )
+        d2 = jnp.sum(diff * diff, axis=-1)
+        d = jnp.sqrt(d2)
+        d_safe = jnp.where(d < eps, eps, d)
+        # g[e,n] = d^{-4}
+        g = d_safe ** (-4.0)
+        G = jnp.sum(g, axis=-1, keepdims=True)
+        w = g / G
+        # ∂g[e,n]/∂r[e,K] = −4 d^{-5} ê_K = −4 g · diff_K / d²
+        # The inactive ``d < eps`` clamp zeroes the gradient
+        # at coincident e–n positions (matches the original
+        # scheme's behavior under autodiff of the clamp).
+        active = (d >= eps)
+        inv_d2 = jnp.where(active, 1.0 / (d_safe * d_safe), 0.0)
+        dg = -4.0 * g[..., None] * diff * inv_d2[..., None]
+        dG = jnp.sum(dg, axis=1, keepdims=True)
+        diag_grad = (dg - w[..., None] * dG) / G[..., None]
+        return w, diag_grad
 
-    rescale_fn = (
-        _redistribute_scheme2
+    rescale_value_and_diag_grad_fn = (
+        _redistribute_scheme2_vg
         if 'scheme2' in gr_scheme
-        else _redistribute_scheme1
-    )
-    jac_rescale_fn = jax.jacobian(
-        rescale_fn, argnums=0,
+        else _redistribute_scheme1_vg
     )
 
     # --- Per-walker gradient functions ---
@@ -208,14 +242,11 @@ def vmc_gto_gradients(
             _grad_fn_logpsi,
         )(batch_samples)
 
-        rescale = jax.vmap(
-            rescale_fn,
-        )(batch_samples)
-        jac_rescale_elc = jax.vmap(
-            jac_rescale_fn,
+        rescale, diag_rescale_elc = jax.vmap(
+            rescale_value_and_diag_grad_fn,
         )(batch_samples)
         novel_correction = 0.5 * jnp.einsum(
-            'beneK->bnK', jac_rescale_elc,
+            'benK->bnK', diag_rescale_elc,
         )
 
         grd_ee = jnp.einsum(

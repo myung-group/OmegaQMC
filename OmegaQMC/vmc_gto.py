@@ -425,10 +425,11 @@ class _VMCDriverGTO:
         self.j_e = j_e
 
         # Get wavefunction and energy functions
-        log_trial_wavefunction, local_energy, get_psi_mo, C_fns \
+        log_trial_wavefunction, local_energy, mo_fns, C_fns \
             = get_psi_fun(mf, params_cusp=params_cusp,
                           trial=trial,
                           jastrow_config=jastrow_config)
+        _, get_psi_mo_partition_vg = mo_fns
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
         self.local_energy_ee = local_energy_ee
@@ -465,7 +466,7 @@ class _VMCDriverGTO:
             log_trial_wavefunction,
             nuc_crds,
             params_corr,
-            get_psi_mo,
+            get_psi_mo_partition_vg,
             eps,
             gr_scheme,
             mo_relax=mo_relax,

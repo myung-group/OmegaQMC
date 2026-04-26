@@ -835,6 +835,22 @@ class _PsiGTO:
         Z_cgao_coeff = self.Z_cgao_coeff
         mo_occ_coeff = self.mo_occ_coeff
 
+        # Static boolean mask of AO indices belonging to an
+        # s-shell.  ``cgs_sph_get`` partitions only s-shell AOs
+        # by atom (see its ``if shell.am == 0`` guard) — the
+        # SWCT-scheme1 redistribution weights inherit that
+        # restriction.  Used inside ``get_psi_mo_partition_vg``
+        # below to mirror that semantics for value+grad.
+        s_ao_mask = jnp.zeros(
+            shell_list[-1].isgs + shell_list[-1].nsgs,
+            dtype=bool,
+        )
+        for shell in shell_list:
+            if shell.am == 0:
+                s_ao_mask = s_ao_mask.at[
+                    shell.isgs:shell.isgs + shell.nsgs
+                ].set(True)
+
         @jax.jit
         def cgs_sph_get(elec_crds, nuc_crds):
             """Spherical GTO evaluation."""
@@ -888,6 +904,35 @@ class _PsiGTO:
                 'ena,am->nem', ao_val_s, mo_occ_coeff
             )
             return mo_val, mo_val_s
+
+        @jax.jit
+        def get_psi_mo_partition_vg(elec_crds, nuc_crds):
+            """MO value and electron-gradient, partitioned by atom.
+
+            Returns ``(mo_val_s, mo_grad_s)`` with shapes
+
+                mo_val_s:  (n_nuc, n_e, n_mo)
+                mo_grad_s: (n_nuc, n_e, n_mo, 3)
+
+            where ``mo_val_s[A, e, m]`` is the contribution to
+            MO ``m`` from atom ``A``'s basis functions evaluated
+            at electron ``e``, and ``mo_grad_s[A, e, m, :]`` is
+            its spatial gradient with respect to ``r_e``.
+            Summing over ``A`` recovers the flat per-electron
+            MO arrays returned by :func:`get_psi_mo_vgl`.
+            """
+            ao_val, ao_grad, _ = jax.vmap(
+                cgs_sph_vgl, in_axes=(0, None)
+            )(elec_crds, nuc_crds)
+            ao_val = ao_val * s_ao_mask
+            ao_grad = ao_grad * s_ao_mask[:, None]
+            mo_val_s = jnp.einsum(
+                'ena,am->nem', ao_val, mo_occ_coeff,
+            )
+            mo_grad_s = jnp.einsum(
+                'enax,am->nemx', ao_grad, mo_occ_coeff,
+            )
+            return mo_val_s, mo_grad_s
 
         @jax.jit
         def cgs_sph_vgl(elec_crds, nuc_crds):
@@ -1045,6 +1090,7 @@ class _PsiGTO:
 
         self.cgs_sph_get = cgs_sph_get
         self.get_psi_mo = get_psi_mo
+        self.get_psi_mo_partition_vg = get_psi_mo_partition_vg
         self.cgs_sph_vgl = cgs_sph_vgl
         self.get_psi_mo_vgl = get_psi_mo_vgl
         self.get_ao_val = get_ao_val
@@ -2372,7 +2418,7 @@ def get_psi_fun(mf, params_cusp=None, trial=None,
         obj.log_trial_wavefunction,
         (obj.local_energy_ee, obj.local_energy_nn,
          obj.local_energy_en, obj.local_energy_ke),
-        obj.get_psi_mo,
+        (obj.get_psi_mo, obj.get_psi_mo_partition_vg),
         (obj.log_trial_wavefunction_C,
          obj.local_energy_ke_C),
     )
