@@ -1,0 +1,14 @@
+python scripts/run_heg_psiformer.py \
+      --psiformer \
+      --optimizer sr --lr 0.05 --sr-damping 1e-3 --sr-n-cg 30 \
+      --rs 2.0 --N 14 --polarization unpolarized \
+      --pf-two-particle-dim 32 \
+      --pf-deep-jastrow \
+      --pretrain-iters 200 --pretrain-walkers 512 --pretrain-lr 3e-3 \
+      --iters 5000 --opt-walkers 2048 \
+      --n-det 16 --pf-n-virt-pw 12 --pf-det-jitter 0.02 \
+      --var-weight 0.01 \
+      --eval-walkers 2048 --eval-blocks 60 --eval-equil-blocks 20 \
+      --steps-per-block 30 \
+      --seed 1 \
+      --prefix heg_N14_rs2_phaseB_sr

@@ -71,6 +71,18 @@ venv.bak/
 *.swo
 *~
 
+# Local run outputs / Claude working dir / large references
+.claude/
+references/
+runs/
+runs_auto/
+
+# Bulk research-paper PDFs kept locally only
+research/**/papers/
+
+# Stray log fragments
+*.log.tail
+
 # macOS
 .DS_Store
 

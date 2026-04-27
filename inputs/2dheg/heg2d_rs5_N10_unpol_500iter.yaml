@@ -1,0 +1,56 @@
+# rs scan local validation @ rs=5, N=10 unpolarized
+# Settings match heg2d_rs2_N10_unpol_500iter.yaml for direct comparison.
+
+project: heg2d_rs5_N10_unpol_500iter
+
+system:
+  dim: 2
+  rs: 5.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 2
+  heads: 2
+  two_particle_dim: 16
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  n_virt_pw: 4
+  det_jitter: 0.02
+  use_ghost_atom: true
+
+pretrain:
+  iters: 100
+  walkers: 256
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 500
+  walkers: 256
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 10
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

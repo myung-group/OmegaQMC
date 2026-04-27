@@ -17,6 +17,10 @@ requires-python = ">=3.7"
 dependencies = [
     "pyscf>=2.10.0",
     "jax>=0.6",
+    "numpy",
+    "scipy",
+    "h5py",
+    "optax",
     "flax",
     "optax",
     "PyYAML",
@@ -38,4 +42,8 @@ classifiers = [
 [project.optional-dependencies]
 bse = ["basis-set-exchange"]
 nn = ["flax>=0.10.0", "pyyaml"]
+
+[tool.setuptools.packages.find]
+include = ["OmegaQMC*"]
+exclude = ["runs*", "references*", "tests*", "scripts*"]
 

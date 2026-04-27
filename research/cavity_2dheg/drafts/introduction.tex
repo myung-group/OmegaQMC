@@ -1,0 +1,189 @@
+% =====================================================================
+%  Introduction — Cavity-modified 2D HEG via NN-VMC
+%  Standalone .tex (compile with main.tex), or read inline.
+% =====================================================================
+
+\section{Introduction}
+
+The two-dimensional homogeneous electron gas (2D HEG) is one of the
+oldest and most carefully studied many-body systems in condensed matter
+physics. Its zero-temperature phase diagram in vacuum is by now well
+established by quantum Monte Carlo (QMC) calculations: a paramagnetic
+Fermi liquid for $r_s \lesssim 30$, a transition to an
+antiferromagnetic triangular Wigner crystal at
+$r_s \approx 31$, and a further transition to a ferromagnetic Wigner
+crystal at $r_s \approx 38$~\cite{TanatarCeperley1989,DrummondNeeds2009,
+2DHEG_QMC_2024}. These benchmarks anchor density-functional theory
+parameterisations of the 2D exchange-correlation functional and underpin
+quantitative predictions for two-dimensional electron systems realised in
+semiconductor heterostructures, silicon MOSFETs, and—most relevant to
+current experimental effort—monolayer transition-metal dichalcogenides
+(TMDs) and their moir\'e heterobilayers, where Wigner-crystal signatures
+have recently been directly imaged~\cite{Smolenski2021,TsuiWigner2024}.
+
+In parallel, the field of \emph{cavity quantum materials} has emerged as
+a powerful experimental and theoretical platform for engineering the
+properties of correlated electron systems through coupling to the
+quantised electromagnetic vacuum of an optical or terahertz
+cavity~\cite{Schlawin2022_review}. Pioneering experiments demonstrated
+collective ultrastrong coupling of cyclotron resonances of
+high-mobility 2D electron gases to terahertz cavity modes with
+cooperativities exceeding 350~\cite{Bayer2017,LiX2018,
+ParaviciniBagliani2018}, modifications of integer and fractional
+quantum Hall transport by cavity vacuum
+fluctuations~\cite{Smolka2014,Appugliese2022}, and—most striking—the
+recent observation that a hovering split-ring resonator more than
+doubles fractional quantum Hall energy gaps in a 2DEG, an effect
+attributed to cavity-mediated long-range attractive electron-electron
+interactions from virtual photon exchange~\cite{Enkner2024}. These
+results raise a conceptually simple but quantitatively unanswered
+question: \emph{how does cavity coupling reshape the equilibrium phase
+diagram of the interacting two-dimensional electron gas?}
+
+Answering this question requires an \emph{ab initio} treatment of both
+the electron-electron Coulomb correlations that drive Wigner
+crystallisation and ferromagnetism in the 2DEG, and the electron-photon
+correlations introduced by the cavity. On the theoretical side,
+substantial progress has been made for finite molecular systems through
+quantum-electrodynamical density-functional theory
+(QEDFT)~\cite{Tokatly2013,Ruggenthaler2014,Flick2017,Ruggenthaler2023_review},
+QED coupled-cluster theory, QED full-configuration interaction, and—most
+recently—polaritonic auxiliary-field quantum Monte Carlo~\cite{Riso2024}
+and deep-learning variational Monte Carlo
+approaches~\cite{Tang2025}. For extended systems, however, the situation
+is markedly less developed. The non-interacting 2D electron gas in a
+cavity admits an exact analytical
+treatment~\cite{Rokaj2022}: the ground state is a product
+of a Fermi-sea Slater determinant and a coherent photon state, light
+and matter remain disentangled, and the only physical effect is a
+photon-induced renormalisation of the quasiparticle mass via virtual
+photons. Strikingly, the recent QED auxiliary-field QMC study of
+Weber~\textit{et~al.}~\cite{Weber2025}—the only \emph{ab initio} QMC
+treatment of the cavity-coupled 2DEG to date—explicitly omits the
+Coulomb interaction (``\emph{As a first step, in this work, we will not
+consider Coulomb interactions}''), studying instead a non-interacting
+electron gas in a soft modulating external potential. Their goal was to
+parameterise a light-matter correlation-energy functional in the
+weak-coupling regime as input to QEDFT functional development; phase
+boundaries, Wigner crystallisation, and magnetic transitions were not
+addressed and are inaccessible without the dominant electron-electron
+interaction.
+
+Thus, despite a decade of theoretical interest in cavity-modified
+quantum materials and the existence of direct experimental probes of
+many-body physics in cavity-coupled 2DEGs, the central question of how
+cavity coupling shifts the established free-space phase boundaries of
+the interacting 2D HEG—the Wigner-crystal density and the magnetic
+transition—has not been computed at \emph{ab initio} accuracy. Standard
+QMC approaches face two obstacles in this regime. Auxiliary-field QMC
+suffers from a fermionic phase problem when Coulomb interactions are
+included, controlled only by an uncontrolled phaseless approximation
+whose bias grows with correlation strength~\cite{Riso2024}. More
+fundamentally, AFQMC inherently respects the translational symmetry of
+the simulation cell, while the Wigner crystal phase \emph{spontaneously
+breaks} that symmetry; addressing the crystal phase requires symmetry-broken
+external potentials or specialised techniques.
+
+\paragraph*{Neural-network variational Monte Carlo as the natural tool.}
+Over the last five years, neural-network variational Monte Carlo
+(NN-VMC) has emerged as the most accurate variational method available
+for continuous-space many-electron problems, with
+FermiNet~\cite{Pfau2020}, PauliNet~\cite{Hermann2020}, and
+PsiFormer~\cite{vonGlehn2023} achieving sub-mHartree accuracy on
+molecular benchmarks and matching or exceeding coupled-cluster results
+across atoms, small molecules, and excited
+states~\cite{Pfau2024}. For the homogeneous electron gas
+specifically, NN-VMC has been benchmarked against $i$-FCIQMC and
+Slater-Jastrow-backflow DMC in three dimensions, recovering essentially
+the exact correlation energy at $r_s = 0.5$--$5$~\cite{Cassella2023,
+Wilson2023,Pescia2024}. Crucially, Cassella~\textit{et~al.}\
+demonstrated that broken-symmetry NN-VMC ans\"atze can capture the
+Fermi-liquid–to–Wigner-crystal transition in three dimensions, providing
+a working recipe for representing both translation-invariant fluid
+phases and translation-broken crystalline phases within the same
+framework~\cite{Cassella2023}. The recent extension of NN-VMC to
+polaritonic chemistry by Tang~\textit{et~al.}~\cite{Tang2025}
+established that the photonic Fock-space degree of freedom can be
+incorporated into a NN-VMC ansatz cleanly via one-hot encoding into the
+electron embedding network, with discrete-continuous Metropolis sampling
+of the joint (electron-position, photon-number) configuration space.
+What has not been attempted is the combination of these two ingredients
+for an extended interacting electron system.
+
+\paragraph*{This work.}
+We present, to our knowledge, the first NN-VMC study of the
+\emph{Coulomb-interacting} two-dimensional electron gas coupled to a
+quantised cavity mode. We employ a self-attention–based PsiFormer
+ansatz~\cite{vonGlehn2023} extended with a photonic Fock-space index
+following the Tang~\textit{et~al.}\ recipe~\cite{Tang2025}, applied to
+the dipole-gauge Pauli-Fierz Hamiltonian for the 2D HEG in a single-mode
+optical cavity. Stochastic reconfiguration is used as the optimiser, and
+twist-averaged boundary conditions are employed both to mitigate
+QED-related finite-size effects~\cite{Weber2025} and to recover the
+thermodynamic limit. We compute the cavity-modified phase diagram of
+the 2D HEG in the $(r_s, \lambda)$ plane, where $\lambda$ is the
+dimensionless light-matter coupling, focusing on:
+\begin{enumerate}
+    \item the Wigner-crystallisation density $r_s^c(\lambda)$ as a
+          function of cavity coupling, validated against the
+          free-space DMC value $r_s^c(0) \approx 31$~\cite{DrummondNeeds2009};
+    \item the cavity-modified ferromagnetic instability across the
+          $(r_s, \lambda)$ plane;
+    \item the symmetry of the cavity-stabilised crystal phase
+          (triangular vs.\ alternative orderings); and
+    \item energetic comparisons against (i)~analytical predictions
+          in the non-interacting limit~\cite{Rokaj2022}, (ii)~the
+          QED-AFQMC reference of Ref.~\cite{Weber2025} in the
+          appropriate parameter window where their approximations are
+          controlled, and (iii)~free-space DMC at $\lambda = 0$.
+\end{enumerate}
+
+Our central physical results are: \emph{(i)} the Wigner-crystallisation
+density shifts as a function of cavity coupling—the sign and magnitude of
+this shift constitute a quantitative prediction directly testable in
+present-generation cavity-2DEG experiments; \emph{(ii)} the
+ferromagnetic transition is similarly modified, providing a route to
+``cavity-engineered magnetism'' in the bulk-2DEG limit; and
+\emph{(iii)} a putative cavity-induced intermediate phase between the
+paramagnetic fluid and the Wigner crystal.
+
+\paragraph*{Significance and connection to experiment.}
+The 2D electron gas at metallic densities ($r_s \sim 2$--$5$) is
+realised across an enormous range of materials platforms; the
+strongly-correlated regime relevant to Wigner crystallisation
+($r_s > 30$) is realised in dilute high-mobility 2DEGs in
+GaAs/AlGaAs heterostructures, silicon MOSFETs, and most recently in
+TMD heterobilayers where direct Wigner-crystal imaging has been
+achieved~\cite{Smolenski2021,TsuiWigner2024}. The cavity-2DEG platform
+of the Faist group~\cite{Bayer2017,LiX2018,ParaviciniBagliani2018,
+Appugliese2022,Enkner2024} provides a controlled experimental knob for
+tuning the cavity coupling $\lambda$ in equilibrium, without any
+external drive. Our calculations therefore provide quantitative
+predictions for what these experiments will measure as the cavity
+coupling is varied: a shift in the carrier density at which Wigner
+crystallisation is observed, a shift in the spin polarisation, or—in
+the regime of strongest coupling—the emergence of a new phase between
+the fluid and the crystal. More broadly, our work establishes
+PsiFormer-class neural-network variational Monte Carlo as a practical
+tool for non-perturbative, \emph{ab initio} treatment of cavity-coupled
+extended condensed-matter systems, opening a route to similar studies
+of doped Mott insulators, two-band semiconductors, and other strongly
+correlated materials in optical cavities.
+
+The remainder of this paper is organised as follows.
+Section~\ref{sec:model} introduces the dipole-gauge Pauli-Fierz
+Hamiltonian for the 2D HEG in a single-mode cavity and discusses
+gauge and finite-size considerations.
+Section~\ref{sec:method} describes our PsiFormer ansatz extended to
+the cavity-electron Fock space, the discrete-continuous sampling
+scheme, the broken-symmetry ansatze used for the Wigner crystal phase,
+and the stochastic reconfiguration optimisation procedure.
+Section~\ref{sec:results} presents results for the Wigner-crystallisation
+density $r_s^c(\lambda)$, the cavity-modified magnetic transition, and
+the candidate intermediate phase, with finite-size and twist-averaged
+extrapolations.
+Section~\ref{sec:discussion} discusses experimental signatures,
+implications for QEDFT functional development, and connection to
+recent observations of cavity-modified fractional quantum Hall states.
+Section~\ref{sec:conclusion} concludes with future directions including
+multi-mode extensions and cavity-modified excited polariton states.

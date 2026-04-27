@@ -1,0 +1,72 @@
+# Smith 2024 comparison: 2D HEG Wigner crystal sector @ rs=50, N=58
+# unpolarized.  Same geometry as the fluid companion; different
+# envelope (localised Gaussians on triangular Bravais lattice with
+# Neel-like alternating spin pattern).
+#
+# rs=50 is deep in the WC phase (rs_c ~= 37 per Smith 2024).
+# Expected per-electron energy ~ -22 mHa (close to Bonsall-Maradudin
+# triangular Madelung -1.106/50 = -22.1 mHa), several mHa below the
+# fluid companion's converged energy.
+
+project: heg2d_rs50_N58_unpol_crystal_smith
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 58
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 2
+  heads: 2
+  two_particle_dim: 32
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.10           # narrower at low density (vs 0.25 default)
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.10           # site jitter for det >= 1, in Bohr
+  use_ghost_atom: true
+
+pretrain:
+  iters: 0                           # no PW HF target; localised Gaussians are the starting state
+
+optimize:
+  type: sr
+  iters: 3000
+  walkers: 512
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 50
+  mc_timestep: 0.025                 # even smaller dt for localised walkers
+  sr_damping: 1.0e-3
+  sr_n_cg: 25
+
+eval:
+  walkers: 512
+  blocks: 60
+  equil_blocks: 15
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 512
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

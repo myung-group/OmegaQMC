@@ -1,0 +1,57 @@
+# Quick validation run: 2D HEG @ rs=2, N=10 unpolarized (5/spin closed shell).
+# Should converge in ~30 min on a single A100 and within ~5 mHa of TD HF.
+# Useful as a smoke test before launching the N=58 production runs.
+
+project: heg2d_rs2_N10_unpol_quick
+
+system:
+  dim: 2
+  rs: 2.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 2
+  heads: 2
+  two_particle_dim: 16
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  n_virt_pw: 4
+  det_jitter: 0.02
+  use_ghost_atom: true
+
+pretrain:
+  iters: 200
+  walkers: 256
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 1024
+  lr: 0.05
+  var_weight: 0.01
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+
+eval:
+  walkers: 1024
+  blocks: 40
+  equil_blocks: 10
+  steps_per_block: 30
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

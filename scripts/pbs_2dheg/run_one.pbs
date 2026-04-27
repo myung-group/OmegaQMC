@@ -1,0 +1,50 @@
+#!/bin/bash
+#PBS -l select=1:ncpus=8:ngpus=1
+#PBS -N heg2d
+#PBS -q workq
+#PBS -r n
+#PBS -j oe
+#PBS -V
+#PBS -o logs/pbs_${PBS_JOBID}.out
+
+# Single 2D HEG PsiFormer run on one frodo A100.
+#
+# Usage:  qsub -v YAML=inputs/2dheg/heg2d_rs2_N58_unpol.yaml \
+#               -N heg2d_rs2_N58 \
+#               scripts/pbs_2dheg/run_one.pbs
+#
+# The YAML path is passed via -v YAML=...; -N renames the job for
+# nicer log filenames.
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+mkdir -p logs
+
+if [[ -z "${YAML:-}" ]]; then
+    echo "error: must pass -v YAML=<path-to-yaml>" >&2
+    exit 1
+fi
+
+# JAX / XLA tunings for shared-GPU friendliness.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export TF_CUDNN_DETERMINISTIC=1
+
+# Activate conda env.  frodo's base env (Python 3.12, jax 0.10,
+# flax 0.12.7, pyscf 2.13) is the one with the OmegaQMC dependencies.
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate base
+
+echo "==== 2D HEG PsiFormer run ===="
+echo "YAML: $YAML"
+echo "Host: $(hostname)"
+echo "Date: $(date -Iseconds)"
+echo "PBS Job ID: $PBS_JOBID"
+echo "Allocated GPU(s):"
+nvidia-smi --query-gpu=index,name,memory.free --format=csv,noheader
+echo "============================="
+
+python scripts/run_heg_psiformer.py "$YAML"
+
+echo "==== done $(date -Iseconds) ===="
