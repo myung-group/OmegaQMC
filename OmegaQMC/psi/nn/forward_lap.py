@@ -65,10 +65,31 @@ Slices landed so far:
   ``vgl_backflow_op`` (twin of
   :class:`OmegaQMC.psi.nn.wf.BackflowOp` with the default
   multiplicative / additive activations).
+* slice 11 — PsiFormer GNN building blocks:
+  ``vgl_mlp`` (MLP block as composition of linears +
+  named activations), ``vgl_residual`` (post-block
+  residual with optional ``1/sqrt(2)`` normalization),
+  and ``vgl_node_attention_update`` (twin of
+  :class:`OmegaQMC.psi.nn.gnn.update_features.NodeAttentionElectronUpdateFeature`
+  composing :func:`vgl_multi_head_attention` + residual +
+  MLP + residual).
+* slice 12 — PsiFormer ElectronGNN outer loop:
+  ``vgl_ne_diff_vectors`` (ne edge twin matching
+  :func:`OmegaQMC.psi.nn.gnn.graph._compute_edges`),
+  ``vgl_electron_embedding_positional`` (twin of
+  :class:`ElectronEmbedding` in positional mode),
+  ``vgl_electron_gnn_layer_psiformer`` (single layer:
+  node-attention update + concatenate-rule subnet +
+  electron residual), and
+  ``vgl_electron_gnn_psiformer`` (positional embedding +
+  N layers).  Restricted to the PsiFormer config:
+  ``edge_types=null``, ``deep_features=False``,
+  single ``node_attention`` update feature, ``concatenate``
+  rule.  Other configurations defer to a later slice.
 
-Remaining primitives (graph builders, top-level wiring,
-...) follow the same convention and land in subsequent
-slices.
+Remaining primitives (top-level ``log_psi_vgl`` builder,
+driver wiring, ...) follow the same convention and land
+in subsequent slices.
 """
 
 from typing import NamedTuple
@@ -1362,3 +1383,351 @@ def vgl_backflow_op(
             add = vgl_mul(envel, add)
         out = vgl_add(out, add)
     return out
+
+
+# ---------- MLP block ----------
+
+_VGL_ACTIVATIONS = {
+    'tanh': vgl_tanh,
+    'silu': vgl_silu,
+    'ssp': vgl_ssp,
+    'sigmoid': vgl_sigmoid,
+    'softplus': vgl_softplus,
+    None: None,
+}
+
+
+def vgl_mlp(
+    vin: VGL,
+    layers,
+    *,
+    activation='tanh',
+    last_linear: bool = False,
+) -> VGL:
+    """Composition of ``vgl_linear`` + activation per hidden layer.
+
+    Mirrors :class:`OmegaQMC.psi.nn.layers.MLP.__call__`:
+    activation is applied after every linear except the
+    final one when ``last_linear=True``.
+
+    Args:
+        vin: input VGL with feature axis trailing.
+        layers: iterable of ``(w, b)`` pairs.  ``b`` may be
+            ``None`` for a bias-less layer; in that case a
+            zero bias of the appropriate shape is supplied.
+        activation: activation name (key into the registry
+            ``_VGL_ACTIVATIONS``) or a callable taking and
+            returning a VGL.
+        last_linear: if ``True``, no activation on the final
+            layer (matches the production flag).
+    """
+    if isinstance(activation, str) or activation is None:
+        act_fn = _VGL_ACTIVATIONS[activation]
+    else:
+        act_fn = activation
+
+    pairs = list(layers)
+    n = len(pairs)
+    out = vin
+    for i, (w, b) in enumerate(pairs):
+        if b is None:
+            b = jnp.zeros(
+                (w.shape[-1],), dtype=out.value.dtype,
+            )
+        out = vgl_linear(out, w, b)
+        is_last = (i == n - 1)
+        if not is_last or not last_linear:
+            if act_fn is not None:
+                out = act_fn(out)
+    return out
+
+
+def vgl_residual(
+    inp: VGL, update: VGL, *, normalize: bool,
+) -> VGL:
+    """Residual connection — ``(inp + update) / sqrt(2)`` or sum.
+
+    Mirrors :class:`OmegaQMC.psi.nn.layers.ResidualConnection`
+    on a single tensor; if shapes match the connection adds,
+    optionally normalised, otherwise it returns the update
+    unchanged (used by the production class for
+    dim-changing layers).
+    """
+    if inp.value.shape != update.value.shape:
+        return update
+    summed = vgl_add(inp, update)
+    if normalize:
+        return vgl_scale(summed, 1.0 / jnp.sqrt(2.0))
+    return summed
+
+
+def vgl_node_attention_update(
+    h_vgl: VGL,
+    *,
+    wq, wk, wv, wo,
+    num_heads: int,
+    mlp_layers,
+    mlp_activation='tanh',
+    mlp_last_linear: bool = False,
+    attn_residual_normalize=None,
+    mlp_residual_normalize=None,
+) -> VGL:
+    """VGL twin of
+    :meth:`OmegaQMC.psi.nn.gnn.update_features.NodeAttentionElectronUpdateFeature.__call__`.
+
+    Mirrors the production op-for-op:
+
+        att = MultiHeadAttention(h, h, h)
+        if attn_residual: att = residual(h, att)
+        out = MLP(att)
+        if mlp_residual: out = residual(att, out)
+        return out
+
+    Args:
+        h_vgl: input embedding VGL, value shape
+            ``(n_elec, emb_dim)``.
+        wq, wk, wv, wo: attention kernel matrices.
+        num_heads: must divide ``emb_dim``.
+        mlp_layers: ``[(w, b), ...]`` for the post-attention
+            MLP (see :func:`vgl_mlp`).
+        mlp_activation, mlp_last_linear: forwarded to
+            :func:`vgl_mlp`.
+        attn_residual_normalize, mlp_residual_normalize:
+            ``None`` to skip the residual (matching a
+            ``None`` value of the production attribute), or
+            a bool to apply :func:`vgl_residual` with that
+            ``normalize`` flag.
+    """
+    att = vgl_multi_head_attention(
+        h_vgl, h_vgl, h_vgl,
+        wq=wq, wk=wk, wv=wv, wo=wo,
+        num_heads=num_heads,
+    )
+    if attn_residual_normalize is not None:
+        att = vgl_residual(
+            h_vgl, att, normalize=attn_residual_normalize,
+        )
+    out = vgl_mlp(
+        att, mlp_layers,
+        activation=mlp_activation,
+        last_linear=mlp_last_linear,
+    )
+    if mlp_residual_normalize is not None:
+        out = vgl_residual(
+            att, out, normalize=mlp_residual_normalize,
+        )
+    return out
+
+
+# ---------- PsiFormer ElectronGNN outer loop ----------
+
+def vgl_ne_diff_vectors(
+    r_vgl: VGL, R: jnp.ndarray,
+) -> VGL:
+    """VGL twin of the ne-edge ``_compute_edges`` call.
+
+    Mirrors
+    :func:`OmegaQMC.psi.nn.gnn.graph._compute_edges` for an
+    nucleus-electron edge with ``filter_diagonal=False``:
+
+        diffs = r[None, :, :] - R[:, None, :]    # (n_nuc, n_e, 3)
+
+    where ``r = r_vgl.value`` is the variable electron
+    coordinate tensor of shape ``(n_e, 3)`` and ``R`` is the
+    constant nucleus tensor of shape ``(n_nuc, 3)``.
+    """
+    if r_vgl.value.ndim != 2 or r_vgl.value.shape[-1] != 3:
+        raise ValueError(
+            f"vgl_ne_diff_vectors expects r of shape "
+            f"(n_e, 3); got {r_vgl.value.shape}"
+        )
+    R = jnp.asarray(R)
+    if R.ndim != 2 or R.shape[-1] != 3:
+        raise ValueError(
+            f"vgl_ne_diff_vectors expects R of shape "
+            f"(n_nuc, 3); got {R.shape}"
+        )
+    D = r_vgl.grad.shape[0]
+    R_vgl = vgl_constant(R, D=D, dtype=r_vgl.value.dtype)
+    r_un = vgl_unsqueeze(r_vgl, axis=-3)   # (1, n_e, 3)
+    R_un = vgl_unsqueeze(R_vgl, axis=-2)   # (n_nuc, 1, 3)
+    return vgl_sub(r_un, R_un)              # (n_nuc, n_e, 3)
+
+
+def vgl_electron_embedding_positional(
+    r_vgl: VGL,
+    R: jnp.ndarray,
+    *,
+    n_up: int,
+    n_down: int,
+    ne_powers,
+    ne_log_rescale: bool,
+    use_spin: bool,
+    proj_W=None,
+) -> VGL:
+    """VGL twin of :class:`ElectronEmbedding` in positional mode.
+
+    Builds ne edges via :func:`vgl_ne_diff_vectors`, applies
+    :func:`vgl_distance_power_edge_feature` and
+    :func:`vgl_difference_edge_feature` in the same order as
+    :func:`OmegaQMC.psi.nn.build._make_ne_embedding`, swaps
+    the ``(n_nuc, n_e)`` axes, flattens to per-electron
+    feature vectors, optionally appends a spin indicator, and
+    optionally projects to ``embedding_dim`` via a single
+    bias-less linear.
+
+    Args:
+        r_vgl: electron-coord VGL of shape ``(n_e, 3)``.
+        R: nucleus coordinates ``(n_nuc, 3)``.
+        n_up, n_down: spin-block sizes (``n_e = n_up +
+            n_down``).
+        ne_powers: passed through to the distance-power
+            feature.
+        ne_log_rescale: passed through to both edge features.
+        use_spin: append the ``±1`` spin indicator column.
+        proj_W: ``None`` to skip projection, or the bias-less
+            kernel of the production ``nnx.Linear`` (shape
+            ``(in_dim, embedding_dim)``).
+
+    Returns:
+        Per-electron embedding VGL ``(n_e, out_dim)`` where
+        ``out_dim`` is either ``embedding_dim`` (if projected)
+        or ``ne_feat_dim * n_nuc + (1 if use_spin else 0)``.
+    """
+    n_e = n_up + n_down
+    if r_vgl.value.shape[0] != n_e:
+        raise ValueError(
+            f"vgl_electron_embedding_positional: r_vgl has "
+            f"{r_vgl.value.shape[0]} electrons, expected "
+            f"{n_e} (= n_up + n_down)"
+        )
+    d_vgl = vgl_ne_diff_vectors(r_vgl, R)
+    feat_dist = vgl_distance_power_edge_feature(
+        d_vgl, ne_powers, log_rescale=ne_log_rescale,
+    )
+    feat_diff = vgl_difference_edge_feature(
+        d_vgl, log_rescale=ne_log_rescale,
+    )
+    feats = vgl_concat(
+        [feat_dist, feat_diff], axis=-1,
+    )                                          # (n_nuc, n_e, F)
+    feats = vgl_swapaxes(feats, -3, -2)        # (n_e, n_nuc, F)
+    feats = vgl_reshape(feats, (n_e, -1))      # (n_e, n_nuc*F)
+    if use_spin:
+        D = r_vgl.grad.shape[0]
+        spins = jnp.concatenate([
+            jnp.ones(n_up, dtype=feats.value.dtype),
+            -jnp.ones(n_down, dtype=feats.value.dtype),
+        ])[:, None]
+        spin_const = vgl_constant(
+            spins, D=D, dtype=feats.value.dtype,
+        )
+        feats = vgl_concat([feats, spin_const], axis=-1)
+    if proj_W is not None:
+        b = jnp.zeros(
+            (proj_W.shape[1],), dtype=feats.value.dtype,
+        )
+        feats = vgl_linear(feats, proj_W, b)
+    return feats
+
+
+def vgl_electron_gnn_layer_psiformer(
+    h_vgl: VGL,
+    *,
+    attn_wq, attn_wk, attn_wv, attn_wo,
+    attn_num_heads: int,
+    attn_mlp_layers,
+    attn_mlp_activation='tanh',
+    attn_mlp_last_linear: bool = False,
+    attn_residual_normalize=None,
+    attn_mlp_residual_normalize=None,
+    subnet_layers,
+    subnet_activation='tanh',
+    subnet_last_linear: bool = False,
+    electron_residual_normalize=None,
+) -> VGL:
+    """Single PsiFormer-style :class:`ElectronGNNLayer`.
+
+    Restricted to:
+
+    * single ``node_attention`` update feature,
+    * ``concatenate`` update rule (a single feature reduces
+      this to plain ``subnet(att_out)``),
+    * ``deep_features=False``,
+    * ``last_layer`` always (no edge update path).
+
+    The production layer would also iterate over edge types
+    and other update features; those branches land in a
+    later slice.
+
+    Args:
+        h_vgl: input embedding VGL ``(n_e, emb_dim)``.
+        attn_*: kernels and hyperparameters forwarded to
+            :func:`vgl_node_attention_update`.
+        subnet_layers: ``[(w, b), ...]`` for the post-update
+            ``subnet`` MLP (production: ``MLP(uf_total_dim,
+            emb_dim)`` with ``last_linear=False``).
+        subnet_activation, subnet_last_linear: forwarded to
+            :func:`vgl_mlp`.
+        electron_residual_normalize: ``None`` to skip the
+            residual (matching ``electron_residual=None`` in
+            production), or a bool to apply
+            :func:`vgl_residual` with that ``normalize`` flag.
+    """
+    att = vgl_node_attention_update(
+        h_vgl,
+        wq=attn_wq, wk=attn_wk, wv=attn_wv, wo=attn_wo,
+        num_heads=attn_num_heads,
+        mlp_layers=attn_mlp_layers,
+        mlp_activation=attn_mlp_activation,
+        mlp_last_linear=attn_mlp_last_linear,
+        attn_residual_normalize=attn_residual_normalize,
+        mlp_residual_normalize=attn_mlp_residual_normalize,
+    )
+    updated = vgl_mlp(
+        att, subnet_layers,
+        activation=subnet_activation,
+        last_linear=subnet_last_linear,
+    )
+    if electron_residual_normalize is not None:
+        updated = vgl_residual(
+            h_vgl, updated,
+            normalize=electron_residual_normalize,
+        )
+    return updated
+
+
+def vgl_electron_gnn_psiformer(
+    r_vgl: VGL,
+    R: jnp.ndarray,
+    *,
+    n_up: int,
+    n_down: int,
+    embedding_kwargs,
+    layer_specs,
+) -> VGL:
+    """VGL twin of :class:`ElectronGNN` in PsiFormer mode.
+
+    Composes :func:`vgl_electron_embedding_positional` with a
+    sequence of :func:`vgl_electron_gnn_layer_psiformer`
+    layers, returning the final per-electron embedding VGL.
+
+    Args:
+        r_vgl: electron-coord VGL ``(n_e, 3)``.
+        R: nucleus coordinates ``(n_nuc, 3)``.
+        n_up, n_down: spin-block sizes.
+        embedding_kwargs: forwarded to
+            :func:`vgl_electron_embedding_positional` (must
+            include ``ne_powers``, ``ne_log_rescale``,
+            ``use_spin``, optionally ``proj_W``).
+        layer_specs: iterable of dicts, each forwarded as
+            ``**spec`` to
+            :func:`vgl_electron_gnn_layer_psiformer`.
+    """
+    h = vgl_electron_embedding_positional(
+        r_vgl, R, n_up=n_up, n_down=n_down,
+        **embedding_kwargs,
+    )
+    for spec in layer_specs:
+        h = vgl_electron_gnn_layer_psiformer(h, **spec)
+    return h
