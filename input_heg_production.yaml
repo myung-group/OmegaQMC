@@ -87,7 +87,8 @@ optimize:
   kfac_damping_adapt: true         # adaptive Levenberg-Marquardt schedule
   kfac_damping_min: 1.0e-4
   kfac_damping_max: 1.0e2
-  kfac_damping_lookback: 10
+  kfac_damping_lookback: 10        # window size for LM ratio aggregation
+  kfac_damping_decay: 0.95         # LM rule: damping × decay if ratio>0.75, ÷ decay if ratio<0.25 (FermiNet uses 0.9 every 5 iters)
   kfac_ema_decay: 0.0              # 0 = current iter only; 0.95 = FermiNet's EMA
   kfac_norm_constraint: null       # trust-region clip on ‖step‖.  null → disable
   multi_device: false              # KFAC pmap — NOT YET WIRED

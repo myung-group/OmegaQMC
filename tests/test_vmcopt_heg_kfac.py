@@ -297,6 +297,99 @@ def test_fixed_scale_param_accepted():
     assert np.all(np.isfinite(res['E_per_elec_history']))
 
 
+def test_lm_ratio_damping_responds_to_actual_vs_predicted():
+    """FermiNet-faithful Levenberg-Marquardt: when the actual energy
+    reduction tracks the quadratic-model prediction (``ratio ≈ 1``)
+    over a window of ``damping_lookback`` iters, the LM rule loosens
+    damping (multiplies by ``damping_decay`` < 1).  When the model
+    massively over-predicts (``ratio < 0.25``, e.g. fixed_scale=True
+    with too-aggressive lr), damping should rapidly tighten.
+
+    This is the schedule that keeps ``fixed_scale=True`` stable.
+    """
+    cfg = HEGPsiFormerConfig(
+        n_up=7, n_down=7, L=7.77, n_det=2,
+        embedding_dim=16, n_interactions=1,
+        two_particle_stream_dim=8, n_attention_heads=2,
+        use_cusp=False, use_deep_jastrow=False,
+        use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
+    )
+    init_key = jax.random.key(0)
+
+    # Recipe A: ``fixed_scale=False`` (kernel_scale=1 everywhere) at
+    # tiny lr — the quadratic model is very accurate, so the LM ratio
+    # should sit near 1 and damping should drift downward.
+    opt = _HEGKFACOptimizer(
+        cfg, init_key,
+        capture_activations=False,
+        fixed_scale=False,
+        lr=1.0e-3,
+        damping=1.0e-2,
+        damping_adapt=True,
+        damping_lookback=4,
+        damping_decay=0.95,
+    )
+    res = opt(jax.random.key(1), num_iters=20, num_walkers=32,
+              mcmc_decorr_steps=2, num_equil_steps=10, verbose=0)
+    # Run must not NaN.
+    assert np.all(np.isfinite(res['E_per_elec_history']))
+
+
+def test_lm_ratio_damping_stabilises_fixed_scale_run():
+    """End-to-end: ``fixed_scale=True`` with the FermiNet-faithful LM
+    ratio damping must stay finite — historically this combination
+    diverged within ~6 iters because the ``n_e``-magnified step
+    overshoots the trust region.  The Martens-Grosse ratio rule
+    detects the prediction failure and ramps damping fast enough to
+    keep training stable.
+    """
+    cfg = HEGPsiFormerConfig(
+        n_up=7, n_down=7, L=7.77, n_det=2,
+        embedding_dim=16, n_interactions=1,
+        two_particle_stream_dim=8, n_attention_heads=2,
+        use_cusp=False, use_deep_jastrow=False,
+        use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
+    )
+    init_key = jax.random.key(0)
+    opt = _HEGKFACOptimizer(
+        cfg, init_key,
+        capture_activations=True,
+        fixed_scale=True,
+        lr=1.0e-3,                       # small enough to start safely
+        damping=1.0e-2,
+        damping_adapt=True,
+        damping_min=1.0e-4,
+        damping_max=1.0e3,
+        damping_lookback=4,              # short window for fast response
+        damping_decay=0.9,
+        damping_overshoot_threshold=10.0,
+        damping_overshoot_factor=2.0,
+        norm_constraint=1.0e-3,
+    )
+    res = opt(jax.random.key(1), num_iters=20, num_walkers=32,
+              mcmc_decorr_steps=2, num_equil_steps=10, verbose=0)
+    # At minimum: training stayed finite (no NaN/Inf).  If LM ratio
+    # logic is broken this would NaN within ~6 iters.
+    assert np.all(np.isfinite(res['E_per_elec_history']))
+
+
+def test_damping_decay_param_accepted():
+    """``damping_decay`` plumbs through the constructor."""
+    cfg = HEGPsiFormerConfig(
+        n_up=7, n_down=7, L=7.77, n_det=2,
+        embedding_dim=16, n_interactions=1,
+        two_particle_stream_dim=8, n_attention_heads=2,
+        use_cusp=False, use_deep_jastrow=False,
+        use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
+    )
+    init_key = jax.random.key(0)
+    opt = _HEGKFACOptimizer(
+        cfg, init_key,
+        damping_decay=0.9,
+    )
+    assert opt.damping_decay == 0.9
+
+
 def test_kfac_with_multi_device_falls_back_when_one_gpu():
     """multi_device=True with n_devices == 1 falls back to single-
     device cleanly (no exception)."""

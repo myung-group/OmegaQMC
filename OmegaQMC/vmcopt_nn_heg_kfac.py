@@ -41,19 +41,28 @@ Other features
   Kronecker factors.  Auto-fallback to single-device when only one
   GPU is visible.
 
-* **Adaptive Levenberg-Marquardt damping** with two response
-  timescales:
+* **Adaptive Levenberg-Marquardt damping** — FermiNet/kfac-jax
+  recipe (Martens & Grosse 2015) with a panic-mode safety net.
+  Two response timescales:
 
-    1. *Slow trend mode* — every ``damping_lookback`` iters look
-       at the energy trend and adjust damping by ×0.95 (descent)
-       or ÷0.95 (ascent).  Symmetric so noise doesn't ramp damping
-       unboundedly.
+    1. *Quadratic-model ratio mode (FermiNet faithful)* — every
+       ``damping_lookback`` iters compare the aggregated *actual*
+       energy reduction ``ΔE`` to the predicted reduction
+       ``Δm = ½·(η·c)²·⟨step, F·step⟩ - (η·c)·⟨grad, step⟩`` from
+       the local quadratic model (where ``η = lr_now``,
+       ``c = clip``, ``step`` is the applied update direction with
+       ``kernel_scale`` baked in).  Form ``ratio = ΔE/Δm``.  If
+       ``ratio > 0.75`` the model under-predicts descent → loosen
+       damping (``×damping_decay``).  If ``ratio < 0.25`` the model
+       over-predicts → tighten damping (``÷damping_decay``).
+       This is the schedule that makes FermiNet's
+       ``fixed_scale=n_e`` step convention stable.
     2. *Fast panic mode* — every iter, compare ``‖step‖`` to its
        running median.  If the current step is more than
        ``damping_overshoot_threshold`` × the median (default 10×),
        multiply damping by ``damping_overshoot_factor`` (default 2).
-       This catches geometric blowup within 1-2 iters and is the
-       safety net you want when ``fixed_scale=True``.
+       Catches geometric blowup within 1-2 iters before the slower
+       LM ratio can react.
 
   All damping values are bounded by ``[damping_min, damping_max]``.
 
@@ -61,12 +70,12 @@ Other features
   per-electron factors ``A``, ``G`` use ``1/(W·n_e)`` normalisation
   but ``dW_loss`` is per-walker-summed, so the textbook KFAC
   derivation calls for an ``n_e`` multiplier on the natural-
-  gradient step.  Set ``fixed_scale=True`` to enable.  At our
-  default damping (0.1) this overshoots the trust region; reduce
-  ``lr`` by ~``n_e_typical`` (e.g. 0.1 → 0.005) and consider
-  setting ``norm_constraint`` for added safety.  The math is right
-  but stable training requires care — FermiNet's adaptive LM
-  damping schedule and 1e-4 norm-constraint give this for free.
+  gradient step.  Set ``fixed_scale=True`` to enable.  Combine with
+  ``damping_adapt=True`` (LM ratio mode) and a moderate initial
+  damping (e.g. ``1e-3``) plus ``norm_constraint=1e-3`` for
+  FermiNet-faithful training; the LM ratio rapidly ramps damping
+  during the early iters so the ``n_e`` step magnitude doesn't
+  overshoot the trust region.
 
 Algorithm
 ---------
@@ -534,7 +543,11 @@ def _generic_natural_gradient(
         pmean_axis: If set, average across devices via ``lax.pmean``.
 
     Returns:
-        ``(P_g,)`` natural-gradient direction.
+        ``(x, f)`` where ``x`` is the natural-gradient direction and
+        ``f`` is the energy gradient ``E_w[de · grad_w log|ψ|]``.
+        Both are length-``P_g``.  Returning ``f`` lets callers compute
+        the predicted-reduction ``<grad, step>`` quadratic-model term
+        without recomputing it.
     """
     W = per_walker_grads_flat.shape[0]
 
@@ -571,7 +584,7 @@ def _generic_natural_gradient(
         beta = rr_new / (rr + 1e-30)
         p = r + beta * p
         rr = rr_new
-    return x
+    return x, f
 
 
 # ---------------------------------------------------------------------
@@ -618,6 +631,7 @@ class _HEGKFACOptimizer:
         damping_min: float = 1.0e-4,
         damping_max: float = 1.0e2,
         damping_lookback: int = 10,
+        damping_decay: float = 0.95,
         damping_overshoot_threshold: float = 10.0,
         damping_overshoot_factor: float = 2.0,
         ema_decay: float = 0.0,
@@ -659,6 +673,7 @@ class _HEGKFACOptimizer:
         self.damping_min = float(damping_min)
         self.damping_max = float(damping_max)
         self.damping_lookback = int(damping_lookback)
+        self.damping_decay = float(damping_decay)
         self.damping_overshoot_threshold = float(
             damping_overshoot_threshold
         )
@@ -832,6 +847,28 @@ class _HEGKFACOptimizer:
             extraction (treat each (w, e) as a sample); otherwise we
             fall back to the un-decomposed ``M^T M`` / ``M M^T``
             formula in :func:`_extract_kron_factors`.
+
+            Returns ``(new_params, new_A, new_G, e_mean, var,
+            total_norm, clip, dot_grad_step, dot_step_F_step)``.  The
+            last three feed FermiNet-style Levenberg-Marquardt
+            adaptive damping in the outer loop:
+
+              ``effective_lr = lr_now * clip``
+              ``predicted_change``
+                  = 0.5·effective_lr²·dot_step_F_step
+                    − effective_lr·dot_grad_step
+              ``ratio = (E_new − E_old) / predicted_change``
+
+            ``dot_grad_step = ⟨grad, applied_step⟩`` summed over all
+            blocks (Frobenius for kernels), and ``dot_step_F_step ≈
+            ⟨applied_step, F · applied_step⟩``.  Under the (F+λI)·step
+            = grad relation that the damped solve enforces, the latter
+            equals ``c·⟨grad, applied_step⟩`` per Linear layer (with
+            ``c = kernel_scale``) and ``⟨grad, step⟩`` for the generic
+            block.  When ``fixed_scale=False`` and there's no separate
+            kernel scale, both reduce to the standard
+            ``⟨grad, step⟩`` and ``predicted_change = -effective_lr·
+            (1 - effective_lr/2)·dot``.
             """
             pw_grad = per_walker_grad_vmap(walkers, params)
 
@@ -852,6 +889,7 @@ class _HEGKFACOptimizer:
 
             new_A, new_G = {}, {}
             update_kernels: Dict[str, jax.Array] = {}
+            layer_dW_loss: Dict[str, jax.Array] = {}
             # FermiNet-style per-layer scale (n_e_layer for layers
             # where we used RepeatedDenseBlock-style extraction; 1 for
             # the M^T M fallback so the natural-gradient step has
@@ -873,9 +911,8 @@ class _HEGKFACOptimizer:
                     # 1/(W·n_e)-normalised but dW_loss is per-walker
                     # -summed, so multiplying the step by n_e matches
                     # textbook KFAC magnitude.  Set ``kfac_fixed_scale``
-                    # in the YAML to enable; lr typically needs to
-                    # drop by ~n_e_typical (e.g. 0.1 → 0.005) to keep
-                    # the effective step in the trust region.
+                    # in the YAML to enable; the LM ratio damping in
+                    # the outer loop handles the trust-region.
                     kernel_scale[layer] = (
                         float(n_e) if fixed_scale else 1.0
                     )
@@ -897,9 +934,10 @@ class _HEGKFACOptimizer:
                 A_inv, G_inv = _damped_kron_inverse(
                     A_new, G_new, damping_arr,
                 )
-                # ΔW = -lr · scale · G_inv · dW_loss · A_inv
-                step = kernel_scale[layer] * (G_inv @ dW_loss @ A_inv)
-                update_kernels[layer] = step    # *direction*, not yet scaled
+                # ΔW = -lr · kernel_scale · G_inv · dW_loss · A_inv
+                applied_step = kernel_scale[layer] * (G_inv @ dW_loss @ A_inv)
+                update_kernels[layer] = applied_step
+                layer_dW_loss[layer] = dW_loss
 
             # ---- Generic block: damped natural gradient ----
             # Collect per-walker grads of log|ψ| for all generic leaves.
@@ -919,14 +957,16 @@ class _HEGKFACOptimizer:
                 generic_pw_flat_list, axis=1,
             ) if generic_pw_flat_list else jnp.zeros((walkers.shape[0], 0))
 
-            generic_step_flat = (
-                _generic_natural_gradient(
-                    de_eff, generic_pw_flat, damping_arr,
-                    pmean_axis=pmean_axis,
+            if generic_pw_flat.shape[1] > 0:
+                generic_step_flat, generic_grad_flat = (
+                    _generic_natural_gradient(
+                        de_eff, generic_pw_flat, damping_arr,
+                        pmean_axis=pmean_axis,
+                    )
                 )
-                if generic_pw_flat.shape[1] > 0
-                else jnp.zeros(0)
-            )
+            else:
+                generic_step_flat = jnp.zeros(0)
+                generic_grad_flat = jnp.zeros(0)
 
             # ---- Trust-region clip (norm_constraint) ----
             # Always compute the total Frobenius norm of the natural-
@@ -941,6 +981,28 @@ class _HEGKFACOptimizer:
                 clip = jnp.minimum(1.0, norm_clip / (lr_now * total_norm))
             else:
                 clip = jnp.asarray(1.0, dtype=jnp.float64)
+
+            # ---- Predicted-reduction terms (FermiNet LM) ----
+            # dot_grad_step = ⟨grad, applied_step⟩, summed over all blocks.
+            # dot_step_F_step ≈ ⟨applied_step, F · applied_step⟩, using the
+            # damped relation (F+λI)·raw_step = grad.  For Linear blocks
+            # with applied_step = c·raw_step:
+            #   ⟨applied_step, F · applied_step⟩ ≈ c · ⟨grad, applied_step⟩
+            # For generic block (c = 1): equal to dot_grad_step_gen.
+            dot_grad_step = jnp.zeros((), dtype=jnp.float64)
+            dot_step_F_step = jnp.zeros((), dtype=jnp.float64)
+            for layer in layer_paths:
+                dot_l = jnp.sum(
+                    layer_dW_loss[layer] * update_kernels[layer]
+                )
+                dot_grad_step = dot_grad_step + dot_l
+                dot_step_F_step = (
+                    dot_step_F_step + kernel_scale[layer] * dot_l
+                )
+            if generic_pw_flat.shape[1] > 0:
+                dot_gen = jnp.sum(generic_grad_flat * generic_step_flat)
+                dot_grad_step = dot_grad_step + dot_gen
+                dot_step_F_step = dot_step_F_step + dot_gen
 
             # ---- Apply update ----
             scale = -lr_now * clip
@@ -958,21 +1020,19 @@ class _HEGKFACOptimizer:
                 generic_paths_list,
                 generic_pw_flat_list,
             ):
-                p_shape = sub.shape[1:]                # original param shape
-                # Wait — sub has shape (W, P_flat); the original leaf shape
-                # was (W, *param_shape) so we need that.  Recover from leaf:
+                # sub has shape (W, P_flat); recover the original param
+                # shape from the params pytree below.
                 leaf_shape_flat = sub.shape[1]
                 slice_ = generic_step_flat[offset:offset + leaf_shape_flat]
                 offset += leaf_shape_flat
-                # Reshape back to the param's true shape.  Look up via the
-                # original params pytree.
                 old_param = _get_at_path(params, path)
                 slice_ = slice_.reshape(old_param.shape)
                 new_params = _set_at_path(
                     new_params, path, old_param + scale * slice_,
                 )
 
-            return new_params, new_A, new_G, e_mean, var, total_norm
+            return (new_params, new_A, new_G, e_mean, var, total_norm,
+                    clip, dot_grad_step, dot_step_F_step)
 
         if multi_device:
             self._kfac_step_core = jax.pmap(
@@ -1120,8 +1180,14 @@ class _HEGKFACOptimizer:
         timestamp_prev = datetime.now()
         damping_now = self.damping
         # Look-back windows for adaptive damping.
-        e_window: list = []
         step_norm_window: list = []
+        # Martens-Grosse LM ratio bookkeeping.
+        # Each entry holds ``(actual_change, predicted_change)`` for one
+        # iter; we aggregate over ``damping_lookback`` entries before
+        # consulting the ratio (smooths Monte-Carlo noise on ``E_local``).
+        ratio_window: list = []
+        prev_e_total: Optional[float] = None
+        prev_predicted: Optional[float] = None
 
         for it in range(1, num_iters + 1):
             # Decorrelate walkers under |ψ_θ|² with the current params.
@@ -1187,12 +1253,11 @@ class _HEGKFACOptimizer:
                     jnp.asarray(damping_now, dtype=jnp.float64),
                     (n_dev,),
                 )
-                p_out, A_out, G_out, e_mean_o, var_o, step_norm_o = (
-                    kfac_step_core(
-                        p_rep, e_loc_sh, w_sh,
-                        A_rep, G_rep, lr_rep, damp_rep,
-                        captured_inputs,
-                    )
+                (p_out, A_out, G_out, e_mean_o, var_o, step_norm_o,
+                 clip_o, dot_grad_o, dot_F_o) = kfac_step_core(
+                    p_rep, e_loc_sh, w_sh,
+                    A_rep, G_rep, lr_rep, damp_rep,
+                    captured_inputs,
                 )
                 params = _take_first_device(p_out)
                 A_state = _take_first_device(A_out)
@@ -1200,15 +1265,18 @@ class _HEGKFACOptimizer:
                 e_mean = _take_first_device(e_mean_o)
                 var = _take_first_device(var_o)
                 step_norm = _take_first_device(step_norm_o)
+                clip_val = _take_first_device(clip_o)
+                dot_grad_step = _take_first_device(dot_grad_o)
+                dot_step_F_step = _take_first_device(dot_F_o)
             else:
-                params, A_state, G_state, e_mean, var, step_norm = (
-                    kfac_step_core(
-                        params, e_loc, walkers,
-                        A_state, G_state,
-                        jnp.asarray(lr_now, dtype=jnp.float64),
-                        jnp.asarray(damping_now, dtype=jnp.float64),
-                        captured_inputs,
-                    )
+                (params, A_state, G_state, e_mean, var, step_norm,
+                 clip_val, dot_grad_step,
+                 dot_step_F_step) = kfac_step_core(
+                    params, e_loc, walkers,
+                    A_state, G_state,
+                    jnp.asarray(lr_now, dtype=jnp.float64),
+                    jnp.asarray(damping_now, dtype=jnp.float64),
+                    captured_inputs,
                 )
 
             # Logging.
@@ -1230,8 +1298,9 @@ class _HEGKFACOptimizer:
                     file=fout,
                 )
 
-            # Adaptive Levenberg-Marquardt damping (heuristic) —
-            # two response timescales:
+            # Adaptive Levenberg-Marquardt damping — FermiNet/kfac-jax
+            # recipe (Martens & Grosse 2015) with a panic-mode safety
+            # net.  Two response timescales:
             #
             # 1. Fast "panic mode" — every iter, check if ‖step‖ has
             #    blown up beyond ``damping_overshoot_threshold`` ×
@@ -1241,13 +1310,39 @@ class _HEGKFACOptimizer:
             #    when ``fixed_scale=True`` puts the step magnitude
             #    near the trust-region boundary.
             #
-            # 2. Slow trend mode — every ``damping_lookback`` iters,
-            #    look at the energy trend over the window.  If
-            #    energy went up: damping /= 0.95.  Down: damping *=
-            #    0.95.  Else keep.  Symmetric multiplier avoids
-            #    runaway damping when the LM signal is noisy.
+            # 2. Quadratic-model ratio mode (FermiNet faithful) —
+            #    every ``damping_lookback`` iters, compare the
+            #    aggregated *actual* energy reduction to the
+            #    *predicted* reduction from the local quadratic model
+            #
+            #        Δm = ½·(η·c)²·⟨step, F·step⟩ - (η·c)·⟨grad, step⟩
+            #
+            #    where ``η = lr_now``, ``c = clip`` (trust-region
+            #    factor), ``step`` is the applied update direction
+            #    (with ``kernel_scale`` baked in), ``grad`` is the
+            #    energy gradient and ``F`` is the (damped) Fisher.
+            #    Under the natural-gradient relation
+            #    ``(F + λI)·raw_step = grad`` this evaluates exactly
+            #    to the closed form computed inside ``step_body``.
+            #
+            #    Martens-Grosse rule:
+            #      ratio > 0.75 → quadratic model under-predicts
+            #                       descent → loosen damping (×decay).
+            #      ratio < 0.25 → quadratic model over-predicts
+            #                       descent → tighten damping (÷decay).
+            #
+            #    Aggregating actual & predicted over ``damping_lookback``
+            #    iters before forming the ratio smooths Monte-Carlo
+            #    noise on E_local without losing responsiveness.
             #
             # Bound by ``[damping_min, damping_max]``.
+            e_total = float(e_mean)
+            eff_lr = float(lr_now) * float(clip_val)
+            predicted_change_this = float(
+                0.5 * eff_lr ** 2 * float(dot_step_F_step)
+                - eff_lr * float(dot_grad_step)
+            )
+
             if self.damping_adapt:
                 step_norm_val = float(step_norm)
                 step_norm_window.append(step_norm_val)
@@ -1269,23 +1364,35 @@ class _HEGKFACOptimizer:
                             self.damping_min, self.damping_max,
                         ))
 
-                # Slow trend mode (every damping_lookback iters).
-                e_window.append(e_per)
-                if len(e_window) >= self.damping_lookback:
-                    half = self.damping_lookback // 2
-                    early = float(np.mean(e_window[:half]))
-                    late = float(np.mean(e_window[-half:]))
-                    trend = late - early
-                    noise = float(np.std(e_window) /
-                                  np.sqrt(self.damping_lookback))
-                    if trend > noise:
-                        damping_now /= 0.95
-                    elif trend < -noise:
-                        damping_now *= 0.95
-                    damping_now = float(np.clip(
-                        damping_now, self.damping_min, self.damping_max,
-                    ))
-                    e_window = []
+                # LM ratio mode: e_total measured at iter t is the
+                # energy after the step taken at iter t-1, so the
+                # actual reduction for the *previous* iter's step is
+                # e_total(t) - e_total(t-1).  Pair it with that step's
+                # predicted reduction.
+                if (prev_e_total is not None
+                        and prev_predicted is not None):
+                    ratio_window.append(
+                        (e_total - prev_e_total, prev_predicted),
+                    )
+                    if len(ratio_window) >= self.damping_lookback:
+                        actual_sum = sum(a for a, _ in ratio_window)
+                        pred_sum = sum(p for _, p in ratio_window)
+                        if abs(pred_sum) > 1e-30:
+                            ratio = actual_sum / pred_sum
+                            if ratio > 0.75:
+                                damping_now *= self.damping_decay
+                            elif ratio < 0.25:
+                                damping_now /= self.damping_decay
+                            damping_now = float(np.clip(
+                                damping_now,
+                                self.damping_min, self.damping_max,
+                            ))
+                        ratio_window = []
+
+            # Always update bookkeeping (even when damping_adapt is
+            # False, we keep them consistent for when the user toggles).
+            prev_e_total = e_total
+            prev_predicted = predicted_change_this
 
         if not (fname_log is None
                 or (isinstance(fname_log, str) and fname_log == "")):
@@ -1312,6 +1419,7 @@ def get_vmcopt_nn_heg_kfac_func(
     damping_min: float = 1.0e-4,
     damping_max: float = 1.0e2,
     damping_lookback: int = 10,
+    damping_decay: float = 0.95,
     damping_overshoot_threshold: float = 10.0,
     damping_overshoot_factor: float = 2.0,
     ema_decay: float = 0.0,
@@ -1340,6 +1448,7 @@ def get_vmcopt_nn_heg_kfac_func(
         damping_min=damping_min,
         damping_max=damping_max,
         damping_lookback=damping_lookback,
+        damping_decay=damping_decay,
         damping_overshoot_threshold=damping_overshoot_threshold,
         damping_overshoot_factor=damping_overshoot_factor,
         ema_decay=ema_decay,
