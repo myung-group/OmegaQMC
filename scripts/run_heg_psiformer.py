@@ -122,6 +122,15 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         n_virt_pw=int(a.get('n_virt_pw', 12)),
         det_jitter=float(a.get('det_jitter', 0.02)),
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
+        # Backflow on/off — defaults to True (FermiNet/PsiFormer recipe).
+        use_backflow=bool(a.get('use_backflow', True)),
+        # Envelope choice — 'plane_wave' (Fermi-sea Slater) or
+        # 'crystal_gaussian' (localised Gaussians on triangular Bravais
+        # lattice for the Wigner-crystal sector).
+        envelope_type=str(a.get('envelope_type', 'plane_wave')),
+        crystal_sigma_init=float(a.get('crystal_sigma_init', 0.25)),
+        crystal_spin_pattern=str(a.get('crystal_spin_pattern', 'neel')),
+        crystal_det_jitter=float(a.get('crystal_det_jitter', 0.0)),
         dim=int(dim),
     )
 
@@ -352,6 +361,7 @@ def _run(cfg, project, run_dir, prefix):
             sr_n_cg = int(_get(cfg, 'optimize.sr_n_cg', 30))
             opt = get_vmcopt_nn_heg_sr_func(
                 config, init_key,
+                prefix=prefix,
                 lr=opt_lr, damping=sr_damp, n_cg=sr_n_cg,
                 var_weight=var_weight,
                 ewald_n_real=ewald_n_real,

@@ -1,0 +1,78 @@
+# Minimal-ansatz Wigner-crystal run for rs=50, N=58 unpolarized.
+# Strips down all features that compete with the localised-Gaussian
+# envelope:
+#   * single Slater determinant (no multi-det jitter spreading sites)
+#   * NO backflow (prevents the GNN from drifting walkers off sites)
+#   * NO deep Jastrow (prevents fluid-like correlation morphing)
+#   * NO ghost atom (avoids C2 anisotropy artifact along cell axes)
+#   * smaller embedding/layers (less variational room for off-target moves)
+# Keeps Kato cusp (analytical, no trainable params that hurt).
+#
+# Expected behaviour:
+#   iter 1   ~ -20 to -22 mHa/elec   (close to Bonsall-Maradudin -22.1)
+#   final    ~ -20 to -21 mHa/elec   (~1 mHa above BM from finite-sigma kinetic)
+#
+# Fluid companion: heg2d_rs50_N58_unpol_fluid_smith.yaml
+
+project: heg2d_rs50_N58_unpol_crystal_minimal
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 58
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32                  # smaller — was 64
+  layers: 1                          # smaller — was 2
+  heads: 2
+  two_particle_dim: 8                # smaller — was 32
+  n_det: 1                           # single det — was 4
+  full_determinant: false
+  use_cusp: true                     # keep (analytical, doesn't hurt)
+  deep_jastrow: false                # OFF — was true
+  pair_jastrow: false
+  use_backflow: false                # OFF — main fix; was true
+  use_ghost_atom: false              # OFF — was true (avoid C2 artifact)
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.10
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.0            # no jitter needed for n_det=1
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 1000                        # less needed — was 3000
+  walkers: 256                       # less needed — was 512
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.025
+  sr_damping: 1.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 30
+  equil_blocks: 15
+  steps_per_block: 20
+  mc_timestep: 5.0                   # large step needed (sigma~9.5 Bohr)
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6                 # was 4 — extends beyond Bragg radius
+  n_walkers: 256
+  equil_steps: 200
+  sample_steps: 80
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

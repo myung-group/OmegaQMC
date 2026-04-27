@@ -1,0 +1,53 @@
+# Smoke-test the crystal-aware walker init fix.  Compare to the
+# previous broken N=10 rs=40 crystal run (which plateaued near HF).
+# Expected: with the fix, energy should drop well below HF in <50 iters.
+
+project: heg2d_smoke_crystal_fix
+
+system:
+  dim: 2
+  rs: 40.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 16
+  layers: 1
+  heads: 2
+  two_particle_dim: 8
+  n_det: 2
+  use_cusp: true
+  deep_jastrow: false
+  use_ghost_atom: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.20
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.05
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 100
+  walkers: 128
+  lr: 0.05
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.05
+  sr_damping: 1.0e-3
+  sr_n_cg: 10
+
+eval:
+  walkers: 128
+  blocks: 5
+  equil_blocks: 10                    # 5x more equilibration; lets step adaptation reach optimum
+  steps_per_block: 10
+  mc_timestep: 1.0                    # ~ sigma/(several) — much larger than the optimize default
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

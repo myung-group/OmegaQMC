@@ -151,6 +151,7 @@ class _HEGSROptimizer:
         ewald_n_real: int = 3,
         ewald_n_recip: int = 6,
         ewald_eta: Optional[float] = None,
+        ofname_chkpt: Optional[str] = None,
     ):
         self.config = config
         self.L = float(config.L)
@@ -162,6 +163,7 @@ class _HEGSROptimizer:
         self.damping = float(damping)
         self.n_cg = int(n_cg)
         self.var_weight = float(var_weight)
+        self.ofname_chkpt = ofname_chkpt
 
         if self.dim == 3:
             self.lattice = make_cubic_lattice(self.L)
@@ -299,6 +301,28 @@ class _HEGSROptimizer:
     # -----------------------------------------------------
 
     def initialize_walkers(self, rng_key, num_walkers):
+        """Sample walker positions for the SR optimiser.
+
+        Crystal-aware: when ``config.envelope_type == 'crystal_gaussian'``
+        walkers are placed at the triangular Bravais sites with a small
+        Gaussian noise so MCMC immediately samples the dominant region
+        of |psi|^2 (uniform-init walkers fail to bridge the ``a_NN``
+        gap to localised |psi|^2 peaks within typical decorrelation
+        steps and SR then trains the localised character away).
+        """
+        envelope_type = getattr(self.config, 'envelope_type', 'plane_wave')
+        if envelope_type == 'crystal_gaussian' and self.dim == 2:
+            from .psi.nn.env_localized_2d import crystal_init_walkers_2d
+            return crystal_init_walkers_2d(
+                rng_key, num_walkers,
+                n_up=self.n_up, n_down=self.n_down, L=self.L,
+                sigma_init=float(getattr(
+                    self.config, 'crystal_sigma_init', 0.25,
+                )),
+                spin_pattern=str(getattr(
+                    self.config, 'crystal_spin_pattern', 'neel',
+                )),
+            )
         return self.L * jax.random.uniform(
             rng_key, (num_walkers, self.nelec, self.dim),
         )
@@ -447,6 +471,30 @@ class _HEGSROptimizer:
 
         self.params_flat = params_flat
         params_pytree = self.unravel(params_flat)
+
+        # Save checkpoint so downstream tools (density plot, eval
+        # restart, etc.) can recover the trained wavefunction.  The
+        # HEG SR driver previously announced the file in run_heg_psiformer
+        # but never actually wrote it.
+        if (self.ofname_chkpt is not None
+                and self.ofname_chkpt != ""):
+            from .nn_checkpoint import save_nn_checkpoint
+            try:
+                save_nn_checkpoint(
+                    self.ofname_chkpt, params_pytree,
+                    epoch=int(len(e_history)),
+                    config_name='HEG_PsiFormer',
+                    mol_info=None,
+                    energy=(e_history[-1] if e_history else None),
+                )
+            except Exception as e:
+                # Don't crash a long training run on save failure;
+                # surface the error.
+                print(
+                    f"[warn] failed to save checkpoint "
+                    f"{self.ofname_chkpt}: {e}",
+                )
+
         return {
             'params': params_pytree,
             'params_flat': params_flat,
@@ -476,7 +524,9 @@ def get_vmcopt_nn_heg_sr_func(
     Returns:
         :class:`_HEGSROptimizer` — callable.
     """
-    del prefix  # currently unused; kept for signature parity.
+    if prefix.endswith(".chk.h5"):
+        prefix = prefix[: -len(".chk.h5")]
+    ofname_chkpt = prefix + ".chk.h5" if prefix else None
     return _HEGSROptimizer(
         config, init_key,
         lr=lr,
@@ -486,4 +536,5 @@ def get_vmcopt_nn_heg_sr_func(
         ewald_n_real=ewald_n_real,
         ewald_n_recip=ewald_n_recip,
         ewald_eta=ewald_eta,
+        ofname_chkpt=ofname_chkpt,
     )

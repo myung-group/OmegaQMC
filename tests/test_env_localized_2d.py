@@ -110,6 +110,54 @@ def test_envelope_2d_grad_finite():
     assert jnp.all(jnp.isfinite(g))
 
 
+def test_crystal_init_walkers_2d_shape_and_locality():
+    """Crystal-aware walker init: walkers sit near triangular sites
+    with Gaussian noise of size ~ sigma_init * a_NN."""
+    import jax
+    from OmegaQMC.psi.nn.env_localized_2d import (
+        crystal_init_walkers_2d, triangular_lattice_sites,
+    )
+    rs = 30.0
+    n_up, n_down = 9, 9
+    L = float(np.sqrt(np.pi * 18) * rs)
+    walkers = crystal_init_walkers_2d(
+        jax.random.key(0), num_walkers=8,
+        n_up=n_up, n_down=n_down, L=L,
+        sigma_init=0.10, spin_pattern='neel',
+    )
+    assert walkers.shape == (8, 18, 2)
+    # All walker positions should be within [0, L)^2 after wrapping
+    assert jnp.all((walkers >= 0) & (walkers < L))
+    # Average distance from each walker to the nearest triangular site
+    # should be O(sigma_init * a_NN).
+    sites = triangular_lattice_sites(rs, 18) % L
+    a_nn = float(np.sqrt(2 * np.pi / np.sqrt(3)) * rs)
+    walker_flat = np.asarray(walkers).reshape(-1, 2)  # (8*18, 2)
+    # Minimum-image distance from each walker to each site:
+    diffs = walker_flat[:, None, :] - sites[None, :, :]
+    diffs_mi = diffs - L * np.round(diffs / L)
+    dists = np.linalg.norm(diffs_mi, axis=-1)
+    nn_dist = np.min(dists, axis=-1)
+    median_nn_dist = float(np.median(nn_dist))
+    # Walkers should sit close to sites: median NN distance <
+    # ~2 * (sigma_init * a_NN) per spin assignment.
+    assert median_nn_dist < 2.0 * 0.10 * a_nn, (
+        f"median walker->site distance {median_nn_dist:.2f} Bohr "
+        f"vs noise scale {0.10 * a_nn:.2f} Bohr — walkers are not "
+        "near sites."
+    )
+
+
+def test_crystal_init_walkers_2d_invalid_pattern_raises():
+    import jax
+    from OmegaQMC.psi.nn.env_localized_2d import crystal_init_walkers_2d
+    with pytest.raises(ValueError):
+        crystal_init_walkers_2d(
+            jax.random.key(0), 4, n_up=4, n_down=4, L=10.0,
+            spin_pattern='banana',
+        )
+
+
 def test_neel_assigns_alternating_sites():
     """In Neel pattern, up sites and down sites should interleave."""
     rs = 30.0

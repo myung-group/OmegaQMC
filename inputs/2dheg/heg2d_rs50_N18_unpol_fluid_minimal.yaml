@@ -1,0 +1,64 @@
+# Same minimal-ansatz config as the crystal companion, but with the
+# plane-wave envelope -> stays in fluid sector.  For an apples-to-apples
+# fluid vs crystal comparison at fixed N=18 and fixed ansatz size.
+
+project: heg2d_rs50_N18_unpol_fluid_minimal
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 1
+  heads: 2
+  two_particle_dim: 8
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: false
+  pair_jastrow: false
+  use_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 4
+  det_jitter: 0.0
+
+pretrain:
+  iters: 0                           # plane-wave Slater is already HF, no pretraining needed
+
+optimize:
+  type: sr
+  iters: 1000
+  walkers: 256
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 20
+  equil_blocks: 10
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 256
+  equil_steps: 150
+  sample_steps: 60
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

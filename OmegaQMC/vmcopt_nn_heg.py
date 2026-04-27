@@ -239,6 +239,25 @@ class _HEGAdamOptimizer:
     # -----------------------------------------------------
 
     def initialize_walkers(self, rng_key, num_walkers):
+        """Sample walker positions for the Adam optimiser.
+
+        Crystal-aware: see :class:`_HEGSROptimizer.initialize_walkers`
+        for rationale.  Walkers placed at triangular Bravais sites
+        with small noise when ``envelope_type='crystal_gaussian'``.
+        """
+        envelope_type = getattr(self.config, 'envelope_type', 'plane_wave')
+        if envelope_type == 'crystal_gaussian' and self.dim == 2:
+            from .psi.nn.env_localized_2d import crystal_init_walkers_2d
+            return crystal_init_walkers_2d(
+                rng_key, num_walkers,
+                n_up=self.n_up, n_down=self.n_down, L=self.L,
+                sigma_init=float(getattr(
+                    self.config, 'crystal_sigma_init', 0.25,
+                )),
+                spin_pattern=str(getattr(
+                    self.config, 'crystal_spin_pattern', 'neel',
+                )),
+            )
         return self.L * jax.random.uniform(
             rng_key, (num_walkers, self.nelec, self.dim),
         )

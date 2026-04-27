@@ -1,0 +1,75 @@
+# N=50 fluid sector at rs=50 — light "proper" ansatz.
+#
+# N=50 is the smallest system size where:
+#   * per-spin count = 25 IS a closed-shell Fermi sea (1, 5, 9, 13, 21, 25, ...)
+#   * 25 = 5x5 super-cell of triangular Bravais sites (commensurate WC)
+# So fluid and crystal sectors share the same N and the WC sector
+# can lay 50 sites in a clean 5x5x2 triangular pattern (no gaps).
+#
+# SYMMETRIC ansatz: same module on both sectors, only envelope differs.
+# Light: emb=16, layers=1, n_det=1, no backflow, no Jastrow, no ghost
+# (the things that previously contaminated the crystal sector).
+# Kato cusp ON in both for short-range correlation.
+#
+# Companion: heg2d_rs50_N50_unpol_crystal.yaml
+
+project: heg2d_rs50_N50_unpol_fluid
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 50                              # 25/spin, closed shell, commensurate triangular
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 16
+  layers: 1
+  heads: 2
+  two_particle_dim: 8
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: false
+  pair_jastrow: false
+  use_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 8                       # next shell beyond 25/spin
+  det_jitter: 0.0
+
+pretrain:
+  iters: 0                           # plane-wave Slater is HF; cusp is parameter-free
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 256
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 30
+  equil_blocks: 15
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 256
+  equil_steps: 200
+  sample_steps: 80
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8
