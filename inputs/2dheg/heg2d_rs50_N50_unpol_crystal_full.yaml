@@ -1,0 +1,75 @@
+# N=50 Wigner-crystal sector @ rs=50 — full PsiFormer ansatz with
+# Gaussian-localised envelope, Jastrow + backflow + cusp + ghost.
+# Companion: heg2d_rs50_N50_unpol_fluid_full.yaml.
+#
+# Crystal-aware walker init (now wired into all drivers) places walkers
+# at the triangular Bravais sites, so the random backflow + jastrow do
+# NOT train the localisation away anymore (the bug-fix from this morning).
+#
+# 2000 SR iters; expected E/N ~ -19 to -20 mHa, close to Smith 2024
+# (MP)^2NQS value -19.83 mHa.
+
+project: heg2d_rs50_N50_unpol_crystal_full
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 2
+  heads: 2
+  two_particle_dim: 32
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true
+  use_ghost_atom: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.10
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.10           # site jitter for n_det=4
+
+pretrain:
+  iters: 0                           # crystal envelope is the localised target
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 512
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 50
+  mc_timestep: 0.025                 # smaller for localised walkers
+  sr_damping: 1.0e-3
+  sr_n_cg: 25
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 30                   # extra burn-in (large cell + sigma~9.5)
+  steps_per_block: 30
+  mc_timestep: 5.0                   # large step for crystal (sigma~9.5 Bohr)
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 512
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

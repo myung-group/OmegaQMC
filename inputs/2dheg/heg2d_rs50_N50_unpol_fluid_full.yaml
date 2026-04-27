@@ -1,0 +1,71 @@
+# N=50 fluid sector @ rs=50 — full PsiFormer ansatz (matching prior
+# smith-style settings: emb=64, layers=2, n_det=4, deep_jastrow on,
+# backflow on, cusp on, ghost on).
+#
+# 2000 SR iters for proper convergence at low density.
+# Companion: heg2d_rs50_N50_unpol_crystal_full.yaml
+
+project: heg2d_rs50_N50_unpol_fluid_full
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 2
+  heads: 2
+  two_particle_dim: 32
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true
+  use_ghost_atom: true
+  envelope_type: plane_wave
+  n_virt_pw: 12                      # next two shells beyond Fermi sea
+  det_jitter: 0.05                   # break n_det degeneracy
+
+pretrain:
+  iters: 200                         # drive backflow toward HF baseline
+  walkers: 384
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 512
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 50              # critical at low density (huge cell)
+  mc_timestep: 0.04
+  sr_damping: 1.0e-3
+  sr_n_cg: 25
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 15
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 512
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8
