@@ -1,0 +1,130 @@
+% =====================================================================
+% Cavity-modified 2D HEG via NN-VMC
+% Compile: pdflatex main && bibtex main && pdflatex main && pdflatex main
+% =====================================================================
+\documentclass[aps,prl,reprint,superscriptaddress,longbibliography]{revtex4-2}
+
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\bibliographystyle{apsrev4-2}
+
+% ---------------------------------------------------------------------
+
+\begin{document}
+
+\title{Cavity-modified phase diagram of the two-dimensional electron
+gas via neural-network variational Monte Carlo}
+
+\author{C.W.\ Myung}
+\affiliation{Department of Physics, Sungkyunkwan University,
+Suwon 16419, Republic of Korea}
+% Add coauthors as appropriate.
+
+\date{\today}
+
+\begin{abstract}
+We compute the cavity-modified phase diagram of the two-dimensional
+homogeneous electron gas using neural-network variational Monte Carlo
+with a self-attention–based PsiFormer ansatz extended to the joint
+electron–photon Fock space. Treating the dipole-gauge Pauli-Fierz
+Hamiltonian for a single cavity mode coupled to the Coulomb-interacting
+2D electron gas, we map the Wigner-crystallisation density and the
+ferromagnetic transition as functions of the dimensionless light-matter
+coupling. We find that
+[\textbf{TODO: insert cavity-modified $r_s^c(\lambda)$ shift}],
+constituting a quantitative prediction directly testable in
+present-generation cavity-2DEG experiments. Our work establishes
+neural-network variational Monte Carlo as a non-perturbative
+\emph{ab initio} method for cavity-coupled extended condensed-matter
+systems.
+\end{abstract}
+
+\maketitle
+
+% =====================================================================
+\input{introduction.tex}
+
+% =====================================================================
+\section{Model}\label{sec:model}
+
+\textbf{TODO:} dipole-gauge Pauli-Fierz Hamiltonian for the 2D HEG;
+gauge choice; finite-size considerations following
+Ref.~\cite{Weber2025}; the role of the diamagnetic $\bm A^2$ term per
+Ref.~\cite{Rokaj2022}; choice of a single-mode vs.\ multi-mode cavity;
+relation to experimental cavity geometries (split-ring, Fabry-Perot,
+photonic-crystal terahertz cavities).
+
+% =====================================================================
+\section{Method}\label{sec:method}
+
+\textbf{TODO:} PsiFormer ansatz for the 2D HEG; the photonic Fock-space
+extension following Ref.~\cite{Tang2025}; Pauli–Fierz one-photon mode
+coupled to the electronic embedding via one-hot encoding;
+discrete-continuous Metropolis sampling; broken-symmetry ansatze for the
+Wigner crystal phase following Ref.~\cite{Cassella2023};
+twist-averaged boundary conditions to mitigate QED-related finite-size
+effects~\cite{Weber2025}; stochastic reconfiguration optimisation;
+photon Fock-space truncation $N_{\rm max}$; convergence criteria.
+
+% =====================================================================
+\section{Results}\label{sec:results}
+
+\subsection{Validation: free-space limit}
+
+\textbf{TODO:} reproduce free-space DMC reference at $\lambda = 0$;
+$r_s^c \approx 31$ from Ref.~\cite{DrummondNeeds2009}; benchmark
+correlation energies at $r_s = 1, 2, 5, 10$.
+
+\subsection{Cavity-modified Wigner crystallisation}
+
+\textbf{TODO:} $r_s^c(\lambda)$ scan; phase boundary; sign and
+magnitude of the shift; discussion of mechanism (cavity-mediated
+attraction \emph{vs.}\ photon-dressed kinetic energy).
+
+\subsection{Cavity-modified magnetic transition}
+
+\textbf{TODO:} polarisation scan at multiple $r_s$ and $\lambda$;
+location of the ferromagnetic instability boundary in the
+$(r_s, \lambda)$ plane.
+
+\subsection{Cavity-induced intermediate phase}
+
+\textbf{TODO:} evidence for/against an intermediate phase between fluid
+and crystal under cavity coupling.
+
+% =====================================================================
+\section{Discussion}\label{sec:discussion}
+
+\textbf{TODO:} experimental signatures; comparison with the
+QED-AFQMC-derived QEDFT functional of Ref.~\cite{Weber2025} where their
+parameter regime overlaps ours; prediction for the Faist-group
+experiments; connection to the Imamo\u{g}lu-group cavity-modified FQH
+observations~\cite{Smolka2014,Enkner2024}; how the
+$\lambda$-axis maps onto experimental cavity geometries.
+
+% =====================================================================
+\section{Conclusion}\label{sec:conclusion}
+
+\textbf{TODO:} summary of cavity-modified 2D HEG phase diagram;
+significance for cavity-quantum-materials field; methodological
+contribution of NN-VMC for cavity-coupled extended systems; future
+directions: (i) multi-mode cavity, (ii) cavity-modified excited
+polariton states via NES-VMC~\cite{Pfau2024}, (iii) Floquet (driven
+cavity) extension via Sambe-space variational principle, (iv) extension
+to TMD-relevant two-band models.
+
+% =====================================================================
+\section*{Acknowledgments}
+
+This work used the OmegaQMC code base (\href{https://github.com/...}{GitHub}).
+Computations were performed on the [\textbf{TODO}] cluster.
+
+% =====================================================================
+\bibliography{../refs/refs}
+
+\end{document}
