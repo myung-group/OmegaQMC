@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "OmegaQMC"
-version = "0.3.0"
+version = "0.3.2"
 description = "QMC with fragment-wise correlated sampling and cavity coupling"
 authors = [
     {name = "Soohaeng Yoo Willow", email = "sy7willow@gmail.com"},
@@ -21,6 +21,9 @@ dependencies = [
     "scipy",
     "h5py",
     "optax",
+    "flax",
+    "optax",
+    "PyYAML",
     "pytest"
 ]
 classifiers = [

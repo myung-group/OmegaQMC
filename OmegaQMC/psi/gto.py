@@ -1,7 +1,10 @@
 import jax
 import jax.numpy as jnp
 # from functools import partial
-from OmegaQMC.shell import read_shell, evaluate_cusp_s
+from OmegaQMC.shell import (
+    read_shell, evaluate_cusp_s, evaluate_cusp_s_vgl,
+)
+from OmegaQMC.utils import laplacian_linearize
 # from OmegaQMC.constants import EE_CUSP_VALUE
 # JASTROW_EE_L_CUT, JASTROW_EE_M_POWER
 
@@ -393,6 +396,129 @@ def _angular_cartesian(am, dr, rad_s):
         raise ValueError("shell.am > 4 is not supported yet.")
 
 
+def _angular_cartesian_poly(am, dr):
+    """Harmonic polynomial ``Y(dr)`` of a GTO shell.
+
+    Same as :func:`_angular_cartesian` with ``rad_s`` set to
+    ``1.0``, but always returns a 1-D array of shape
+    ``(2 am + 1,)`` — even for ``am = 0`` — so the shape is
+    uniform across shells.  ``am`` is a Python int unrolled
+    at JAX trace time.
+    """
+    if am == 0:
+        return jnp.ones(1)
+    return _angular_cartesian(am, dr, 1.0)
+
+
+def _angular_cartesian_vgl(am, dr):
+    """Value and spatial gradient of the harmonic polynomial.
+
+    Returns ``(Y, grad_Y)`` where ``Y`` has shape
+    ``(2 am + 1,)`` and ``grad_Y`` has shape
+    ``(2 am + 1, 3)``.  The Laplacian is zero by construction
+    (solid harmonics are harmonic), so only ``(value, grad)``
+    are returned.
+
+    ``jax.jacobian`` unrolls at trace time because the
+    dispatch in :func:`_angular_cartesian_poly` is a Python
+    ``if`` on the constant ``am``.  For a small ``(2 am + 1,
+    3)`` output this costs a negligible amount of memory.
+    """
+    Y = _angular_cartesian_poly(am, dr)
+    if am == 0:
+        return Y, jnp.zeros((1, 3))
+    grad_Y = jax.jacobian(
+        lambda d: _angular_cartesian_poly(am, d)
+    )(dr)
+    return Y, grad_Y
+
+
+def _slater_det_assemble(mo_val, mo_grad, mo_lap):
+    """Analytical (log|det|, ∇_e, ∇²_e) for a Slater det.
+
+    Inputs:
+      mo_val  — (n_e, n_mo)     φ_m(r_e)
+      mo_grad — (n_e, n_mo, 3)  ∂φ_m/∂r_e
+      mo_lap  — (n_e, n_mo)     ∇²_e φ_m(r_e)
+
+    Alpha electrons are at even indices (``0, 2, 4, ...``)
+    and beta at odd indices, matching the convention of
+    :func:`log_slater_determinant`.
+
+    Returns ``(log_val, grad_e, lap_e)`` with shapes
+    ``()``, ``(n_e, 3)``, ``(n_e,)`` respectively.  The
+    Slater identity used is the standard one:
+
+        Γ[i, x]     = Σ_m (S⁻¹)[m, i] · G[i, m, x]
+        ∇_i  log|S| = Γ[i, :]
+        ∇²_i log|S| = Σ_m (S⁻¹)[m, i] · L[i, m] − |Γ[i]|²
+
+    per spin block, then interleaved back to electron order.
+    """
+    def _block(S, G, L):
+        A = jnp.linalg.inv(S)
+        Gamma = jnp.einsum('ji,ijx->ix', A, G)
+        lap = (
+            jnp.einsum('ji,ij->i', A, L)
+            - jnp.sum(Gamma * Gamma, axis=-1)
+        )
+        _, logdet = jnp.linalg.slogdet(S)
+        return logdet, Gamma, lap
+
+    S_a = mo_val[::2, :]
+    S_b = mo_val[1::2, :]
+    G_a = mo_grad[::2, :, :]
+    G_b = mo_grad[1::2, :, :]
+    L_a = mo_lap[::2, :]
+    L_b = mo_lap[1::2, :]
+
+    logdet_a, Gamma_a, lap_a = _block(S_a, G_a, L_a)
+    logdet_b, Gamma_b, lap_b = _block(S_b, G_b, L_b)
+
+    log_val = logdet_a + logdet_b
+    n_e = mo_val.shape[0]
+    grad_e = jnp.zeros((n_e, 3), dtype=mo_val.dtype)
+    grad_e = grad_e.at[::2].set(Gamma_a)
+    grad_e = grad_e.at[1::2].set(Gamma_b)
+    lap_e = jnp.zeros(n_e, dtype=mo_val.dtype)
+    lap_e = lap_e.at[::2].set(lap_a)
+    lap_e = lap_e.at[1::2].set(lap_b)
+    return log_val, grad_e, lap_e
+
+
+def _radial_vgl(alpha, norm, r2, r):
+    """Contracted Gaussian radial: value, ``R'/r``, and
+    ``R'' + 2 R'/r``.
+
+    For the contracted sum ``R(r) = Σ_p N_p · e^{-α_p r²}``,
+
+        R(r)              = Σ_p N_p · e^{-α_p r²}
+        R'(r)/r           = Σ_p N_p · (-2 α_p) · e^{-α_p r²}
+        R''(r) + 2 R'(r)/r
+                          = Σ_p N_p · (4 α_p² r² − 6 α_p)
+                                · e^{-α_p r²}
+
+    All three expressions are manifestly division-free, and
+    are therefore safe at the electron-on-nucleus
+    coincidence ``r = 0``.  Higher-``l`` shells pick up an
+    extra ``2 l · R'/r`` term in the Laplacian of ``R·Y``;
+    the assembly in :func:`cgs_sph_vgl` applies that shift
+    per shell.
+
+    ``r`` is accepted purely for API symmetry with the
+    cusp-corrected sibling :func:`evaluate_cusp_s_vgl` — it
+    does not appear in the expressions below.
+    """
+    del r  # unused; kept for API symmetry
+    e = jnp.exp(-alpha * r2) * norm
+    R = jnp.sum(e)
+    R_p_over_r = jnp.sum(-2.0 * alpha * e)
+    R_lap = jnp.sum(
+        (4.0 * alpha**2 * r2 - 6.0 * alpha) * e
+    )
+    return R, R_p_over_r, R_lap
+
+
 class _PsiGTO:
     """
     Holds all JAX-compiled wavefunction and energy functions
@@ -596,6 +722,115 @@ class _PsiGTO:
             return mo_val, mo_val_s
 
         @jax.jit
+        def cgs_sph_vgl(elec_crds, nuc_crds):
+            """Spherical GTO value, gradient, and Laplacian.
+
+            Single-electron evaluator.  Returns the triple
+
+                (ao_val, ao_grad, ao_lap)
+
+            with shapes
+
+                ao_val:  (n_nuc, n_sgs)
+                ao_grad: (n_nuc, n_sgs, 3)
+                ao_lap:  (n_nuc, n_sgs)
+
+            where ``ao_grad[A, m, :]`` is the spatial gradient
+            of AO ``m`` on atom ``A`` with respect to the
+            electron coordinate, and ``ao_lap[A, m]`` is its
+            Laplacian.  Angular Laplacians vanish
+            identically (solid harmonics), so the shell's
+            full Laplacian is ``(R'' + 2(l+1) R'/r) · Y``.
+            """
+            n_nuc = nuc_crds.shape[0]
+            nsgs_total = (
+                shell_list[-1].isgs + shell_list[-1].nsgs
+            )
+            ao_val = jnp.zeros((n_nuc, nsgs_total))
+            ao_grad = jnp.zeros((n_nuc, nsgs_total, 3))
+            ao_lap = jnp.zeros((n_nuc, nsgs_total))
+            for shell in shell_list:
+                pos = nuc_crds[shell.iat]
+                dr = elec_crds - pos
+                r2 = jnp.sum(dr * dr, axis=-1)
+                r = jnp.sqrt(r2)
+                R, R_p_over_r, R_lap = _radial_vgl(
+                    shell.alpha, shell.norm, r2, r,
+                )
+                am = shell.am
+
+                if am == 0 and shell.is_cusp:
+                    f_val, f_p_over_r, f_lap = (
+                        evaluate_cusp_s_vgl(
+                            r,
+                            Z_rc[shell.iat],
+                            Z_charges[shell.iat],
+                            R, R_p_over_r, R_lap,
+                            Z_cgao_q0[shell.iat],
+                            Z_cgao_coeff[shell.iat],
+                        )
+                    )
+                    val_store = jnp.array([f_val])
+                    grad_store = (f_p_over_r * dr)[None, :]
+                    lap_store = jnp.array([f_lap])
+                elif am == 0:
+                    val_store = jnp.array([R])
+                    grad_store = (R_p_over_r * dr)[None, :]
+                    lap_store = jnp.array([R_lap])
+                else:
+                    Y, grad_Y = _angular_cartesian_vgl(am, dr)
+                    val_store = R * Y
+                    grad_store = (
+                        R_p_over_r * dr[None, :] * Y[:, None]
+                        + R * grad_Y
+                    )
+                    lap_store = (
+                        R_lap + 2.0 * am * R_p_over_r
+                    ) * Y
+
+                sl = slice(
+                    shell.isgs, shell.isgs + shell.nsgs,
+                )
+                ao_val = ao_val.at[shell.iat, sl].set(
+                    val_store
+                )
+                ao_grad = ao_grad.at[shell.iat, sl, :].set(
+                    grad_store
+                )
+                ao_lap = ao_lap.at[shell.iat, sl].set(
+                    lap_store
+                )
+            return ao_val, ao_grad, ao_lap
+
+        @jax.jit
+        def get_psi_mo_vgl(elec_crds, nuc_crds):
+            """MO value, gradient, and Laplacian per electron.
+
+            Returns ``(mo_val, mo_grad, mo_lap)`` with shapes
+
+                mo_val:  (n_e, n_mo)
+                mo_grad: (n_e, n_mo, 3)
+                mo_lap:  (n_e, n_mo)
+
+            where each electron's MOs are evaluated at its own
+            coordinate — ``mo_grad[e, m, :]`` is ∂φ_m/∂r_e
+            and ``mo_lap[e, m]`` is ∇²_e φ_m(r_e).
+            """
+            ao_val, ao_grad, ao_lap = jax.vmap(
+                cgs_sph_vgl, in_axes=(0, None)
+            )(elec_crds, nuc_crds)
+            mo_val = jnp.einsum(
+                'ena,am->em', ao_val, mo_occ_coeff
+            )
+            mo_grad = jnp.einsum(
+                'enax,am->emx', ao_grad, mo_occ_coeff
+            )
+            mo_lap = jnp.einsum(
+                'ena,am->em', ao_lap, mo_occ_coeff
+            )
+            return mo_val, mo_grad, mo_lap
+
+        @jax.jit
         def get_ao_val(elec_crds, nuc_crds):
             """AO evaluation only (no MO contraction)."""
             ao_val, _ = jax.vmap(
@@ -620,14 +855,40 @@ class _PsiGTO:
             )
             return log_det_alpha + log_det_beta
 
+        @jax.jit
+        def log_slater_det_analytic_C(elec_crds, nuc_crds, C):
+            """Analytical (log|det S|, ∇_e, ∇²_e) for CPHF path.
+
+            Same as :func:`log_slater_det_analytic` below, but
+            contracts AO derivatives with an explicit MO
+            coefficient matrix ``C`` instead of the stored
+            ``mo_occ_coeff``.  Used by the orbital-response
+            (CPHF) branch of :func:`local_energy_ke_C`.
+            """
+            ao_val, ao_grad, ao_lap = jax.vmap(
+                cgs_sph_vgl, in_axes=(0, None)
+            )(elec_crds, nuc_crds)
+            mo_val = jnp.einsum('ena,am->em', ao_val, C)
+            mo_grad = jnp.einsum('enax,am->emx', ao_grad, C)
+            mo_lap = jnp.einsum('ena,am->em', ao_lap, C)
+            return _slater_det_assemble(
+                mo_val, mo_grad, mo_lap,
+            )
+
         self.cgs_sph_get = cgs_sph_get
         self.get_psi_mo = get_psi_mo
+        self.cgs_sph_vgl = cgs_sph_vgl
+        self.get_psi_mo_vgl = get_psi_mo_vgl
         self.get_ao_val = get_ao_val
         self._log_slater_det_C = log_slater_det_C
+        self._log_slater_det_analytic_C = (
+            log_slater_det_analytic_C
+        )
 
     def _build_slater_fns(self):
         """Build single- or multi-determinant Slater functions."""
         get_psi_mo = self.get_psi_mo
+        get_psi_mo_vgl = self.get_psi_mo_vgl
         cgs_sph_get = self.cgs_sph_get
 
         @jax.jit
@@ -643,6 +904,26 @@ class _PsiGTO:
                 beta_matrix
             )
             return log_det_alpha + log_det_beta
+
+        @jax.jit
+        def log_slater_det_analytic(elec_crds, nuc_crds):
+            """Analytical (log|det|, grad_e, lap_e) triple.
+
+            Closed-form ∇_e and ∇²_e of ``log|det S|`` via
+            the Slater identity — no autodiff over the
+            determinant.  Used by the analytical path of
+            :func:`local_energy_ke`.  Returns:
+
+                log_val : scalar
+                grad_e  : (n_e, 3)  — ∇_e log|det|
+                lap_e   : (n_e,)    — ∇²_e log|det|
+            """
+            mo_val, mo_grad, mo_lap = get_psi_mo_vgl(
+                elec_crds, nuc_crds,
+            )
+            return _slater_det_assemble(
+                mo_val, mo_grad, mo_lap,
+            )
 
         if self.trial is not None:
             mo_coeff_full = self.mo_coeff_full
@@ -689,8 +970,13 @@ class _PsiGTO:
                 return jnp.log(jnp.abs(sum_val)) + logmax
 
             self._log_slater = log_slater_multidet
+            # Multi-det analytical path is a v2 follow-up;
+            # the KE driver falls back to linearize for
+            # self.trial is not None.
+            self._log_slater_analytic = None
         else:
             self._log_slater = log_slater_determinant
+            self._log_slater_analytic = log_slater_det_analytic
 
     def _build_pade_jastrow_fns(self):
         """Build Padé-form Jastrow functions J2_aa, J2_ab, J1."""
@@ -751,9 +1037,99 @@ class _PsiGTO:
                 / (1.0 + b_per_atom[:, None] * r)
             return jnp.sum(u_vals)
 
+        @jax.jit
+        def J2_pade_vgl(elec_crds, curr_params):
+            """Per-electron (grad, lap) of Padé two-body log J₂.
+
+            Returns ``(grad_e, lap_e)`` with shapes
+            ``(n_e, 3)`` and ``(n_e,)``, summing the like-
+            and unlike-spin contributions.  For each pair
+            ``(i, j)`` with ``i < j`` and spin-selected
+            ``(a, b)``,
+
+                u(r)  = a r / (1 + b r)
+                u'(r) = a / (1 + b r)²
+                u''   = -2 a b / (1 + b r)³
+
+            Pair ``(i, j)`` contributes
+            ``+u'(r)·diff/r`` to electron ``i`` and the
+            opposite to ``j``; the per-electron Laplacian
+            contribution ``u'' + 2 u'/r`` lands on both.
+            """
+            n_e = elec_crds.shape[0]
+            i, j = jnp.triu_indices(n_e, k=1)
+            diffs = elec_crds[i] - elec_crds[j]
+            r_ij = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
+            same = (i % 2) == (j % 2)
+            a_like = curr_params["like"][0]
+            b_like = curr_params["like"][1]
+            a_unlike = curr_params["unlike"][0]
+            b_unlike = curr_params["unlike"][1]
+            a = jnp.where(same, a_like, a_unlike)
+            b = jnp.where(same, b_like, b_unlike)
+            denom = 1.0 + b * r_ij
+            up = a / (denom * denom)
+            upp = -2.0 * a * b / (denom * denom * denom)
+            grad_pair = (up / r_ij)[:, None] * diffs
+            lap_pair = upp + 2.0 * up / r_ij
+
+            grad_e = jnp.zeros((n_e, 3), dtype=elec_crds.dtype)
+            grad_e = grad_e.at[i].add(grad_pair)
+            grad_e = grad_e.at[j].add(-grad_pair)
+            lap_e = jnp.zeros(n_e, dtype=elec_crds.dtype)
+            lap_e = lap_e.at[i].add(lap_pair)
+            lap_e = lap_e.at[j].add(lap_pair)
+            return grad_e, lap_e
+
+        @jax.jit
+        def J1_pade_vgl(elec_crds, nuc_crds, curr_params):
+            """Per-electron (grad, lap) of Padé one-body log J₁.
+
+            Returns ``(grad_e, lap_e)`` with shapes
+            ``(n_e, 3)`` and ``(n_e,)``.  Same parameter
+            convention as :func:`J1` above:
+
+              * ``l_cgto=True``: ``curr_params[sym]`` is
+                ``[a, b]`` per element.
+              * ``l_cgto=False``: ``curr_params[sym]`` is
+                just ``b``; ``a`` is fixed at ``-Z``.
+            """
+            if l_cgto:
+                ab_arr = jnp.stack([
+                    curr_params[sym]
+                    for sym in unique_elements
+                ])
+                a_per_atom = ab_arr[atom_to_elem_idx, 0]
+                b_per_atom = ab_arr[atom_to_elem_idx, 1]
+            else:
+                b_arr = jnp.array([
+                    curr_params[sym]
+                    for sym in unique_elements
+                ])
+                b_per_atom = b_arr[atom_to_elem_idx]
+                a_per_atom = -Z_charges
+            diffs = (
+                elec_crds[:, None, :] - nuc_crds[None, :, :]
+            )
+            r = jnp.sqrt(jnp.sum(diffs * diffs, axis=-1))
+            denom = 1.0 + b_per_atom[None, :] * r
+            up = a_per_atom[None, :] / (denom * denom)
+            upp = (
+                -2.0 * a_per_atom[None, :]
+                * b_per_atom[None, :]
+                / (denom * denom * denom)
+            )
+            grad_e = jnp.sum(
+                (up / r)[..., None] * diffs, axis=1,
+            )
+            lap_e = jnp.sum(upp + 2.0 * up / r, axis=1)
+            return grad_e, lap_e
+
         self.J2_aa = J2_aa
         self.J2_ab = J2_ab
         self.J1 = J1
+        self._J2_pade_vgl = J2_pade_vgl
+        self._J1_pade_vgl = J1_pade_vgl
 
     def _build_bspline_jastrow_fns(self):
         """Build B-spline Jastrow functions."""
@@ -976,6 +1352,12 @@ class _PsiGTO:
         """Build log_trial_wavefunction and _C variant."""
         _log_slater = self._log_slater
         _log_slater_det_C = self._log_slater_det_C
+        _log_slater_det_analytic_C = (
+            self._log_slater_det_analytic_C
+        )
+        _J1_pade_vgl = self._J1_pade_vgl
+        _J2_pade_vgl = self._J2_pade_vgl
+        trial = self.trial
         J1 = self.J1
         J2_aa = self.J2_aa
         J2_ab = self.J2_ab
@@ -1059,14 +1441,14 @@ class _PsiGTO:
             return ln_slater + jastrow_term
 
         @jax.jit
-        def local_energy_ke_C(
-            elec_crds, nuc_crds, curr_params, C
+        def _local_energy_ke_C_hessian(
+            elec_crds, nuc_crds, curr_params, C,
         ):
-            """Kinetic energy with explicit MO coefficients."""
+            """Prior Hessian-based KE(C) — regression only."""
             def _log_psi_flat(p_flat):
                 return log_trial_wavefunction_C(
                     p_flat.reshape(-1, 3),
-                    nuc_crds, curr_params, C
+                    nuc_crds, curr_params, C,
                 )
             grad_fn = jax.grad(_log_psi_flat)
             hess_fn = jax.hessian(_log_psi_flat)
@@ -1077,9 +1459,98 @@ class _PsiGTO:
             grad_term_sq = jnp.sum(grad_log_psi**2)
             return -0.5 * (lap_term + grad_term_sq)
 
+        @jax.jit
+        def local_energy_ke_C(
+            elec_crds, nuc_crds, curr_params, C,
+        ):
+            """Analytical forward-Laplacian KE with explicit C.
+
+            The CPHF orbital-response path (`jax.jvp` over
+            ``C``) still flows through this kernel, but the
+            per-walker working set is now closed-form in
+            ``C`` via :func:`_slater_det_assemble`.
+            """
+            p_flat_shape = elec_crds.shape
+            if trial is None:
+                _, g_s, L_s = _log_slater_det_analytic_C(
+                    elec_crds, nuc_crds, C,
+                )
+                grad_flat = g_s.reshape(-1)
+                lap_total = jnp.sum(L_s)
+            else:
+                def _slater_flat(p):
+                    return _log_slater_det_C(
+                        p.reshape(p_flat_shape),
+                        nuc_crds, C,
+                    )
+                lap_s, grad_s = laplacian_linearize(
+                    _slater_flat
+                )(elec_crds.flatten())
+                grad_flat = grad_s
+                lap_total = lap_s
+
+            if "J1_pade" in curr_params:
+                g, L = _J1_pade_vgl(
+                    elec_crds, nuc_crds,
+                    curr_params["J1_pade"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
+            if "J2_pade" in curr_params:
+                g, L = _J2_pade_vgl(
+                    elec_crds, curr_params["J2_pade"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
+
+            has_other = (
+                "J1_bspline" in curr_params
+                or "J2_bspline" in curr_params
+                or "J3_eeI" in curr_params
+            )
+            if has_other:
+                def _other_flat(p):
+                    elec = p.reshape(p_flat_shape)
+                    acc = 0.0
+                    if "J1_bspline" in curr_params:
+                        acc = acc + J1_bspline_fn(
+                            elec, nuc_crds,
+                            curr_params["J1_bspline"],
+                        )
+                    if "J2_bspline" in curr_params:
+                        acc = (
+                            acc
+                            + J2_bspline_aa(
+                                elec,
+                                curr_params["J2_bspline"],
+                            )
+                            + J2_bspline_ab(
+                                elec,
+                                curr_params["J2_bspline"],
+                            )
+                        )
+                    if "J3_eeI" in curr_params:
+                        acc = acc + J3_eeI_fn(
+                            elec, nuc_crds,
+                            curr_params["J3_eeI"],
+                        )
+                    return acc
+                lap_o, grad_o = laplacian_linearize(
+                    _other_flat
+                )(elec_crds.flatten())
+                grad_flat = grad_flat + grad_o
+                lap_total = lap_total + lap_o
+
+            return -0.5 * (
+                lap_total + jnp.sum(grad_flat * grad_flat)
+            )
+
         self.log_trial_wavefunction = log_trial_wavefunction
         self.log_trial_wavefunction_C = log_trial_wavefunction_C
         self.local_energy_ke_C = local_energy_ke_C
+        self._local_energy_ke_C_hessian = (
+            _local_energy_ke_C_hessian
+        )
 
     def _build_coulomb_fns(self):
         """Build Coulomb interaction energy functions."""
@@ -1139,16 +1610,41 @@ class _PsiGTO:
         self.local_energy_en = local_energy_en
 
     def _build_ke_fns(self):
-        """Build kinetic energy function."""
+        """Build kinetic energy functions.
+
+        Produces two callables with the same signature:
+
+          * ``local_energy_ke`` — analytical forward-Laplacian
+            kernel used in the hot path.  Slater gradient /
+            Laplacian via the closed-form
+            :func:`_slater_det_assemble`; Padé J1/J2 via the
+            ``_J{1,2}_pade_vgl`` helpers; B-spline and J3_eeI
+            folded into a single O(N) ``laplacian_linearize``
+            call, so their per-walker temp memory remains
+            linear in ``n_elec``.
+          * ``_local_energy_ke_hessian`` — the prior
+            ``jax.hessian(_log_psi_flat)`` kernel, retained
+            verbatim for regression and debug.
+        """
         log_trial_wavefunction = self.log_trial_wavefunction
+        log_slater_analytic = self._log_slater_analytic
+        _log_slater = self._log_slater
+        _J1_pade_vgl = self._J1_pade_vgl
+        _J2_pade_vgl = self._J2_pade_vgl
+        J1_bspline_fn = self.J1_bspline_fn
+        J2_bspline_aa = self.J2_bspline_aa
+        J2_bspline_ab = self.J2_bspline_ab
+        J3_eeI_fn = self.J3_eeI_fn
 
         @jax.jit
-        def local_energy_ke(elec_crds, nuc_crds, curr_params):
-            """Kinetic energy calculation."""
+        def _local_energy_ke_hessian(
+            elec_crds, nuc_crds, curr_params,
+        ):
+            """Prior Hessian-based KE kernel (regression only)."""
             def _log_psi_flat(p_flat):
                 return log_trial_wavefunction(
                     p_flat.reshape(-1, 3),
-                    nuc_crds, curr_params
+                    nuc_crds, curr_params,
                 )
             grad_fn = jax.grad(_log_psi_flat)
             hess_fn = jax.hessian(_log_psi_flat)
@@ -1159,6 +1655,92 @@ class _PsiGTO:
             grad_term_sq = jnp.sum(grad_log_psi**2)
             return -0.5 * (lap_term + grad_term_sq)
 
+        @jax.jit
+        def local_energy_ke(elec_crds, nuc_crds, curr_params):
+            """Analytical forward-Laplacian kinetic energy."""
+            p_flat_shape = elec_crds.shape
+            # Slater: analytical for single-det, linearize
+            # fallback for multi-det.
+            if log_slater_analytic is not None:
+                _, g_s, L_s = log_slater_analytic(
+                    elec_crds, nuc_crds,
+                )
+                grad_flat = g_s.reshape(-1)
+                lap_total = jnp.sum(L_s)
+            else:
+                def _slater_flat(p):
+                    return _log_slater(
+                        p.reshape(p_flat_shape), nuc_crds,
+                    )
+                lap_s, grad_s = laplacian_linearize(
+                    _slater_flat
+                )(elec_crds.flatten())
+                grad_flat = grad_s
+                lap_total = lap_s
+
+            # Padé J1 / J2 — closed-form VGL.
+            if "J1_pade" in curr_params:
+                g, L = _J1_pade_vgl(
+                    elec_crds, nuc_crds,
+                    curr_params["J1_pade"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
+            if "J2_pade" in curr_params:
+                g, L = _J2_pade_vgl(
+                    elec_crds, curr_params["J2_pade"],
+                )
+                grad_flat = grad_flat + g.reshape(-1)
+                lap_total = lap_total + jnp.sum(L)
+
+            # B-spline + J3_eeI via O(N) linearize.  These are
+            # all additive in log ψ, so one combined call
+            # suffices — the per-walker temp then scales with
+            # n_elec instead of (3 n_elec)² as with the old
+            # jax.hessian path.
+            has_other = (
+                "J1_bspline" in curr_params
+                or "J2_bspline" in curr_params
+                or "J3_eeI" in curr_params
+            )
+            if has_other:
+                def _other_flat(p):
+                    elec = p.reshape(p_flat_shape)
+                    acc = 0.0
+                    if "J1_bspline" in curr_params:
+                        acc = acc + J1_bspline_fn(
+                            elec, nuc_crds,
+                            curr_params["J1_bspline"],
+                        )
+                    if "J2_bspline" in curr_params:
+                        acc = (
+                            acc
+                            + J2_bspline_aa(
+                                elec,
+                                curr_params["J2_bspline"],
+                            )
+                            + J2_bspline_ab(
+                                elec,
+                                curr_params["J2_bspline"],
+                            )
+                        )
+                    if "J3_eeI" in curr_params:
+                        acc = acc + J3_eeI_fn(
+                            elec, nuc_crds,
+                            curr_params["J3_eeI"],
+                        )
+                    return acc
+                lap_o, grad_o = laplacian_linearize(
+                    _other_flat
+                )(elec_crds.flatten())
+                grad_flat = grad_flat + grad_o
+                lap_total = lap_total + lap_o
+
+            return -0.5 * (
+                lap_total + jnp.sum(grad_flat * grad_flat)
+            )
+
+        self._local_energy_ke_hessian = _local_energy_ke_hessian
         self.local_energy_ke = local_energy_ke
 
 

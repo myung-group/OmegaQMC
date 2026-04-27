@@ -1,15 +1,22 @@
 """Physics utilities for NN trial wavefunctions.
 
-Ported from ``deepqmc/physics.py`` — pairwise distances and
-the efficient O(N) Laplacian via ``jax.linearize``.
+Ported from ``deepqmc/physics.py`` — pairwise distances.
+The O(N) Laplacian helper lives in :mod:`OmegaQMC.utils`
+as ``laplacian_linearize`` and is re-exported here as
+``laplacian`` for backward compatibility.
 """
-
-from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
 
+from ...utils import laplacian_linearize as laplacian
 from .utils import norm
+
+__all__ = [
+    "pairwise_diffs",
+    "pairwise_self_distance",
+    "laplacian",
+]
 
 
 def pairwise_diffs(
@@ -62,37 +69,3 @@ def pairwise_self_distance(
             .at[..., j, i].set(dists)
         )
     return dists
-
-
-def laplacian(
-    f: Callable[[jax.Array], jax.Array],
-) -> Callable[
-    [jax.Array], tuple[jax.Array, jax.Array]
-]:
-    """O(N) Laplacian via ``jax.linearize`` + ``fori_loop``.
-
-    Given a scalar function *f* of a flat coordinate vector,
-    returns a function that computes ``(nabla^2 f, grad f)``.
-
-    This is more efficient than the full Hessian approach
-    ``jax.hessian`` which scales as O(N^2).
-
-    Args:
-        f: Scalar function of a 1-D coordinate array.
-
-    Returns:
-        Function ``(x) -> (laplacian, gradient)``.
-    """
-    def lap(x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        n_coord = len(x)
-        grad_f = jax.grad(f)
-        df, grad_f_jvp = jax.linearize(grad_f, x)
-        eye = jnp.eye(n_coord)
-        d2f = (
-            lambda i, val: val + grad_f_jvp(eye[i])[i]
-        )
-        d2f_sum = jax.lax.fori_loop(
-            0, n_coord, d2f, 0.0,
-        )
-        return d2f_sum, df
-    return lap

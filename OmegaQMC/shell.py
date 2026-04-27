@@ -62,6 +62,80 @@ def evaluate_cusp_s(r, rc, Z, rad_s, q0, coeff):
 
     return jnp.dot(coeff, terms)
 
+
+@jax.jit
+def evaluate_cusp_s_vgl(
+    r, rc, Z, rad_s, rad_s_p_r, rad_s_lap, q0, coeff,
+):
+    """Cusp-corrected s: value, grad/r, and radial Laplacian.
+
+    Returns the triple ``(f, f'/r, f'' + 2 f'/r)`` at scalar
+    ``r``, where ``f`` is the same scalar that
+    :func:`evaluate_cusp_s` returns.  These are the quantities
+    the Slater block needs to build ``∇χ = (f'/r) · dr`` and
+    ``∇²χ = f'' + 2 f'/r`` for an s-orbital (l = 0).
+
+    ``rad_s``, ``rad_s_p_r``, ``rad_s_lap`` carry the
+    uncorrected primitive sum ``R_0(r)``, ``R_0'(r)/r``, and
+    ``R_0''(r) + 2 R_0'(r)/r``.  Expressed this way the
+    ``(1 - b) R_0`` branch contains no bare ``1/r``.  The
+    cusp-polynomial branch ``Q(r) = b(r) q0 e^{-Zr} P(r)``
+    genuinely has a nuclear-cusp singularity (``Q'(0) ≠ 0``),
+    so ``Q'/r`` is kept as a plain division — finite at any
+    ``r`` a Metropolis walker visits.
+    """
+    s = r / rc
+    one_minus_s = 1.0 - s
+    inside = r < rc
+
+    # b(r) and its radial derivatives — all forms below are
+    # division-free (and regular at r = 0).  Factorisations:
+    #   b'(r)  = -(30/rc)·s²·(1-s)²
+    #   b'(r)/r = -(30/rc³)·r·(1-s)²
+    #   b''(r) = -(60/rc²)·s·(1-s)·(1-2s)
+    b_core = 1.0 - 10.0*s**3 + 15.0*s**4 - 6.0*s**5
+    bp_core = -(30.0 / rc) * s**2 * one_minus_s**2
+    bp_over_r_core = -(30.0 / rc**3) * r * one_minus_s**2
+    bpp_core = (
+        -(60.0 / rc**2) * s * one_minus_s * (1.0 - 2.0*s)
+    )
+    BL_core = bpp_core + 2.0 * bp_over_r_core
+
+    b = jnp.where(inside, b_core, 0.0)
+    bp = jnp.where(inside, bp_core, 0.0)
+    bp_over_r = jnp.where(inside, bp_over_r_core, 0.0)
+    BL = jnp.where(inside, BL_core, 0.0)
+
+    # Part A: coeff[0] · (1 - b(r)) · R_0(r)
+    c0 = coeff[0]
+    A_val = c0 * (1.0 - b) * rad_s
+    A_grad_over_r = c0 * (
+        -bp_over_r * rad_s + (1.0 - b) * rad_s_p_r
+    )
+    A_lap = c0 * (
+        -BL * rad_s
+        + (1.0 - b) * rad_s_lap
+        - 2.0 * r * bp * rad_s_p_r
+    )
+
+    # Part B: Q(r) = b(r) · q0·e^{-Zr} · P(r), a scalar
+    # function of r only.  Second-order scalar autodiff is
+    # O(1) memory — the Hessian-memory pathology this module
+    # avoids is about vmap over 3N-dim coord vectors, not
+    # scalar r.
+    def _Q(rv):
+        return evaluate_cusp_s(rv, rc, Z, 0.0, q0, coeff)
+    Q_val = _Q(r)
+    Q_grad = jax.grad(_Q)(r)
+    Q_hess = jax.grad(jax.grad(_Q))(r)
+    Q_grad_over_r = Q_grad / r
+    Q_lap = Q_hess + 2.0 * Q_grad_over_r
+
+    f_val = A_val + Q_val
+    f_grad_over_r = A_grad_over_r + Q_grad_over_r
+    f_lap = A_lap + Q_lap
+    return f_val, f_grad_over_r, f_lap
+
 def read_shell(ish_basis, ia, nsgs, ncgs):
     """
     Reads and processes a single basis shell from PySCF basis set format.

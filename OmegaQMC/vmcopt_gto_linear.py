@@ -740,7 +740,7 @@ class _VMCOptDriverGTO_Linear:
             if num_walkers == 'auto':
                 num_walkers = auto_bs
             if deriv_batch_size == 'auto':
-                deriv_batch_size = auto_bs
+                deriv_batch_size = num_walkers
             if num_opt_samples == 'auto':
                 num_opt_samples = 5 * num_walkers
             if verbose >= 1:
