@@ -1,0 +1,72 @@
+# Smith 2024 comparison: 2D HEG fluid sector @ rs=50, N=58 unpolarized.
+# Square cell — matches Smith et al. PRL 133, 266504 (2024) spot-check
+# size for direct (MP)^2NQS comparison.  rs=50 is well into the WC
+# regime (rs_c ~ 37 per Smith 2024); fluid sector should give a
+# higher-energy result than the crystal companion
+# (heg2d_rs50_N58_unpol_crystal_smith.yaml).
+#
+# Wall-clock estimate: ~2-4 h on one A100.
+
+project: heg2d_rs50_N58_unpol_fluid_smith
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 58                              # 29 per spin, closed shell, square cell (Smith 2024 spot-check)
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64                  # production-grade
+  layers: 2
+  heads: 2
+  two_particle_dim: 32
+  n_det: 4                           # 4 dets keeps run time manageable
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  envelope_type: plane_wave
+  n_virt_pw: 12                      # next two shells beyond Fermi sea (more flexibility for low-density mixing)
+  det_jitter: 0.05                   # larger jitter to encourage broken-symmetry exploration
+  use_ghost_atom: true
+
+pretrain:
+  iters: 200
+  walkers: 384
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 3000
+  walkers: 512
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 50              # critical at rs=50 (huge cell, slow walker decorrelation)
+  mc_timestep: 0.04                  # smaller dt at large L
+  sr_damping: 1.0e-3
+  sr_n_cg: 25
+
+eval:
+  walkers: 512
+  blocks: 60
+  equil_blocks: 15
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2               # first + second triangular shells (12 vectors)
+  cartesian_n_max: 4                 # 80 vectors on a 9x9 reciprocal grid (covers Bragg + intermediate-k)
+  n_walkers: 512
+  equil_steps: 300                   # extra equilibration for accurate S(k)
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

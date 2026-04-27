@@ -1,0 +1,59 @@
+# Low-density Wigner-crystal sector run @ rs=30, N=10 unpolarized.
+# Localized-Gaussian envelope on a triangular Bravais lattice with
+# Neel-like alternating spin pattern. Same N + light settings as the
+# fluid companion (heg2d_rs30_N10_unpol_fluid.yaml) so the energy
+# difference E_crystal - E_fluid directly bounds the WC stability.
+
+project: heg2d_rs30_N10_unpol_crystal
+
+system:
+  dim: 2
+  rs: 30.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 2
+  heads: 2
+  two_particle_dim: 16
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.25
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.05
+  use_ghost_atom: true
+
+pretrain:
+  iters: 0           # crystal envelope IS the HF target; no pretrain
+
+optimize:
+  type: sr
+  iters: 500
+  walkers: 256
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 10
+  mc_timestep: 0.05  # smaller dt — localized walkers move slowly
+  sr_damping: 1.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

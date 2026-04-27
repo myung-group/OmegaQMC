@@ -1,0 +1,59 @@
+# Fix A: 2D HEG fluid sector @ rs=20, N=18 unpolarized.
+# Companion to heg2d_rs20_N18_unpol_crystal_v2.yaml — same N, longer
+# iters, more walkers, slower MCMC decorrelation tuned for low density.
+# Goal: verify E_fluid > E_crystal at rs=40 (Wigner-crystal phase).
+
+project: heg2d_rs20_N18_unpol_fluid_v2
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18                              # 9/spin closed shell, also commensurate (3x3x2) triangular
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 2
+  heads: 2
+  two_particle_dim: 16
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  envelope_type: plane_wave
+  n_virt_pw: 8
+  det_jitter: 0.02
+  use_ghost_atom: true
+
+pretrain:
+  iters: 200
+  walkers: 384
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 512
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 30              # 3x more than light scan -- low-density decorrelation
+  mc_timestep: 0.08                  # smaller step at large L
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+
+eval:
+  walkers: 512
+  blocks: 40
+  equil_blocks: 10
+  steps_per_block: 20
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

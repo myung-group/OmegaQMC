@@ -81,13 +81,27 @@ class _VMCDriverHEG:
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
+        self.dim = int(getattr(config, 'dim', 3))
         self.ofname_chkpt = ofname_chkpt
 
-        self.lattice = make_cubic_lattice(self.L)
-        self.ewald = build_ewald_tables(
-            self.L, eta=ewald_eta,
-            n_real=ewald_n_real, n_recip=ewald_n_recip,
-        )
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+            self.ewald = build_ewald_tables(
+                self.L, eta=ewald_eta,
+                n_real=ewald_n_real, n_recip=ewald_n_recip,
+            )
+            _ewald_pair = ewald_pair_energy
+        else:
+            from .psi.nn.periodic import make_square_lattice
+            from .observables.ewald_2d import (
+                build_ewald_2d_tables, ewald_2d_pair_energy,
+            )
+            self.lattice = make_square_lattice(self.L)
+            self.ewald = build_ewald_2d_tables(
+                self.L, eta=ewald_eta,
+                n_real=ewald_n_real, n_recip=ewald_n_recip,
+            )
+            _ewald_pair = ewald_2d_pair_energy
 
         log_psi, init_params, graphdef = make_heg_log_psi(
             config, init_key,
@@ -99,16 +113,19 @@ class _VMCDriverHEG:
         lattice = self.lattice
         tables = self.ewald
         nelec = self.nelec
+        dim = self.dim
+        # Closure for downstream chunked Ewald usage further down.
+        self._ewald_pair_fn = _ewald_pair
 
         # Pure-Python closures: inner ``@jax.jit`` inside an outer
         # ``jax.jit(jax.vmap(f))`` triggers a pathological XLA fusion
         # on large reciprocal grids.  Jit only at the outermost layer.
         def energy_potential(r):
-            return ewald_pair_energy(r, tables)
+            return _ewald_pair(r, tables)
 
         def energy_kinetic(r, params):
             def f_flat(r_flat):
-                return log_psi(r_flat.reshape(nelec, 3), params)
+                return log_psi(r_flat.reshape(nelec, dim), params)
             lap_fn = laplacian(f_flat)
             lap_val, grad_val = lap_fn(r.reshape(-1))
             return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
@@ -145,7 +162,7 @@ class _VMCDriverHEG:
 
     def initialize_walkers(self, rng_key, num_walkers):
         """Uniformly sample electron positions inside the cell."""
-        shape = (num_walkers, self.nelec, 3)
+        shape = (num_walkers, self.nelec, self.dim)
         return self.L * jax.random.uniform(rng_key, shape)
 
     def load_checkpoint(self, filepath):
@@ -242,11 +259,12 @@ class _VMCDriverHEG:
         # Kinetic vmap is unaffected (per-walker Laplacian fori_loop
         # dominates, compile ~2 s at 256 walkers).
         tables_ = self.ewald
+        _ewald_pair_chunk_fn = self._ewald_pair_fn
         chunk = 32
 
         @jax.jit
         def _pot_chunk(w_chunk):
-            return ewald_pair_energy(w_chunk, tables_)
+            return _ewald_pair_chunk_fn(w_chunk, tables_)
 
         def _pot_batch(w):
             n = w.shape[0]
@@ -414,13 +432,28 @@ class _VMCDriverHEGTwist:
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
+        self.dim = int(getattr(config, 'dim', 3))
         self.kappa = tuple(float(x) for x in kappa)
 
-        self.lattice = make_cubic_lattice(self.L)
-        self.ewald = build_ewald_tables(
-            self.L, eta=ewald_eta,
-            n_real=ewald_n_real, n_recip=ewald_n_recip,
-        )
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+            self.ewald = build_ewald_tables(
+                self.L, eta=ewald_eta,
+                n_real=ewald_n_real, n_recip=ewald_n_recip,
+            )
+            _ewald_pair = ewald_pair_energy
+        else:
+            from .psi.nn.periodic import make_square_lattice
+            from .observables.ewald_2d import (
+                build_ewald_2d_tables, ewald_2d_pair_energy,
+            )
+            self.lattice = make_square_lattice(self.L)
+            self.ewald = build_ewald_2d_tables(
+                self.L, eta=ewald_eta,
+                n_real=ewald_n_real, n_recip=ewald_n_recip,
+            )
+            _ewald_pair = ewald_2d_pair_energy
+        self._ewald_pair_fn = _ewald_pair
 
         log_psi_complex, init_params, graphdef = (
             make_heg_log_psi_complex(config, init_key, kappa=kappa)
@@ -432,6 +465,7 @@ class _VMCDriverHEGTwist:
         tables = self.ewald
         lattice = self.lattice
         nelec = self.nelec
+        dim = self.dim
 
         # ``u = Re(log ψ)``, ``v = Im(log ψ)`` — real-valued scalar
         # functions of real r used by the complex-kinetic formula
@@ -443,14 +477,14 @@ class _VMCDriverHEGTwist:
             return jnp.imag(log_psi_complex(r, params))
 
         def energy_potential(r):
-            return ewald_pair_energy(r, tables)
+            return _ewald_pair(r, tables)
 
         def energy_kinetic(r, params):
             def u_flat(r_flat):
-                return u_fn(r_flat.reshape(nelec, 3), params)
+                return u_fn(r_flat.reshape(nelec, dim), params)
 
             def v_flat(r_flat):
-                return v_fn(r_flat.reshape(nelec, 3), params)
+                return v_fn(r_flat.reshape(nelec, dim), params)
 
             r_flat = r.reshape(-1)
             lap_u, grad_u = laplacian(u_flat)(r_flat)
@@ -492,7 +526,7 @@ class _VMCDriverHEGTwist:
 
     def initialize_walkers(self, rng_key, num_walkers):
         return self.L * jax.random.uniform(
-            rng_key, (num_walkers, self.nelec, 3),
+            rng_key, (num_walkers, self.nelec, self.dim),
         )
 
     def __call__(
@@ -537,11 +571,12 @@ class _VMCDriverHEGTwist:
             return rk, nw, acc.mean()
 
         tables_ = self.ewald
+        _ewald_pair_chunk_fn = self._ewald_pair_fn
         chunk = 32
 
         @jax.jit
         def _pot_chunk(w_chunk):
-            return ewald_pair_energy(w_chunk, tables_)
+            return _ewald_pair_chunk_fn(w_chunk, tables_)
 
         def _pot_batch(w):
             n = w.shape[0]
@@ -734,13 +769,22 @@ def run_twist_averaged_heg(
           * ``twists`` — ``(N_tw, 3)`` array used.
           * ``energies_per_twist`` / ``errors_per_twist`` — raw data.
     """
-    from .afqmc_3deg import generate_halton_twists_3d
-
+    dim = int(getattr(config, 'dim', 3))
     if twists is None:
-        twists = generate_halton_twists_3d(n_twists)
+        if dim == 3:
+            from .afqmc_3deg import generate_halton_twists_3d
+            twists = generate_halton_twists_3d(n_twists)
+        else:
+            from .heg_2d import generate_halton_twists_2d
+            twists = generate_halton_twists_2d(n_twists)
     else:
         twists = np.asarray(twists, dtype=np.float64)
         n_twists = int(twists.shape[0])
+        if twists.shape[1] != dim:
+            raise ValueError(
+                f"twists has shape {twists.shape}; "
+                f"expected last-dim={dim}",
+            )
 
     if fname_log is None or fname_log == "":
         fout = sys.stdout

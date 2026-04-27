@@ -59,8 +59,10 @@ def GraphEdgeBuilder(mask_self):
         ``-> Array`` of coordinate differences.
     """
     def build(pos_sender, pos_receiver):
-        assert pos_sender.shape[-1] == 3
-        assert pos_receiver.shape[-1] == 3
+        # 3D for molecular / 3D HEG, 2D for 2D HEG.  Both sender and
+        # receiver must agree on the spatial dimension.
+        assert pos_sender.shape[-1] in (2, 3)
+        assert pos_receiver.shape[-1] == pos_sender.shape[-1]
         assert len(pos_sender.shape) == 2
         assert (
             not mask_self

@@ -1,0 +1,60 @@
+# Smoke-test the new S(k) accumulation block (~30 sec on CPU).
+
+project: heg2d_smoke_obs
+
+system:
+  dim: 2
+  rs: 2.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 16
+  layers: 1
+  heads: 2
+  two_particle_dim: 8
+  n_det: 2
+  use_cusp: true
+  deep_jastrow: false
+  use_ghost_atom: true
+  envelope_type: plane_wave
+  n_virt_pw: 4
+  det_jitter: 0.02
+
+pretrain:
+  iters: 30
+  walkers: 64
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 30
+  walkers: 128
+  lr: 0.05
+  mcmc_decorr_steps: 5
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 10
+
+eval:
+  walkers: 128
+  blocks: 5
+  equil_blocks: 2
+  steps_per_block: 5
+
+observables:
+  enabled: true
+  triangular_shells: 1            # 6 first-shell triangular reciprocal vectors
+  cartesian_n_max: 2              # 24 vectors on 5x5 reciprocal grid
+  n_walkers: 128
+  equil_steps: 50
+  sample_steps: 30
+  decorr_steps: 3
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

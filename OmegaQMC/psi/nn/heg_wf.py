@@ -48,10 +48,13 @@ from .layers import MLP
 def _make_heg_phys_conf(r: jax.Array) -> PhysicalConfiguration:
     """Wrap electron coords in a :class:`PhysicalConfiguration`.
 
-    The HEG has no nuclei, so ``R`` is an empty ``(0, 3)`` array.
+    The HEG has no nuclei, so ``R`` is an empty ``(0, dim)`` array;
+    ``dim`` is inferred from ``r.shape[-1]`` so the same helper works
+    in 2D and 3D without modification.
     """
+    dim = int(r.shape[-1])
     return PhysicalConfiguration(
-        R=jnp.zeros((0, 3), dtype=r.dtype),
+        R=jnp.zeros((0, dim), dtype=r.dtype),
         r=r,
         mol_idx=jnp.asarray(0),
     )
@@ -175,16 +178,24 @@ class HEGSlaterJastrow(nnx.Module):
         *,
         use_jastrow: bool = True,
         jastrow_hidden=(16, 16),
+        dim: int = 3,
         rngs,
     ):
         self.n_up = n_up
         self.n_down = n_down
         self.n_det = n_det
         self.L = float(L)
-        self.lattice = nnx.data(make_cubic_lattice(L))
+        self.dim = int(dim)
+        if dim == 3:
+            self.lattice = nnx.data(make_cubic_lattice(L))
+        elif dim == 2:
+            from .periodic import make_square_lattice
+            self.lattice = nnx.data(make_square_lattice(L))
+        else:
+            raise ValueError(f"dim must be 2 or 3, got {dim}")
 
         self.envelope = PlaneWaveEnvelope(
-            n_up=n_up, n_down=n_down, n_det=n_det, L=L,
+            n_up=n_up, n_down=n_down, n_det=n_det, L=L, dim=dim,
         )
         if use_jastrow:
             self.jastrow = PeriodicPairJastrow(
@@ -243,10 +254,12 @@ class HEGConfig(NamedTuple):
     Attributes:
         n_up: Spin-up electrons.
         n_down: Spin-down electrons.
-        L: Cubic simulation-cell side length.
+        L: Cubic (3D) or square (2D) simulation-cell side length.
         n_det: Number of Slater determinants.
         use_jastrow: Enable the periodic pair Jastrow.
         jastrow_hidden: Hidden-layer widths for Jastrow MLPs.
+        dim: Spatial dimension (3 for 3D HEG, 2 for 2D HEG).
+            Defaults to 3 for backward compatibility.
     """
 
     n_up: int
@@ -255,6 +268,7 @@ class HEGConfig(NamedTuple):
     n_det: int = 1
     use_jastrow: bool = True
     jastrow_hidden: tuple = (16, 16)
+    dim: int = 3
 
 
 class HEGPsiFormerConfig(NamedTuple):
@@ -375,6 +389,23 @@ class HEGPsiFormerConfig(NamedTuple):
     # Strongly recommended (and the default); the ``--pf-no-ghost-
     # atom`` CLI flag disables it for diagnostic comparisons.
     use_ghost_atom: bool = True
+    # Spatial dimension: 3 (default) for 3D HEG; 2 for 2D HEG.
+    # Selects the cubic-vs-square lattice and 3D-vs-2D plane-wave
+    # basis enumeration in :func:`build_heg_psiformer_wf`.
+    dim: int = 3
+    # Envelope choice: 'plane_wave' (default — Slater determinant of
+    # plane waves at the closed-shell Fermi sea, suitable for the
+    # *fluid* phase of the HEG) or 'crystal_gaussian' (Slater
+    # determinant of localised Gaussians on a triangular Bravais
+    # lattice, suitable for the *Wigner crystal* phase of the 2D HEG
+    # at r_s > r_s^c ~ 31).  Only 'crystal_gaussian' with dim=2 is
+    # supported as the crystal envelope.
+    envelope_type: str = 'plane_wave'
+    # Crystal-envelope hyperparameters (used only when
+    # envelope_type == 'crystal_gaussian').
+    crystal_sigma_init: float = 0.25       # fraction of NN spacing
+    crystal_spin_pattern: str = 'neel'     # 'neel' (AFM) or 'all_up' (FM)
+    crystal_det_jitter: float = 0.0        # site-position jitter for det>=1
 
 
 def make_heg_log_psi(
@@ -401,6 +432,7 @@ def make_heg_log_psi(
         L=config.L,
         use_jastrow=config.use_jastrow,
         jastrow_hidden=config.jastrow_hidden,
+        dim=getattr(config, 'dim', 3),
         rngs=rngs,
     )
     graphdef, params, other = nnx.split(model, nnx.Param, ...)
@@ -443,19 +475,30 @@ class HEGSlaterJastrowComplex(nnx.Module):
         n_det: int,
         L: float,
         *,
-        kappa=(0.0, 0.0, 0.0),
+        kappa=None,
         use_jastrow: bool = True,
         jastrow_hidden=(16, 16),
+        dim: int = 3,
         rngs,
     ):
+        if kappa is None:
+            kappa = (0.0,) * dim
         self.n_up = n_up
         self.n_down = n_down
         self.n_det = n_det
         self.L = float(L)
-        self.lattice = nnx.data(make_cubic_lattice(L))
+        self.dim = int(dim)
+        if dim == 3:
+            self.lattice = nnx.data(make_cubic_lattice(L))
+        elif dim == 2:
+            from .periodic import make_square_lattice
+            self.lattice = nnx.data(make_square_lattice(L))
+        else:
+            raise ValueError(f"dim must be 2 or 3, got {dim}")
 
         self.envelope = ComplexPlaneWaveEnvelope(
-            n_up=n_up, n_down=n_down, n_det=n_det, L=L, kappa=kappa,
+            n_up=n_up, n_down=n_down, n_det=n_det, L=L,
+            kappa=kappa, dim=dim,
         )
         if use_jastrow:
             self.jastrow = PeriodicPairJastrow(

@@ -1,0 +1,57 @@
+# Smoke-test config: verifies the 2D HEG pipeline runs end-to-end
+# without crashing.  ~5-10 min on CPU.  Energies will NOT be
+# converged — this is purely an infrastructure check.
+
+project: heg2d_smoke
+
+system:
+  dim: 2
+  rs: 2.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 16
+  layers: 1
+  heads: 2
+  two_particle_dim: 8
+  n_det: 2
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: false
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  n_virt_pw: 4
+  det_jitter: 0.02
+  use_ghost_atom: true
+
+pretrain:
+  iters: 30
+  walkers: 64
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 30
+  walkers: 128
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 5
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 10
+
+eval:
+  walkers: 128
+  blocks: 5
+  equil_blocks: 2
+  steps_per_block: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

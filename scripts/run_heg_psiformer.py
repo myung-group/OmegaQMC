@@ -54,6 +54,11 @@ from OmegaQMC.afqmc_3deg import (
     get_afqmc_3deg_func,
     pz_correlation_energy,
 )
+from OmegaQMC.heg_2d import (
+    build_2deg_system,
+    hf_energy_2d_finite,
+    hf_energy_2d_td,
+)
 from OmegaQMC.psi.nn.heg_wf import HEGConfig, HEGPsiFormerConfig
 from OmegaQMC.vmcopt_nn_heg import get_vmcopt_nn_heg_func
 from OmegaQMC.vmcopt_nn_heg_sr import get_vmcopt_nn_heg_sr_func
@@ -96,7 +101,7 @@ def _get(d, key, default=None):
     return cur
 
 
-def _build_psiformer_config(cfg, n_up, n_down, L):
+def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
     a = cfg.get('ansatz', {})
     jas_act = a.get('jas_activation', 'tanh')
     return HEGPsiFormerConfig(
@@ -117,15 +122,17 @@ def _build_psiformer_config(cfg, n_up, n_down, L):
         n_virt_pw=int(a.get('n_virt_pw', 12)),
         det_jitter=float(a.get('det_jitter', 0.02)),
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
+        dim=int(dim),
     )
 
 
-def _build_slater_jastrow_config(cfg, n_up, n_down, L):
+def _build_slater_jastrow_config(cfg, n_up, n_down, L, dim=3):
     a = cfg.get('ansatz', {})
     return HEGConfig(
         n_up=n_up, n_down=n_down, L=L,
         n_det=int(a.get('n_det', 1)),
         use_jastrow=bool(a.get('use_jastrow', True)),
+        dim=int(dim),
     )
 
 
@@ -194,6 +201,9 @@ def _run(cfg, project, run_dir, prefix):
     rs = float(_get(cfg, 'system.rs', 2.0))
     N = int(_get(cfg, 'system.N', 14))
     polarization = _get(cfg, 'system.polarization', 'unpolarized')
+    dim = int(_get(cfg, 'system.dim', 3))
+    if dim not in (2, 3):
+        raise ValueError(f"system.dim must be 2 or 3, got {dim}")
 
     # --- Seed ---
     # Omitted, null, or 'random' → draw one from OS entropy so repeat
@@ -208,17 +218,28 @@ def _run(cfg, project, run_dir, prefix):
         seed = int(raw_seed)
         seed_auto = False
 
-    sys_info = build_3deg_system(
-        rs, N_elec=N, N_pw=N // 2, polarization=polarization,
-    )
+    if dim == 3:
+        sys_info = build_3deg_system(
+            rs, N_elec=N, N_pw=N // 2, polarization=polarization,
+        )
+        cell_label = "V"
+        cell_unit = "Bohr^3"
+        cell_val = sys_info['volume']
+    else:  # dim == 2
+        sys_info = build_2deg_system(
+            rs, N_elec=N, polarization=polarization,
+        )
+        cell_label = "A"
+        cell_unit = "Bohr^2"
+        cell_val = sys_info['area']
     L = sys_info['L']
     n_up = sys_info['nup']
     n_down = sys_info['ndown']
 
     print("=" * 70)
-    print(f"HEG VMC run: project={project}")
+    print(f"HEG VMC run: project={project}  dim={dim}")
     print(f"  rs={rs}  N={N}  pol={polarization}")
-    print(f"  Cell L={L:.4f} Bohr   V={sys_info['volume']:.4f} Bohr³")
+    print(f"  Cell L={L:.4f} Bohr   {cell_label}={cell_val:.4f} {cell_unit}")
     print(f"  n_up={n_up}  n_down={n_down}")
     print(f"  Run dir: {run_dir}")
     print(f"  Seed:    {seed}"
@@ -226,31 +247,51 @@ def _run(cfg, project, run_dir, prefix):
     print("=" * 70)
 
     # --- Reference energies ---
-    afqmc = get_afqmc_3deg_func(
-        sys_info, dt=0.005, include_coulomb=True, verbose=False,
-    )
-    e_hf_ha = float(afqmc.e_trial) / N
-    e_corr_pz_ha = pz_correlation_energy(rs, polarization)
-    print(f"\n[ref] Finite-cell HF (AFQMC trial): "
-          f"{e_hf_ha:.6f} Ha/elec = {e_hf_ha * 2:.6f} Ry/elec")
-    print(f"[ref] Perdew-Zunger correlation (∞-limit): "
-          f"{e_corr_pz_ha:.6f} Ha/elec = "
-          f"{e_corr_pz_ha * 2:.6f} Ry/elec")
+    if dim == 3:
+        afqmc = get_afqmc_3deg_func(
+            sys_info, dt=0.005, include_coulomb=True, verbose=False,
+        )
+        e_hf_ha = float(afqmc.e_trial) / N
+        e_corr_pz_ha = pz_correlation_energy(rs, polarization)
+        print(f"\n[ref] Finite-cell HF (AFQMC trial): "
+              f"{e_hf_ha:.6f} Ha/elec = {e_hf_ha * 2:.6f} Ry/elec")
+        print(f"[ref] Perdew-Zunger correlation (inf-limit): "
+              f"{e_corr_pz_ha:.6f} Ha/elec = "
+              f"{e_corr_pz_ha * 2:.6f} Ry/elec")
+    else:
+        # 2D: analytical HF reference (Stern 1973 closed form for the
+        # thermodynamic limit, plus the finite-N correction via 2D
+        # Ewald and a discrete-k Fermi-sea sum).
+        hf_2d = hf_energy_2d_finite(sys_info)
+        e_hf_ha = float(hf_2d['total'])
+        e_hf_td = hf_energy_2d_td(rs, polarization)
+        # No PZ-style 2D correlation parametrization included by
+        # default; user can compare to Attaccalite 2002 manually.
+        e_corr_pz_ha = 0.0
+        print(f"\n[ref] Finite-N HF (analytic, 2D): "
+              f"{e_hf_ha:.6f} Ha/elec  "
+              f"(TD limit: {e_hf_td:.6f}, FS = "
+              f"{(e_hf_ha - e_hf_td)*1000:+.2f} mHa)")
+        print(f"  T={hf_2d['kinetic']:.6f}, "
+              f"V_x={hf_2d['exchange']:.6f}, "
+              f"e_M={hf_2d['madelung']:.6f}  Ha/elec")
 
     # --- Ansatz ---
     ansatz_type = _get(cfg, 'ansatz.type', 'psiformer')
     if ansatz_type == 'psiformer':
-        config = _build_psiformer_config(cfg, n_up, n_down, L)
+        config = _build_psiformer_config(cfg, n_up, n_down, L, dim=dim)
         a = cfg['ansatz']
-        print(f"  Ansatz: PsiFormer — "
+        print(f"  Ansatz: PsiFormer (dim={dim}) - "
               f"emb={a.get('embedding_dim', 64)}, "
               f"layers={a.get('layers', 2)}, "
               f"tp_dim={a.get('two_particle_dim', 16)}, "
               f"heads={a.get('heads', 2)}, "
               f"n_det={a.get('n_det', 1)}")
     elif ansatz_type in ('slater_jastrow', 'sj'):
-        config = _build_slater_jastrow_config(cfg, n_up, n_down, L)
-        print("  Ansatz: Slater-Jastrow")
+        config = _build_slater_jastrow_config(
+            cfg, n_up, n_down, L, dim=dim,
+        )
+        print(f"  Ansatz: Slater-Jastrow (dim={dim})")
     else:
         raise ValueError(f"Unknown ansatz.type: {ansatz_type!r}")
 
@@ -341,8 +382,10 @@ def _run(cfg, project, run_dir, prefix):
                                        1.0e2)),
                 damping_lookback=int(_get(cfg,
                                           'optimize.kfac_damping_lookback', 10)),
+                damping_decay=float(_get(cfg,
+                                        'optimize.kfac_damping_decay', 0.95)),
                 damping_overshoot_threshold=float(_get(cfg,
-                    'optimize.kfac_damping_overshoot_threshold', 5.0)),
+                    'optimize.kfac_damping_overshoot_threshold', 10.0)),
                 damping_overshoot_factor=float(_get(cfg,
                     'optimize.kfac_damping_overshoot_factor', 2.0)),
                 ema_decay=float(_get(cfg, 'optimize.kfac_ema_decay', 0.0)),
@@ -450,6 +493,92 @@ def _run(cfg, project, run_dir, prefix):
         'e_corr_pz_ha': float(e_corr_pz_ha),
         'recovered_pz_pct': float(recovered_frac),
     }
+
+    # --- Observables (S(k), optional) ---
+    obs_cfg = cfg.get('observables') or {}
+    if obs_cfg.get('enabled', False):
+        print("\n[obs] Accumulating S(k) on |psi|^2 walkers ...")
+        from OmegaQMC.observables.structure_factor import (
+            reciprocal_grid_2d,
+            reciprocal_lattice_vectors_triangular,
+            structure_factor,
+        )
+        import jax.numpy as jnp
+
+        # Build k-grids requested by the YAML.
+        k_grids = {}
+        if obs_cfg.get('triangular_shells', 0) > 0:
+            n_shell = int(obs_cfg['triangular_shells'])
+            kt = reciprocal_lattice_vectors_triangular(
+                rs=rs, n_shell=n_shell,
+            )
+            k_grids['triangular_bragg'] = jnp.asarray(kt)
+        if obs_cfg.get('cartesian_n_max', None) is not None:
+            n_max_k = int(obs_cfg['cartesian_n_max'])
+            k_grids['cartesian_grid'] = reciprocal_grid_2d(L, n_max=n_max_k)
+        if not k_grids:
+            print("[obs] No k-grids requested; skipping.")
+        else:
+            n_walkers_obs = int(obs_cfg.get('n_walkers', eval_walkers))
+            n_equil_obs = int(obs_cfg.get('equil_steps', 200))
+            n_sample_obs = int(obs_cfg.get('sample_steps', 100))
+            decorr_obs = int(obs_cfg.get('decorr_steps', 5))
+
+            rng_obs = jax.random.fold_in(eval_key, 999)
+            walkers_obs = driver.initialize_walkers(
+                rng_obs, n_walkers_obs,
+            )
+            step_size_obs = (3 * mc_timestep) ** 0.5
+
+            # Equilibrate on |psi|^2 with trained params.
+            for _ in range(n_equil_obs):
+                rng_obs, sk_key = jax.random.split(rng_obs)
+                keys = jax.random.split(sk_key, n_walkers_obs)
+                walkers_obs, _ = driver._metropolis_move_allw(
+                    keys, walkers_obs, step_size_obs, driver.params,
+                )
+
+            # Per-block S(k) averages, then mean +- serr across blocks.
+            sk_blocks = {name: [] for name in k_grids}
+            sk_eval_fns = {
+                name: jax.jit(jax.vmap(
+                    lambda r, kg=kg: structure_factor(r, kg),
+                ))
+                for name, kg in k_grids.items()
+            }
+            for _ in range(n_sample_obs):
+                for _ in range(decorr_obs):
+                    rng_obs, sk_key = jax.random.split(rng_obs)
+                    keys = jax.random.split(sk_key, n_walkers_obs)
+                    walkers_obs, _ = driver._metropolis_move_allw(
+                        keys, walkers_obs, step_size_obs, driver.params,
+                    )
+                for name in k_grids:
+                    sk_per_walker = sk_eval_fns[name](walkers_obs)
+                    sk_blocks[name].append(
+                        np.asarray(jnp.mean(sk_per_walker, axis=0)),
+                    )
+
+            summary['observables'] = {}
+            for name, blocks in sk_blocks.items():
+                arr = np.stack(blocks)            # (n_sample, n_k)
+                mean = np.mean(arr, axis=0)
+                serr = np.std(arr, axis=0) / np.sqrt(arr.shape[0])
+                summary['observables'][f'sk_{name}'] = {
+                    'k_vectors': np.asarray(k_grids[name]).tolist(),
+                    'mean': mean.tolist(),
+                    'serr': serr.tolist(),
+                }
+                # Print top-few peaks for quick eyeballing.
+                idx = np.argsort(-mean)[:6]
+                print(f"  [{name}] top S(k) peaks (mean +- serr):")
+                for i in idx:
+                    k = np.asarray(k_grids[name])[i]
+                    print(
+                        f"    k=({k[0]:+.4f}, {k[1]:+.4f})  "
+                        f"|k|={np.linalg.norm(k):.4f}  "
+                        f"S(k) = {mean[i]:.3f} +- {serr[i]:.3f}"
+                    )
 
     # --- TABC (optional) ---
     n_twists = int(_get(cfg, 'twist.n_twists', 0))

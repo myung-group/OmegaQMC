@@ -1,0 +1,62 @@
+# 2D HEG Wigner crystal (AF) PsiFormer @ rs=35, N=18 (3x3x2 super-cell of triangular sites)
+# Phase 2 — for the rs_c~31 phase boundary scan (Drummond-Needs 2009).
+#
+# At rs > rs_c the crystal sector should have lower variational energy
+# than the same N fluid run (heg2d_rs35_N18_unpol_fluid.yaml).
+# Compare crystal vs fluid total energies to bracket rs_c.
+
+project: heg2d_rs35_N18_crystal_AF
+
+system:
+  dim: 2
+  rs: 35.0
+  N: 18                              # closed shell unpolarized = 9/spin
+  polarization: unpolarized          # AFM crystal needs Neel spin pattern
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 2
+  heads: 2
+  two_particle_dim: 32
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_ghost_atom: true
+  # Crystal-envelope choice: localised Gaussians on the triangular
+  # Bravais lattice with Neel spin pattern.
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.25           # fraction of NN distance
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.05           # site jitter for det>=1 (Bohr)
+
+pretrain:
+  iters: 0                           # NO pretrain: localised Gaussians ARE the HF target
+
+optimize:
+  type: sr
+  iters: 6000
+  walkers: 1024
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.05                  # smaller dt: localised walkers move slowly
+  sr_damping: 1.0e-3
+  sr_n_cg: 30
+
+eval:
+  walkers: 1024
+  blocks: 60
+  equil_blocks: 20
+  steps_per_block: 30
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

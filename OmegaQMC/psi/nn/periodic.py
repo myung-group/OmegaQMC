@@ -50,6 +50,27 @@ def make_cubic_lattice(L: float) -> PeriodicLattice:
     return PeriodicLattice(A=A, A_inv=A_inv, metric=metric, volume=volume)
 
 
+def make_square_lattice(L: float) -> PeriodicLattice:
+    """Build a square 2D :class:`PeriodicLattice` of side length *L*.
+
+    The ``volume`` field stores the 2D cell *area* ``L^2`` — every
+    downstream caller treats it as the canonical "cell measure" and so
+    interpreting it as area in 2D matches the area-based normalisation
+    used by the 2D Coulomb pair potential
+    (:mod:`OmegaQMC.observables.ewald_2d`).
+
+    All position helpers (:func:`fractional_coords`, :func:`wrap_to_cell`,
+    :func:`minimum_image_diff`, :func:`periodic_norm`,
+    :func:`periodic_norm_sq`) work as-is once the lattice is 2D — they
+    only depend on the matrix shape, not on a hard-coded dimension.
+    """
+    A = jnp.eye(2) * L
+    A_inv = jnp.eye(2) / L
+    metric = jnp.eye(2) * (L * L)
+    volume = jnp.asarray(L * L)
+    return PeriodicLattice(A=A, A_inv=A_inv, metric=metric, volume=volume)
+
+
 def make_lattice(A: jax.Array) -> PeriodicLattice:
     """Build a :class:`PeriodicLattice` from a primitive-vector matrix.
 
@@ -237,7 +258,8 @@ def periodic_pairwise_diffs(
         lattice: :class:`PeriodicLattice`.
 
     Returns:
-        ``(n1, n2, 4)`` array.
+        ``(n1, n2, dim+1)`` array (``dim = 3`` for cubic lattice,
+        ``dim = 2`` for square 2D lattice).
     """
     diff = r1[:, None, :] - r2[None, :, :]
     diff_mi = minimum_image_diff(diff, lattice)

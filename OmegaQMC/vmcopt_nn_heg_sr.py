@@ -54,6 +54,9 @@ from .psi.nn.heg_wf import (
 from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy
+from .observables.ewald_dispatch import (
+    build_ewald_tables_dim, ewald_pair_energy_dim,
+)
 
 
 TARGET_ACCEPTANCE_RATE = 0.5
@@ -154,14 +157,19 @@ class _HEGSROptimizer:
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
+        self.dim = int(getattr(config, 'dim', 3))
         self.lr = float(lr)
         self.damping = float(damping)
         self.n_cg = int(n_cg)
         self.var_weight = float(var_weight)
 
-        self.lattice = make_cubic_lattice(self.L)
-        self.ewald = build_ewald_tables(
-            self.L, eta=ewald_eta,
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+        else:
+            from .psi.nn.periodic import make_square_lattice
+            self.lattice = make_square_lattice(self.L)
+        self.ewald = build_ewald_tables_dim(
+            self.L, dim=self.dim, eta=ewald_eta,
             n_real=ewald_n_real, n_recip=ewald_n_recip,
         )
 
@@ -186,12 +194,13 @@ class _HEGSROptimizer:
         tables = self.ewald
         lattice = self.lattice
         nelec = self.nelec
+        dim = self.dim
 
         # Per-walker local energy (kin + pot).
         def kin_only(r, p_flat):
             def f_flat(r_flat):
                 return log_psi_flat(
-                    r_flat.reshape(nelec, 3), p_flat,
+                    r_flat.reshape(nelec, dim), p_flat,
                 )
             lap_val, grad_val = laplacian(f_flat)(r.reshape(-1))
             return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
@@ -225,9 +234,15 @@ class _HEGSROptimizer:
         # Ewald potential: chunked over walkers to avoid XLA's
         # fusion bomb at (n_real=3, n_recip=6).  See vmcopt_nn_heg.
         self._pot_chunk_size = 32
-        self._pot_chunk = jax.jit(
-            lambda w: ewald_pair_energy(w, tables),
-        )
+        if dim == 3:
+            self._pot_chunk = jax.jit(
+                lambda w: ewald_pair_energy(w, tables),
+            )
+        else:
+            from .observables.ewald_2d import ewald_2d_pair_energy
+            self._pot_chunk = jax.jit(
+                lambda w: ewald_2d_pair_energy(w, tables),
+            )
 
         # ---- SR step (jitted end-to-end, takes walkers & flat params)
         damping_arr = jnp.asarray(self.damping, dtype=jnp.float64)
@@ -285,7 +300,7 @@ class _HEGSROptimizer:
 
     def initialize_walkers(self, rng_key, num_walkers):
         return self.L * jax.random.uniform(
-            rng_key, (num_walkers, self.nelec, 3),
+            rng_key, (num_walkers, self.nelec, self.dim),
         )
 
     # -----------------------------------------------------

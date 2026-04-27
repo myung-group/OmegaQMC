@@ -31,6 +31,9 @@ from .psi.nn.heg_wf import HEGConfig, make_heg_log_psi_any as make_heg_log_psi
 from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy
+from .observables.ewald_dispatch import (
+    build_ewald_tables_dim, ewald_pair_energy_dim,
+)
 
 
 _TARGET_ACCEPTANCE_RATE = 0.5
@@ -73,13 +76,18 @@ class _HEGAdamOptimizer:
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
+        self.dim = int(getattr(config, 'dim', 3))
         self.lr = lr
         self.var_weight = float(var_weight)
         self.ofname_chkpt = ofname_chkpt
 
-        self.lattice = make_cubic_lattice(self.L)
-        self.ewald = build_ewald_tables(
-            self.L, eta=ewald_eta,
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+        else:
+            from .psi.nn.periodic import make_square_lattice
+            self.lattice = make_square_lattice(self.L)
+        self.ewald = build_ewald_tables_dim(
+            self.L, dim=self.dim, eta=ewald_eta,
             n_real=ewald_n_real, n_recip=ewald_n_recip,
         )
 
@@ -93,6 +101,7 @@ class _HEGAdamOptimizer:
         tables = self.ewald
         lattice = self.lattice
         nelec = self.nelec
+        dim = self.dim
 
         # The Ewald reciprocal-sum at (n_real=3, n_recip=6) has 2196
         # G-vectors.  Under ``jax.vmap`` over walkers, XLA's fusion
@@ -101,16 +110,22 @@ class _HEGAdamOptimizer:
         # function broadcasts over leading dims natively) compiles
         # in ~0.6 s.  We therefore compute kinetic *per-walker with
         # vmap* and potential *in one batched call*, then add.
+        if dim == 3:
+            _ewald_pair = ewald_pair_energy
+        else:
+            from .observables.ewald_2d import ewald_2d_pair_energy
+            _ewald_pair = ewald_2d_pair_energy
+
         def kin_only(r, params):
             def f_flat(r_flat):
-                return log_psi(r_flat.reshape(nelec, 3), params)
+                return log_psi(r_flat.reshape(nelec, dim), params)
             lap_fn = laplacian(f_flat)
             lap_val, grad_val = lap_fn(r.reshape(-1))
             return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
         def local_energy(r, params):
             """Per-walker local energy (kept for external callers)."""
-            return kin_only(r, params) + ewald_pair_energy(r, tables)
+            return kin_only(r, params) + _ewald_pair(r, tables)
 
         def metropolis_move(rng_key, r, step_size, params):
             key_prop, key_acc = jax.random.split(rng_key)
@@ -169,7 +184,7 @@ class _HEGAdamOptimizer:
         # 128-walker batch takes ~130 s, while a 32-walker chunk
         # compiles in ~3 s and is reused across all chunks.
         _pot_chunk_size = 32
-        _pot_chunk = jax.jit(lambda w: ewald_pair_energy(w, tables))
+        _pot_chunk = jax.jit(lambda w: _ewald_pair(w, tables))
 
         def _pot_batch(w):
             n = w.shape[0]
@@ -225,7 +240,7 @@ class _HEGAdamOptimizer:
 
     def initialize_walkers(self, rng_key, num_walkers):
         return self.L * jax.random.uniform(
-            rng_key, (num_walkers, self.nelec, 3),
+            rng_key, (num_walkers, self.nelec, self.dim),
         )
 
     # -----------------------------------------------------

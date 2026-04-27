@@ -1,0 +1,58 @@
+# 2D HEG fluid PsiFormer @ rs=30, N=18 unpolarized
+# Companion to heg2d_rs30_N18_crystal_AF.yaml — same N for direct
+# energy comparison.
+
+project: heg2d_rs30_N18_fluid
+
+system:
+  dim: 2
+  rs: 30.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 2
+  heads: 2
+  two_particle_dim: 32
+  n_det: 8
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  envelope_type: plane_wave
+  n_virt_pw: 8
+  det_jitter: 0.02
+  use_ghost_atom: true
+
+pretrain:
+  iters: 300
+  walkers: 512
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 6000
+  walkers: 1024
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 30
+
+eval:
+  walkers: 1024
+  blocks: 60
+  equil_blocks: 20
+  steps_per_block: 30
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

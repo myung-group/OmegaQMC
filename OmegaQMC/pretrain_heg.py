@@ -146,9 +146,14 @@ class _HEGPreTrainDriver:
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
         self.n_det = int(config.n_det)
+        self.dim = int(getattr(config, 'dim', 3))
         self.lr = float(lr)
 
-        self.lattice = make_cubic_lattice(self.L)
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+        else:
+            from .psi.nn.periodic import make_square_lattice
+            self.lattice = make_square_lattice(self.L)
 
         rngs = nnx.Rngs(init_key)
         model = build_heg_psiformer_wf(config, rngs)
@@ -156,13 +161,25 @@ class _HEGPreTrainDriver:
             model, nnx.Param, ...,
         )
 
-        self.basis_up = enumerate_real_pw_basis(self.n_up, self.L)
-        if self.n_down > 0:
-            self.basis_down = enumerate_real_pw_basis(
-                self.n_down, self.L,
-            )
+        if self.dim == 3:
+            self.basis_up = enumerate_real_pw_basis(self.n_up, self.L)
+            if self.n_down > 0:
+                self.basis_down = enumerate_real_pw_basis(
+                    self.n_down, self.L,
+                )
+            else:
+                self.basis_down = None
         else:
-            self.basis_down = None
+            from .psi.nn.env_periodic import enumerate_real_pw_basis_2d
+            self.basis_up = enumerate_real_pw_basis_2d(
+                self.n_up, self.L,
+            )
+            if self.n_down > 0:
+                self.basis_down = enumerate_real_pw_basis_2d(
+                    self.n_down, self.L,
+                )
+            else:
+                self.basis_down = None
 
         graphdef = self.graphdef
         other = self.other
@@ -280,7 +297,7 @@ class _HEGPreTrainDriver:
         # Walker initialisation.
         rng_key, init_key = jax.random.split(rng_key)
         walkers = self.L * jax.random.uniform(
-            init_key, (num_walkers, self.nelec, 3),
+            init_key, (num_walkers, self.nelec, self.dim),
         )
         step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
 

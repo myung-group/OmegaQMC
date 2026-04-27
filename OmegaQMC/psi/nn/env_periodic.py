@@ -51,6 +51,118 @@ class RealPWBasis(NamedTuple):
     k_sq: jax.Array
 
 
+def _enumerate_real_pw_basis_dd(
+    n_orb: int, L: float, dim: int,
+) -> RealPWBasis:
+    """Dimension-agnostic real plane-wave basis enumerator.
+
+    See :func:`enumerate_real_pw_basis` (3D) and
+    :func:`enumerate_real_pw_basis_2d` (2D) for the public wrappers.
+    """
+    if n_orb < 1:
+        raise ValueError(f"n_orb must be >= 1, got {n_orb}")
+    if dim not in (2, 3):
+        raise ValueError(f"dim must be 2 or 3, got {dim}")
+
+    dk = 2.0 * np.pi / L
+    nmax = int(np.ceil((n_orb / 2.0) ** (1.0 / dim))) + 4
+
+    # Enumerate integer points and sort by |n|^2 then lexicographic.
+    rng = np.arange(-nmax, nmax + 1)
+    if dim == 3:
+        nx, ny, nz = np.meshgrid(rng, rng, rng, indexing='ij')
+        n_ints = np.stack(
+            [nx.ravel(), ny.ravel(), nz.ravel()], axis=1,
+        )
+    else:
+        nx, ny = np.meshgrid(rng, rng, indexing='ij')
+        n_ints = np.stack([nx.ravel(), ny.ravel()], axis=1)
+    n_sq = np.sum(n_ints ** 2, axis=1)
+    # Lexicographic key for stable secondary sort.
+    base = 2 * nmax + 1
+    if dim == 3:
+        lex_key = (
+            n_ints[:, 0] * base ** 2
+            + n_ints[:, 1] * base
+            + n_ints[:, 2]
+        )
+    else:
+        lex_key = n_ints[:, 0] * base + n_ints[:, 1]
+    order = np.lexsort((lex_key, n_sq))
+    n_ints_sorted = n_ints[order]
+    n_sq_sorted = n_sq[order]
+
+    # Pair (+k, -k) representatives.
+    kvecs_list = []
+    basis_idx_list = []
+    basis_is_sin_list = []
+    k_sq_list = []
+    seen = set()
+
+    def _is_positive_rep(n_tuple):
+        for x in n_tuple:
+            if x != 0:
+                return x > 0
+        return True
+
+    for i in range(len(n_ints_sorted)):
+        n_tuple = tuple(int(x) for x in n_ints_sorted[i])
+        if n_tuple in seen or tuple(-x for x in n_tuple) in seen:
+            continue
+        if not _is_positive_rep(n_tuple):
+            continue
+        idx = len(kvecs_list)
+        kvecs_list.append(tuple(x * dk for x in n_tuple))
+        k_sq_list.append(n_sq_sorted[i] * dk * dk)
+        seen.add(n_tuple)
+        if all(x == 0 for x in n_tuple):
+            # k=0: only the constant (cos).
+            basis_idx_list.append(idx)
+            basis_is_sin_list.append(0)
+        else:
+            # Paired (+k): cos then sin.
+            basis_idx_list.append(idx)
+            basis_is_sin_list.append(0)
+            basis_idx_list.append(idx)
+            basis_is_sin_list.append(1)
+        if len(basis_idx_list) >= n_orb:
+            break
+
+    if len(basis_idx_list) < n_orb:
+        raise RuntimeError(
+            f"Could not enumerate {n_orb} basis functions "
+            f"within nmax={nmax}. Increase nmax buffer.",
+        )
+
+    basis_idx_list = basis_idx_list[:n_orb]
+    basis_is_sin_list = basis_is_sin_list[:n_orb]
+
+    return RealPWBasis(
+        kvecs=jnp.asarray(kvecs_list, dtype=jnp.float64),
+        basis_idx=jnp.asarray(basis_idx_list, dtype=jnp.int32),
+        basis_is_sin=jnp.asarray(basis_is_sin_list, dtype=jnp.int32),
+        k_sq=jnp.asarray(k_sq_list, dtype=jnp.float64),
+    )
+
+
+def enumerate_real_pw_basis_2d(n_orb: int, L: float) -> RealPWBasis:
+    """Real plane-wave basis on a 2D square lattice of side L.
+
+    Returns the lowest-``|k|^2`` real basis functions (constant, cos,
+    sin, cos, sin, ...) up to the closed-shell count enclosing
+    ``n_orb``.  Closed-shell counts in 2D are
+    ``1, 5, 9, 13, 21, 25, 29, 37, 45, 57, ...``.
+
+    Args:
+        n_orb: Number of basis functions required (>= 1).
+        L: Square cell side length.
+
+    Returns:
+        :class:`RealPWBasis` with ``kvecs.shape == (n_pw, 2)``.
+    """
+    return _enumerate_real_pw_basis_dd(n_orb, L, dim=2)
+
+
 def enumerate_real_pw_basis(
     n_orb: int, L: float,
 ) -> RealPWBasis:
@@ -193,11 +305,18 @@ class PlaneWaveEnvelope(nnx.Module):
         spin_restricted: bool = True,
         init_pw_count: Optional[int] = None,
         det_jitter: float = 0.0,
+        dim: int = 3,
     ):
         if init_pw_count is None:
             init_pw_count = max(n_up, n_down, 1)
 
-        basis = enumerate_real_pw_basis(init_pw_count, L)
+        if dim == 3:
+            basis = enumerate_real_pw_basis(init_pw_count, L)
+        elif dim == 2:
+            basis = enumerate_real_pw_basis_2d(init_pw_count, L)
+        else:
+            raise ValueError(f"dim must be 2 or 3, got {dim}")
+        self.dim = dim
         self.n_up = n_up
         self.n_down = n_down
         self.n_det = n_det
@@ -443,6 +562,67 @@ class ComplexPWBasis(NamedTuple):
     kappa: jax.Array
 
 
+def _enumerate_complex_pw_basis_dd(
+    n_orb: int, L: float, dim: int, kappa,
+) -> ComplexPWBasis:
+    """Dimension-agnostic complex twisted plane-wave basis enumerator."""
+    if n_orb < 1:
+        raise ValueError(f"n_orb must be >= 1, got {n_orb}")
+    if dim not in (2, 3):
+        raise ValueError(f"dim must be 2 or 3, got {dim}")
+    kappa = np.asarray(kappa, dtype=np.float64)
+    if kappa.shape != (dim,):
+        raise ValueError(
+            f"kappa must have shape ({dim},), got {kappa.shape}",
+        )
+
+    dk = 2.0 * np.pi / L
+    nmax = int(np.ceil(n_orb ** (1.0 / dim))) + 4
+    rng = np.arange(-nmax, nmax + 1)
+    if dim == 3:
+        nx, ny, nz = np.meshgrid(rng, rng, rng, indexing='ij')
+        n_ints = np.stack(
+            [nx.ravel(), ny.ravel(), nz.ravel()], axis=1,
+        )
+    else:
+        nx, ny = np.meshgrid(rng, rng, indexing='ij')
+        n_ints = np.stack([nx.ravel(), ny.ravel()], axis=1)
+    shifted = n_ints + kappa[None, :]
+    shifted_sq = np.sum(shifted ** 2, axis=-1)
+
+    base = 2 * nmax + 1
+    if dim == 3:
+        lex_key = (
+            n_ints[:, 0] * base ** 2
+            + n_ints[:, 1] * base
+            + n_ints[:, 2]
+        )
+    else:
+        lex_key = n_ints[:, 0] * base + n_ints[:, 1]
+    order = np.lexsort((lex_key, shifted_sq))
+    order = order[:n_orb]
+
+    selected_n = n_ints[order]
+    kvecs = (selected_n.astype(np.float64) + kappa[None, :]) * dk
+    k_sq = np.sum(kvecs ** 2, axis=-1)
+
+    return ComplexPWBasis(
+        kvecs=jnp.asarray(kvecs, dtype=jnp.float64),
+        k_sq=jnp.asarray(k_sq, dtype=jnp.float64),
+        n_ints=jnp.asarray(selected_n, dtype=jnp.int32),
+        kappa=jnp.asarray(kappa, dtype=jnp.float64),
+    )
+
+
+def enumerate_complex_pw_basis_2d(
+    n_orb: int, L: float, kappa=(0.0, 0.0),
+) -> ComplexPWBasis:
+    """Complex twisted plane-wave basis on a 2D square lattice."""
+    return _enumerate_complex_pw_basis_dd(
+        n_orb, L, dim=2, kappa=kappa,
+    )
+
+
 def enumerate_complex_pw_basis(
     n_orb: int, L: float,
     kappa=(0.0, 0.0, 0.0),
@@ -540,15 +720,24 @@ class ComplexPlaneWaveEnvelope(nnx.Module):
         n_det: int,
         L: float,
         *,
-        kappa=(0.0, 0.0, 0.0),
+        kappa=None,
+        dim: int = 3,
     ):
+        if kappa is None:
+            kappa = (0.0,) * dim
         self.n_up = n_up
         self.n_down = n_down
         self.n_det = n_det
         self.L = float(L)
+        self.dim = dim
 
         n_pw = max(n_up, n_down, 1)
-        basis = enumerate_complex_pw_basis(n_pw, L, kappa=kappa)
+        if dim == 3:
+            basis = enumerate_complex_pw_basis(n_pw, L, kappa=kappa)
+        elif dim == 2:
+            basis = enumerate_complex_pw_basis_2d(n_pw, L, kappa=kappa)
+        else:
+            raise ValueError(f"dim must be 2 or 3, got {dim}")
         self.n_pw = int(basis.kvecs.shape[0])
         self.kvecs = nnx.data(basis.kvecs)
         self.k_sq = nnx.data(basis.k_sq)

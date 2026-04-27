@@ -159,8 +159,10 @@ class HEGElectronEmbedding(nnx.Module):
                     "use_ghost_atom=True requires a lattice.",
                 )
             self.lattice = nnx.data(lattice)
-            # 3 sin + 3 cos + 1 periodic-norm = 7 features per electron.
-            ne_feat_dim = 7
+            # dim sin + dim cos + 1 periodic-norm = 2*dim+1 features.
+            # Inferred from lattice.A.shape (3 for cubic, 2 for square).
+            self._dim = int(lattice.A.shape[0])
+            ne_feat_dim = 2 * self._dim + 1
             self.ghost_proj = nnx.Linear(
                 embedding_dim + ne_feat_dim, embedding_dim,
                 use_bias=False, rngs=rngs,
@@ -168,6 +170,7 @@ class HEGElectronEmbedding(nnx.Module):
         else:
             self.lattice = None
             self.ghost_proj = None
+            self._dim = None
 
     def __call__(self, phys_conf, nucleus_embedding=None):
         """Return per-electron embeddings.
@@ -184,16 +187,18 @@ class HEGElectronEmbedding(nnx.Module):
             return spin_emb
 
         # Ghost-atom positional fingerprint.  The ghost sits at the
-        # cell origin, so ae = r_elec - 0 = r_elec.
-        r = phys_conf.r                                      # (n_elec, 3)
-        s = fractional_coords(r, self.lattice)               # (n_elec, 3)
+        # cell origin, so ae = r_elec - 0 = r_elec.  Shapes carry the
+        # spatial dimension (3 for 3D HEG, 2 for 2D HEG); the
+        # downstream feature concatenation has 2*dim + 1 columns.
+        r = phys_conf.r                                      # (n_elec, dim)
+        s = fractional_coords(r, self.lattice)               # (n_elec, dim)
         two_pi_s = 2.0 * jnp.pi * s
-        sin_s = jnp.sin(two_pi_s)                            # (n_elec, 3)
-        cos_s = jnp.cos(two_pi_s)                            # (n_elec, 3)
+        sin_s = jnp.sin(two_pi_s)                            # (n_elec, dim)
+        cos_s = jnp.cos(two_pi_s)                            # (n_elec, dim)
         r_periodic = periodic_norm(r, self.lattice, safe=True)  # (n_elec,)
         ne_feat = jnp.concatenate(
             [sin_s, cos_s, r_periodic[:, None]], axis=-1,
-        )                                                    # (n_elec, 7)
+        )                                                    # (n_elec, 2*dim+1)
         return self.ghost_proj(
             jnp.concatenate([spin_emb, ne_feat], axis=-1),
         )
@@ -612,24 +617,62 @@ def build_heg_psiformer_wf(
     n_elec = n_up + n_down
     emb_dim = config.embedding_dim
     tp_dim = config.two_particle_stream_dim
+    dim = int(getattr(config, 'dim', 3))
 
-    lattice = make_cubic_lattice(L)
+    if dim == 3:
+        lattice = make_cubic_lattice(L)
+    elif dim == 2:
+        from .periodic import make_square_lattice
+        lattice = make_square_lattice(L)
+    else:
+        raise ValueError(f"config.dim must be 2 or 3, got {dim}")
 
-    # --- Envelope: plane waves at Γ ---
-    # The PW basis is extended beyond the Fermi shell by
-    # ``config.n_virt_pw`` functions so the multi-det expansion
-    # has virtual orbitals to specialise into.  Without virtuals
-    # (basis == Fermi shell exactly), every Slater determinant
-    # over the occupied subspace is equal up to a constant, and
-    # ``n_det > 1`` is structurally degenerate.  ``det_jitter``
-    # seeds dets d≥1 with a small random perturbation so they
-    # start as distinct particle-hole admixtures of the Fermi sea.
-    pw_basis_size = max(n_up, n_down, 1) + int(config.n_virt_pw)
-    envelope = PlaneWaveEnvelope(
-        n_up=n_up, n_down=n_down, n_det=n_det, L=L,
-        init_pw_count=pw_basis_size,
-        det_jitter=config.det_jitter,
-    )
+    # --- Envelope: dispatch on config.envelope_type ---
+    envelope_type = getattr(config, 'envelope_type', 'plane_wave')
+    if envelope_type == 'plane_wave':
+        # The PW basis is extended beyond the Fermi shell by
+        # ``config.n_virt_pw`` functions so the multi-det expansion
+        # has virtual orbitals to specialise into.  Without virtuals
+        # (basis == Fermi shell exactly), every Slater determinant
+        # over the occupied subspace is equal up to a constant, and
+        # ``n_det > 1`` is structurally degenerate.  ``det_jitter``
+        # seeds dets d>=1 with a small random perturbation so they
+        # start as distinct particle-hole admixtures of the Fermi sea.
+        pw_basis_size = max(n_up, n_down, 1) + int(config.n_virt_pw)
+        envelope = PlaneWaveEnvelope(
+            n_up=n_up, n_down=n_down, n_det=n_det, L=L,
+            init_pw_count=pw_basis_size,
+            det_jitter=config.det_jitter,
+            dim=dim,
+        )
+    elif envelope_type == 'crystal_gaussian':
+        if dim != 2:
+            raise ValueError(
+                "crystal_gaussian envelope requires dim=2 "
+                f"(got dim={dim}).  Wigner-crystal ansatz is only "
+                "implemented in 2D.",
+            )
+        from .env_localized_2d import GaussianLocalizedEnvelope2D
+        # Recover r_s from the cell geometry: pi * rs^2 = A/N -> rs.
+        rs = L / np.sqrt(np.pi * (n_up + n_down))
+        envelope = GaussianLocalizedEnvelope2D(
+            n_up=n_up, n_down=n_down, n_det=n_det,
+            rs=float(rs), L=L,
+            sigma_init=float(getattr(
+                config, 'crystal_sigma_init', 0.25,
+            )),
+            spin_pattern=str(getattr(
+                config, 'crystal_spin_pattern', 'neel',
+            )),
+            det_jitter=float(getattr(
+                config, 'crystal_det_jitter', 0.0,
+            )),
+        )
+    else:
+        raise ValueError(
+            f"Unknown envelope_type {envelope_type!r}; "
+            f"expected 'plane_wave' or 'crystal_gaussian'.",
+        )
 
     # --- Electron embedding: spin-typed, optionally ghost-atom enriched ---
     electron_embedding = HEGElectronEmbedding(
@@ -659,8 +702,9 @@ def build_heg_psiformer_wf(
 
     edge_types = ['same', 'anti']
     edge_features = {et: _periodic_ee_feature() for et in edge_types}
-    # Dim of the 'same'/'anti' edge feature (sin/cos 6 + |r| 1 = 7).
-    ee_feat_dim = 6 + 1
+    # Dim of the 'same'/'anti' edge feature: 2*dim (sin+cos) + 1 (|r|).
+    # 3D: 6 + 1 = 7; 2D: 4 + 1 = 5.
+    ee_feat_dim = 2 * dim + 1
 
     # --- GNN layers ---
     layers = []
@@ -783,10 +827,20 @@ def build_heg_psiformer_wf(
     # for the Kato-slope derivation.
     cusp_electrons = None
     if config.use_cusp:
+        # Kato slope in d dimensions for 1/r Coulomb scales as
+        # 1/(d-1): 3D anti-spin = 1/2, 3D same-spin = 1/4 (Pauli);
+        # 2D anti-spin = 1, 2D same-spin = 1/2 (factor-of-two larger
+        # because the radial volume element is 2*pi*r dr in 2D vs.
+        # 4*pi*r^2 dr in 3D, so the kinetic-energy 1/r divergence
+        # at coincidence is twice as severe).
+        if dim == 3:
+            same_scale, anti_scale = 0.25, 0.5
+        else:  # dim == 2
+            same_scale, anti_scale = 0.5, 1.0
         cusp_electrons = PeriodicElectronicCusp(
             L=L,
-            same_scale=0.25,
-            anti_scale=0.5,
+            same_scale=same_scale,
+            anti_scale=anti_scale,
             alpha_init=1.0,
             r_cut_frac=0.45,
             trainable_alpha=True,
@@ -1050,25 +1104,37 @@ def build_heg_psiformer_wf_complex(
     config,
     rngs: nnx.Rngs,
     *,
-    kappa=(0.0, 0.0, 0.0),
+    kappa=None,
 ):
     """Assemble a complex (twist-aware) PsiFormer HEG wavefunction.
 
     Shares the GNN / backflow / cusp / jastrow construction logic
     with :func:`build_heg_psiformer_wf` — only the envelope and the
     wrapping wavefunction class differ.  The built model returns a
-    *complex* scalar ``log ψ`` suitable for the TABC driver.
+    *complex* scalar ``log psi`` suitable for the TABC driver.
 
     Args:
         config: :class:`~.heg_wf.HEGPsiFormerConfig`.
         rngs: NNX RNG state.
-        kappa: Twist angle ``(3,)`` in fractional coordinates
-            ``[-0.5, 0.5)``.  Default ``(0, 0, 0)`` (Γ point).
+        kappa: Twist angle in fractional coordinates ``[-0.5, 0.5)``.
+            Shape ``(dim,)`` matching ``config.dim``.  Default
+            ``None`` -> Gamma point.
     """
+    dim = int(getattr(config, 'dim', 3))
+    if kappa is None:
+        kappa = (0.0,) * dim
+    if dim == 3:
+        lattice = make_cubic_lattice(float(config.L))
+    elif dim == 2:
+        from .periodic import make_square_lattice
+        lattice = make_square_lattice(float(config.L))
+    else:
+        raise ValueError(f"config.dim must be 2 or 3, got {dim}")
+
     # Build the real-valued PsiFormer to get all the GNN / backflow /
     # cusp / jastrow modules, then swap in a complex envelope and
     # rewrap.  This guarantees the non-envelope parameter pytree is
-    # structurally identical between the real Γ-point training
+    # structurally identical between the real Gamma-point training
     # ansatz and the per-twist complex evaluation ansatz, so
     # ``transfer_trained_params`` can copy everything except the
     # envelope block.
@@ -1076,14 +1142,14 @@ def build_heg_psiformer_wf_complex(
     complex_envelope = ComplexPlaneWaveEnvelope(
         n_up=config.n_up, n_down=config.n_down,
         n_det=config.n_det, L=float(config.L),
-        kappa=kappa,
+        kappa=kappa, dim=dim,
     )
     return HEGPsiFormerWaveFunctionComplex(
         n_up=config.n_up, n_down=config.n_down,
         n_det=config.n_det, L=float(config.L),
         omni=base.omni,
         envelope=complex_envelope,
-        lattice=make_cubic_lattice(float(config.L)),
+        lattice=lattice,
         cusp_electrons=base.cusp_electrons,
         pair_jastrow=base.pair_jastrow,
     )

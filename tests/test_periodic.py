@@ -145,13 +145,17 @@ def test_sincos_periodic_triclinic(triclinic):
 # -------------------------------------------------------------
 
 def test_periodic_norm_small_limit(cubic):
-    """Near origin, ‖s‖_p ≈ 2π |diff|.  The metric-tensor form
-    absorbs the Euclidean norm at leading order."""
+    """Near origin, ``periodic_norm_sq`` approaches the Euclidean
+    squared distance (in Bohr^2).  The implementation uses the
+    FermiNet 1/(2pi)^2 normalization so it matches Bohr-unit
+    Euclidean distances at short range, not the un-normalised
+    Cassella formula's (2pi)^2 |r|^2 — see the ``periodic_norm_sq``
+    docstring for context.  This test confirms the rescaling."""
     diff = jnp.asarray([1e-4, 2e-4, -1.5e-4])
     n2 = periodic_norm_sq(diff, cubic)
     euclidean_sq = jnp.sum(diff ** 2, axis=-1)
-    # Leading order: n2 ≈ (2π)² * euclidean_sq
-    ratio = float(n2 / ((2 * np.pi) ** 2 * euclidean_sq))
+    # Leading order: n2 ~= euclidean_sq (Bohr^2 units).
+    ratio = float(n2 / euclidean_sq)
     assert abs(ratio - 1.0) < 1e-4
 
 
