@@ -479,12 +479,26 @@ class _HEGSROptimizer:
         if (self.ofname_chkpt is not None
                 and self.ofname_chkpt != ""):
             from .nn_checkpoint import save_nn_checkpoint
+            # save_nn_checkpoint is a molecular-code helper that wants a
+            # mol_info object with .n_up/.n_down/.charges/.coords for
+            # the metadata header.  HEG has no nuclei -> pass an empty
+            # stub with the right attribute surface so the call
+            # succeeds end-to-end (params + meta).
+
+            class _HEGMolInfoStub:
+                def __init__(self, n_up, n_down, dim):
+                    self.n_up = int(n_up)
+                    self.n_down = int(n_down)
+                    self.charges = np.zeros((0,), dtype=np.float64)
+                    self.coords = np.zeros((0, dim), dtype=np.float64)
+
+            stub = _HEGMolInfoStub(self.n_up, self.n_down, self.dim)
             try:
                 save_nn_checkpoint(
                     self.ofname_chkpt, params_pytree,
                     epoch=int(len(e_history)),
                     config_name='HEG_PsiFormer',
-                    mol_info=None,
+                    mol_info=stub,
                     energy=(e_history[-1] if e_history else None),
                 )
             except Exception as e:
