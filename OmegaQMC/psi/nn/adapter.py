@@ -15,6 +15,8 @@ from .config import NNAnsatzConfig, load_nn_config
 from .forward_lap import log_psi_vgl_psiformer
 from .gnn.update_features import (
     NodeAttentionElectronUpdateFeature,
+    NodeSumElectronUpdateFeature,
+    ResidualElectronUpdateFeature,
 )
 from .physics import laplacian
 from .types import PhysicalConfiguration
@@ -31,15 +33,11 @@ def _psiformer_compat(config) -> bool:
         return False
     if config.conf_coeff != 'sum_pool':
         return False
-    if not config.envelope_isotropic:
-        return False
     if not config.envelope_per_orbital_exponent:
         return False
     if config.envelope_spin_restricted:
         return False
     if config.envelope_softplus_zeta:
-        return False
-    if config.use_jastrow:
         return False
     if not config.use_backflow:
         return False
@@ -47,7 +45,8 @@ def _psiformer_compat(config) -> bool:
         return False
     if (
         config.cusp_electrons
-        and config.cusp_electrons_type != 'psiformer'
+        and config.cusp_electrons_type
+        not in ('psiformer', 'deepqmc')
     ):
         return False
     if (
@@ -69,11 +68,11 @@ def _psiformer_compat(config) -> bool:
         return False
     if not config.update_features:
         return False
-    if len(config.update_features) != 1:
-        return False
-    uf = config.update_features[0]
-    if uf.get('type') != 'node_attention':
-        return False
+    for uf in config.update_features:
+        if uf.get('type') not in (
+            'node_attention', 'residual', 'node_sum',
+        ):
+            return False
     return True
 
 
@@ -86,33 +85,73 @@ def _extract_mlp_layers(mlp):
     return out
 
 
+def _mlp_activation_name(mlp):
+    """Reverse-lookup the MLP's resolved activation
+    callable to a string key understood by
+    :data:`_VGL_ACTIVATIONS` in ``forward_lap``."""
+    from .layers import _ACTIVATIONS
+
+    fn = mlp.activation
+    if fn is None:
+        return None
+    for name, candidate in _ACTIVATIONS.items():
+        if candidate is fn:
+            return name
+    raise ValueError(
+        f"unsupported MLP activation: {fn!r}",
+    )
+
+
+def _extract_update_spec(uf):
+    if isinstance(uf, NodeAttentionElectronUpdateFeature):
+        attn = uf.attention
+        attn_norm = (
+            uf.attention_residual.normalize
+            if uf.attention_residual is not None
+            else None
+        )
+        mlp_norm = (
+            uf.mlp_residual.normalize
+            if uf.mlp_residual is not None
+            else None
+        )
+        return {
+            'type': 'node_attention',
+            'attn_wq': attn.wq.kernel.value,
+            'attn_wk': attn.wk.kernel.value,
+            'attn_wv': attn.wv.kernel.value,
+            'attn_wo': attn.wo.kernel.value,
+            'attn_num_heads': attn.num_heads,
+            'attn_mlp_layers': _extract_mlp_layers(uf.mlp),
+            'attn_mlp_activation': 'tanh',
+            'attn_mlp_last_linear': False,
+            'attn_residual_normalize': attn_norm,
+            'attn_mlp_residual_normalize': mlp_norm,
+        }
+    if isinstance(uf, ResidualElectronUpdateFeature):
+        return {'type': 'residual'}
+    if isinstance(uf, NodeSumElectronUpdateFeature):
+        return {
+            'type': 'node_sum',
+            'node_types': uf.node_types,
+            'normalize': uf.normalize,
+        }
+    raise ValueError(
+        f"unsupported update feature: {type(uf).__name__}",
+    )
+
+
 def _extract_layer_spec(layer):
-    uf = layer.update_features[0]
-    assert isinstance(uf, NodeAttentionElectronUpdateFeature)
-    attn = uf.attention
-    attn_norm = (
-        uf.attention_residual.normalize
-        if uf.attention_residual is not None else None
-    )
-    mlp_norm = (
-        uf.mlp_residual.normalize
-        if uf.mlp_residual is not None else None
-    )
     e_res_norm = (
         layer.electron_residual.normalize
         if layer.electron_residual is not None else None
     )
+    update_specs = [
+        _extract_update_spec(uf)
+        for uf in layer.update_features
+    ]
     return {
-        'attn_wq': attn.wq.kernel.value,
-        'attn_wk': attn.wk.kernel.value,
-        'attn_wv': attn.wv.kernel.value,
-        'attn_wo': attn.wo.kernel.value,
-        'attn_num_heads': attn.num_heads,
-        'attn_mlp_layers': _extract_mlp_layers(uf.mlp),
-        'attn_mlp_activation': 'tanh',
-        'attn_mlp_last_linear': False,
-        'attn_residual_normalize': attn_norm,
-        'attn_mlp_residual_normalize': mlp_norm,
+        'update_specs': update_specs,
         'subnet_layers': _extract_mlp_layers(layer.subnet),
         'subnet_activation': 'tanh',
         'subnet_last_linear': False,
@@ -150,9 +189,31 @@ def _build_vgl_kwargs(model):
         'per_orbital_exponent': env.per_orbital_exponent,
         'softplus_zeta': env.softplus_zeta,
     }
+    if model.omni.jastrow is not None:
+        jas_mod = model.omni.jastrow
+        jastrow = {
+            'layers': _extract_mlp_layers(jas_mod.net),
+            'activation': _mlp_activation_name(jas_mod.net),
+            'last_linear': jas_mod.net.last_linear,
+            'sum_first': jas_mod.sum_first,
+        }
+    else:
+        jastrow = None
     if model.cusp_electrons is not None:
         cusp_mod = model.cusp_electrons
+        cusp_cls_name = type(
+            cusp_mod.cusp_function,
+        ).__name__
+        if cusp_cls_name == 'PsiformerCusp':
+            cusp_type = 'psiformer'
+        elif cusp_cls_name == 'DeepQMCCusp':
+            cusp_type = 'deepqmc'
+        else:
+            raise ValueError(
+                f"unsupported cusp class: {cusp_cls_name}",
+            )
         cusp = {
+            'type': cusp_type,
             'same_scale': cusp_mod.same_scale,
             'anti_scale': cusp_mod.anti_scale,
             'same_alpha': cusp_mod.same_alpha.value,
@@ -167,6 +228,7 @@ def _build_vgl_kwargs(model):
         'bf_down_layers': bf_down_layers,
         'envelope': envelope,
         'cusp': cusp,
+        'jastrow': jastrow,
     }
 
 

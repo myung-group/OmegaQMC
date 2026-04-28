@@ -1320,6 +1320,47 @@ def vgl_deepqmc_cusp(
     return vgl_scale(vgl_sum_all(weighted), -1.0)
 
 
+# ---------- Jastrow twin ----------
+
+def vgl_jastrow(
+    embeddings: VGL,
+    layers,
+    *,
+    activation,
+    last_linear: bool,
+    sum_first: bool,
+) -> VGL:
+    """Scalar VGL twin of :class:`OmegaQMC.psi.nn.omni.Jastrow`.
+
+    ``sum_first=True``  : reduce electrons first, then MLP.
+    ``sum_first=False`` : MLP per electron, then reduce.
+
+    The MLP produces a final trailing axis of size 1 which
+    is squeezed out, matching ``Jastrow.__call__``'s
+    ``squeeze(axis=-1)``.
+    """
+    if sum_first:
+        pooled = vgl_sum_axes(embeddings, axes=(-2,))
+        out = vgl_mlp(
+            pooled, layers,
+            activation=activation,
+            last_linear=last_linear,
+        )
+    else:
+        per_e = vgl_mlp(
+            embeddings, layers,
+            activation=activation,
+            last_linear=last_linear,
+        )
+        out = vgl_sum_axes(per_e, axes=(-2,))
+    # ``out.value`` shape is ``(1,)`` — squeeze to scalar.
+    return VGL(
+        value=out.value[..., 0],
+        grad=out.grad[..., 0],
+        lap=out.lap[..., 0],
+    )
+
+
 # ---------- BackflowOp twin ----------
 
 def _vgl_default_mult_act(vin: VGL) -> VGL:
@@ -1640,61 +1681,149 @@ def vgl_electron_embedding_positional(
     return feats
 
 
+def vgl_node_sum_update(
+    h_vgl: VGL,
+    *,
+    n_up: int,
+    n_down: int,
+    node_types,
+    normalize: bool,
+) -> VGL:
+    """VGL twin of
+    :class:`OmegaQMC.psi.nn.gnn.update_features.NodeSumElectronUpdateFeature`.
+
+    For each requested node type (``'up'`` and/or
+    ``'down'``), compute the sum (or mean if
+    ``normalize=True``) of the electron embeddings in that
+    spin block and tile the result across all electrons.
+    The per-type results are concatenated along the last
+    axis; total output feature width is
+    ``len(node_types) * emb_dim``.
+    """
+    n_e = n_up + n_down
+    pieces = []
+    for nt in node_types:
+        if nt == 'up':
+            sub = _vgl_slice0(h_vgl, slice(None, n_up))
+            denom = n_up if normalize else 1
+        elif nt == 'down':
+            sub = _vgl_slice0(h_vgl, slice(n_up, None))
+            denom = n_down if normalize else 1
+        else:
+            raise ValueError(
+                f"unsupported node type: {nt!r}",
+            )
+        pooled = vgl_sum_axes(
+            sub, axes=(-2,), keepdims=True,
+        )
+        if normalize:
+            pooled = vgl_scale(pooled, 1.0 / denom)
+        pieces.append(VGL(
+            value=jnp.broadcast_to(
+                pooled.value,
+                (n_e,) + pooled.value.shape[1:],
+            ),
+            grad=jnp.broadcast_to(
+                pooled.grad,
+                pooled.grad.shape[:1]
+                + (n_e,)
+                + pooled.grad.shape[2:],
+            ),
+            lap=jnp.broadcast_to(
+                pooled.lap,
+                (n_e,) + pooled.lap.shape[1:],
+            ),
+        ))
+    return vgl_concat(pieces, axis=-1)
+
+
 def vgl_electron_gnn_layer_psiformer(
     h_vgl: VGL,
     *,
-    attn_wq, attn_wk, attn_wv, attn_wo,
-    attn_num_heads: int,
-    attn_mlp_layers,
-    attn_mlp_activation='tanh',
-    attn_mlp_last_linear: bool = False,
-    attn_residual_normalize=None,
-    attn_mlp_residual_normalize=None,
+    n_up: int,
+    n_down: int,
+    update_specs,
     subnet_layers,
     subnet_activation='tanh',
     subnet_last_linear: bool = False,
     electron_residual_normalize=None,
 ) -> VGL:
-    """Single PsiFormer-style :class:`ElectronGNNLayer`.
+    """PsiFormer-shape :class:`ElectronGNNLayer` VGL.
 
-    Restricted to:
+    Composes one or more update features per
+    ``update_specs`` (each a dict with a ``'type'`` key
+    and the corresponding kwargs), concatenates them along
+    the embedding axis, and applies the ``subnet`` MLP plus
+    optional residual.  Restricted to the ``concatenate``
+    update rule, ``deep_features=False``, and the
+    ``last_layer`` path (no edge updates).
 
-    * single ``node_attention`` update feature,
-    * ``concatenate`` update rule (a single feature reduces
-      this to plain ``subnet(att_out)``),
-    * ``deep_features=False``,
-    * ``last_layer`` always (no edge update path).
+    Supported update types:
 
-    The production layer would also iterate over edge types
-    and other update features; those branches land in a
-    later slice.
+    * ``'node_attention'`` — kwargs forwarded to
+      :func:`vgl_node_attention_update`.
+    * ``'residual'``       — pass-through (no kwargs).
+    * ``'node_sum'``       — kwargs ``node_types`` (subset
+      of ``{'up','down'}``) and ``normalize``;
+      forwarded to :func:`vgl_node_sum_update`.
 
     Args:
         h_vgl: input embedding VGL ``(n_e, emb_dim)``.
-        attn_*: kernels and hyperparameters forwarded to
-            :func:`vgl_node_attention_update`.
-        subnet_layers: ``[(w, b), ...]`` for the post-update
-            ``subnet`` MLP (production: ``MLP(uf_total_dim,
-            emb_dim)`` with ``last_linear=False``).
-        subnet_activation, subnet_last_linear: forwarded to
-            :func:`vgl_mlp`.
+        n_up, n_down: spin-block sizes (used by
+            ``node_sum``).
+        update_specs: list of update-feature dicts.
+        subnet_layers, subnet_activation,
+            subnet_last_linear: forwarded to :func:`vgl_mlp`
+            (production: ``MLP(uf_total_dim, emb_dim)``).
         electron_residual_normalize: ``None`` to skip the
-            residual (matching ``electron_residual=None`` in
-            production), or a bool to apply
-            :func:`vgl_residual` with that ``normalize`` flag.
+            residual, or a bool to apply :func:`vgl_residual`.
     """
-    att = vgl_node_attention_update(
-        h_vgl,
-        wq=attn_wq, wk=attn_wk, wv=attn_wv, wo=attn_wo,
-        num_heads=attn_num_heads,
-        mlp_layers=attn_mlp_layers,
-        mlp_activation=attn_mlp_activation,
-        mlp_last_linear=attn_mlp_last_linear,
-        attn_residual_normalize=attn_residual_normalize,
-        mlp_residual_normalize=attn_mlp_residual_normalize,
+    feats = []
+    for spec in update_specs:
+        t = spec['type']
+        if t == 'node_attention':
+            f = vgl_node_attention_update(
+                h_vgl,
+                wq=spec['attn_wq'],
+                wk=spec['attn_wk'],
+                wv=spec['attn_wv'],
+                wo=spec['attn_wo'],
+                num_heads=spec['attn_num_heads'],
+                mlp_layers=spec['attn_mlp_layers'],
+                mlp_activation=spec.get(
+                    'attn_mlp_activation', 'tanh',
+                ),
+                mlp_last_linear=spec.get(
+                    'attn_mlp_last_linear', False,
+                ),
+                attn_residual_normalize=spec.get(
+                    'attn_residual_normalize',
+                ),
+                mlp_residual_normalize=spec.get(
+                    'attn_mlp_residual_normalize',
+                ),
+            )
+        elif t == 'residual':
+            f = h_vgl
+        elif t == 'node_sum':
+            f = vgl_node_sum_update(
+                h_vgl,
+                n_up=n_up, n_down=n_down,
+                node_types=spec['node_types'],
+                normalize=spec['normalize'],
+            )
+        else:
+            raise NotImplementedError(
+                f"update feature type not supported by "
+                f"VGL path: {t!r}",
+            )
+        feats.append(f)
+    combined = (
+        feats[0] if len(feats) == 1
+        else vgl_concat(feats, axis=-1)
     )
     updated = vgl_mlp(
-        att, subnet_layers,
+        combined, subnet_layers,
         activation=subnet_activation,
         last_linear=subnet_last_linear,
     )
@@ -1738,7 +1867,9 @@ def vgl_electron_gnn_psiformer(
         **embedding_kwargs,
     )
     for spec in layer_specs:
-        h = vgl_electron_gnn_layer_psiformer(h, **spec)
+        h = vgl_electron_gnn_layer_psiformer(
+            h, n_up=n_up, n_down=n_down, **spec,
+        )
     return h
 
 
@@ -1766,6 +1897,7 @@ def log_psi_vgl_psiformer(
     bf_down_layers,
     envelope,
     cusp,
+    jastrow=None,
 ) -> VGL:
     """VGL twin of
     :meth:`OmegaQMC.psi.nn.wf.NeuralNetworkWaveFunction.__call__`
@@ -1803,7 +1935,14 @@ def log_psi_vgl_psiformer(
             ``softplus_zeta``.  Constants extracted from the
             production :class:`ExponentialEnvelopes`.
         cusp: ``None`` or dict with keys ``same_scale``,
-            ``anti_scale``, ``same_alpha``, ``anti_alpha``.
+            ``anti_scale``, ``same_alpha``, ``anti_alpha``,
+            and an optional ``type`` (``'psiformer'`` or
+            ``'deepqmc'``; defaults to ``'psiformer'``).
+        jastrow: ``None`` or dict with keys ``layers``,
+            ``activation``, ``last_linear``, ``sum_first``
+            (forwarded to :func:`vgl_jastrow`).  When
+            non-``None``, the Jastrow scalar is added to
+            ``log|ψ|`` after the cusp.
 
     Returns:
         VGL of ``log|ψ|`` (scalar value and lap, ``(D,)`` grad).
@@ -1897,6 +2036,14 @@ def log_psi_vgl_psiformer(
 
     # 7. Electron cusp (PsiformerCusp)
     if cusp is None:
+        if jastrow is not None:
+            jas = vgl_jastrow(
+                h, jastrow['layers'],
+                activation=jastrow['activation'],
+                last_linear=jastrow['last_linear'],
+                sum_first=jastrow['sum_first'],
+            )
+            return vgl_add(log_psi_main, jas)
         return log_psi_main
 
     same_up = VGL(
@@ -1935,10 +2082,19 @@ def log_psi_vgl_psiformer(
     cusp_total = vgl_constant(
         jnp.array(0.0, dtype=elec_flat.dtype), D=D,
     )
+    cusp_type = cusp.get('type', 'psiformer')
+    if cusp_type == 'psiformer':
+        cusp_fn = vgl_psiformer_cusp
+    elif cusp_type == 'deepqmc':
+        cusp_fn = vgl_deepqmc_cusp
+    else:
+        raise ValueError(
+            f"unknown cusp type: {cusp_type!r}",
+        )
     if same_dists.value.size > 0:
         cusp_total = vgl_add(
             cusp_total,
-            vgl_psiformer_cusp(
+            cusp_fn(
                 cusp['same_scale'],
                 cusp['same_alpha'],
                 same_dists,
@@ -1947,10 +2103,19 @@ def log_psi_vgl_psiformer(
     if anti_dists.value.size > 0:
         cusp_total = vgl_add(
             cusp_total,
-            vgl_psiformer_cusp(
+            cusp_fn(
                 cusp['anti_scale'],
                 cusp['anti_alpha'],
                 anti_dists,
             ),
         )
-    return vgl_add(log_psi_main, cusp_total)
+    out = vgl_add(log_psi_main, cusp_total)
+    if jastrow is not None:
+        jas = vgl_jastrow(
+            h, jastrow['layers'],
+            activation=jastrow['activation'],
+            last_linear=jastrow['last_linear'],
+            sum_first=jastrow['sum_first'],
+        )
+        out = vgl_add(out, jas)
+    return out
