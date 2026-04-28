@@ -55,7 +55,7 @@ pretrain:
 
 optimize:
   type: sr
-  iters: 1000
+  iters: 5000
   walkers: 256
   lr: 0.05
   var_weight: 0.0
@@ -125,7 +125,7 @@ pretrain:
 
 optimize:
   type: sr
-  iters: 1000
+  iters: 5000
   walkers: 256
   lr: 0.05
   var_weight: 0.0
