@@ -722,6 +722,710 @@ def vgl_gaussian_edge_feature(
     return vgl_exp(scaled)
 
 
+def vgl_apply_edge_feature(d_vgl: VGL, spec: dict) -> VGL:
+    """Dispatch to a VGL edge-feature twin based on a spec.
+
+    Recognised ``spec['type']`` values:
+
+    * ``'distance_power'`` — keys ``powers``, optional
+      ``eps`` (default ``0.0``) and ``log_rescale``
+      (default ``False``).  Maps to
+      :func:`vgl_distance_power_edge_feature`.
+    * ``'difference'`` — optional ``log_rescale``
+      (default ``False``).  Maps to
+      :func:`vgl_difference_edge_feature`.
+    * ``'gaussian'`` — keys ``mus``, ``sigmas``.  Maps to
+      :func:`vgl_gaussian_edge_feature`.
+    * ``'combined'`` — key ``features`` (list of nested
+      specs).  Applies each in turn and concatenates along
+      the last axis.
+
+    Used to thread the production ``edge_features`` dict
+    through the VGL pipeline without requiring callers to
+    name the primitive directly.
+    """
+    t = spec['type']
+    if t == 'distance_power':
+        return vgl_distance_power_edge_feature(
+            d_vgl, spec['powers'],
+            eps=spec.get('eps', 0.0),
+            log_rescale=spec.get('log_rescale', False),
+        )
+    if t == 'difference':
+        return vgl_difference_edge_feature(
+            d_vgl,
+            log_rescale=spec.get('log_rescale', False),
+        )
+    if t == 'gaussian':
+        return vgl_gaussian_edge_feature(
+            d_vgl, spec['mus'], spec['sigmas'],
+        )
+    if t == 'combined':
+        feats = [
+            vgl_apply_edge_feature(d_vgl, sub)
+            for sub in spec['features']
+        ]
+        return vgl_concat(feats, axis=-1)
+    raise ValueError(
+        f"unknown edge_feature type: {t!r}",
+    )
+
+
+# ---------- Edge construction (sender, receiver) ----------
+#
+# Layout matches the production ``_compute_edges``:
+#
+#     diffs[i_send, j_recv, :] = pos_recv[j_recv]
+#                                - pos_sender[i_send]
+#
+# All three presets (psiformer, ferminet, deeperwin) set
+# ``self_interaction=True``; the off-diagonal-only branch
+# (``mask_self=True``) is implemented for completeness but
+# not yet exercised by adapter-level configs.
+
+def _vgl_offdiag_pairs(diffs_vgl: VGL) -> VGL:
+    """Filter the diagonal (sender == receiver) from a square
+    pairwise VGL, returning shape
+    ``(n - 1, n, *trailing)``."""
+    n = diffs_vgl.value.shape[0]
+    assert diffs_vgl.value.shape[1] == n
+    send_idx = (
+        jnp.arange(n)[None, :]
+        <= jnp.arange(n - 1)[:, None]
+    ) + jnp.arange(n - 1)[:, None]
+    recv_idx = jnp.broadcast_to(
+        jnp.arange(n)[None], (n - 1, n),
+    )
+    return VGL(
+        value=diffs_vgl.value[send_idx, recv_idx],
+        grad=diffs_vgl.grad[:, send_idx, recv_idx],
+        lap=diffs_vgl.lap[send_idx, recv_idx],
+    )
+
+
+def vgl_pair_diffs_send_recv(
+    sender_vgl: VGL, receiver_vgl: VGL,
+) -> VGL:
+    """Produce ``recv[j] - send[i]`` as a 3-D pairwise VGL.
+
+    Result has shape ``(n_send, n_recv, 3)`` matching the
+    production ``_compute_edges``.
+    """
+    s_un = vgl_unsqueeze(sender_vgl, axis=-2)
+    r_un = vgl_unsqueeze(receiver_vgl, axis=-3)
+    return vgl_sub(r_un, s_un)
+
+
+def vgl_build_same_edges(
+    r_vgl: VGL,
+    *,
+    n_up: int,
+    n_down: int,
+    edge_feature_spec: dict,
+    self_interaction: bool,
+) -> tuple:
+    """Build ``(uu, dd)`` same-spin edge VGLs.
+
+    Mirrors the production
+    :class:`SameGraphEdges` constituent arrays.  Each block
+    is the receiver-major pairwise diff between same-spin
+    coordinates, transformed by ``edge_feature_spec``.
+
+    Returns:
+        ``(uu_vgl, dd_vgl)`` — value shapes ``(n_up, n_up,
+        F)`` and ``(n_down, n_down, F)`` if
+        ``self_interaction`` else ``(n_up - 1, n_up, F)``
+        and ``(n_down - 1, n_down, F)``.
+    """
+    r_up = _vgl_slice0(r_vgl, slice(None, n_up))
+    r_dn = _vgl_slice0(r_vgl, slice(n_up, None))
+
+    def _block(r_block):
+        diffs = vgl_pair_diffs_send_recv(r_block, r_block)
+        if not self_interaction:
+            diffs = _vgl_offdiag_pairs(diffs)
+        return vgl_apply_edge_feature(
+            diffs, edge_feature_spec,
+        )
+
+    return _block(r_up), _block(r_dn)
+
+
+def vgl_build_anti_edges(
+    r_vgl: VGL,
+    *,
+    n_up: int,
+    n_down: int,
+    edge_feature_spec: dict,
+) -> tuple:
+    """Build ``(du, ud)`` anti-spin edge VGLs.
+
+    Mirrors the production :class:`AntiGraphEdges`
+    constituent arrays.  ``du`` carries diffs from
+    spin-down senders to spin-up receivers (shape
+    ``(n_down, n_up, F)``); ``ud`` is the transpose
+    (``(n_up, n_down, F)``).
+    """
+    r_up = _vgl_slice0(r_vgl, slice(None, n_up))
+    r_dn = _vgl_slice0(r_vgl, slice(n_up, None))
+    du_diff = vgl_pair_diffs_send_recv(r_dn, r_up)
+    ud_diff = vgl_pair_diffs_send_recv(r_up, r_dn)
+    return (
+        vgl_apply_edge_feature(du_diff, edge_feature_spec),
+        vgl_apply_edge_feature(ud_diff, edge_feature_spec),
+    )
+
+
+def vgl_same_edges_single_array(
+    uu_vgl: VGL, dd_vgl: VGL,
+) -> VGL:
+    """Concatenate ``uu`` and ``dd`` blocks into the
+    flat ``single_array`` layout of
+    :class:`SameGraphEdges`.
+
+    Output value shape: ``(n_uu + n_dd, F)`` where
+    ``n_uu = uu.shape[0] * uu.shape[1]`` and
+    ``n_dd = dd.shape[0] * dd.shape[1]``.
+    """
+    F = uu_vgl.value.shape[-1]
+    uu_flat = vgl_reshape(uu_vgl, (-1, F))
+    dd_flat = vgl_reshape(dd_vgl, (-1, F))
+    return vgl_concat([uu_flat, dd_flat], axis=-2)
+
+
+def vgl_anti_edges_single_array(
+    du_vgl: VGL, ud_vgl: VGL,
+) -> VGL:
+    """Concatenate ``du`` and ``ud`` blocks into the
+    flat ``single_array`` layout of
+    :class:`AntiGraphEdges`."""
+    F = du_vgl.value.shape[-1]
+    du_flat = vgl_reshape(du_vgl, (-1, F))
+    ud_flat = vgl_reshape(ud_vgl, (-1, F))
+    return vgl_concat([du_flat, ud_flat], axis=-2)
+
+
+def vgl_build_up_edges(
+    r_vgl: VGL,
+    *,
+    n_up: int,
+    n_down: int,
+    edge_feature_spec: dict,
+) -> VGL:
+    """Build ``'up'`` edges as a single VGL.
+
+    Mirrors the production :class:`UpGraphEdges` constructed
+    by :func:`MolecularGraphEdgeBuilder`: senders are the
+    spin-up electrons, receivers are all electrons.
+
+    Returns:
+        Edge VGL of value shape ``(n_up, n_e, F)``.
+    """
+    r_up = _vgl_slice0(r_vgl, slice(None, n_up))
+    diffs = vgl_pair_diffs_send_recv(r_up, r_vgl)
+    return vgl_apply_edge_feature(diffs, edge_feature_spec)
+
+
+def vgl_build_down_edges(
+    r_vgl: VGL,
+    *,
+    n_up: int,
+    n_down: int,
+    edge_feature_spec: dict,
+) -> VGL:
+    """Build ``'down'`` edges as a single VGL.
+
+    Mirrors the production :class:`DownGraphEdges`: senders
+    are the spin-down electrons, receivers are all electrons.
+
+    Returns:
+        Edge VGL of value shape ``(n_down, n_e, F)``.
+    """
+    r_dn = _vgl_slice0(r_vgl, slice(n_up, None))
+    diffs = vgl_pair_diffs_send_recv(r_dn, r_vgl)
+    return vgl_apply_edge_feature(diffs, edge_feature_spec)
+
+
+def _vgl_sum_along0(vin: VGL, normalize: bool) -> VGL:
+    """Reduce ``vin`` along value-axis 0 (sender axis).
+
+    ``normalize=True`` divides by the sender count, matching
+    ``jnp.mean``.  Empty senders short-circuit to ``jnp.sum``
+    semantics (no division).
+    """
+    n = vin.value.shape[0]
+    neg_axis = -vin.value.ndim
+    pooled = vgl_sum_axes(
+        vin, axes=(neg_axis,), keepdims=False,
+    )
+    if normalize and n > 0:
+        pooled = vgl_scale(pooled, 1.0 / n)
+    return pooled
+
+
+def vgl_sum_senders_simple(
+    edges_vgl: VGL, normalize: bool,
+) -> VGL:
+    """``sum_senders`` for :class:`SimpleGraphEdges` /
+    :class:`UpGraphEdges` / :class:`DownGraphEdges`.
+
+    Reduces the sender axis (value axis 0) of an edge VGL
+    of shape ``(n_send, n_recv, F)`` to ``(n_recv, F)``.
+    """
+    return _vgl_sum_along0(edges_vgl, normalize)
+
+
+def vgl_sum_senders_same(
+    uu_vgl: VGL, dd_vgl: VGL, normalize: bool,
+) -> VGL:
+    """``sum_senders`` for :class:`SameGraphEdges`.
+
+    Per-block reduction (uu over its senders, dd over its
+    senders), each optionally normalized by its own sender
+    count, then concatenated along the receiver axis.
+    """
+    up = _vgl_sum_along0(uu_vgl, normalize)
+    dn = _vgl_sum_along0(dd_vgl, normalize)
+    return vgl_concat([up, dn], axis=-2)
+
+
+def vgl_sum_senders_anti(
+    du_vgl: VGL, ud_vgl: VGL, normalize: bool,
+) -> VGL:
+    """``sum_senders`` for :class:`AntiGraphEdges`.
+
+    ``du`` reduces over its (down-spin) senders and lands on
+    spin-up receivers; ``ud`` reduces over its (up-spin)
+    senders and lands on spin-down receivers.  Concatenated
+    along the receiver axis to give shape ``(n_e, F)``.
+    """
+    up = _vgl_sum_along0(du_vgl, normalize)
+    dn = _vgl_sum_along0(ud_vgl, normalize)
+    return vgl_concat([up, dn], axis=-2)
+
+
+def vgl_convolution_update(
+    edges_vgl: dict,
+    h_vgl: VGL,
+    *,
+    edge_types,
+    n_up: int,
+    n_down: int,
+    normalize: bool,
+    w_specs: dict,
+    h_specs: dict,
+) -> VGL:
+    """VGL twin of
+    :class:`OmegaQMC.psi.nn.gnn.update_features.ConvolutionElectronUpdateFeature`.
+
+    For each requested edge type, applies the per-type
+    edge-feature MLP ``w_nets[et]`` to the edge VGL,
+    transforms the full per-electron embedding by the
+    per-type node MLP ``h_nets[et]``, multiplies the
+    sender-indexed transformed nodes into the transformed
+    edges, then reduces over senders (per the production
+    ``GraphEdges.convolve`` semantics for that class).
+    Concatenates across edge types along the feature axis.
+
+    Args:
+        edges_vgl: dict with the same layout as
+            :func:`vgl_edge_sum_update`.
+        h_vgl: full per-electron embedding VGL
+            ``(n_e, node_dim)``.
+        edge_types: edge types to convolve over (subset of
+            ``{'same','anti','up','down','ee'}``).
+        n_up, n_down: spin-block sizes.
+        normalize: per-type sum-vs-mean toggle (matches the
+            ``EdgeSumElectronUpdateFeature`` semantics: 'ee'
+            divides the *combined* same+anti by ``n_e``,
+            other types divide *per block* by the sender
+            count).
+        w_specs, h_specs: dict keyed by edge type, each
+            value a dict ``{'layers': [(W,b),...],
+            'activation': name, 'last_linear': bool}``
+            forwarded to :func:`vgl_mlp`.
+
+    Returns:
+        VGL of value shape
+        ``(n_e, len(edge_types) * tp_dim)``.
+    """
+    n_e = n_up + n_down
+
+    def _w(et, edge_part):
+        ws = w_specs[et]
+        return vgl_mlp(
+            edge_part, ws['layers'],
+            activation=ws.get('activation', 'tanh'),
+            last_linear=ws.get('last_linear', False),
+        )
+
+    def _h(et):
+        hs = h_specs[et]
+        return vgl_mlp(
+            h_vgl, hs['layers'],
+            activation=hs.get('activation', 'tanh'),
+            last_linear=hs.get('last_linear', False),
+        )
+
+    def _conv_simple(et, sender_slice):
+        we = _w(et, edges_vgl[et])
+        hx = _h(et)
+        sender = _vgl_slice0(hx, sender_slice)
+        sender_un = vgl_unsqueeze(sender, axis=-2)
+        prod = vgl_mul(we, sender_un)
+        return vgl_sum_senders_simple(prod, normalize)
+
+    def _conv_same(et, normalize_):
+        uu, dd = edges_vgl[et]
+        uu_we = _w(et, uu)
+        dd_we = _w(et, dd)
+        hx = _h(et)
+        send_up = vgl_unsqueeze(
+            _vgl_slice0(hx, slice(None, n_up)), axis=-2,
+        )
+        send_dn = vgl_unsqueeze(
+            _vgl_slice0(hx, slice(n_up, None)), axis=-2,
+        )
+        uu_prod = vgl_mul(uu_we, send_up)
+        dd_prod = vgl_mul(dd_we, send_dn)
+        return vgl_sum_senders_same(
+            uu_prod, dd_prod, normalize_,
+        )
+
+    def _conv_anti(et, normalize_):
+        du, ud = edges_vgl[et]
+        du_we = _w(et, du)
+        ud_we = _w(et, ud)
+        hx = _h(et)
+        send_up = vgl_unsqueeze(
+            _vgl_slice0(hx, slice(None, n_up)), axis=-2,
+        )
+        send_dn = vgl_unsqueeze(
+            _vgl_slice0(hx, slice(n_up, None)), axis=-2,
+        )
+        du_prod = vgl_mul(du_we, send_dn)
+        ud_prod = vgl_mul(ud_we, send_up)
+        return vgl_sum_senders_anti(
+            du_prod, ud_prod, normalize_,
+        )
+
+    pieces = []
+    for et in edge_types:
+        if et == 'ee':
+            same_conv = _conv_same('same', False)
+            anti_conv = _conv_anti('anti', False)
+            total = vgl_add(same_conv, anti_conv)
+            if normalize:
+                total = vgl_scale(total, 1.0 / n_e)
+            pieces.append(total)
+        elif et == 'same':
+            pieces.append(_conv_same(et, normalize))
+        elif et == 'anti':
+            pieces.append(_conv_anti(et, normalize))
+        elif et == 'up':
+            pieces.append(
+                _conv_simple(et, slice(None, n_up)),
+            )
+        elif et == 'down':
+            pieces.append(
+                _conv_simple(et, slice(n_up, None)),
+            )
+        else:
+            raise NotImplementedError(
+                f"convolution edge type not supported: "
+                f"{et!r}",
+            )
+    if len(pieces) == 1:
+        return pieces[0]
+    return vgl_concat(pieces, axis=-1)
+
+
+def vgl_edge_sum_update(
+    edges_vgl: dict,
+    *,
+    edge_types,
+    n_up: int,
+    n_down: int,
+    normalize: bool,
+) -> VGL:
+    """VGL twin of
+    :class:`OmegaQMC.psi.nn.gnn.update_features.EdgeSumElectronUpdateFeature`.
+
+    For each requested edge type, reduce the corresponding
+    edge VGL along the sender axis (per the production
+    ``sum_senders`` semantics for that class) and concatenate
+    the results along the feature axis.  Output value shape
+    ``(n_e, len(edge_types) * F)``.
+
+    The ``edges_vgl`` dict carries one entry per edge type
+    available to this layer.  Layout per key:
+
+    * ``'same'``: ``(uu_vgl, dd_vgl)`` tuple with shapes
+      ``(n_uu, n_up, F)`` / ``(n_dd, n_down, F)``.
+    * ``'anti'``: ``(du_vgl, ud_vgl)`` tuple with shapes
+      ``(n_down, n_up, F)`` / ``(n_up, n_down, F)``.
+    * ``'up'`` / ``'down'`` / any other simple type: a single
+      VGL of shape ``(n_send, n_e, F)``.
+
+    The ``'ee'`` alias matches the production special case
+    ``(same.sum_senders(False) + anti.sum_senders(False)) /
+    n_e`` (or ``/ 1`` if ``normalize=False``); it requires
+    both ``'same'`` and ``'anti'`` to be present in
+    ``edges_vgl``.
+    """
+    n_e = n_up + n_down
+    pieces = []
+    for et in edge_types:
+        if et == 'ee':
+            uu, dd = edges_vgl['same']
+            du, ud = edges_vgl['anti']
+            same_sum = vgl_sum_senders_same(
+                uu, dd, normalize=False,
+            )
+            anti_sum = vgl_sum_senders_anti(
+                du, ud, normalize=False,
+            )
+            total = vgl_add(same_sum, anti_sum)
+            if normalize:
+                total = vgl_scale(total, 1.0 / n_e)
+            pieces.append(total)
+        elif et == 'same':
+            uu, dd = edges_vgl[et]
+            pieces.append(
+                vgl_sum_senders_same(uu, dd, normalize),
+            )
+        elif et == 'anti':
+            du, ud = edges_vgl[et]
+            pieces.append(
+                vgl_sum_senders_anti(du, ud, normalize),
+            )
+        else:
+            pieces.append(
+                vgl_sum_senders_simple(
+                    edges_vgl[et], normalize,
+                ),
+            )
+    if len(pieces) == 1:
+        return pieces[0]
+    return vgl_concat(pieces, axis=-1)
+
+
+# ---------- Deep-features edge update (shared subnet_g) ----------
+
+def _vgl_slice_axis_m2(vin: VGL, start, stop) -> VGL:
+    """Slice ``vin`` along value-side axis -2.
+
+    The leading ``D`` axis of ``grad`` is preserved; ``start``
+    / ``stop`` index into the value-side axis -2 (which is
+    ``grad`` axis -2 as well, since ``grad`` shares the
+    trailing value shape).
+    """
+    return VGL(
+        value=vin.value[..., start:stop, :],
+        grad=vin.grad[..., start:stop, :],
+        lap=vin.lap[..., start:stop, :],
+    )
+
+
+def _vgl_edge_residual_one(
+    old_vgl: VGL, new_vgl: VGL, *, normalize: bool,
+) -> VGL:
+    """Per-leaf residual mirroring :class:`ResidualConnection`.
+
+    Returns ``new_vgl`` when shapes differ (matches the
+    production projection-free branch), otherwise the
+    optionally-normalised sum.
+    """
+    if old_vgl.value.shape != new_vgl.value.shape:
+        return new_vgl
+    summed = vgl_add(old_vgl, new_vgl)
+    if normalize:
+        return vgl_scale(summed, 1.0 / jnp.sqrt(2.0))
+    return summed
+
+
+def _vgl_apply_tp_residual(old, new, *, normalize: bool):
+    """Apply ``ResidualConnection`` over the dict-of-edges
+    layout used by :func:`vgl_update_edges_shared`.
+
+    Mirrors :meth:`ResidualConnection.__call__` operating
+    leaf-by-leaf on the production
+    :class:`SameGraphEdges` / :class:`AntiGraphEdges` /
+    :class:`SimpleGraphEdges` pytrees: the ``same`` / ``anti``
+    leaves are ``(uu, dd)`` / ``(du, ud)`` pairs of VGLs;
+    other types are a single VGL leaf.
+    """
+    if isinstance(old, VGL):
+        return _vgl_edge_residual_one(
+            old, new, normalize=normalize,
+        )
+    return tuple(
+        _vgl_edge_residual_one(o, n, normalize=normalize)
+        for o, n in zip(old, new)
+    )
+
+
+def vgl_update_edges_shared(
+    edges_vgl: dict,
+    *,
+    edge_types_order,
+    subnet_layers,
+    subnet_activation='tanh',
+    subnet_last_linear: bool = False,
+    tp_residual_normalize=None,
+) -> dict:
+    """VGL twin of :meth:`ElectronGNNLayer._update_edges` with
+    ``deep_features='shared'``.
+
+    Mirrors the production op-for-op: stack each edge type's
+    ``single_array`` representation, concatenate along axis
+    ``-2``, apply a single shared ``subnet_g`` MLP on the
+    feature axis, split the result back into per-type chunks,
+    reshape into the original structured layout, then
+    optionally apply the residual connection.
+
+    Restricted to a homogeneous edge-type list (all keys
+    must produce ``single_array`` tensors of matching ``ndim``
+    on every axis except ``-2``); the production
+    :meth:`_update_edges` carries the same restriction
+    implicitly through ``jnp.concatenate(..., axis=-2)``.
+
+    Args:
+        edges_vgl: dict layout matching
+            :func:`vgl_edge_sum_update`.  ``'same'`` / ``'anti'``
+            entries are ``(uu, dd)`` / ``(du, ud)`` tuples;
+            other types are single VGLs.
+        edge_types_order: ordered list of dict keys to process.
+            Must match the iteration order used by
+            :meth:`_update_edges` (i.e. ``list(edges.keys())``
+            of the production graph).
+        subnet_layers, subnet_activation,
+            subnet_last_linear: forwarded to :func:`vgl_mlp`
+            (the per-layer ``subnet_g``).
+        tp_residual_normalize: ``None`` to skip the residual,
+            else a bool forwarded to
+            :class:`ResidualConnection`.
+
+    Returns:
+        Dict with the same structure as ``edges_vgl``,
+        carrying the updated edge VGLs.
+    """
+    if len(edge_types_order) == 0:
+        return {}
+
+    arrs = []
+    metas = []
+    for k in edge_types_order:
+        e = edges_vgl[k]
+        if k == 'same':
+            uu, dd = e
+            F = uu.value.shape[-1]
+            uu_flat = vgl_reshape(uu, (-1, F))
+            dd_flat = vgl_reshape(dd, (-1, F))
+            arrs.append(
+                vgl_concat([uu_flat, dd_flat], axis=-2),
+            )
+            metas.append({
+                'kind': 'same',
+                'uu_shape': uu.value.shape[:-1],
+                'dd_shape': dd.value.shape[:-1],
+            })
+        elif k == 'anti':
+            du, ud = e
+            F = du.value.shape[-1]
+            du_flat = vgl_reshape(du, (-1, F))
+            ud_flat = vgl_reshape(ud, (-1, F))
+            arrs.append(
+                vgl_concat([du_flat, ud_flat], axis=-2),
+            )
+            metas.append({
+                'kind': 'anti',
+                'du_shape': du.value.shape[:-1],
+                'ud_shape': ud.value.shape[:-1],
+            })
+        else:
+            arrs.append(e)
+            metas.append({
+                'kind': 'simple',
+                'shape': e.value.shape,
+            })
+
+    ref_ndim = arrs[0].value.ndim
+    for a in arrs[1:]:
+        if a.value.ndim != ref_ndim:
+            raise NotImplementedError(
+                "vgl_update_edges_shared: heterogeneous "
+                "single_array ndim across edge types is "
+                "not supported (matches production "
+                "concatenate(axis=-2) restriction)",
+            )
+
+    sizes = [a.value.shape[-2] for a in arrs]
+    if len(arrs) == 1:
+        combined = arrs[0]
+    else:
+        combined = vgl_concat(arrs, axis=-2)
+
+    transformed = vgl_mlp(
+        combined, subnet_layers,
+        activation=subnet_activation,
+        last_linear=subnet_last_linear,
+    )
+
+    F_new = transformed.value.shape[-1]
+    parts = []
+    start = 0
+    for sz in sizes:
+        parts.append(
+            _vgl_slice_axis_m2(transformed, start, start + sz),
+        )
+        start += sz
+
+    new_edges = {}
+    for k, part, meta in zip(edge_types_order, parts, metas):
+        kind = meta['kind']
+        if kind == 'same':
+            uu_shape = meta['uu_shape']
+            n_uu_flat = uu_shape[-2] * uu_shape[-1]
+            uu_part = _vgl_slice_axis_m2(part, 0, n_uu_flat)
+            dd_part = _vgl_slice_axis_m2(
+                part, n_uu_flat, part.value.shape[-2],
+            )
+            uu_new = vgl_reshape(
+                uu_part, uu_shape + (F_new,),
+            )
+            dd_new = vgl_reshape(
+                dd_part, meta['dd_shape'] + (F_new,),
+            )
+            new_edges[k] = (uu_new, dd_new)
+        elif kind == 'anti':
+            du_shape = meta['du_shape']
+            n_du_flat = du_shape[-2] * du_shape[-1]
+            du_part = _vgl_slice_axis_m2(part, 0, n_du_flat)
+            ud_part = _vgl_slice_axis_m2(
+                part, n_du_flat, part.value.shape[-2],
+            )
+            du_new = vgl_reshape(
+                du_part, du_shape + (F_new,),
+            )
+            ud_new = vgl_reshape(
+                ud_part, meta['ud_shape'] + (F_new,),
+            )
+            new_edges[k] = (du_new, ud_new)
+        else:
+            new_edges[k] = part
+
+    if tp_residual_normalize is not None:
+        new_edges = {
+            k: _vgl_apply_tp_residual(
+                edges_vgl[k], new_edges[k],
+                normalize=tp_residual_normalize,
+            )
+            for k in edge_types_order
+        }
+    return new_edges
+
+
 # ---------- Slater-determinant VGL ----------
 #
 # Differentiating ``log|det S(x)|`` analytically via Jacobi's
@@ -1747,16 +2451,27 @@ def vgl_electron_gnn_layer_psiformer(
     subnet_activation='tanh',
     subnet_last_linear: bool = False,
     electron_residual_normalize=None,
-) -> VGL:
+    edges_vgl=None,
+    deep_features=False,
+    last_layer: bool = False,
+    edge_types_order=None,
+    subnet_g_layers=None,
+    subnet_g_activation='tanh',
+    subnet_g_last_linear: bool = False,
+    tp_residual_normalize=None,
+):
     """PsiFormer-shape :class:`ElectronGNNLayer` VGL.
 
     Composes one or more update features per
     ``update_specs`` (each a dict with a ``'type'`` key
     and the corresponding kwargs), concatenates them along
     the embedding axis, and applies the ``subnet`` MLP plus
-    optional residual.  Restricted to the ``concatenate``
-    update rule, ``deep_features=False``, and the
-    ``last_layer`` path (no edge updates).
+    optional residual.  When ``deep_features='shared'`` and
+    ``last_layer=False``, also runs the deep-feature edge
+    update (:func:`vgl_update_edges_shared`) after the node
+    update; the updated edges are returned as the second
+    tuple element.  Otherwise ``edges_vgl`` is returned
+    unchanged.
 
     Supported update types:
 
@@ -1766,6 +2481,14 @@ def vgl_electron_gnn_layer_psiformer(
     * ``'node_sum'``       — kwargs ``node_types`` (subset
       of ``{'up','down'}``) and ``normalize``;
       forwarded to :func:`vgl_node_sum_update`.
+    * ``'edge_sum'``       — kwargs ``edge_types`` and
+      ``normalize``; forwarded to
+      :func:`vgl_edge_sum_update` and consumes the
+      ``edges_vgl`` dict supplied by the outer GNN.
+    * ``'convolution'``    — kwargs ``edge_types``,
+      ``normalize``, ``w_specs``, ``h_specs``; forwarded
+      to :func:`vgl_convolution_update` and consumes the
+      ``edges_vgl`` dict.
 
     Args:
         h_vgl: input embedding VGL ``(n_e, emb_dim)``.
@@ -1777,6 +2500,9 @@ def vgl_electron_gnn_layer_psiformer(
             (production: ``MLP(uf_total_dim, emb_dim)``).
         electron_residual_normalize: ``None`` to skip the
             residual, or a bool to apply :func:`vgl_residual`.
+        edges_vgl: optional dict of edge VGLs keyed by edge
+            type (see :func:`vgl_edge_sum_update`); required
+            when any ``'edge_sum'`` update is present.
     """
     feats = []
     for spec in update_specs:
@@ -1812,6 +2538,30 @@ def vgl_electron_gnn_layer_psiformer(
                 node_types=spec['node_types'],
                 normalize=spec['normalize'],
             )
+        elif t == 'edge_sum':
+            if edges_vgl is None:
+                raise ValueError(
+                    "edge_sum update requires edges_vgl",
+                )
+            f = vgl_edge_sum_update(
+                edges_vgl,
+                edge_types=spec['edge_types'],
+                n_up=n_up, n_down=n_down,
+                normalize=spec['normalize'],
+            )
+        elif t == 'convolution':
+            if edges_vgl is None:
+                raise ValueError(
+                    "convolution update requires edges_vgl",
+                )
+            f = vgl_convolution_update(
+                edges_vgl, h_vgl,
+                edge_types=spec['edge_types'],
+                n_up=n_up, n_down=n_down,
+                normalize=spec['normalize'],
+                w_specs=spec['w_specs'],
+                h_specs=spec['h_specs'],
+            )
         else:
             raise NotImplementedError(
                 f"update feature type not supported by "
@@ -1832,6 +2582,27 @@ def vgl_electron_gnn_layer_psiformer(
             h_vgl, updated,
             normalize=electron_residual_normalize,
         )
+
+    if deep_features == 'shared' and not last_layer:
+        if edges_vgl is None or edge_types_order is None:
+            raise ValueError(
+                "deep_features='shared' requires edges_vgl "
+                "and edge_types_order",
+            )
+        if subnet_g_layers is None:
+            raise ValueError(
+                "deep_features='shared' requires "
+                "subnet_g_layers",
+            )
+        new_edges = vgl_update_edges_shared(
+            edges_vgl,
+            edge_types_order=edge_types_order,
+            subnet_layers=subnet_g_layers,
+            subnet_activation=subnet_g_activation,
+            subnet_last_linear=subnet_g_last_linear,
+            tp_residual_normalize=tp_residual_normalize,
+        )
+        return updated, new_edges
     return updated
 
 
@@ -1843,12 +2614,21 @@ def vgl_electron_gnn_psiformer(
     n_down: int,
     embedding_kwargs,
     layer_specs,
+    edge_features=None,
+    self_interaction: bool = True,
+    deep_features=False,
 ) -> VGL:
     """VGL twin of :class:`ElectronGNN` in PsiFormer mode.
 
     Composes :func:`vgl_electron_embedding_positional` with a
     sequence of :func:`vgl_electron_gnn_layer_psiformer`
     layers, returning the final per-electron embedding VGL.
+
+    When ``edge_features`` is not ``None``, the corresponding
+    edge VGLs are constructed once (matching the production
+    ``deep_features=False`` mode in which edges stay fixed
+    across layers) and threaded through each layer for
+    consumption by ``edge_sum`` updates.
 
     Args:
         r_vgl: electron-coord VGL ``(n_e, 3)``.
@@ -1861,15 +2641,72 @@ def vgl_electron_gnn_psiformer(
         layer_specs: iterable of dicts, each forwarded as
             ``**spec`` to
             :func:`vgl_electron_gnn_layer_psiformer`.
+        edge_features: ``None`` or dict mapping edge type
+            (``'same'``, ``'anti'``, ``'up'``, ``'down'``)
+            to an edge-feature spec dict accepted by
+            :func:`vgl_apply_edge_feature`.
+        self_interaction: forwarded to
+            :func:`vgl_build_same_edges` for the ``'same'``
+            edge type.
     """
     h = vgl_electron_embedding_positional(
         r_vgl, R, n_up=n_up, n_down=n_down,
         **embedding_kwargs,
     )
-    for spec in layer_specs:
-        h = vgl_electron_gnn_layer_psiformer(
-            h, n_up=n_up, n_down=n_down, **spec,
+
+    edges_vgl = None
+    if edge_features:
+        edges_vgl = {}
+        for et, spec in edge_features.items():
+            if et == 'same':
+                edges_vgl[et] = vgl_build_same_edges(
+                    r_vgl,
+                    n_up=n_up, n_down=n_down,
+                    edge_feature_spec=spec,
+                    self_interaction=self_interaction,
+                )
+            elif et == 'anti':
+                edges_vgl[et] = vgl_build_anti_edges(
+                    r_vgl,
+                    n_up=n_up, n_down=n_down,
+                    edge_feature_spec=spec,
+                )
+            elif et == 'up':
+                edges_vgl[et] = vgl_build_up_edges(
+                    r_vgl,
+                    n_up=n_up, n_down=n_down,
+                    edge_feature_spec=spec,
+                )
+            elif et == 'down':
+                edges_vgl[et] = vgl_build_down_edges(
+                    r_vgl,
+                    n_up=n_up, n_down=n_down,
+                    edge_feature_spec=spec,
+                )
+            else:
+                raise NotImplementedError(
+                    f"edge type not supported by VGL "
+                    f"path: {et!r}",
+                )
+
+    edge_types_order = (
+        list(edge_features.keys()) if edge_features else None
+    )
+    n_layers = len(layer_specs)
+    for i, spec in enumerate(layer_specs):
+        last = (i == n_layers - 1)
+        out = vgl_electron_gnn_layer_psiformer(
+            h, n_up=n_up, n_down=n_down,
+            edges_vgl=edges_vgl,
+            deep_features=deep_features,
+            last_layer=last,
+            edge_types_order=edge_types_order,
+            **spec,
         )
+        if isinstance(out, VGL):
+            h = out
+        else:
+            h, edges_vgl = out
     return h
 
 
@@ -1898,6 +2735,9 @@ def log_psi_vgl_psiformer(
     envelope,
     cusp,
     jastrow=None,
+    edge_features=None,
+    self_interaction: bool = True,
+    deep_features=False,
 ) -> VGL:
     """VGL twin of
     :meth:`OmegaQMC.psi.nn.wf.NeuralNetworkWaveFunction.__call__`
@@ -1972,6 +2812,9 @@ def log_psi_vgl_psiformer(
         r_vgl, R, n_up=n_up, n_down=n_down,
         embedding_kwargs=embedding_kwargs,
         layer_specs=layer_specs,
+        edge_features=edge_features,
+        self_interaction=self_interaction,
+        deep_features=deep_features,
     )                                           # (n_e, emb_dim)
 
     # 3. Backflow MLPs (multi_head with n_bf=1 — squeeze)

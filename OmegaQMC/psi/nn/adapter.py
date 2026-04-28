@@ -13,7 +13,15 @@ from flax import nnx
 
 from .config import NNAnsatzConfig, load_nn_config
 from .forward_lap import log_psi_vgl_psiformer
+from .gnn.edge_features import (
+    CombinedEdgeFeature,
+    DifferenceEdgeFeature,
+    DistancePowerEdgeFeature,
+    GaussianEdgeFeature,
+)
 from .gnn.update_features import (
+    ConvolutionElectronUpdateFeature,
+    EdgeSumElectronUpdateFeature,
     NodeAttentionElectronUpdateFeature,
     NodeSumElectronUpdateFeature,
     ResidualElectronUpdateFeature,
@@ -37,8 +45,6 @@ def _psiformer_compat(config) -> bool:
         return False
     if config.envelope_spin_restricted:
         return False
-    if config.envelope_softplus_zeta:
-        return False
     if not config.use_backflow:
         return False
     if config.cusp_nuclei:
@@ -49,28 +55,16 @@ def _psiformer_compat(config) -> bool:
         not in ('psiformer', 'deepqmc')
     ):
         return False
-    if (
-        config.cusp_electrons
-        and not config.cusp_trainable_alpha
-    ):
-        return False
-    if config.edge_types:
-        return False
-    if config.deep_features:
-        return False
-    if not config.use_spin_embedding:
-        return False
-    if not config.project_to_embedding_dim:
+    if config.deep_features not in (False, 'shared'):
         return False
     if config.ne_powers != [1]:
-        return False
-    if not config.ne_log_rescale:
         return False
     if not config.update_features:
         return False
     for uf in config.update_features:
         if uf.get('type') not in (
             'node_attention', 'residual', 'node_sum',
+            'edge_sum', 'convolution',
         ):
             return False
     return True
@@ -136,8 +130,72 @@ def _extract_update_spec(uf):
             'node_types': uf.node_types,
             'normalize': uf.normalize,
         }
+    if isinstance(uf, EdgeSumElectronUpdateFeature):
+        return {
+            'type': 'edge_sum',
+            'edge_types': uf.edge_types,
+            'normalize': uf.normalize,
+        }
+    if isinstance(uf, ConvolutionElectronUpdateFeature):
+        def _mlp_spec(net):
+            return {
+                'layers': _extract_mlp_layers(net),
+                'activation': _mlp_activation_name(net),
+                'last_linear': net.last_linear,
+            }
+        w_specs = {
+            et: _mlp_spec(uf.w_nets[et])
+            for et in uf.edge_types
+        }
+        h_specs = {
+            et: _mlp_spec(uf.h_nets[et])
+            for et in uf.edge_types
+        }
+        return {
+            'type': 'convolution',
+            'edge_types': uf.edge_types,
+            'normalize': uf.normalize,
+            'w_specs': w_specs,
+            'h_specs': h_specs,
+        }
     raise ValueError(
         f"unsupported update feature: {type(uf).__name__}",
+    )
+
+
+def _extract_edge_feature_spec(feat):
+    """Reverse-lookup an edge-feature module to a spec dict
+    accepted by :func:`vgl_apply_edge_feature`."""
+    if isinstance(feat, CombinedEdgeFeature):
+        return {
+            'type': 'combined',
+            'features': [
+                _extract_edge_feature_spec(f)
+                for f in feat.features
+            ],
+        }
+    if isinstance(feat, DistancePowerEdgeFeature):
+        spec = {
+            'type': 'distance_power',
+            'powers': [int(p) for p in feat.powers],
+            'log_rescale': feat.log_rescale,
+        }
+        if feat.eps:
+            spec['eps'] = feat.eps
+        return spec
+    if isinstance(feat, DifferenceEdgeFeature):
+        return {
+            'type': 'difference',
+            'log_rescale': feat.log_rescale,
+        }
+    if isinstance(feat, GaussianEdgeFeature):
+        return {
+            'type': 'gaussian',
+            'mus': feat.mus,
+            'sigmas': feat.sigmas,
+        }
+    raise ValueError(
+        f"unsupported edge feature: {type(feat).__name__}",
     )
 
 
@@ -150,23 +208,42 @@ def _extract_layer_spec(layer):
         _extract_update_spec(uf)
         for uf in layer.update_features
     ]
-    return {
+    spec = {
         'update_specs': update_specs,
         'subnet_layers': _extract_mlp_layers(layer.subnet),
         'subnet_activation': 'tanh',
         'subnet_last_linear': False,
         'electron_residual_normalize': e_res_norm,
     }
+    if layer.deep_features == 'shared':
+        spec['subnet_g_layers'] = _extract_mlp_layers(
+            layer.subnet_g,
+        )
+        spec['subnet_g_activation'] = (
+            _mlp_activation_name(layer.subnet_g)
+        )
+        spec['subnet_g_last_linear'] = (
+            layer.subnet_g.last_linear
+        )
+        tp_res = layer.tp_residual
+        spec['tp_residual_normalize'] = (
+            tp_res.normalize if tp_res is not None else None
+        )
+    return spec
 
 
-def _build_vgl_kwargs(model):
+def _build_vgl_kwargs(model, *, ne_log_rescale=True):
     """Extract VGL kwargs from a built PsiFormer model."""
     gnn = model.omni.gnn
-    proj_W = gnn.electron_embedding.proj.kernel.value
+    embed_mod = gnn.electron_embedding
+    proj_W = (
+        embed_mod.proj.kernel.value
+        if embed_mod.proj is not None else None
+    )
     embedding_kwargs = {
         'ne_powers': [1],
-        'ne_log_rescale': True,
-        'use_spin': True,
+        'ne_log_rescale': ne_log_rescale,
+        'use_spin': embed_mod.use_spin,
         'proj_W': proj_W,
     }
     layer_specs = [
@@ -212,15 +289,32 @@ def _build_vgl_kwargs(model):
             raise ValueError(
                 f"unsupported cusp class: {cusp_cls_name}",
             )
+        if cusp_mod.trainable_alpha:
+            same_alpha = cusp_mod.same_alpha.value
+            anti_alpha = cusp_mod.anti_alpha.value
+        else:
+            init = jnp.asarray(
+                cusp_mod.initial_alpha, dtype=float,
+            )
+            same_alpha = init
+            anti_alpha = init
         cusp = {
             'type': cusp_type,
             'same_scale': cusp_mod.same_scale,
             'anti_scale': cusp_mod.anti_scale,
-            'same_alpha': cusp_mod.same_alpha.value,
-            'anti_alpha': cusp_mod.anti_alpha.value,
+            'same_alpha': same_alpha,
+            'anti_alpha': anti_alpha,
         }
     else:
         cusp = None
+    if gnn.edge_features:
+        edge_features = {
+            et: _extract_edge_feature_spec(feat)
+            for et, feat in gnn.edge_features.items()
+        }
+    else:
+        edge_features = None
+    deep_features = gnn.layers[0].deep_features
     return {
         'embedding_kwargs': embedding_kwargs,
         'layer_specs': layer_specs,
@@ -229,6 +323,9 @@ def _build_vgl_kwargs(model):
         'envelope': envelope,
         'cusp': cusp,
         'jastrow': jastrow,
+        'edge_features': edge_features,
+        'self_interaction': gnn.self_interaction,
+        'deep_features': deep_features,
     }
 
 
@@ -309,7 +406,9 @@ def make_nn_log_psi(config, mol_info, rng_key):
         )
         elec_flat = r_grouped.reshape(-1)
         mdl = nnx.merge(graphdef, params, other)
-        kwargs = _build_vgl_kwargs(mdl)
+        kwargs = _build_vgl_kwargs(
+            mdl, ne_log_rescale=config.ne_log_rescale,
+        )
         out = log_psi_vgl_psiformer(
             elec_flat, nuc_crds,
             n_up=n_up, n_down=n_down, n_det=n_det,
