@@ -39,7 +39,7 @@ def h2_mol():
 def psiformer_trial(h2_mol):
     """Build a PsiFormer trial on H2."""
     rng_key = jax.random.key(123)
-    log_psi, params, graphdef = make_nn_log_psi(
+    log_psi, params, graphdef, _lap_grad = make_nn_log_psi(
         'psiformer', h2_mol, rng_key,
     )
     return log_psi, params, h2_mol

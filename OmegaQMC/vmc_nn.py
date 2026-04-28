@@ -23,7 +23,6 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
 
 from .psi.nn.adapter import make_nn_log_psi
-from .psi.nn.physics import laplacian
 from .constants import MIN_DIST_THRESHOLD
 from .utils import (
     do_binning_analysis,
@@ -112,10 +111,11 @@ class _VMCDriverNN:
             )
         )
 
-        log_psi, init_params, graphdef \
+        log_psi, init_params, graphdef, lap_grad \
             = make_nn_log_psi(config, mol_info, init_key)
         self.log_psi = log_psi
         self.params = init_params
+        self.lap_grad = lap_grad
 
         # Precompute nuclear repulsion energy and gradient
         def _nuc_repulsion(R):
@@ -153,13 +153,12 @@ class _VMCDriverNN:
 
         @jax.jit
         def energy_ke(elec_crds, params):
-            def f_flat(r_flat):
-                r = r_flat.reshape(nelec, 3)
-                return log_psi(r, nuc_crds, params)
-            r_flat = elec_crds.reshape(-1)
-            lap_fn = laplacian(f_flat)
-            lap_val, grad_val = lap_fn(r_flat)
-            return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
+            lap_val, grad_val = lap_grad(
+                elec_crds, nuc_crds, params,
+            )
+            return -0.5 * (
+                lap_val + jnp.dot(grad_val, grad_val)
+            )
 
         self.energy_ee = energy_ee
         self.energy_en = energy_en

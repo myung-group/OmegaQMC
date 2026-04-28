@@ -41,7 +41,6 @@ from .nn_checkpoint import (
     load_nn_checkpoint,
 )
 from .psi.nn.adapter import make_nn_log_psi
-from .psi.nn.physics import laplacian
 from .constants import MIN_DIST_THRESHOLD
 # from .utils import do_binning_analysis
 
@@ -189,13 +188,14 @@ class _VMCOptDriverNN_SR:
             else getattr(config, 'name', 'custom')
         )
 
-        log_psi, init_params, graphdef = (
+        log_psi, init_params, graphdef, lap_grad = (
             make_nn_log_psi(
                 config, mol_info, init_key,
             )
         )
         self.init_params = init_params
         self.log_psi = log_psi
+        self.lap_grad = lap_grad
 
         # Precompute nuclear repulsion
         n_nuc = len(charges)
@@ -235,13 +235,12 @@ class _VMCOptDriverNN_SR:
         # --- Kinetic energy via NN Laplacian ---
         @jax.jit
         def energy_ke(elec_crds, params):
-            def f_flat(r_flat):
-                r = r_flat.reshape(nelec, 3)
-                return log_psi(r, nuc_crds, params)
-            r_flat = elec_crds.reshape(-1)
-            lap_fn = laplacian(f_flat)
-            lap_val, grad_val = lap_fn(r_flat)
-            return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
+            lap_val, grad_val = lap_grad(
+                elec_crds, nuc_crds, params,
+            )
+            return -0.5 * (
+                lap_val + jnp.dot(grad_val, grad_val)
+            )
 
         # --- Total local energy ---
         @jax.jit

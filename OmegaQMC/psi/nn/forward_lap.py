@@ -87,9 +87,18 @@ Slices landed so far:
   single ``node_attention`` update feature, ``concatenate``
   rule.  Other configurations defer to a later slice.
 
-Remaining primitives (top-level ``log_psi_vgl`` builder,
-driver wiring, ...) follow the same convention and land
-in subsequent slices.
+* slice 13 — top-level ``log|ψ|`` builder for PsiFormer:
+  ``log_psi_vgl_psiformer`` composes the slice-12 GNN
+  with per-spin backflow MLPs, the slice-9 envelopes, the
+  slice-10 cusp + backflow op, and the slice-6 Slater
+  multi-det aggregation into a scalar
+  ``log|ψ|(elec_flat, R) → VGL`` matching the
+  PsiFormer-config :class:`NeuralNetworkWaveFunction`.
+
+Remaining primitives (driver wiring of ``log_psi_vgl``
+into ``_VMCDriverNN`` / ``_VMCOptDriverNN_SR`` and
+config-coverage extensions) follow the same convention
+and land in subsequent slices.
 """
 
 from typing import NamedTuple
@@ -1731,3 +1740,217 @@ def vgl_electron_gnn_psiformer(
     for spec in layer_specs:
         h = vgl_electron_gnn_layer_psiformer(h, **spec)
     return h
+
+
+# ---------- Top-level log|ψ| builder (PsiFormer) ----------
+
+def _vgl_slice0(vin: VGL, idx) -> VGL:
+    """Slice ``vin`` along value-axis 0 (and grad axis 1)."""
+    return VGL(
+        value=vin.value[idx],
+        grad=vin.grad[:, idx],
+        lap=vin.lap[idx],
+    )
+
+
+def log_psi_vgl_psiformer(
+    elec_flat: jnp.ndarray,
+    R: jnp.ndarray,
+    *,
+    n_up: int,
+    n_down: int,
+    n_det: int,
+    embedding_kwargs,
+    layer_specs,
+    bf_up_layers,
+    bf_down_layers,
+    envelope,
+    cusp,
+) -> VGL:
+    """VGL twin of
+    :meth:`OmegaQMC.psi.nn.wf.NeuralNetworkWaveFunction.__call__`
+    restricted to the PsiFormer config.
+
+    Assumed config:
+
+    * ``full_determinant=True``,
+    * ``backflow_transform='mult'``,
+    * ``conf_coeff=SumPool(1)`` (coefficients = ones),
+    * ``omni`` = GNN + per-spin multi-head backflow MLPs,
+      no Jastrow,
+    * envelope = isotropic, ``per_orbital_exponent=True``,
+      ``spin_restricted=False``, ``softplus_zeta=False``,
+    * ``cusp_electrons=PsiformerCusp`` (or ``None``);
+    * ``cusp_nuclei=None``.
+
+    Args:
+        elec_flat: 1-D electron coordinates of shape
+            ``(3 * (n_up + n_down),)``.
+        R: nucleus coordinates ``(n_nuc, 3)`` — constant in
+            ``elec_flat``.
+        n_up, n_down, n_det: spin-block and determinant
+            counts.
+        embedding_kwargs, layer_specs: forwarded to
+            :func:`vgl_electron_gnn_psiformer`.
+        bf_up_layers, bf_down_layers: ``[(w, b), ...]`` for
+            the per-spin backflow MLPs (single ``n_bf=1``
+            head; activation is ``None`` and
+            ``last_linear=True`` per the production
+            ``bf_mlp_*`` config).
+        envelope: dict with keys ``center_idx``, ``zetas_up``,
+            ``zetas_down``, ``pi_up``, ``pi_down``,
+            ``isotropic``, ``per_orbital_exponent``,
+            ``softplus_zeta``.  Constants extracted from the
+            production :class:`ExponentialEnvelopes`.
+        cusp: ``None`` or dict with keys ``same_scale``,
+            ``anti_scale``, ``same_alpha``, ``anti_alpha``.
+
+    Returns:
+        VGL of ``log|ψ|`` (scalar value and lap, ``(D,)`` grad).
+    """
+    n_e = n_up + n_down
+    D = elec_flat.shape[0]
+    assert D == 3 * n_e
+
+    r_vgl = vgl_reshape(vgl_input(elec_flat), (n_e, 3))
+    R_vgl = vgl_constant(R, D=D, dtype=elec_flat.dtype)
+
+    # 1. Geometry — diffs and distances
+    diffs_nuc = vgl_pairwise_diffs(r_vgl, R_vgl)
+    # diff_vec: (n_e, n_nuc, 3)
+    diff_vec = VGL(
+        value=diffs_nuc.value[..., :3],
+        grad=diffs_nuc.grad[..., :3],
+        lap=diffs_nuc.lap[..., :3],
+    )
+    dists_nuc = vgl_safe_norm(diff_vec)        # (n_e, n_nuc)
+    dists_elec_full = vgl_pairwise_self_distance(
+        r_vgl, full=True,
+    )                                           # (n_e, n_e)
+
+    # 2. GNN
+    h = vgl_electron_gnn_psiformer(
+        r_vgl, R, n_up=n_up, n_down=n_down,
+        embedding_kwargs=embedding_kwargs,
+        layer_specs=layer_specs,
+    )                                           # (n_e, emb_dim)
+
+    # 3. Backflow MLPs (multi_head with n_bf=1 — squeeze)
+    h_up = _vgl_slice0(h, slice(None, n_up))
+    h_dn = _vgl_slice0(h, slice(n_up, None))
+    bf_up = vgl_mlp(
+        h_up, bf_up_layers,
+        activation=None, last_linear=True,
+    )                                           # (n_up, n_e*n_det)
+    bf_dn = vgl_mlp(
+        h_dn, bf_down_layers,
+        activation=None, last_linear=True,
+    )                                           # (n_down, n_e*n_det)
+    bf_up = vgl_reshape(bf_up, (n_up, n_det, n_e))
+    bf_dn = vgl_reshape(bf_dn, (n_down, n_det, n_e))
+    # (n_det, n_up, n_e) and (n_det, n_down, n_e)
+    bf_up = vgl_swapaxes(bf_up, -2, -3)
+    bf_dn = vgl_swapaxes(bf_dn, -2, -3)
+
+    # 4. Envelope (per spin)
+    diffs_up = _vgl_slice0(diffs_nuc, slice(None, n_up))
+    diffs_dn = _vgl_slice0(diffs_nuc, slice(n_up, None))
+    orb_up_env = vgl_exponential_envelopes_one_spin(
+        diffs_up,
+        center_idx=envelope['center_idx'],
+        zeta=envelope['zetas_up'],
+        pi=envelope['pi_up'],
+        isotropic=envelope['isotropic'],
+        per_orbital_exponent=envelope['per_orbital_exponent'],
+        softplus_zeta=envelope['softplus_zeta'],
+        n_det=n_det,
+    )                                           # (n_det, n_up, n_e)
+    orb_dn_env = vgl_exponential_envelopes_one_spin(
+        diffs_dn,
+        center_idx=envelope['center_idx'],
+        zeta=envelope['zetas_down'],
+        pi=envelope['pi_down'],
+        isotropic=envelope['isotropic'],
+        per_orbital_exponent=envelope['per_orbital_exponent'],
+        softplus_zeta=envelope['softplus_zeta'],
+        n_det=n_det,
+    )                                           # (n_det, n_down, n_e)
+
+    # 5. BackflowOp (mult only) — xs = xs_env · mult_act(fs)
+    #    BackflowOp.with_envelope=True, but the envel array
+    #    is unused on the mult branch, so this reduces to a
+    #    plain element-wise product.
+    mult_up = _vgl_default_mult_act(bf_up)
+    mult_dn = _vgl_default_mult_act(bf_dn)
+    orb_up = vgl_mul(orb_up_env, mult_up)
+    orb_dn = vgl_mul(orb_dn_env, mult_dn)
+
+    # 6. Slater multi-det
+    orb_full = vgl_concat(
+        [orb_up, orb_dn], axis=-2,
+    )                                           # (n_det, n_e, n_e)
+    sign_per_det, log_abs = slogdet_vgl(orb_full)
+    coeffs = jnp.ones((n_det,), dtype=elec_flat.dtype)
+    log_psi_main = slogdet_multidet_vgl(
+        log_abs, sign_per_det, coeffs,
+    )                                           # scalar VGL
+
+    # 7. Electron cusp (PsiformerCusp)
+    if cusp is None:
+        return log_psi_main
+
+    same_up = VGL(
+        value=dists_elec_full.value[:n_up, :n_up],
+        grad=dists_elec_full.grad[:, :n_up, :n_up],
+        lap=dists_elec_full.lap[:n_up, :n_up],
+    )
+    same_dn = VGL(
+        value=dists_elec_full.value[n_up:, n_up:],
+        grad=dists_elec_full.grad[:, n_up:, n_up:],
+        lap=dists_elec_full.lap[n_up:, n_up:],
+    )
+    iu_up, ju_up = jnp.triu_indices(n_up, k=1)
+    iu_dn, ju_dn = jnp.triu_indices(n_down, k=1)
+    same_up_flat = VGL(
+        value=same_up.value[iu_up, ju_up],
+        grad=same_up.grad[:, iu_up, ju_up],
+        lap=same_up.lap[iu_up, ju_up],
+    )
+    same_dn_flat = VGL(
+        value=same_dn.value[iu_dn, ju_dn],
+        grad=same_dn.grad[:, iu_dn, ju_dn],
+        lap=same_dn.lap[iu_dn, ju_dn],
+    )
+    same_dists = vgl_concat(
+        [same_up_flat, same_dn_flat], axis=-1,
+    )
+    anti_block = VGL(
+        value=dists_elec_full.value[:n_up, n_up:],
+        grad=dists_elec_full.grad[:, :n_up, n_up:],
+        lap=dists_elec_full.lap[:n_up, n_up:],
+    )
+    anti_dists = vgl_reshape(
+        anti_block, (n_up * n_down,),
+    )
+    cusp_total = vgl_constant(
+        jnp.array(0.0, dtype=elec_flat.dtype), D=D,
+    )
+    if same_dists.value.size > 0:
+        cusp_total = vgl_add(
+            cusp_total,
+            vgl_psiformer_cusp(
+                cusp['same_scale'],
+                cusp['same_alpha'],
+                same_dists,
+            ),
+        )
+    if anti_dists.value.size > 0:
+        cusp_total = vgl_add(
+            cusp_total,
+            vgl_psiformer_cusp(
+                cusp['anti_scale'],
+                cusp['anti_alpha'],
+                anti_dists,
+            ),
+        )
+    return vgl_add(log_psi_main, cusp_total)
