@@ -1,0 +1,66 @@
+# rs=20, N=50 fluid with BF + deep_jastrow + bigger network.
+# Diagnostic v2: emb=32 BF+J plateaued at -41.5 mHa, *worse* than the bare
+# emb=32 run at -43.7 mHa. Hypothesis: network too small for BF/J to help.
+# Test: emb=64, layers=2, n_det=2 with BF + deep_jastrow. If this drops below
+# -44 mHa, capacity hypothesis confirmed. Smith 2024 target: -46.37 mHa.
+
+project: rs_scan_n50_rs20_fluid_bfdj_big
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 2
+  heads: 4
+  two_particle_dim: 32
+  n_det: 2
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  use_backflow: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 8
+  det_jitter: 0.0
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 5000
+  walkers: 256
+  lr: 0.02
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 3.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 30
+  equil_blocks: 15
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 256
+  equil_steps: 200
+  sample_steps: 80
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

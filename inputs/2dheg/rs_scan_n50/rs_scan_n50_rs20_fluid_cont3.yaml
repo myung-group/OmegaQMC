@@ -1,0 +1,65 @@
+# rs=20, N=50 bare fluid round 4 — CONTINUE from _cont2 chkpt on frodo.
+# Cont2 ended at -45.10 mHa eval (-45.79 train plateau). 10x more iters.
+# lr=0.005, 100000 SR iters. Crystal target -45.913 mHa.
+
+project: rs_scan_n50_rs20_fluid_cont3
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 1
+  heads: 2
+  two_particle_dim: 16
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: false
+  pair_jastrow: false
+  use_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 8
+  det_jitter: 0.0
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 100000
+  walkers: 256
+  lr: 0.005
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 3.0e-3
+  sr_n_cg: 15
+  load_chkpt: runs/rs_scan_n50_rs20_fluid_cont2/rs_scan_n50_rs20_fluid_cont2.chk.h5
+
+eval:
+  walkers: 256
+  blocks: 30
+  equil_blocks: 15
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 256
+  equil_steps: 200
+  sample_steps: 80
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8
