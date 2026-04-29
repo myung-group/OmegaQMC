@@ -2,7 +2,7 @@
 Phaseless Auxiliary-Field Quantum Monte Carlo (AFQMC) driver.
 
 The public entry point is :func:`get_afqmc_func`, which returns a
-reusable ``_AFQMCDriver`` instance (setup once, run many times).
+reusable ``_AFQMCDriverGTO`` instance (setup once, run many times).
 
 Canonical implementations live in dedicated submodules:
 
@@ -286,6 +286,8 @@ def population_control_pair_branch(weights, phia, phib, rng_key):
 from OmegaQMC.observables.greens import (       # noqa: E402
     _greens_function_spin,
     greens_function,
+    greens_function_force_bias,
+    greens_function_overlap,
     _gf_spin_single_det,
     greens_function_multidet,
 )
@@ -452,7 +454,9 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
         fbbound = FBBOUND_DEFAULT
 
     # 1. Compute Green's function from current walkers
-    Ga, Gb, Ghalfa, Ghalfb, ovlp = greens_function(
+    # (specialized: only Ghalf + overlap needed for force
+    # bias, full G is dropped)
+    Ghalfa, Ghalfb, ovlp = greens_function_force_bias(
         phia, phib, trial_up, trial_dn)
 
     # 2. Apply first half of one-body propagator
@@ -498,7 +502,9 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
     phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
 
     # 7. Compute new overlap and update weights
-    _, _, _, _, ovlp_new = greens_function(phia, phib, trial_up, trial_dn)
+    # (specialized: only overlap needed)
+    ovlp_new = greens_function_overlap(
+        phia, phib, trial_up, trial_dn)
 
     weights_new, e_hybrid_new = _update_weights_phaseless(
         weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
@@ -605,7 +611,7 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
 # Driver
 # ===================================================================
 
-class _AFQMCDriver:
+class _AFQMCDriverGTO:
     """Phaseless AFQMC driver.
 
     Separates setup (integral preparation, trial WF, propagator build)
@@ -927,7 +933,7 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
                or None for single-det HF trial (default).
 
     Returns:
-        _AFQMCDriver instance (callable).
+        _AFQMCDriverGTO instance (callable).
     """
-    return _AFQMCDriver(mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
+    return _AFQMCDriverGTO(mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
                         trial=trial)

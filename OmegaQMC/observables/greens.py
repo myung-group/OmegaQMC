@@ -46,6 +46,114 @@ def _greens_function_spin(phi, trial):
     return G, Ghalf, ovlp, log_ovlp
 
 
+def _ghalf_ovlp_spin(phi, trial):
+    """Half-rotated GF + overlap, **no full G**.
+
+    For callers that consume only ``Ghalf`` and ``ovlp``
+    (e.g. force-bias assembly inside AFQMC's
+    ``propagate_walkers``), skipping the
+    ``trial.conj() @ Ghalf`` einsum saves
+    ``O(nwalkers · nbasis² · nocc)`` flops and
+    ``nwalkers · nbasis²`` complex scratch per call.
+
+    Args:
+        phi: Walker orbitals,
+            shape (nwalkers, nbasis, nocc).
+        trial: Trial orbitals, shape (nbasis, nocc).
+
+    Returns:
+        Ghalf: Half-rotated GF,
+            shape (nwalkers, nocc, nbasis).
+        ovlp: det(trial^dag phi), shape (nwalkers,).
+    """
+    ovlp_mat = jnp.einsum(
+        'wpi,pj->wij', phi, trial.conj(),
+    )
+    ovlp_inv = jnp.linalg.inv(ovlp_mat)
+    Ghalf = jnp.einsum('wij,wqj->wiq', ovlp_inv, phi)
+    sign, log_det = jnp.linalg.slogdet(ovlp_mat)
+    ovlp = sign * jnp.exp(log_det)
+    return Ghalf, ovlp
+
+
+def _overlap_only_spin(phi, trial):
+    """Overlap only — no inverse, no Ghalf, no G.
+
+    For callers that consume only ``ovlp`` (e.g. the
+    post-step weight update in AFQMC's
+    ``propagate_walkers``), skipping the inverse and
+    ``Ghalf`` assembly saves an extra
+    ``nwalkers · nocc³`` + ``2 · nwalkers · nbasis · nocc²``
+    flops per spin per call.
+
+    Args:
+        phi: Walker orbitals,
+            shape (nwalkers, nbasis, nocc).
+        trial: Trial orbitals, shape (nbasis, nocc).
+
+    Returns:
+        ovlp: det(trial^dag phi), shape (nwalkers,).
+    """
+    ovlp_mat = jnp.einsum(
+        'wpi,pj->wij', phi, trial.conj(),
+    )
+    sign, log_det = jnp.linalg.slogdet(ovlp_mat)
+    return sign * jnp.exp(log_det)
+
+
+@partial(jax.jit, static_argnames=[])
+def greens_function_force_bias(
+    phia, phib, trial_up, trial_dn,
+):
+    """Half-rotated G + overlap, **no full G**.
+
+    Specialized variant of :func:`greens_function` for the
+    per-step force-bias path in AFQMC, which only consumes
+    ``Ghalfa, Ghalfb, overlap``.  Drops the
+    ``O(nwalkers · nbasis² · nocc)`` full-G einsum.
+
+    Args:
+        phia: Walker alpha orbitals,
+            shape (nwalkers, nbasis, nup).
+        phib: Walker beta orbitals,
+            shape (nwalkers, nbasis, ndown).
+        trial_up, trial_dn: Trial orbitals.
+
+    Returns:
+        Ghalfa: shape (nwalkers, nup, nbasis).
+        Ghalfb: shape (nwalkers, ndown, nbasis).
+        overlap: shape (nwalkers,).
+    """
+    Ghalfa, ovlp_a = _ghalf_ovlp_spin(phia, trial_up)
+    Ghalfb, ovlp_b = _ghalf_ovlp_spin(phib, trial_dn)
+    return Ghalfa, Ghalfb, ovlp_a * ovlp_b
+
+
+@partial(jax.jit, static_argnames=[])
+def greens_function_overlap(
+    phia, phib, trial_up, trial_dn,
+):
+    """Overlap only — no inverse, no Ghalf, no G.
+
+    Specialized variant of :func:`greens_function` for the
+    post-step weight update in AFQMC, which only consumes
+    ``overlap``.
+
+    Args:
+        phia: Walker alpha orbitals,
+            shape (nwalkers, nbasis, nup).
+        phib: Walker beta orbitals,
+            shape (nwalkers, nbasis, ndown).
+        trial_up, trial_dn: Trial orbitals.
+
+    Returns:
+        overlap: shape (nwalkers,).
+    """
+    ovlp_a = _overlap_only_spin(phia, trial_up)
+    ovlp_b = _overlap_only_spin(phib, trial_dn)
+    return ovlp_a * ovlp_b
+
+
 @partial(jax.jit, static_argnames=[])
 def greens_function(phia, phib, trial_up, trial_dn):
     """One-particle Green's function for all walkers.

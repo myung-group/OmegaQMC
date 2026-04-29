@@ -32,7 +32,11 @@ from OmegaQMC.observables.energy import (
     local_energy_1body,
     local_energy_2body,
 )
-from OmegaQMC.observables.greens import greens_function
+from OmegaQMC.observables.greens import (
+    greens_function,
+    greens_function_force_bias,
+    greens_function_overlap,
+)
 from OmegaQMC.integrals.cholesky import (
     chunked_cholesky,
     half_rotate_cholesky,
@@ -301,7 +305,8 @@ def propagate_qed_walkers(phia, phib, q, weights, overlap, e_hybrid,
         fbbound = FBBOUND_DEFAULT
 
     # 0. Compute Green's function (for force bias)
-    Ga, Gb, Ghalfa, Ghalfb, ovlp = greens_function(
+    # (specialized: only Ghalf + overlap needed)
+    Ghalfa, Ghalfb, ovlp = greens_function_force_bias(
         phia, phib, trial_up, trial_dn)
 
     # 1. First photon half-step
@@ -357,7 +362,8 @@ def propagate_qed_walkers(phia, phib, q, weights, overlap, e_hybrid,
 
     # 6. Weight update
     # Electronic part: phaseless approximation
-    _, _, _, _, ovlp_new = greens_function(phia, phib, trial_up, trial_dn)
+    ovlp_new = greens_function_overlap(
+        phia, phib, trial_up, trial_dn)
     weights_new, e_hybrid_new = _update_weights_phaseless(
         weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
 

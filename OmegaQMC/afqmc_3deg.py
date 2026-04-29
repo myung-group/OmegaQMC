@@ -28,6 +28,8 @@ from OmegaQMC.afqmc_gto import (
     _apply_exp_vhs,
     orthogonalize_walkers,
     greens_function,
+    greens_function_force_bias,
+    greens_function_overlap,
     local_energy_1body,
     _update_weights_phaseless,
     _make_afqmc_sharding,
@@ -859,7 +861,8 @@ def _propagate_3deg_walkers(phia, phib, weights, overlap, e_hybrid,
         fbbound = FBBOUND_DEFAULT
 
     # Green's function for force bias
-    Ga, Gb, Ghalfa, Ghalfb, ovlp = greens_function(
+    # (specialized: only Ghalf + overlap needed)
+    Ghalfa, Ghalfb, ovlp = greens_function_force_bias(
         phia, phib, trial_up, trial_dn)
 
     # First half one-body (skip beta for fully polarized)
@@ -917,7 +920,8 @@ def _propagate_3deg_walkers(phia, phib, weights, overlap, e_hybrid,
     # Weight update
     # When skip_beta: phib is unchanged so ovlp_b_new/ovlp_b_old = 1,
     # and the combined overlap ratio correctly reflects only alpha.
-    _, _, _, _, ovlp_new = greens_function(phia, phib, trial_up, trial_dn)
+    ovlp_new = greens_function_overlap(
+        phia, phib, trial_up, trial_dn)
     weights_new, e_hybrid_new = _update_weights_phaseless(
         weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
 
