@@ -364,6 +364,7 @@ class _VMCOptDriverNN_SR:
         self.run_equilibration = run_equilibration
         self.run_production = run_production
         self.compute_batch_energy = compute_batch_energy
+        self.total_local_energy = total_local_energy
 
     def initialize_walkers(
         self, rng_key, num_walkers,
@@ -515,23 +516,37 @@ class _VMCOptDriverNN_SR:
         if verbose >= 1:
             print(f"SR optimizer: {n_params} parameters")
 
-        # --- Jacobian function ---
+        # --- Fused Jacobian + local-energy function ---
+        # Fused into a single jit so XLA CSE can share
+        # the forward graph between the lap_grad VGL pass
+        # (kinetic energy) and the reverse-mode pullback
+        # over flat params (Jacobian) — saves one NN
+        # forward per walker per iteration.  Returns
+        # (E_L, O) so the SR loop can drop its separate
+        # ``compute_batch_energy`` pass.  ``O`` is cast to
+        # float32 to halve Jacobian storage; SR linear
+        # algebra does not need float64.
         def log_psi_of_flat(fp, r):
             return log_psi(
                 r, nuc_crds, unravel_fn(fp),
             )
 
+        total_local_energy_fn = self.total_local_energy
+
         @jax.jit
-        def jac_batch_fn(batch_w, fp):
-            # Gradient w.r.t. flat params comes out
-            # as float64 when x64 mode is active;
-            # cast to float32 to halve Jacobian
-            # storage (the SR linear algebra does
-            # not need float64 precision).
-            return jax.vmap(
-                jax.grad(log_psi_of_flat),
-                in_axes=(None, 0),
-            )(fp, batch_w).astype(jnp.float32)
+        def jac_and_energy_batch_fn(batch_w, fp):
+            params_pytree = unravel_fn(fp)
+
+            def per_walker(elec):
+                E_L = total_local_energy_fn(
+                    elec, params_pytree,
+                )
+                O_w = jax.grad(log_psi_of_flat)(
+                    fp, elec,
+                )
+                return E_L, O_w.astype(jnp.float32)
+
+            return jax.vmap(per_walker)(batch_w)
 
         # --- Auto-tune ---
         auto_walkers = num_walkers == 'auto'
@@ -546,7 +561,7 @@ class _VMCOptDriverNN_SR:
             free_mb = None
         if auto_jac:
             jac_batch_size = _autotune_jac_batch(
-                jac_batch_fn, self.nelec,
+                jac_and_energy_batch_fn, self.nelec,
                 flat_params, free_mb,
             )
         if auto_walkers:
@@ -558,8 +573,11 @@ class _VMCOptDriverNN_SR:
                 probe = jnp.zeros(
                     (1, self.nelec, 3),
                 )
-                compiled = jax.jit(jac_batch_fn) \
-                    .lower(probe, flat_params).compile()
+                compiled = (
+                    jax.jit(jac_and_energy_batch_fn)
+                    .lower(probe, flat_params)
+                    .compile()
+                )
                 analysis = compiled.memory_analysis()
                 per_w = analysis.alias_size + analysis.temp_size
                 jac_batch_mem_mb = jac_batch_size * per_w / 1e6
@@ -672,14 +690,12 @@ class _VMCOptDriverNN_SR:
                 num_steps_decorr,
             )
 
-            # (b) Compute local energies
-            E_L = self.compute_batch_energy(
-                walkers, params,
-            )
-            E_mean = float(E_L.mean())
-            E_std = float(E_L.std())
-
-            # (c) Compute Jacobian in batches
+            # (b)+(c) Compute local energies and
+            # Jacobian together in batches.  Fused so
+            # XLA CSE shares the forward graph between
+            # the kinetic-energy VGL pass and the
+            # reverse-mode pullback over flat params.
+            E_L_parts = []
             O_parts = []
             for i in range(
                 0, num_walkers, jac_batch_size,
@@ -689,12 +705,15 @@ class _VMCOptDriverNN_SR:
                     num_walkers,
                 )
                 batch = walkers[i:end]
-                O_parts.append(
-                    jac_batch_fn(
-                        batch, flat_params,
-                    )
+                E_part, O_part = jac_and_energy_batch_fn(
+                    batch, flat_params,
                 )
+                E_L_parts.append(E_part)
+                O_parts.append(O_part)
+            E_L = jnp.concatenate(E_L_parts, axis=0)
             O = jnp.concatenate(O_parts, axis=0)
+            E_mean = float(E_L.mean())
+            E_std = float(E_L.std())
 
             # (d) Force vector (centered form)
             #     f = mean(dE * dO) = dE @ dO / N
