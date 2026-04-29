@@ -382,6 +382,7 @@ class _VMCDriverNN:
             nn_gradient_batch = vmc_nn_gradients_zvzb(
                 self.log_psi, nuc_crds, charges,
                 nelec, params,
+                lap_grad=self.lap_grad,
             )
 
             p = pathlib.Path(ofname_grd)

@@ -232,8 +232,19 @@ def _extract_layer_spec(layer):
     return spec
 
 
-def _build_vgl_kwargs(model, *, ne_log_rescale=True):
-    """Extract VGL kwargs from a built PsiFormer model."""
+def _build_vgl_kwargs(
+    model, *, ne_log_rescale=True, edge_features=None,
+):
+    """Extract VGL kwargs from a built PsiFormer model.
+
+    ``edge_features`` is the static (params-independent)
+    edge-feature spec, pre-extracted at adapter init time.
+    Pass it in so we never re-iterate over JAX-array
+    attributes (e.g. ``feat.powers``) under jit tracing —
+    iterating them triggers ``_unstack`` ops whose outputs
+    are abstract tracers, which then trip Python ``int()``
+    in :func:`_extract_edge_feature_spec`.
+    """
     gnn = model.omni.gnn
     embed_mod = gnn.electron_embedding
     proj_W = (
@@ -307,13 +318,11 @@ def _build_vgl_kwargs(model, *, ne_log_rescale=True):
         }
     else:
         cusp = None
-    if gnn.edge_features:
+    if edge_features is None and gnn.edge_features:
         edge_features = {
             et: _extract_edge_feature_spec(feat)
             for et, feat in gnn.edge_features.items()
         }
-    else:
-        edge_features = None
     deep_features = gnn.layers[0].deep_features
     return {
         'embedding_kwargs': embedding_kwargs,
@@ -370,6 +379,21 @@ def make_nn_log_psi(config, mol_info, rng_key):
     n_det = config.n_determinants
     use_vgl = _psiformer_compat(config)
 
+    # Pre-extract the static (params-independent)
+    # edge-feature spec.  Iterating ``feat.powers`` (a
+    # ``jnp.asarray``) under jit tracing triggers
+    # ``_unstack`` whose output is an abstract tracer,
+    # causing ``int(p)`` in ``_extract_edge_feature_spec``
+    # to raise ``ConcretizationTypeError``.  Doing it once
+    # here on the eagerly-built model avoids that.
+    if model.omni.gnn.edge_features:
+        _static_edge_features = {
+            et: _extract_edge_feature_spec(feat)
+            for et, feat in model.omni.gnn.edge_features.items()
+        }
+    else:
+        _static_edge_features = None
+
     def log_psi(elec_crds, nuc_crds, params):
         """Evaluate log|psi| for a single walker.
 
@@ -408,6 +432,7 @@ def make_nn_log_psi(config, mol_info, rng_key):
         mdl = nnx.merge(graphdef, params, other)
         kwargs = _build_vgl_kwargs(
             mdl, ne_log_rescale=config.ne_log_rescale,
+            edge_features=_static_edge_features,
         )
         out = log_psi_vgl_psiformer(
             elec_flat, nuc_crds,
@@ -419,5 +444,10 @@ def make_nn_log_psi(config, mol_info, rng_key):
     lap_grad = (
         _lap_grad_vgl if use_vgl else _lap_grad_linearize
     )
+    # Attach the VGL-availability flag so downstream consumers
+    # (e.g. ``vmc_nn_gradients_zvzb``) can decide whether the
+    # analytic forward-Laplacian path is safe to compose
+    # with ``jax.jacfwd`` over nuclear coordinates.
+    lap_grad.use_vgl = use_vgl
 
     return log_psi, init_params, graphdef, lap_grad

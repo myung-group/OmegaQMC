@@ -380,6 +380,7 @@ def vmc_nn_gradients_zvzb(
     charges,
     nelec,
     params,
+    lap_grad=None,
 ):
     """Build a JIT-compiled ZVZB gradient batch function.
 
@@ -429,6 +430,31 @@ def vmc_nn_gradients_zvzb(
         Total number of electrons.
     params : pytree
         NN wavefunction parameters (NNX State).
+    lap_grad : callable, optional
+        ``(elec_crds, nuc_crds, params) -> (lap_x, grad_x)``
+        returning the electron-coord Laplacian and gradient
+        of ``log|ψ|`` for a single walker.  If supplied and
+        carrying ``lap_grad.use_vgl == True`` (as produced by
+        the analytic-VGL path of :func:`make_nn_log_psi`), the
+        per-``(ia, k)`` ``fori_loop`` over
+        ``ke_dpsi - ke_psi`` is replaced by a single
+        ``jax.jacfwd``-over-nuclei pass on
+        :math:`(\\nabla_x\\log|\\psi|, \\Delta_x\\log|\\psi|)`,
+        using the identity (derived from
+        :math:`q = \\log|\\psi| + \\log|h_{ia,k}|` with
+        :math:`h = \\nabla_R\\log|\\psi|`)
+
+        .. math::
+           \\mathrm{grd\\_ke}_{ia,k}
+           = -\\tfrac{1}{2}\\,\\Delta_x h_{ia,k}
+             - \\nabla_x\\log|\\psi|\\cdot\\nabla_x h_{ia,k},
+
+        in which the :math:`1/h_{ia,k}` factor cancels
+        against the outer :math:`\\nabla_R\\log|\\psi|` factor
+        in :math:`(\\mathrm{KE}_{d\\psi}-\\mathrm{KE}_\\psi)\\,
+        \\nabla_R\\log|\\psi|`.  When omitted or with
+        ``use_vgl == False``, the original
+        ``laplacian``-per-component path is used.
 
     Returns
     -------
@@ -439,6 +465,8 @@ def vmc_nn_gradients_zvzb(
         shape ``(batch, natom, 3)``.
     """
     from ..psi.nn.physics import laplacian
+
+    use_vgl = bool(getattr(lap_grad, 'use_vgl', False))
 
     n_nuc = len(charges)
     charges_elec = -jnp.ones(nelec)
@@ -517,33 +545,61 @@ def vmc_nn_gradients_zvzb(
             lap_val + jnp.dot(grad_val, grad_val)
         )
 
+    # --- VGL-based ZV kinetic correction ---
+    # Replaces the ``ke_dpsi - ke_psi`` fori_loop with a
+    # single ``jax.jacfwd`` over nuclear coordinates on the
+    # ``(grad_x_lp, lap_x_lp)`` pair returned by ``lap_grad``.
+    # The mixed Hessian/Laplacian-of-grad identity above lets
+    # the per-(ia, k) Laplacian be computed once for all
+    # nuclear components.
+    if use_vgl:
+        def _grd_ke_vgl(elec_crds):
+            def _lap_grad_of_R(R):
+                return lap_grad(elec_crds, R, params)
+            (lap_x_lp,
+             grad_x_lp) = lap_grad(elec_crds, nuc_crds, params)
+            (lap_x_h,
+             grad_x_h) = jax.jacfwd(_lap_grad_of_R)(nuc_crds)
+            # lap_x_h shape (n_nuc, 3); grad_x_h shape
+            # (D, n_nuc, 3); grad_x_lp shape (D,).
+            return -0.5 * lap_x_h - jnp.einsum(
+                'd,dab->ab', grad_x_lp, grad_x_h,
+            )
+
     # --- Decomposed ZVZB gradient (single walker) ---
     @jax.jit
     def _grd_zvzb(elec_crds):
         f_en = _force_en_bare(elec_crds)
         grad_lp = _grad_nuc_log_psi(elec_crds)
-        ke_psi = _ke_psi(elec_crds)
 
-        # KE of dpsi/dR_{ia,k} for all (ia, k)
-        def body_fn(idx, val):
-            ia = idx // 3
-            k = idx % 3
-            ke_d = _ke_dpsi_component(
-                elec_crds, ia, k,
+        if use_vgl:
+            # VGL fast path: compute the ZV kinetic
+            # correction directly from
+            # ``(∇_x lp, ∇_x h, Δ_x h)`` (h = ∇_R lp).
+            grd_ke = _grd_ke_vgl(elec_crds)
+        else:
+            ke_psi = _ke_psi(elec_crds)
+
+            # KE of dpsi/dR_{ia,k} for all (ia, k)
+            def body_fn(idx, val):
+                ia = idx // 3
+                k = idx % 3
+                ke_d = _ke_dpsi_component(
+                    elec_crds, ia, k,
+                )
+                return val.at[ia, k].set(ke_d)
+
+            ke_dpsi_all = jax.lax.fori_loop(
+                0, n_nuc * 3, body_fn,
+                jnp.zeros((n_nuc, 3)),
             )
-            return val.at[ia, k].set(ke_d)
-
-        ke_dpsi_all = jax.lax.fori_loop(
-            0, n_nuc * 3, body_fn,
-            jnp.zeros((n_nuc, 3)),
-        )
+            # ZV kinetic correction (gradient sign)
+            grd_ke = (ke_dpsi_all - ke_psi) * grad_lp
 
         # gradient = -force; bare HF: grd_ee_en = -f_en
         # (V_ee has no R-dependence, so the ee piece
         # is identically zero)
         grd_ee_en = -f_en
-        # ZV kinetic correction (gradient sign)
-        grd_ke = (ke_dpsi_all - ke_psi) * grad_lp
         # Pulay/ZB coefficient: stored bare, multiplied
         # by 2*(E_L - <E>) downstream
         grd_logpsi = grad_lp
