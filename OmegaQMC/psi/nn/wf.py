@@ -219,10 +219,10 @@ class NeuralNetworkWaveFunction(nnx.Module):
         dists_elec = pairwise_self_distance(
             phys_conf.r, full=True,
         )
-        jastrow, fs, nuc_params = (
+        jastrow, fs, nuc_params, _emb = (
             self.omni(phys_conf)
             if self.omni is not None
-            else (None, None, None)
+            else (None, None, None, None)
         )
         orb = self.envelope(phys_conf, nuc_params)
         if self.full_determinant:

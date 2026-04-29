@@ -123,8 +123,15 @@ class OmniNet(nnx.Module):
         self.nuclear_gnn_head = nuclear_gnn_head
 
     def __call__(self, phys_conf):
+        # Returns (jastrow, backflow, nuc_params, embeddings).
+        # ``embeddings`` is the per-electron post-GNN feature stream
+        # (n_elec, d1) — exposed so downstream wavefunctions can
+        # add their own readout heads (e.g. coord-transform
+        # backflow x_i = r_i + W·h_i^(T) à la Smith 2024).
+        # Pre-existing callers that unpacked 3 values must be
+        # updated.
         if self.gnn is None:
-            return None, None, None
+            return None, None, None, None
         graph_nodes = self.gnn(phys_conf)
         embeddings = graph_nodes.electrons
         nuc_emb = graph_nodes.nuclei
@@ -148,7 +155,7 @@ class OmniNet(nnx.Module):
                     embeddings[self.n_up:],
                 ),
             )
-        return jastrow, backflow, nuc_params
+        return jastrow, backflow, nuc_params, embeddings
 
 
 class NuclearGNNHead(nnx.Module):

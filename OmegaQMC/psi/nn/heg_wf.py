@@ -332,6 +332,15 @@ class HEGPsiFormerConfig(NamedTuple):
     jas_mlp_bias: bool = True
     jas_mlp_zero_init_last: bool = True
     use_backflow: bool = True
+    # Coord-transform backflow (Smith 2024 PRL 133 266504, eq. 19):
+    # x_i = r_i + W_bf · h_i^(T).  When True, a small Linear readout
+    # from the post-GNN one-body stream produces a per-electron
+    # displacement that shifts positions before the orbital basis is
+    # evaluated.  Multiplicative BF (use_backflow=True) and
+    # coord-transform BF can be enabled simultaneously — they
+    # represent different (non-redundant) families of correlations.
+    use_coord_backflow: bool = False
+    coord_bf_zero_init: bool = True   # zero-init last layer so initial Δr = 0
     # ``use_cusp`` is ON by default.  Previously it was False
     # because the naïve PsiformerCusp implementation had three
     # separable bugs: (i) unconstrained trainable ``α`` that
@@ -406,6 +415,13 @@ class HEGPsiFormerConfig(NamedTuple):
     crystal_sigma_init: float = 0.25       # fraction of NN spacing
     crystal_spin_pattern: str = 'neel'     # 'neel' (AFM) or 'all_up' (FM)
     crystal_det_jitter: float = 0.0        # site-position jitter for det>=1
+    # Walker initialisation strategy (consumed by the SR/eval drivers).
+    # 'auto' (default) → crystal_perturbed when envelope is
+    # crystal_gaussian, uniform otherwise.  'crystal_perturbed' forces
+    # WC-position init even for plane-wave (fluid) envelopes — Smith
+    # 2024 uses this for both phases (PRL 133, 266504, supplement page
+    # 7).  'uniform' forces uniform init regardless of envelope.
+    walker_init: str = 'auto'
 
 
 def make_heg_log_psi(

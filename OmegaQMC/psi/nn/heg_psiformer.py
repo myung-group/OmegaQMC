@@ -271,6 +271,7 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         lattice,
         cusp_electrons=None,
         pair_jastrow=None,
+        coord_backflow=None,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -281,6 +282,7 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         self.envelope = envelope
         self.cusp_electrons = cusp_electrons
         self.pair_jastrow = pair_jastrow
+        self.coord_backflow = coord_backflow
 
     @property
     def _spin_slices(self):
@@ -305,7 +307,13 @@ class HEGPsiFormerWaveFunction(nnx.Module):
             ``(n_det, n_up, n_up)`` and ``(n_det, n_down, n_down)``.
         """
         pc = _make_heg_phys_conf(r)
-        _, fs, _nuc_params = self.omni(pc)
+        _, fs, _nuc_params, emb = self.omni(pc)
+        # Coord-transform backflow (Smith 2024): shift positions
+        # before evaluating the orbital basis.
+        if (getattr(self, 'coord_backflow', None) is not None
+                and emb is not None):
+            r_bf = r + self.coord_backflow(emb)
+            pc = _make_heg_phys_conf(r_bf)
         orb = self.envelope(pc)
         orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
         orb_up = orb_up[:, :self.n_up]
@@ -329,10 +337,22 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         pc = _make_heg_phys_conf(r)
 
         # GNN + backflow (and optional deep jastrow).
-        jastrow, fs, _nuc_params = self.omni(pc)
+        jastrow, fs, _nuc_params, emb = self.omni(pc)
+
+        # Coord-transform backflow (Smith 2024 PRL 133 266504, eq. 19):
+        # x_i = r_i + W_bf · h_i^(T).  When active, the orbital basis
+        # is evaluated at the shifted positions.  Cusp + pair-Jastrow
+        # always use the *original* r (the cusp condition is a
+        # property of the *true* electron coordinates).
+        if (getattr(self, 'coord_backflow', None) is not None
+                and emb is not None):
+            r_bf = r + self.coord_backflow(emb)
+            pc_bf = _make_heg_phys_conf(r_bf)
+        else:
+            pc_bf = pc
 
         # Envelope orbitals.
-        orb = self.envelope(pc)  # (n_det, n_elec, n_up + n_down)
+        orb = self.envelope(pc_bf)  # (n_det, n_elec, n_up + n_down)
 
         # full_determinant=False convention: split columns, slice rows.
         orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
@@ -856,11 +876,26 @@ def build_heg_psiformer_wf(
             rngs=rngs,
         )
 
+    # --- Optional coord-transform backflow (Smith 2024) ---
+    coord_backflow = None
+    if getattr(config, 'use_coord_backflow', False):
+        coord_backflow = nnx.Linear(
+            in_features=emb_dim,
+            out_features=dim,
+            use_bias=False,
+            rngs=rngs,
+        )
+        if getattr(config, 'coord_bf_zero_init', True):
+            coord_backflow.kernel = nnx.Param(
+                jnp.zeros_like(param_value(coord_backflow.kernel)),
+            )
+
     return HEGPsiFormerWaveFunction(
         n_up=n_up, n_down=n_down, n_det=n_det, L=L,
         omni=omni, envelope=envelope, lattice=lattice,
         cusp_electrons=cusp_electrons,
         pair_jastrow=pair_jastrow,
+        coord_backflow=coord_backflow,
     )
 
 
@@ -1021,6 +1056,7 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         lattice,
         cusp_electrons=None,
         pair_jastrow=None,
+        coord_backflow=None,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -1031,6 +1067,7 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         self.envelope = envelope
         self.cusp_electrons = cusp_electrons
         self.pair_jastrow = pair_jastrow
+        self.coord_backflow = coord_backflow
 
     @property
     def _spin_slices(self):
@@ -1043,10 +1080,19 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         pc = _make_heg_phys_conf(r)
 
         # GNN + backflow (and optional deep jastrow) — real-valued.
-        jastrow, fs, _nuc_params = self.omni(pc)
+        jastrow, fs, _nuc_params, emb = self.omni(pc)
+
+        # Coord-transform backflow (Smith 2024).  Same as the real
+        # Γ-point variant.
+        if (getattr(self, 'coord_backflow', None) is not None
+                and emb is not None):
+            r_bf = r + self.coord_backflow(emb)
+            pc_bf = _make_heg_phys_conf(r_bf)
+        else:
+            pc_bf = pc
 
         # Envelope orbitals — complex.
-        orb = self.envelope(pc)  # complex (n_det, n_elec, n_up+n_down)
+        orb = self.envelope(pc_bf)  # complex (n_det, n_elec, n_up+n_down)
 
         orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
         orb_up = orb_up[:, :self.n_up]

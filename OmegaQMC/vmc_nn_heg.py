@@ -163,17 +163,26 @@ class _VMCDriverHEG:
     def initialize_walkers(self, rng_key, num_walkers):
         """Sample electron positions inside the cell.
 
-        For Wigner-crystal trial wavefunctions
-        (``envelope_type='crystal_gaussian'``) walkers are placed near
-        the triangular Bravais sites with a small Gaussian noise — see
-        :func:`OmegaQMC.psi.nn.env_localized_2d.crystal_init_walkers_2d`
-        for the rationale (uniform-init walkers do not bridge the
-        ``a_NN`` gap to ``|psi|^2`` peaks within a few Metropolis steps,
-        and SR then trains the localised character away).  All other
-        envelopes get a plain uniform sample.
+        Dispatch order:
+        1. Explicit ``config.walker_init`` (``'uniform'`` or
+           ``'crystal_perturbed'``) wins.
+        2. Otherwise fall back to envelope-based default
+           (``crystal_gaussian`` → ``crystal_perturbed``, else
+           ``uniform``).
         """
+        walker_init = str(getattr(
+            self.config, 'walker_init', 'auto',
+        )).lower()
         envelope_type = getattr(self.config, 'envelope_type', 'plane_wave')
-        if envelope_type == 'crystal_gaussian' and self.dim == 2:
+
+        if walker_init == 'auto':
+            walker_init = (
+                'crystal_perturbed'
+                if (envelope_type == 'crystal_gaussian' and self.dim == 2)
+                else 'uniform'
+            )
+
+        if walker_init == 'crystal_perturbed' and self.dim == 2:
             from .psi.nn.env_localized_2d import crystal_init_walkers_2d
             return crystal_init_walkers_2d(
                 rng_key, num_walkers,
@@ -548,8 +557,17 @@ class _VMCDriverHEGTwist:
         ))
 
     def initialize_walkers(self, rng_key, num_walkers):
+        walker_init = str(getattr(
+            self.config, 'walker_init', 'auto',
+        )).lower()
         envelope_type = getattr(self.config, 'envelope_type', 'plane_wave')
-        if envelope_type == 'crystal_gaussian' and self.dim == 2:
+        if walker_init == 'auto':
+            walker_init = (
+                'crystal_perturbed'
+                if (envelope_type == 'crystal_gaussian' and self.dim == 2)
+                else 'uniform'
+            )
+        if walker_init == 'crystal_perturbed' and self.dim == 2:
             from .psi.nn.env_localized_2d import crystal_init_walkers_2d
             return crystal_init_walkers_2d(
                 rng_key, num_walkers,

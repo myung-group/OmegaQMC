@@ -124,6 +124,10 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
         # Backflow on/off — defaults to True (FermiNet/PsiFormer recipe).
         use_backflow=bool(a.get('use_backflow', True)),
+        # Coord-transform backflow (Smith 2024).  Off by default; set
+        # ``use_coord_backflow: true`` in YAML to enable.
+        use_coord_backflow=bool(a.get('use_coord_backflow', False)),
+        coord_bf_zero_init=bool(a.get('coord_bf_zero_init', True)),
         # Envelope choice — 'plane_wave' (Fermi-sea Slater) or
         # 'crystal_gaussian' (localised Gaussians on triangular Bravais
         # lattice for the Wigner-crystal sector).
@@ -131,6 +135,7 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         crystal_sigma_init=float(a.get('crystal_sigma_init', 0.25)),
         crystal_spin_pattern=str(a.get('crystal_spin_pattern', 'neel')),
         crystal_det_jitter=float(a.get('crystal_det_jitter', 0.0)),
+        walker_init=str(a.get('walker_init', 'auto')),
         dim=int(dim),
     )
 
@@ -359,6 +364,39 @@ def _run(cfg, project, run_dir, prefix):
         if opt_type == 'sr':
             sr_damp = float(_get(cfg, 'optimize.sr_damping', 1e-3))
             sr_n_cg = int(_get(cfg, 'optimize.sr_n_cg', 30))
+            lr_schedule = str(_get(cfg, 'optimize.lr_schedule', 'auto'))
+            lr_decay_T = _get(cfg, 'optimize.lr_decay_T', None)
+            if lr_decay_T is not None:
+                lr_decay_T = float(lr_decay_T)
+            lr_min = float(_get(cfg, 'optimize.lr_min', 0.0))
+            lr_T_max = _get(cfg, 'optimize.lr_T_max', None)
+            if lr_T_max is not None:
+                lr_T_max = int(lr_T_max)
+            lr_n_restarts = int(_get(cfg, 'optimize.lr_n_restarts', 0))
+            spring_mu = float(_get(cfg, 'optimize.spring_mu', 0.0))
+            spring_norm_clip = _get(cfg, 'optimize.spring_norm_clip', None)
+            if spring_norm_clip is not None:
+                spring_norm_clip = float(spring_norm_clip)
+            damping_adapt = bool(_get(
+                cfg, 'optimize.damping_adapt', False,
+            ))
+            damping_min = float(_get(
+                cfg, 'optimize.damping_min', 1e-5,
+            ))
+            damping_max = float(_get(
+                cfg, 'optimize.damping_max', 1e-1,
+            ))
+            damping_factor = float(_get(
+                cfg, 'optimize.damping_factor', 2.0,
+            ))
+            damping_lookback = int(_get(
+                cfg, 'optimize.damping_lookback', 50,
+            ))
+            sampler = str(_get(cfg, 'optimize.sampler', 'metropolis'))
+            mala_grad_clip = _get(cfg, 'optimize.mala_grad_clip', 1.0)
+            if mala_grad_clip is not None:
+                mala_grad_clip = float(mala_grad_clip)
+            save_every = int(_get(cfg, 'optimize.save_every', 500))
             opt = get_vmcopt_nn_heg_sr_func(
                 config, init_key,
                 prefix=prefix,
@@ -366,6 +404,21 @@ def _run(cfg, project, run_dir, prefix):
                 var_weight=var_weight,
                 ewald_n_real=ewald_n_real,
                 ewald_n_recip=ewald_n_recip,
+                lr_schedule=lr_schedule,
+                lr_decay_T=lr_decay_T,
+                lr_min=lr_min,
+                lr_T_max=lr_T_max,
+                lr_n_restarts=lr_n_restarts,
+                spring_mu=spring_mu,
+                spring_norm_clip=spring_norm_clip,
+                damping_adapt=damping_adapt,
+                damping_min=damping_min,
+                damping_max=damping_max,
+                damping_factor=damping_factor,
+                damping_lookback=damping_lookback,
+                sampler=sampler,
+                mala_grad_clip=mala_grad_clip,
+                save_every=save_every,
             )
         elif opt_type == 'adam':
             opt = get_vmcopt_nn_heg_func(
@@ -422,6 +475,36 @@ def _run(cfg, project, run_dir, prefix):
                 opt.params_flat = ravel_pytree(pretrained_params)[0]
             else:
                 opt.params = pretrained_params
+
+        # Resume from a previous checkpoint (overrides pretrain).
+        load_chkpt = _get(cfg, 'optimize.load_chkpt', None)
+        if load_chkpt:
+            from OmegaQMC.nn_checkpoint import load_nn_checkpoint
+            from jax.flatten_util import ravel_pytree
+            chkpt_path = Path(load_chkpt)
+            if not chkpt_path.is_absolute():
+                chkpt_path = Path.cwd() / chkpt_path
+            if not chkpt_path.is_file():
+                raise FileNotFoundError(
+                    f"optimize.load_chkpt: {chkpt_path} not found"
+                )
+            print(f"\n[resume] Loading params from {chkpt_path}")
+            if opt_type == 'sr':
+                template = opt.unravel(opt.params_flat)
+                loaded, meta = load_nn_checkpoint(
+                    str(chkpt_path), template,
+                )
+                opt.params_flat = ravel_pytree(loaded)[0]
+            else:
+                loaded, meta = load_nn_checkpoint(
+                    str(chkpt_path), opt.params,
+                )
+                opt.params = loaded
+            ep_meta = meta.get('epoch', '?')
+            e_meta = meta.get('energy', None)
+            e_str = (f"{float(e_meta):+.6f} Ha"
+                     if e_meta is not None else "n/a")
+            print(f"  resumed @ epoch={ep_meta}, energy={e_str}")
 
         opt_result = opt(
             opt_key,
