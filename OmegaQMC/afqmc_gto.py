@@ -159,6 +159,7 @@ def _qr_batch(phi):
     return jax.vmap(_qr_single)(phi)
 
 
+@jax.jit
 def orthogonalize_walkers(phia, phib):
     """Reorthogonalize walker determinants via QR decomposition.
 
@@ -182,12 +183,17 @@ def orthogonalize_walkers(phia, phib):
     return phia_new, phib_new, log_detR, sign_detR
 
 
+@jax.jit
 def population_control_comb(weights, phia, phib, rng_key):
     """Comb population control with weight rescaling.
 
     Rescales weights to sum to nwalkers (ipie convention), then
     places evenly-spaced 'teeth' on the cumulative weight distribution
     to resample walkers proportional to their weights.
+
+    Pure JAX so the gather stays on device — the previous numpy
+    implementation forced a full GPU↔CPU round-trip of the
+    walker matrices on every population-control step.
 
     Args:
         weights: shape (nwalkers,).
@@ -199,36 +205,32 @@ def population_control_comb(weights, phia, phib, rng_key):
         weights_new, phia_new, phib_new.
     """
     nwalkers = weights.shape[0]
-    weights_np = np.array(weights)
-    total_weight = np.sum(weights_np)
+    total_weight = jnp.sum(weights)
 
     # Rescale weights so total = nwalkers (ipie convention)
     scale = total_weight / nwalkers
-    weights_np = weights_np / scale
+    weights_scaled = weights / scale
 
     # Cumulative distribution (now sums to nwalkers)
-    cumsum = np.cumsum(weights_np)
+    cumsum = jnp.cumsum(weights_scaled)
 
     # Random offset for comb
-    r = float(jax.random.uniform(rng_key))
+    r = jax.random.uniform(rng_key)
 
     # Comb teeth positions
-    teeth = (np.arange(nwalkers) + r)
+    teeth = jnp.arange(nwalkers, dtype=cumsum.dtype) + r
 
     # Select walkers
-    new_indices = np.searchsorted(cumsum, teeth)
-    new_indices = np.clip(new_indices, 0, nwalkers - 1)
+    new_indices = jnp.searchsorted(cumsum, teeth)
+    new_indices = jnp.clip(new_indices, 0, nwalkers - 1)
 
-    phia_np = np.array(phia)
-    phib_np = np.array(phib)
-
-    phia_new = phia_np[new_indices]
-    phib_new = phib_np[new_indices]
+    phia_new = phia[new_indices]
+    phib_new = phib[new_indices]
 
     # All walkers get equal weight = 1.0 after resampling
-    weights_new = np.ones(nwalkers)
+    weights_new = jnp.ones(nwalkers, dtype=weights.dtype)
 
-    return jnp.array(weights_new), jnp.array(phia_new), jnp.array(phib_new)
+    return weights_new, phia_new, phib_new
 
 
 def population_control_pair_branch(weights, phia, phib, rng_key):
@@ -413,6 +415,7 @@ def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt,
     }
 
 
+@partial(jax.jit, static_argnames=('exp_nmax',))
 def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
                       propagator, chol, rchol_a, rchol_b,
                       trial_up, trial_dn, eshift, rng_key,
@@ -512,6 +515,7 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
     return phia, phib, weights_new, ovlp_new, e_hybrid_new, rng_key
 
 
+@partial(jax.jit, static_argnames=('exp_nmax',))
 def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
                                propagator, chol, rchols_a, rchols_b,
                                trials_up, trials_dn, ci_coeffs,
@@ -785,8 +789,11 @@ class _AFQMCDriverGTO:
         eshift = 0.0
         step_count = 0
 
-        acc_weight = 0.0
-        acc_ehybrid = 0.0
+        # On-device accumulators — avoids per-step
+        # GPU↔CPU sync that was previously incurred by
+        # ``acc_weight += float(...)``.
+        acc_weight = jnp.zeros((), dtype=jnp.float64)
+        acc_ehybrid = jnp.zeros((), dtype=jnp.float64)
 
         if verbose:
             print(f"\nStarting AFQMC: {num_eqlb_blocks} eqlb + "
@@ -799,8 +806,8 @@ class _AFQMCDriverGTO:
             print("-" * 70, file=fout)
 
         for iblock in range(total_blocks):
-            acc_weight = 0.0
-            acc_ehybrid = 0.0
+            acc_weight = jnp.zeros((), dtype=jnp.float64)
+            acc_ehybrid = jnp.zeros((), dtype=jnp.float64)
 
             for istep in range(num_steps_per_block):
                 step_count += 1
@@ -846,11 +853,13 @@ class _AFQMCDriverGTO:
                         phib = jax.device_put(phib, phi_sharding)
                         weights = jax.device_put(weights, scalar_sharding)
 
-                # Accumulate weighted hybrid energy for eshift
-                w_step = jnp.sum(jnp.abs(weights))
-                acc_weight += float(w_step)
-                acc_ehybrid += float(jnp.sum(
-                    jnp.abs(weights) * e_hybrid.real))
+                # Accumulate weighted hybrid energy for eshift.
+                # Stays on device — the float() cast is deferred
+                # to end-of-block.
+                w_abs = jnp.abs(weights)
+                acc_weight = acc_weight + jnp.sum(w_abs)
+                acc_ehybrid = acc_ehybrid + jnp.sum(
+                    w_abs * e_hybrid.real)
 
             # End of block: compute energy via mixed estimator
             if self.multidet:
@@ -879,9 +888,11 @@ class _AFQMCDriverGTO:
             e_block_val = float(e_block)
             energy_blocks.append(e_block_val)
 
-            # Update energy shift
-            if acc_weight > 1e-10:
-                eshift = acc_ehybrid / acc_weight
+            # Update energy shift — single host sync per
+            # block (was per step prior to this change).
+            acc_weight_h = float(acc_weight)
+            if acc_weight_h > 1e-10:
+                eshift = float(acc_ehybrid) / acc_weight_h
 
             if verbose:
                 is_eqlb = iblock < num_eqlb_blocks

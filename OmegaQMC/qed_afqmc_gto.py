@@ -83,8 +83,13 @@ class QEDWalkers:
         self.q = jnp.full(nwalkers, q0)
 
 
+@jax.jit
 def population_control_comb_qed(weights, phia, phib, q, rng_key):
     """Comb population control that also resamples the photon coordinate.
+
+    Pure JAX so the gather stays on device — the previous numpy
+    implementation forced a full GPU↔CPU round-trip of the
+    walker matrices on every population-control step.
 
     Args:
         weights: shape (nwalkers,).
@@ -97,30 +102,24 @@ def population_control_comb_qed(weights, phia, phib, q, rng_key):
         weights_new, phia_new, phib_new, q_new.
     """
     nwalkers = weights.shape[0]
-    weights_np = np.array(weights)
-    total_weight = np.sum(weights_np)
+    total_weight = jnp.sum(weights)
 
     scale = total_weight / nwalkers
-    weights_np = weights_np / scale
+    weights_scaled = weights / scale
 
-    cumsum = np.cumsum(weights_np)
-    r = float(jax.random.uniform(rng_key))
-    teeth = np.arange(nwalkers) + r
+    cumsum = jnp.cumsum(weights_scaled)
+    r = jax.random.uniform(rng_key)
+    teeth = jnp.arange(nwalkers, dtype=cumsum.dtype) + r
 
-    new_indices = np.searchsorted(cumsum, teeth)
-    new_indices = np.clip(new_indices, 0, nwalkers - 1)
+    new_indices = jnp.searchsorted(cumsum, teeth)
+    new_indices = jnp.clip(new_indices, 0, nwalkers - 1)
 
-    phia_np = np.array(phia)
-    phib_np = np.array(phib)
-    q_np = np.array(q)
+    phia_new = phia[new_indices]
+    phib_new = phib[new_indices]
+    q_new = q[new_indices]
+    weights_new = jnp.ones(nwalkers, dtype=weights.dtype)
 
-    phia_new = phia_np[new_indices]
-    phib_new = phib_np[new_indices]
-    q_new = q_np[new_indices]
-    weights_new = np.ones(nwalkers)
-
-    return (jnp.array(weights_new), jnp.array(phia_new),
-            jnp.array(phib_new), jnp.array(q_new))
+    return weights_new, phia_new, phib_new, q_new
 
 
 # ===================================================================
@@ -518,8 +517,10 @@ class _QEDAFQMCDriver:
             print("-" * 80)
 
         for iblock in range(total_blocks):
-            acc_weight = 0.0
-            acc_ehybrid = 0.0
+            # On-device accumulators — reduces per-step
+            # GPU↔CPU sync to one per block.
+            acc_weight = jnp.zeros((), dtype=jnp.float64)
+            acc_ehybrid = jnp.zeros((), dtype=jnp.float64)
 
             for istep in range(num_steps_per_block):
                 step_count += 1
@@ -557,11 +558,12 @@ class _QEDAFQMCDriver:
                         weights = jax.device_put(weights, scalar_sharding)
                         q = jax.device_put(q, scalar_sharding)
 
-                # Accumulate for eshift
-                w_step = jnp.sum(jnp.abs(weights))
-                acc_weight += float(w_step)
-                acc_ehybrid += float(jnp.sum(
-                    jnp.abs(weights) * e_hybrid.real))
+                # Accumulate for eshift on-device — single
+                # host sync at end of block instead of per step.
+                w_abs = jnp.abs(weights)
+                acc_weight = acc_weight + jnp.sum(w_abs)
+                acc_ehybrid = acc_ehybrid + jnp.sum(
+                    w_abs * e_hybrid.real)
 
             # End of block: compute energy
             Ga, Gb, Ghalfa, Ghalfb, _ = greens_function(
@@ -583,9 +585,10 @@ class _QEDAFQMCDriver:
             e_ph_block = float(jnp.sum(w * e_ph.real) / w_sum)
             e_ph_blocks.append(e_ph_block)
 
-            # Update energy shift
-            if acc_weight > 1e-10:
-                eshift = acc_ehybrid / acc_weight
+            # Update energy shift — single host sync per block.
+            acc_weight_h = float(acc_weight)
+            if acc_weight_h > 1e-10:
+                eshift = float(acc_ehybrid) / acc_weight_h
 
             if verbose:
                 is_eqlb = iblock < num_eqlb_blocks

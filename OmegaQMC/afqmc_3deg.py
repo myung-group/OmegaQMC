@@ -700,8 +700,10 @@ class _AFQMC3DEGDriver:
             print("-" * 70, file=fout)
 
         for iblock in range(total_blocks):
-            acc_weight = 0.0
-            acc_ehybrid = 0.0
+            # On-device accumulators — reduces per-step
+            # GPU↔CPU sync to one per block.
+            acc_weight = jnp.zeros((), dtype=jnp.float64)
+            acc_ehybrid = jnp.zeros((), dtype=jnp.float64)
 
             for istep in range(num_steps_per_block):
                 step_count += 1
@@ -740,11 +742,12 @@ class _AFQMC3DEGDriver:
                         phib = jax.device_put(phib, phi_sharding)
                         weights = jax.device_put(weights, scalar_sharding)
 
-                # Accumulate for eshift
-                w_step = jnp.sum(jnp.abs(weights))
-                acc_weight += float(w_step)
-                acc_ehybrid += float(jnp.sum(
-                    jnp.abs(weights) * e_hybrid.real))
+                # Accumulate for eshift on-device — single
+                # host sync at end of block instead of per step.
+                w_abs = jnp.abs(weights)
+                acc_weight = acc_weight + jnp.sum(w_abs)
+                acc_ehybrid = acc_ehybrid + jnp.sum(
+                    w_abs * e_hybrid.real)
 
             # End of block: compute energy
             Ga, Gb, Ghalfa, Ghalfb, _ = greens_function(
@@ -766,8 +769,9 @@ class _AFQMC3DEGDriver:
 
             is_eqlb = iblock < num_eqlb_blocks
 
-            if acc_weight > 1e-10:
-                eshift = acc_ehybrid / acc_weight
+            acc_weight_h = float(acc_weight)
+            if acc_weight_h > 1e-10:
+                eshift = float(acc_ehybrid) / acc_weight_h
 
             if verbose:
                 phase = "EQ" if is_eqlb else "  "
