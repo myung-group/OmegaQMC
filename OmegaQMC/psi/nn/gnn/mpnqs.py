@@ -198,7 +198,16 @@ class MPNqsLayer(nnx.Module):
         q = self.w_q(g_ij)                                     # (n, n, d2)
         k = self.w_k(g_ij)                                     # (n, n, d2)
         # Σ_l q_il ⊙ k_lj  → (n, n, d2)
-        attn = jnp.einsum('ild,ljd->ijd', q, k) / jnp.sqrt(n)
+        # Implemented as a batched matmul over the d2 dim (treating d2
+        # as a leading batch axis) so the contraction over l never
+        # materialises an O(N^3) intermediate — peak memory is
+        # O(N^2 * d2).  The naive ``einsum('ild,ljd->ijd')`` creates a
+        # (N, N, N, d2) intermediate that OOMs on N=50 + 1024 walkers
+        # even on an A100 80 GB.
+        q_t = jnp.transpose(q, (2, 0, 1))                      # (d2, n, n)
+        k_t = jnp.transpose(k, (2, 0, 1))                      # (d2, n, n)
+        attn_t = jnp.matmul(q_t, k_t) / jnp.sqrt(n)            # (d2, n, n)
+        attn = jnp.transpose(attn_t, (1, 2, 0))                # (n, n, d2)
         A_ij = self.attn_out(nnx.gelu(attn))                  # (n, n, d2)
 
         # Message m_ij = A_ij ⊙ F_m(g_ij).
