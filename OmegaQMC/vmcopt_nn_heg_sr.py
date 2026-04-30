@@ -424,18 +424,32 @@ class _HEGSROptimizer:
             # SPRING: momentum lives inside the RHS.
             rhs = g + lambda_mu * prev_dtheta
 
-            def matvec_s(v):
-                return (do.T @ (do @ v)) / n
+            # ===== Sherman-Morrison-Woodbury dual-form SR =====
+            # Smith 2024 supplement page 8: "we take advantage of the
+            # sparsity of Fisher matrix S when the number of samples
+            # is smaller than the number of parameters, and apply the
+            # Sherman-Morrison-Woodbury formula".  In NQS, walkers
+            # (1024) << params (~50k-200k), so the n_w-dim kernel is
+            # cheaper than 20 CG iterations on the n_p-dim system.
+            #
+            # Identity:
+            #   (λI + (1/n) O^T O)^{-1} v
+            #     = (1/λ)[v − (1/n) O^T u]
+            #   where u = (I + (1/(λn)) O O^T)^{-1} (O v / (λn))
+            #
+            # do (centered Jacobian) plays the role of O.  K is in
+            # walker space, n_w × n_w (8 MB at 1024 walkers).  We
+            # solve directly with jnp.linalg.solve — no CG needed.
+            inv_λn = 1.0 / (damping * n)
+            K = (do @ do.T) * inv_λn                              # (n_w, n_w)
+            I_plus_K = K + jnp.eye(n, dtype=K.dtype)              # (n_w, n_w)
+            o_rhs = (do @ rhs) * inv_λn                           # (n_w,)
+            u = jnp.linalg.solve(I_plus_K, o_rhs)                 # (n_w,)
+            dtheta = (rhs - do.T @ u) / damping                   # (n_p,)
 
-            def matvec_damped(v):
-                return matvec_s(v) + damping * v
-
-            dtheta = _cg_solve(matvec_damped, rhs, n_iters=n_cg_static)
-
-            # F-norm clip.  ||dθ||_F^2 = dθ^T S dθ.  Active when
-            # c_clip > 0.  jnp.where keeps this differentiable-friendly
-            # but this whole function is autograd-free anyway.
-            s_dtheta = matvec_s(dtheta)
+            # F-norm clip.  S dθ via (1/n) do^T (do dθ) — same memory
+            # cost as in CG matvec.
+            s_dtheta = (do.T @ (do @ dtheta)) / n
             f_norm_sq = jnp.maximum(jnp.dot(dtheta, s_dtheta), 1e-20)
             f_norm = jnp.sqrt(f_norm_sq)
             raw_scale = c_clip / (f_norm + 1e-20)
