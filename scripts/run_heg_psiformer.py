@@ -516,8 +516,12 @@ def _run(cfg, project, run_dir, prefix):
             verbose=1,
         )
         trained_params = opt_result['params']
-        print(f"  Final training E/N: "
-              f"{opt_result['E_final_ha']:.6f} Ha/elec")
+        e_final = opt_result.get('E_final_ha')
+        if e_final is not None:
+            print(f"  Final training E/N: {e_final:.6f} Ha/elec")
+        else:
+            print(f"  (no training iters executed — proceeding to eval "
+                  f"with loaded params)")
     else:
         print("\n[1/2] Skipping training (optimize.skip=true).")
 
