@@ -615,6 +615,89 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
 # Driver
 # ===================================================================
 
+def _autotune_afqmc_walkers(driver, free_mb, mem_frac=0.75, k=4):
+    """Estimate walker count one AFQMC step fits in free GPU mem.
+
+    Uses a delta probe: AOT-compiles the driver's propagator
+    for both 1-walker and ``k``-walker inputs and subtracts
+    ``alias_size + temp_size``, cancelling any walker-
+    independent storage (Cholesky tensor, half-rotated chol,
+    trial orbitals, propagator).  The remainder, divided by
+    ``k - 1``, is the per-walker byte cost.  Falls back to
+    1 MB/walker when AOT analysis is unavailable.
+    Informational only — caller does not mutate state.
+
+    Parameters
+    ----------
+    driver : _AFQMCDriverGTO
+        Driver instance whose ``propagator``, ``chol``, trial
+        orbitals and (optionally) multi-det data live on the
+        GPU.
+    free_mb : float or None
+        Free GPU memory in MiB; ``None`` assumes 4096.
+    mem_frac : float
+        Fraction of free memory to target (default 0.75).
+    k : int
+        Larger probe size for the delta (default 4).
+
+    Returns
+    -------
+    (int, float)
+        ``(n_rec, bytes_per_walker)``.
+    """
+    bpw = None
+    try:
+        nbasis = driver.nbasis
+        nup = driver.nup
+        ndown = driver.ndown
+
+        def _probe(n):
+            phia = jnp.zeros(
+                (n, nbasis, nup), dtype=jnp.complex128)
+            phib = jnp.zeros(
+                (n, nbasis, ndown), dtype=jnp.complex128)
+            weights = jnp.zeros((n,), dtype=jnp.float64)
+            overlap = jnp.zeros((n,), dtype=jnp.complex128)
+            e_hybrid = jnp.zeros((n,), dtype=jnp.complex128)
+            return phia, phib, weights, overlap, e_hybrid
+
+        if driver.multidet:
+            def _call(phia, phib, weights, overlap, e_hybrid):
+                return propagate_walkers_multidet(
+                    phia, phib, weights, overlap, e_hybrid,
+                    driver.propagator, driver.chol,
+                    driver.rchols_a, driver.rchols_b,
+                    driver.trials_up, driver.trials_dn,
+                    driver.ci_coeffs,
+                    jnp.float64(0.0), jax.random.key(0))
+        else:
+            def _call(phia, phib, weights, overlap, e_hybrid):
+                return propagate_walkers(
+                    phia, phib, weights, overlap, e_hybrid,
+                    driver.propagator, driver.chol,
+                    driver.rchol_a, driver.rchol_b,
+                    driver.trial_up, driver.trial_dn,
+                    jnp.float64(0.0), jax.random.key(0))
+
+        m1 = jax.jit(_call).lower(
+            *_probe(1)).compile().memory_analysis()
+        mk = jax.jit(_call).lower(
+            *_probe(k)).compile().memory_analysis()
+        delta = (mk.peak_memory_in_bytes
+                 - m1.peak_memory_in_bytes)
+        if delta > 0:
+            bpw = delta / (k - 1)
+    except Exception:
+        pass
+
+    if not bpw or bpw <= 0:
+        bpw = 1.0e6  # 1 MB/walker fallback
+
+    free_bytes = (free_mb or 4096.0) * 1e6 * mem_frac
+    n_rec = int(free_bytes / bpw)
+    return max(10, n_rec), bpw
+
+
 class _AFQMCDriverGTO:
     """Phaseless AFQMC driver.
 
@@ -760,8 +843,23 @@ class _AFQMCDriverGTO:
             fout = open(fname_log, 'w', 1)
 
         verbose = self.verbose
-        if verbose:
-            print(f"  num_walkers = {num_walkers}", file=fout)
+
+        # --- Informational GPU capacity estimate ---
+        # Does NOT modify num_walkers.
+        try:
+            from .vmcopt_gto_linear import _get_free_gpu_mb
+            free_mb = _get_free_gpu_mb()
+            n_rec, bpw = _autotune_afqmc_walkers(self, free_mb)
+            free_txt = (f"{free_mb:.0f} MiB free"
+                        if free_mb is not None
+                        else "free GPU mem unknown")
+            print(f"ℹ️\tEst. GPU capacity: {n_rec} walkers "
+                  f"(user requested {num_walkers}; "
+                  f"{bpw / 1e6:.2f} MB/walker, {free_txt})",
+                  file=fout)
+        except Exception as e:
+            print(f"ℹ️\tGPU capacity estimate unavailable: {e}",
+                  file=fout)
 
         # Initialize walkers
         walkers = Walkers(self.trial_up, self.trial_dn,
