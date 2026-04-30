@@ -29,23 +29,20 @@ ansatz:
   type: nn_heg                      # NN-based HEG ansatz pipeline
                                     # (PsiFormer / MP-NQS share builder)
   backbone: mpnqs                   # selects MP-NQS dual-stream GNN
-  mpnqs_d1: 32
-  mpnqs_d2: 26
-  mpnqs_hidden: 32
-  mpnqs_n_layers: 4
-  embedding_dim: 32
-  layers: 1                         # PsiFormer layers (no-op for mpnqs)
-  heads: 2                          # PsiFormer heads (no-op for mpnqs)
-  two_particle_dim: 16              # PsiFormer (no-op for mpnqs)
+  mpnqs_d1: 32                      # one-body stream h_i dim (Smith)
+  mpnqs_d2: 26                      # two-body stream h_ij dim (Smith)
+  mpnqs_hidden: 32                  # MLP hidden width (Smith)
+  mpnqs_n_layers: 4                 # T = number of MP-NQS layers (Smith)
   n_det: 16
   full_determinant: false
-  use_cusp: true
-  pair_jastrow: true
+  use_cusp: true                    # Smith's u_2 (Kato cusp)
+  pair_jastrow: false               # not in Smith — disabled for fidelity + memory
   deep_jastrow: false               # disabled — Smith deep Jastrow takes its place
   use_smith_deep_jastrow: true      # Smith eqs. 20-21
   smith_jastrow_hidden: 32
   smith_jastrow_n_layers: 4
-  use_backflow: true
+  use_backflow: false               # multiplicative BF not in Smith;
+                                    # only the coord-transform BF (eq.19)
   use_coord_backflow: true
   coord_bf_zero_init: true
   use_ghost_atom: false
@@ -60,7 +57,12 @@ pretrain:
 optimize:
   type: sr
   iters: 20000
-  walkers: 1024                     # Smith
+  walkers: 512                      # halved from Smith's 1024 to fit
+                                    # A100 80 GB without gradient
+                                    # checkpointing.  Memory floor at
+                                    # 1024 walkers ~94 GB > 80 GB.
+                                    # Restore to 1024 once nnx.remat
+                                    # is added to MP-NQS layers.
   # ---- Smith optimizer (supplement page 8) ----
   lr: 10.0                          # η_0 for rs=20
   lr_schedule: inverse              # η_t = η_0 / (1 + t/T)
