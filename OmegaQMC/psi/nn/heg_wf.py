@@ -332,6 +332,18 @@ class HEGPsiFormerConfig(NamedTuple):
     jas_mlp_bias: bool = True
     jas_mlp_zero_init_last: bool = True
     use_backflow: bool = True
+    # Backbone choice.  'psiformer' (default) → single-stream attention
+    # GNN (FermiNet/PsiFormer family).  'mpnqs' → dual-stream message-
+    # passing (Pescia 2024 / Smith 2024) with persistent two-body
+    # stream — better inductive bias for HEG-type pair-additive
+    # interactions.  Both feed the same backflow / Jastrow / envelope.
+    backbone: str = 'psiformer'
+    # MP-NQS-specific dims (used when backbone='mpnqs'; Smith uses
+    # d1=32, d2=26, hidden=32, T=4).
+    mpnqs_d1: int = 32
+    mpnqs_d2: int = 26
+    mpnqs_hidden: int = 32
+    mpnqs_n_layers: int = 4
     # Coord-transform backflow (Smith 2024 PRL 133 266504, eq. 19):
     # x_i = r_i + W_bf · h_i^(T).  When True, a small Linear readout
     # from the post-GNN one-body stream produces a per-electron
@@ -341,6 +353,13 @@ class HEGPsiFormerConfig(NamedTuple):
     # represent different (non-redundant) families of correlations.
     use_coord_backflow: bool = False
     coord_bf_zero_init: bool = True   # zero-init last layer so initial Δr = 0
+    # Smith 2024 deep Jastrow (eqs. 20-21): U(R) = Σ_i J(h_i, Linear_pre(x_i)).
+    # When True, this REPLACES the standard ``use_deep_jastrow`` head —
+    # builder logs an info message and disables the latter to avoid
+    # double counting.
+    use_smith_deep_jastrow: bool = False
+    smith_jastrow_hidden: int = 32        # Smith's hidden width
+    smith_jastrow_n_layers: int = 4       # Smith's L=4 (3 hidden)
     # ``use_cusp`` is ON by default.  Previously it was False
     # because the naïve PsiformerCusp implementation had three
     # separable bugs: (i) unconstrained trainable ``α`` that

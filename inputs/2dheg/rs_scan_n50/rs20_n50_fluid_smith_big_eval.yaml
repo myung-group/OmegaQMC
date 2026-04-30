@@ -1,0 +1,81 @@
+# Evaluation-only run: load the BIG-network chkpt mid-flight and
+# measure S(k) to characterise whether the converged wavefunction is
+# fluid (S(k)≈1 everywhere) or crystal (sharp triangular Bragg peaks).
+#
+# Loads: runs/rs20_n50_fluid_smith_big/rs20_n50_fluid_smith_big.chk.h5
+# Pretrain skipped, optimize.iters=0 (no training), then eval +
+# observables on the loaded wavefunction.
+#
+# Architecture MUST match the original training YAML (rs20_n50_fluid_smith_big.yaml)
+# exactly — chkpt loading is shape-rigid.
+
+project: rs20_n50_fluid_smith_big_eval
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 3
+  heads: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: true
+  deep_jastrow: true
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 80
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 0                         # no training — load chkpt & eval
+  walkers: 256                     # minimal — equilibration only
+  lr: 0.05                         # ignored (iters=0)
+  sampler: metropolis
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 5
+  load_chkpt: runs/rs20_n50_fluid_smith_big/rs20_n50_fluid_smith_big.chk.h5
+
+eval:
+  # Minimal eval VMC — we only need it to (a) sanity-check loaded
+  # wavefunction reproduces ~-45.89 mHa, (b) leave a populated walker
+  # state for observables.  Real S(k) work happens in observables
+  # phase below, which has its own equilibration + sampling.
+  walkers: 256
+  blocks: 5
+  equil_blocks: 5
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 8
+  n_walkers: 1024
+  equil_steps: 600                 # long equil
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

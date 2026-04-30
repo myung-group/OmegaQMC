@@ -1,0 +1,104 @@
+# rs=20, N=50 fluid — full Smith 2024 recipe (PRL 133, 266504).
+#
+# Faithful reproduction of the (MP)²NQS protocol:
+#   * MP-NQS dual-stream message-passing GNN backbone (d1=32, d2=26,
+#     hidden=32, T=4 layers — Smith supplement page 7).
+#   * Multi-PW orbitals with N_k = 3N (n_virt_pw=125 → 150 PWs).
+#   * Coord-transform backflow x_i = r_i + W_bf · h_i^(T) (eq. 19).
+#   * Smith deep Jastrow J(h_i^(T), Linear_pre(x_i)), L=4 layers (eqs. 20-21).
+#   * Pair Jastrow + multiplicative BF retained (broader correlation stack).
+#   * Walker init: WC-perturbed for both phases (Smith page 7).
+#   * Optimizer: SPRING + lr=10 / (1+t/1000) decay + F-norm clip C=10
+#     + LM adaptive damping + MALA sampling (Smith eq. 23).
+#   * 1024 walkers, 20 MALA decorrelation steps (Smith page 7).
+#
+# Total params: ~80-100k (most of Smith's 50k for the GNN; remainder
+# from envelope coefficients with our larger n_virt_pw, multiplicative
+# BF head, pair Jastrow head — features Smith doesn't include.  We
+# keep them on for safety; can ablate later).
+
+project: rs20_n50_fluid_smithMP
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg                      # NN-based HEG ansatz pipeline
+                                    # (PsiFormer / MP-NQS share builder)
+  backbone: mpnqs                   # selects MP-NQS dual-stream GNN
+  mpnqs_d1: 32
+  mpnqs_d2: 26
+  mpnqs_hidden: 32
+  mpnqs_n_layers: 4
+  embedding_dim: 32
+  layers: 1                         # PsiFormer layers (no-op for mpnqs)
+  heads: 2                          # PsiFormer heads (no-op for mpnqs)
+  two_particle_dim: 16              # PsiFormer (no-op for mpnqs)
+  n_det: 16
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: true
+  deep_jastrow: false               # disabled — Smith deep Jastrow takes its place
+  use_smith_deep_jastrow: true      # Smith eqs. 20-21
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 125                    # Smith N_k = 3N = 150 → 25 occ + 125 virt
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0                          # Smith protocol: cold start
+
+optimize:
+  type: sr
+  iters: 20000
+  walkers: 1024                     # Smith
+  # ---- Smith optimizer (supplement page 8) ----
+  lr: 10.0                          # η_0 for rs=20
+  lr_schedule: inverse              # η_t = η_0 / (1 + t/T)
+  lr_decay_T: 1000                  # Smith T
+  spring_mu: 0.9                    # Smith μ
+  spring_norm_clip: 10.0            # C = η_0 (Smith)
+  damping_adapt: true               # LM adaptive λ
+  damping_min: 1.0e-5
+  damping_max: 1.0e-1
+  damping_factor: 2.0
+  damping_lookback: 100
+  sampler: mala                     # Smith MALA sampler
+  mala_grad_clip: 1.0               # numerical safety
+  var_weight: 0.0
+  mcmc_decorr_steps: 20             # Smith uses 20 MALA between SR
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3                # Smith λ = 0.001
+  sr_n_cg: 20
+  save_every: 500                   # graceful kill safety
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

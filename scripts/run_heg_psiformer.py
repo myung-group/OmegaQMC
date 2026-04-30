@@ -124,10 +124,24 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
         # Backflow on/off — defaults to True (FermiNet/PsiFormer recipe).
         use_backflow=bool(a.get('use_backflow', True)),
+        # Backbone choice: 'psiformer' (default attention GNN) or
+        # 'mpnqs' (Smith 2024 / Pescia 2024 message-passing GNN).
+        backbone=str(a.get('backbone', 'psiformer')),
+        mpnqs_d1=int(a.get('mpnqs_d1', 32)),
+        mpnqs_d2=int(a.get('mpnqs_d2', 26)),
+        mpnqs_hidden=int(a.get('mpnqs_hidden', 32)),
+        mpnqs_n_layers=int(a.get('mpnqs_n_layers', 4)),
         # Coord-transform backflow (Smith 2024).  Off by default; set
         # ``use_coord_backflow: true`` in YAML to enable.
         use_coord_backflow=bool(a.get('use_coord_backflow', False)),
         coord_bf_zero_init=bool(a.get('coord_bf_zero_init', True)),
+        # Smith deep Jastrow (eqs. 20-21).  Replaces the standard
+        # deep_jastrow when enabled.
+        use_smith_deep_jastrow=bool(
+            a.get('use_smith_deep_jastrow', False),
+        ),
+        smith_jastrow_hidden=int(a.get('smith_jastrow_hidden', 32)),
+        smith_jastrow_n_layers=int(a.get('smith_jastrow_n_layers', 4)),
         # Envelope choice — 'plane_wave' (Fermi-sea Slater) or
         # 'crystal_gaussian' (localised Gaussians on triangular Bravais
         # lattice for the Wigner-crystal sector).
@@ -291,23 +305,47 @@ def _run(cfg, project, run_dir, prefix):
               f"e_M={hf_2d['madelung']:.6f}  Ha/elec")
 
     # --- Ansatz ---
-    ansatz_type = _get(cfg, 'ansatz.type', 'psiformer')
-    if ansatz_type == 'psiformer':
+    # ``ansatz.type`` selects the *config dataclass* and the matching
+    # builder pipeline.  Within ``nn_heg`` (PsiFormer/MP-NQS family),
+    # the actual GNN backbone is selected by ``ansatz.backbone``
+    # ('psiformer' single-stream attention vs. 'mpnqs' Pescia/Smith
+    # dual-stream message passing).  ``type: psiformer`` is kept as a
+    # backward-compat alias for existing YAMLs.
+    ansatz_type = str(_get(cfg, 'ansatz.type', 'nn_heg')).lower()
+    if ansatz_type in ('nn_heg', 'psiformer'):
         config = _build_psiformer_config(cfg, n_up, n_down, L, dim=dim)
         a = cfg['ansatz']
-        print(f"  Ansatz: PsiFormer (dim={dim}) - "
-              f"emb={a.get('embedding_dim', 64)}, "
-              f"layers={a.get('layers', 2)}, "
-              f"tp_dim={a.get('two_particle_dim', 16)}, "
-              f"heads={a.get('heads', 2)}, "
-              f"n_det={a.get('n_det', 1)}")
+        backbone = str(a.get('backbone', 'psiformer')).lower()
+        if backbone == 'mpnqs':
+            print(
+                f"  Ansatz: nn_heg / MP-NQS (dim={dim}) - "
+                f"d1={a.get('mpnqs_d1', 32)}, "
+                f"d2={a.get('mpnqs_d2', 26)}, "
+                f"hidden={a.get('mpnqs_hidden', 32)}, "
+                f"T={a.get('mpnqs_n_layers', 4)}, "
+                f"n_det={a.get('n_det', 1)}"
+            )
+        else:
+            print(
+                f"  Ansatz: nn_heg / PsiFormer (dim={dim}) - "
+                f"emb={a.get('embedding_dim', 64)}, "
+                f"layers={a.get('layers', 2)}, "
+                f"tp_dim={a.get('two_particle_dim', 16)}, "
+                f"heads={a.get('heads', 2)}, "
+                f"n_det={a.get('n_det', 1)}"
+            )
     elif ansatz_type in ('slater_jastrow', 'sj'):
         config = _build_slater_jastrow_config(
             cfg, n_up, n_down, L, dim=dim,
         )
         print(f"  Ansatz: Slater-Jastrow (dim={dim})")
     else:
-        raise ValueError(f"Unknown ansatz.type: {ansatz_type!r}")
+        raise ValueError(
+            f"Unknown ansatz.type: {ansatz_type!r}.  "
+            f"Valid: 'nn_heg' (=PsiFormer/MP-NQS pipeline; backbone "
+            f"selectable), 'psiformer' (legacy alias for 'nn_heg'), "
+            f"'slater_jastrow' (or 'sj')."
+        )
 
     # --- RNG keys ---
     rng = jax.random.key(seed)
@@ -321,9 +359,9 @@ def _run(cfg, project, run_dir, prefix):
     pretrained_params = None
     pretrain_iters = int(_get(cfg, 'pretrain.iters', 0))
     if pretrain_iters > 0:
-        if ansatz_type != 'psiformer':
+        if ansatz_type not in ('nn_heg', 'psiformer'):
             print("[warn] pretrain.iters > 0 ignored "
-                  "(pretraining is PsiFormer-only)")
+                  "(pretraining only available for nn_heg ansatz)")
         else:
             pre_walkers = int(_get(cfg, 'pretrain.walkers', 256))
             pre_lr = float(_get(cfg, 'pretrain.lr', 1e-3))

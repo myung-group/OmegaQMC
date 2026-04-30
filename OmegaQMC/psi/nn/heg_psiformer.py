@@ -208,6 +208,86 @@ class HEGElectronEmbedding(nnx.Module):
 # HEG backflow applier (multiplicative-only, no nuclear cutoff)
 # =====================================================================
 
+class SmithDeepJastrow(nnx.Module):
+    """Smith 2024 deep Jastrow (supplement eqs. 20-21).
+
+        U({r_i}) = Σ_i J(h_i^(T), Linear_pre(x_i))
+        J = Linear_L ∘ GELU ∘ ... ∘ Linear_1   (L = 4 layers)
+
+    Takes both the post-GNN one-body stream ``h_i`` AND the
+    backflow-shifted positions ``x_i``; concatenates ``[h_i, Linear_pre(x_i)]``
+    and feeds through an L-layer GELU MLP.  The final layer is
+    zero-initialised so the contribution is exactly zero at iter 0
+    (preserves the envelope-only initialisation).
+
+    Differs from :class:`~OmegaQMC.psi.nn.omni.Jastrow` (used in
+    PsiFormer/FermiNet path) in that it uses position information
+    explicitly — Smith reports this gives "better expressivity" than
+    feeding only the embedding stream.
+
+    Args:
+        d1: One-body stream dim.
+        dim: Spatial dim (2 or 3).
+        hidden: Hidden width.
+        n_layers: Number of Linear layers ``L`` (default 4 → 3 hidden).
+        zero_init_last: Zero-initialise the final layer (default True).
+        rngs: NNX RNG state.
+    """
+
+    def __init__(
+        self,
+        *,
+        d1: int,
+        dim: int,
+        hidden: int = 32,
+        n_layers: int = 4,
+        zero_init_last: bool = True,
+        rngs: nnx.Rngs,
+    ):
+        self.d1 = int(d1)
+        self.dim = int(dim)
+        # Linear_pre: dim → d1 (so the position projection is on the
+        # same scale as h_i before concatenation).
+        self.linear_pre = nnx.Linear(dim, d1, rngs=rngs)
+        # MLP J: in_dim = d1 + d1 (concat of h_i and Linear_pre(x_i)).
+        in_dim = 2 * d1
+        layers = []
+        for li in range(int(n_layers)):
+            out_dim = 1 if li == n_layers - 1 else hidden
+            layers.append(
+                nnx.Linear(in_dim, out_dim, rngs=rngs),
+            )
+            in_dim = out_dim
+        self.layers = nnx.List(layers)
+        if zero_init_last:
+            last = self.layers[-1]
+            last.kernel = nnx.Param(
+                jnp.zeros_like(param_value(last.kernel)),
+            )
+            if last.use_bias:
+                last.bias = nnx.Param(
+                    jnp.zeros_like(param_value(last.bias)),
+                )
+
+    def __call__(self, h: jax.Array, x: jax.Array) -> jax.Array:
+        """Compute scalar log-Jastrow contribution.
+
+        Args:
+            h: One-body stream, ``(n_elec, d1)``.
+            x: Backflow-shifted positions, ``(n_elec, dim)``.
+
+        Returns:
+            Scalar — sum over electrons of per-electron J-output.
+        """
+        x_proj = self.linear_pre(x)
+        z = jnp.concatenate([h, x_proj], axis=-1)
+        for li, layer in enumerate(self.layers):
+            z = layer(z)
+            if li < len(self.layers) - 1:
+                z = nnx.gelu(z)
+        return z.squeeze(-1).sum()
+
+
 def apply_heg_backflow_mult(orb, fs):
     """Multiplicative backflow without the molecular nuclear cutoff.
 
@@ -272,6 +352,7 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         cusp_electrons=None,
         pair_jastrow=None,
         coord_backflow=None,
+        smith_deep_jastrow=None,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -283,6 +364,7 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         self.cusp_electrons = cusp_electrons
         self.pair_jastrow = pair_jastrow
         self.coord_backflow = coord_backflow
+        self.smith_deep_jastrow = smith_deep_jastrow
 
     @property
     def _spin_slices(self):
@@ -343,12 +425,15 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         # x_i = r_i + W_bf · h_i^(T).  When active, the orbital basis
         # is evaluated at the shifted positions.  Cusp + pair-Jastrow
         # always use the *original* r (the cusp condition is a
-        # property of the *true* electron coordinates).
+        # property of the *true* electron coordinates).  ``r_bf`` is
+        # the backflow-wrapped quasiparticle coordinate, used by both
+        # the envelope and the Smith deep Jastrow (eq. 20).
         if (getattr(self, 'coord_backflow', None) is not None
                 and emb is not None):
             r_bf = r + self.coord_backflow(emb)
             pc_bf = _make_heg_phys_conf(r_bf)
         else:
+            r_bf = r
             pc_bf = pc
 
         # Envelope orbitals.
@@ -405,6 +490,15 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         # Deep jastrow from the GNN (sum over electrons after MLP).
         if jastrow is not None:
             log_psi = log_psi + jastrow
+
+        # Smith 2024 deep Jastrow (eqs. 20-21): J(h_i^(T), Linear_pre(x_i)).
+        # Uses both the one-body GNN stream and the backflow-shifted
+        # positions r_bf — strictly more expressive than ``jastrow``
+        # above (which only uses h_i).  Mutually exclusive with the
+        # OmniNet jastrow at builder level: at most one is configured.
+        if (getattr(self, 'smith_deep_jastrow', None) is not None
+                and emb is not None):
+            log_psi = log_psi + self.smith_deep_jastrow(emb, r_bf)
 
         # Optional extra pair Jastrow.
         if self.pair_jastrow is not None:
@@ -694,7 +788,18 @@ def build_heg_psiformer_wf(
             f"expected 'plane_wave' or 'crystal_gaussian'.",
         )
 
-    # --- Electron embedding: spin-typed, optionally ghost-atom enriched ---
+    # --- Backbone dispatch: 'psiformer' (legacy attention GNN) vs.
+    # 'mpnqs' (Pescia 2024 / Smith 2024 dual-stream message passing).
+    backbone = str(getattr(config, 'backbone', 'psiformer')).lower()
+    if backbone == 'mpnqs':
+        # MP-NQS uses its own embedding scheme (learnable seed vector,
+        # spin info via v_ij).  emb_dim downstream is forced to
+        # config.mpnqs_d1 so the heads (BF/Jastrow/coord-BF) consume
+        # the dual-stream output dim.
+        emb_dim = int(getattr(config, 'mpnqs_d1', 32))
+
+    # --- Electron embedding: spin-typed, optionally ghost-atom enriched
+    #     (PsiFormer backbone only).
     electron_embedding = HEGElectronEmbedding(
         n_up=n_up, n_down=n_down,
         embedding_dim=emb_dim,
@@ -739,21 +844,33 @@ def build_heg_psiformer_wf(
         )
         layers.append(layer)
 
-    # --- Assemble ElectronGNN.  The molecular builder wants a
-    # mol_info-like object; since our ElectronGNN only reads n_nuc,
-    # n_up, n_down, and charges (for some paths), we pass a
-    # lightweight shim.
-    gnn = ElectronGNN(
-        mol_info=_HEGMolInfoShim(n_up=n_up, n_down=n_down),
-        embedding_dim=emb_dim,
-        two_particle_stream_dim=tp_dim,
-        n_interactions=config.n_interactions,
-        self_interaction=False,
-        edge_types=edge_types,
-        electron_embedding=electron_embedding,
-        layers=layers,
-        edge_features=edge_features,
-    )
+    # --- Assemble GNN backbone.  The PsiFormer (single-stream
+    # attention) path uses ElectronGNN; the MP-NQS path uses MPNqsGnn
+    # which is a drop-in replacement (same GraphNodes interface).
+    if backbone == 'mpnqs':
+        from .gnn.mpnqs import MPNqsGnn
+        gnn = MPNqsGnn(
+            n_up=n_up, n_down=n_down,
+            lattice=lattice,
+            n_layers=int(getattr(config, 'mpnqs_n_layers', 4)),
+            d1=int(getattr(config, 'mpnqs_d1', 32)),
+            d2=int(getattr(config, 'mpnqs_d2', 26)),
+            hidden=int(getattr(config, 'mpnqs_hidden', 32)),
+            include_spin_in_v_ij=True,
+            rngs=rngs,
+        )
+    else:
+        gnn = ElectronGNN(
+            mol_info=_HEGMolInfoShim(n_up=n_up, n_down=n_down),
+            embedding_dim=emb_dim,
+            two_particle_stream_dim=tp_dim,
+            n_interactions=config.n_interactions,
+            self_interaction=False,
+            edge_types=edge_types,
+            electron_embedding=electron_embedding,
+            layers=layers,
+            edge_features=edge_features,
+        )
 
     # --- Backflow head (from OmniNet) ---
     backflow = None
@@ -797,16 +914,13 @@ def build_heg_psiformer_wf(
         backflow = bf_dict
 
     # --- Deep jastrow head (from OmniNet) ---
-    # With ``activation=None`` and ``bias=False`` this MLP is a
-    # linear readout regardless of how many layers its
-    # ``hidden_layers`` spec asks for — composition of linears
-    # collapses.  Drive activation/bias from the config so the head
-    # is a genuinely nonlinear Jastrow.  The optional zero-init of
-    # the final layer keeps the Jastrow's contribution to log|ψ|
-    # at exactly zero at initialisation so walkers start from the
-    # envelope prior — standard PsiFormer/FermiNet practice.
+    # When ``use_smith_deep_jastrow=True``, the OmniNet-side jastrow is
+    # disabled to avoid double-counting; the Smith variant takes its
+    # place (built below, attached directly to the wavefunction
+    # module rather than via OmniNet).
     deep_jastrow = None
-    if config.use_deep_jastrow:
+    use_smith_dj = bool(getattr(config, 'use_smith_deep_jastrow', False))
+    if config.use_deep_jastrow and not use_smith_dj:
         from .omni import Jastrow as _DeepJastrow
         jas_mlp = MLP(
             emb_dim, 1,
@@ -876,6 +990,20 @@ def build_heg_psiformer_wf(
             rngs=rngs,
         )
 
+    # --- Optional Smith 2024 deep Jastrow (eqs. 20-21) ---
+    # Takes (h_i^(T), Linear_pre(x_i)) — strictly more expressive than
+    # the OmniNet ``deep_jastrow`` above, which uses h_i only.
+    # Mutually exclusive with that head (handled at builder level).
+    smith_deep_jastrow = None
+    if use_smith_dj:
+        smith_deep_jastrow = SmithDeepJastrow(
+            d1=emb_dim, dim=dim,
+            hidden=int(getattr(config, 'smith_jastrow_hidden', 32)),
+            n_layers=int(getattr(config, 'smith_jastrow_n_layers', 4)),
+            zero_init_last=True,
+            rngs=rngs,
+        )
+
     # --- Optional coord-transform backflow (Smith 2024) ---
     coord_backflow = None
     if getattr(config, 'use_coord_backflow', False):
@@ -896,6 +1024,7 @@ def build_heg_psiformer_wf(
         cusp_electrons=cusp_electrons,
         pair_jastrow=pair_jastrow,
         coord_backflow=coord_backflow,
+        smith_deep_jastrow=smith_deep_jastrow,
     )
 
 
@@ -1057,6 +1186,7 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         cusp_electrons=None,
         pair_jastrow=None,
         coord_backflow=None,
+        smith_deep_jastrow=None,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -1068,6 +1198,7 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         self.cusp_electrons = cusp_electrons
         self.pair_jastrow = pair_jastrow
         self.coord_backflow = coord_backflow
+        self.smith_deep_jastrow = smith_deep_jastrow
 
     @property
     def _spin_slices(self):

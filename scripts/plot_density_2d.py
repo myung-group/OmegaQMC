@@ -66,10 +66,13 @@ def _build_wf_from_config(cfg, init_seed=0):
         det_jitter=float(a.get('det_jitter', 0.02)),
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
         use_backflow=bool(a.get('use_backflow', True)),
+        use_coord_backflow=bool(a.get('use_coord_backflow', False)),
+        coord_bf_zero_init=bool(a.get('coord_bf_zero_init', True)),
         envelope_type=str(a.get('envelope_type', 'plane_wave')),
         crystal_sigma_init=float(a.get('crystal_sigma_init', 0.25)),
         crystal_spin_pattern=str(a.get('crystal_spin_pattern', 'neel')),
         crystal_det_jitter=float(a.get('crystal_det_jitter', 0.0)),
+        walker_init=str(a.get('walker_init', 'auto')),
         dim=int(cfg['system'].get('dim', 3)),
     )
 
