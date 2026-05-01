@@ -1,0 +1,85 @@
+# Long lite Smith MP-NQS at N=50 — 100,000 iters.
+# Same architecture as rs20_n50_fluid_smithMP_lite.yaml; just much
+# longer.  lr_decay_T scaled to 5000 so the schedule still has its
+# late-stage refinement region (lr drops to η_0/21 by iter 100k).
+
+project: rs20_n50_fluid_smithMP_lite_100k
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 16
+  mpnqs_d2: 12
+  mpnqs_hidden: 16
+  mpnqs_n_layers: 2
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 16
+  smith_jastrow_n_layers: 4
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 30
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 100000
+  walkers: 256
+  lr: 1.0
+  lr_schedule: inverse
+  lr_decay_T: 5000                  # 10x longer decay timescale than
+                                    # the 2k-iter version (T_max/T = 20)
+  spring_mu: 0.9
+  spring_norm_clip: 1.0
+  damping_adapt: true
+  damping_min: 1.0e-5
+  damping_max: 1.0e-1
+  damping_factor: 2.0
+  damping_lookback: 200             # longer window for the longer run
+  sampler: mala
+  mala_grad_clip: 1.0
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 1000
+
+eval:
+  walkers: 256
+  blocks: 30
+  equil_blocks: 10
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 256
+  equil_steps: 200
+  sample_steps: 50
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8
