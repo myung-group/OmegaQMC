@@ -113,6 +113,10 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         two_particle_stream_dim=int(a.get('two_particle_dim', 16)),
         n_attention_heads=int(a.get('heads', 2)),
         use_cusp=bool(a.get('use_cusp', True)),
+        # Default False — locked Kato slope.  Trainable α was the
+        # cause of a documented variational catastrophe; opt in only
+        # for diagnostic studies.
+        cusp_trainable_alpha=bool(a.get('cusp_trainable_alpha', False)),
         use_deep_jastrow=bool(a.get('deep_jastrow', False)),
         use_pair_jastrow=bool(a.get('pair_jastrow', False)),
         jas_mlp_activation=(None if jas_act in (None, 'none')

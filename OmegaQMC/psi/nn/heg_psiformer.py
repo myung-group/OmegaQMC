@@ -790,23 +790,25 @@ def build_heg_psiformer_wf(
 
     # --- Backbone dispatch: 'psiformer' (legacy attention GNN) vs.
     # 'mpnqs' (Pescia 2024 / Smith 2024 dual-stream message passing).
+    # Embedding / per-layer / edge-feature modules below are
+    # PsiFormer-specific and skipped entirely on the MP-NQS path —
+    # the YAML fields ``layers``, ``heads``, ``two_particle_dim`` are
+    # ignored when ``backbone='mpnqs'``.
     backbone = str(getattr(config, 'backbone', 'psiformer')).lower()
     if backbone == 'mpnqs':
-        # MP-NQS uses its own embedding scheme (learnable seed vector,
-        # spin info via v_ij).  emb_dim downstream is forced to
-        # config.mpnqs_d1 so the heads (BF/Jastrow/coord-BF) consume
-        # the dual-stream output dim.
         emb_dim = int(getattr(config, 'mpnqs_d1', 32))
 
-    # --- Electron embedding: spin-typed, optionally ghost-atom enriched
-    #     (PsiFormer backbone only).
-    electron_embedding = HEGElectronEmbedding(
-        n_up=n_up, n_down=n_down,
-        embedding_dim=emb_dim,
-        lattice=lattice,
-        use_ghost_atom=config.use_ghost_atom,
-        rngs=rngs,
-    )
+    if backbone == 'psiformer':
+        # --- Electron embedding: spin-typed, optionally ghost-atom enriched.
+        electron_embedding = HEGElectronEmbedding(
+            n_up=n_up, n_down=n_down,
+            embedding_dim=emb_dim,
+            lattice=lattice,
+            use_ghost_atom=config.use_ghost_atom,
+            rngs=rngs,
+        )
+    else:
+        electron_embedding = None
 
     # --- Periodic edge features for 'same' and 'anti' edges ---
     #
@@ -825,24 +827,29 @@ def build_heg_psiformer_wf(
             ),
         ])
 
-    edge_types = ['same', 'anti']
-    edge_features = {et: _periodic_ee_feature() for et in edge_types}
-    # Dim of the 'same'/'anti' edge feature: 2*dim (sin+cos) + 1 (|r|).
-    # 3D: 6 + 1 = 7; 2D: 4 + 1 = 5.
-    ee_feat_dim = 2 * dim + 1
+    # --- PsiFormer-specific GNN scaffolding (skipped for MP-NQS) ---
+    if backbone == 'psiformer':
+        edge_types = ['same', 'anti']
+        edge_features = {et: _periodic_ee_feature() for et in edge_types}
+        # Dim of the 'same'/'anti' edge feature: 2*dim (sin+cos) + 1 (|r|).
+        # 3D: 6 + 1 = 7; 2D: 4 + 1 = 5.
+        ee_feat_dim = 2 * dim + 1
 
-    # --- GNN layers ---
-    layers = []
-    for idx in range(config.n_interactions):
-        layer = _build_heg_gnn_layer(
-            config, idx=idx,
-            emb_dim=emb_dim, tp_dim=tp_dim,
-            edge_types=edge_types,
-            ee_feat_dim=ee_feat_dim,
-            n_up=n_up, n_down=n_down,
-            rngs=rngs,
-        )
-        layers.append(layer)
+        layers = []
+        for idx in range(config.n_interactions):
+            layer = _build_heg_gnn_layer(
+                config, idx=idx,
+                emb_dim=emb_dim, tp_dim=tp_dim,
+                edge_types=edge_types,
+                ee_feat_dim=ee_feat_dim,
+                n_up=n_up, n_down=n_down,
+                rngs=rngs,
+            )
+            layers.append(layer)
+    else:
+        edge_types = None
+        edge_features = None
+        layers = None
 
     # --- Assemble GNN backbone.  The PsiFormer (single-stream
     # attention) path uses ElectronGNN; the MP-NQS path uses MPNqsGnn
@@ -977,7 +984,9 @@ def build_heg_psiformer_wf(
             anti_scale=anti_scale,
             alpha_init=1.0,
             r_cut_frac=0.45,
-            trainable_alpha=True,
+            trainable_alpha=bool(getattr(
+                config, 'cusp_trainable_alpha', False,
+            )),
             softplus_alpha=True,
         )
 

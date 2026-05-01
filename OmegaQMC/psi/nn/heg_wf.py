@@ -379,6 +379,13 @@ class HEGPsiFormerConfig(NamedTuple):
     # enabling the cusp gives a correctly Kato-cusped trial
     # wavefunction from iter 0.
     use_cusp: bool = True
+    # Cusp α trainability.  Default False (locked to the analytic Kato
+    # slope) — runaway α drift caused a variational catastrophe in
+    # 100k-iter MP-NQS runs (E went unphysically below DMC, then var
+    # exploded).  Smith uses an analytical u_2 with hard cusp
+    # constraint; we mirror that here by default.  Set True only for
+    # diagnostic exploration of cusp sensitivity.
+    cusp_trainable_alpha: bool = False
     use_deep_jastrow: bool = False
     use_pair_jastrow: bool = False
     pair_jastrow_hidden: tuple = (16, 16)
