@@ -46,6 +46,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from .psi.nn.heg_wf import (
     HEGConfig,
@@ -372,7 +373,12 @@ class _HEGSROptimizer:
 
         # Ewald potential: chunked over walkers to avoid XLA's
         # fusion bomb at (n_real=3, n_recip=6).  See vmcopt_nn_heg.
-        self._pot_chunk_size = 32
+        # Bumped to 1024 for sharded execution: Python-level chunking
+        # of a sharded array forces gathers that defeat the
+        # parallelism.  At 80 GB/A100 the larger chunk fits fine for
+        # typical n_real/n_recip.  Drop to 32 if hitting OOM at small
+        # GPUs.
+        self._pot_chunk_size = 1024
         if dim == 3:
             self._pot_chunk = jax.jit(
                 lambda w: ewald_pair_energy(w, tables),
@@ -464,6 +470,21 @@ class _HEGSROptimizer:
             return dtheta, e_mean, var, g_norm, scale
 
         self._sr_update_core = sr_update_core
+
+        # ---- Multi-GPU sharding setup ----
+        # Walker-axis sharding across all visible JAX devices.  When
+        # only 1 device is visible, the mesh is size-1 and behavior is
+        # identical to the single-device path (no comm overhead).  On
+        # 2+ devices, each device holds num_walkers/n_devices walkers;
+        # JAX's GSPMD compiler auto-distributes the per-walker
+        # MCMC moves and SR Jacobian computation, with implicit
+        # all-reduce/all-gather where needed (mean over walkers,
+        # K = O Oᵀ assembly, dθ = (rhs − Oᵀ u)/λ).
+        self.devices = jax.devices()
+        self.n_devices = len(self.devices)
+        self.mesh = Mesh(np.asarray(self.devices), ('walker',))
+        self.walker_sharding = NamedSharding(self.mesh, P('walker'))
+        self.replicated_sharding = NamedSharding(self.mesh, P())
 
     # -----------------------------------------------------
     # Learning-rate scheduler
@@ -643,6 +664,17 @@ class _HEGSROptimizer:
 
         rng_key, init_key = jax.random.split(rng_key)
         walkers = self.initialize_walkers(init_key, num_walkers)
+        # Multi-GPU: shard walkers along axis 0.  On a single device
+        # this is a no-op; on N devices each gets num_walkers/N
+        # walkers.  num_walkers must be divisible by N.
+        if num_walkers % self.n_devices != 0:
+            raise ValueError(
+                f"num_walkers ({num_walkers}) must be divisible by "
+                f"n_devices ({self.n_devices}) for walker sharding."
+            )
+        walkers = jax.device_put(walkers, self.walker_sharding)
+        # params, prev_dtheta, scalars are replicated across devices.
+        params_flat = jax.device_put(params_flat, self.replicated_sharding)
         step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
 
         # Equilibration.
@@ -727,8 +759,10 @@ class _HEGSROptimizer:
         prev_sigterm = signal.signal(signal.SIGTERM, _stop_handler)
         prev_sigint = signal.signal(signal.SIGINT, _stop_handler)
 
-        # SPRING momentum buffer (zero-init).
-        prev_dtheta = jnp.zeros_like(params_flat)
+        # SPRING momentum buffer (zero-init).  Replicated across devices.
+        prev_dtheta = jax.device_put(
+            jnp.zeros_like(params_flat), self.replicated_sharding,
+        )
         spring_mu = self.spring_mu
         c_clip = self.spring_norm_clip   # 0.0 → disabled inside core
         damping_now = float(self.damping)
