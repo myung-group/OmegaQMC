@@ -46,9 +46,11 @@ optimize:
   type: sr
   iters: 10000
   walkers: 512                      # 2x previous run (was 256)
-  lr: 0.05                          # standard vanilla-SR lr
-  lr_schedule: cosine               # smooth refinement (no warm restart)
-  lr_min: 5.0e-4
+  lr: 0.005                         # 10x smaller — refinement near
+                                    # the basin minimum, lr=0.05 was
+                                    # overshooting on every step.
+  lr_schedule: cosine
+  lr_min: 5.0e-5
   lr_T_max: 10000
   lr_n_restarts: 0
   spring_mu: 0.0                    # NO momentum (was 0.9 — bias amplifier)
