@@ -389,6 +389,15 @@ class _HEGSROptimizer:
                 lambda w: ewald_2d_pair_energy(w, tables),
             )
 
+        # ---- Multi-GPU sharding setup (must precede sr_update_core
+        # so its closure can capture replicated_sharding) ----
+        self.devices = jax.devices()
+        self.n_devices = len(self.devices)
+        self.mesh = Mesh(np.asarray(self.devices), ('walker',))
+        self.walker_sharding = NamedSharding(self.mesh, P('walker'))
+        self.replicated_sharding = NamedSharding(self.mesh, P())
+        replicated_sharding = self.replicated_sharding   # closure capture
+
         # ---- SR step (jitted end-to-end, takes walkers & flat params)
         var_weight_arr = jnp.asarray(
             self.var_weight, dtype=jnp.float64,
@@ -443,15 +452,32 @@ class _HEGSROptimizer:
             #     = (1/λ)[v − (1/n) O^T u]
             #   where u = (I + (1/(λn)) O O^T)^{-1} (O v / (λn))
             #
-            # do (centered Jacobian) plays the role of O.  K is in
-            # walker space, n_w × n_w (8 MB at 1024 walkers).  We
-            # solve directly with jnp.linalg.solve — no CG needed.
+            # Multi-GPU notes (sharded execution):
+            # - ``do`` is sharded along walker axis 0.
+            # - K = do @ do.T is naturally walker×walker; we force it
+            #   replicated so the linear solve runs in parallel on
+            #   all devices (otherwise it gathers to one device).
+            # - dtheta is in param space → replicated for the update.
             inv_λn = 1.0 / (damping * n)
             K = (do @ do.T) * inv_λn                              # (n_w, n_w)
+            # Force K replicated across devices: jnp.linalg.solve
+            # doesn't shard, so without this it would gather K to one
+            # device and idle the others.  After this constraint, all
+            # devices run the same solve in parallel — fast (8 MB at
+            # 1024 walkers).
+            K = jax.lax.with_sharding_constraint(
+                K, replicated_sharding,
+            )
             I_plus_K = K + jnp.eye(n, dtype=K.dtype)              # (n_w, n_w)
             o_rhs = (do @ rhs) * inv_λn                           # (n_w,)
+            o_rhs = jax.lax.with_sharding_constraint(
+                o_rhs, replicated_sharding,
+            )
             u = jnp.linalg.solve(I_plus_K, o_rhs)                 # (n_w,)
             dtheta = (rhs - do.T @ u) / damping                   # (n_p,)
+            dtheta = jax.lax.with_sharding_constraint(
+                dtheta, replicated_sharding,
+            )
 
             # F-norm clip.  S dθ via (1/n) do^T (do dθ) — same memory
             # cost as in CG matvec.
@@ -470,21 +496,6 @@ class _HEGSROptimizer:
             return dtheta, e_mean, var, g_norm, scale
 
         self._sr_update_core = sr_update_core
-
-        # ---- Multi-GPU sharding setup ----
-        # Walker-axis sharding across all visible JAX devices.  When
-        # only 1 device is visible, the mesh is size-1 and behavior is
-        # identical to the single-device path (no comm overhead).  On
-        # 2+ devices, each device holds num_walkers/n_devices walkers;
-        # JAX's GSPMD compiler auto-distributes the per-walker
-        # MCMC moves and SR Jacobian computation, with implicit
-        # all-reduce/all-gather where needed (mean over walkers,
-        # K = O Oᵀ assembly, dθ = (rhs − Oᵀ u)/λ).
-        self.devices = jax.devices()
-        self.n_devices = len(self.devices)
-        self.mesh = Mesh(np.asarray(self.devices), ('walker',))
-        self.walker_sharding = NamedSharding(self.mesh, P('walker'))
-        self.replicated_sharding = NamedSharding(self.mesh, P())
 
     # -----------------------------------------------------
     # Learning-rate scheduler
@@ -677,16 +688,20 @@ class _HEGSROptimizer:
         params_flat = jax.device_put(params_flat, self.replicated_sharding)
         step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
 
-        # Equilibration.
-        ar = 0.0
+        # Equilibration.  Keep step_size as a device-resident jax
+        # array — converting to Python float each step would force
+        # a host sync (allreduce + transfer) and blow up multi-GPU
+        # throughput.  Convert once at end for printing only.
+        ar_jax = jnp.zeros(())
         for _ in range(num_equil_steps):
             rng_key, sub = jax.random.split(rng_key)
             keys = jax.random.split(sub, num_walkers)
             walkers, acc = mcmc_move_allw(
                 keys, walkers, step_size, params_flat,
             )
-            ar = float(jnp.mean(acc))
-            step_size = _adapt_step_size(step_size, ar)
+            ar_jax = jnp.mean(acc)
+            step_size = _adapt_step_size(step_size, ar_jax)
+        ar = float(ar_jax)   # sync once after the loop
 
         if verbose >= 1:
             extras = []
@@ -774,7 +789,9 @@ class _HEGSROptimizer:
         clip_scale = 1.0
 
         for it in range(1, num_iters + 1):
-            # Decorrelate walkers.
+            # Decorrelate walkers.  step_size stays on-device — no
+            # float() sync per step (multi-GPU killer; 30 syncs/iter
+            # × 50ms/sync = 1.5s wasted).
             for _ in range(mcmc_decorr_steps):
                 rng_key, sub = jax.random.split(rng_key)
                 keys = jax.random.split(sub, num_walkers)
@@ -782,7 +799,7 @@ class _HEGSROptimizer:
                     keys, walkers, step_size, params_flat,
                 )
                 step_size = _adapt_step_size(
-                    step_size, float(jnp.mean(acc)),
+                    step_size, jnp.mean(acc),
                 )
 
             # Local energies (kin + pot).
