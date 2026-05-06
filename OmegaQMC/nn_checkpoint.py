@@ -200,6 +200,109 @@ def load_nn_checkpoint_partial(filepath, template_params, log_fn=print):
     return jax.tree.unflatten(treedef, merged_leaves), meta
 
 
+def load_nn_checkpoint_partial_by_path(
+    filepath, target_template_params, source_template_params,
+    log_fn=print,
+):
+    """Path-based partial loader for cross-architecture continuation.
+
+    Unlike :func:`load_nn_checkpoint_partial` (which copies by flat
+    INDEX and assumes target's first n_source positions match the
+    source), this variant matches by KEY PATH.  Use when adding a
+    submodule whose name sorts BEFORE existing modules in the
+    flat order (e.g., ``coord_backflow`` < ``envelope`` < ``omni``):
+    nnx flattens attributes in ATTRIBUTE-NAME-SORTED order, so a new
+    early-letter attribute shifts every existing leaf's flat position.
+
+    Caller responsibility: provide ``source_template_params`` — a
+    fresh-init pytree with the SAME structure as the saved chkpt
+    (typically built from the target's config with the new modules'
+    flags disabled).
+
+    Args:
+        filepath: Path to source ``.chk.h5`` file.
+        target_template_params: Target pytree (with the new modules)
+            at fresh init.  Output preserves this structure.
+        source_template_params: Pytree matching the chkpt's structure
+            (i.e., target minus the new modules).  Used only to derive
+            the chkpt's path for each leaf — values are ignored.
+        log_fn: Logger.
+
+    Returns:
+        Tuple ``(params, meta)`` — params has source values at every
+        path that exists in both source and target (with matching
+        shapes); target's fresh init for paths that exist only in
+        target (the new modules).
+    """
+    src_paths_leaves = jax.tree_util.tree_flatten_with_path(
+        source_template_params,
+    )[0]
+    tgt_paths_leaves, tgt_treedef = (
+        jax.tree_util.tree_flatten_with_path(target_template_params)
+    )
+    n_source_paths = len(src_paths_leaves)
+
+    with h5py.File(filepath, 'r') as f:
+        pg = f['params']
+        n_source_chkpt = int(pg.attrs['num_leaves'])
+        if n_source_paths != n_source_chkpt:
+            raise ValueError(
+                f"source_template_params has {n_source_paths} leaves "
+                f"but chkpt has {n_source_chkpt}.  Source template's "
+                f"structure must match the saved chkpt exactly."
+            )
+        src_dict = {
+            path: jnp.asarray(pg[str(i)][()])
+            for i, (path, _) in enumerate(src_paths_leaves)
+        }
+        meta = {}
+        if 'meta' in f:
+            mg = f['meta']
+            for k in mg.attrs:
+                meta[k] = mg.attrs[k]
+            if 'charges' in mg:
+                meta['charges'] = np.asarray(mg['charges'])
+            if 'coords' in mg:
+                meta['coords'] = np.asarray(mg['coords'])
+
+    merged_leaves = []
+    n_copied = 0
+    n_skipped_shape = 0
+    n_new = 0
+    copied_total = 0
+    skipped_total = 0
+    new_total = 0
+    for path, tgt_leaf in tgt_paths_leaves:
+        if path in src_dict:
+            src_leaf = src_dict[path]
+            if (src_leaf.shape == tgt_leaf.shape
+                    and src_leaf.dtype == tgt_leaf.dtype):
+                merged_leaves.append(src_leaf)
+                n_copied += 1
+                copied_total += int(np.prod(src_leaf.shape))
+            else:
+                merged_leaves.append(tgt_leaf)
+                n_skipped_shape += 1
+                skipped_total += int(np.prod(tgt_leaf.shape))
+        else:
+            merged_leaves.append(tgt_leaf)
+            n_new += 1
+            new_total += int(np.prod(tgt_leaf.shape))
+
+    log_fn(
+        f"  [load_partial_by_path] copied {n_copied} leaves "
+        f"({copied_total} params), {n_new} new leaves "
+        f"({new_total} params at fresh init), "
+        f"{n_skipped_shape} shape-mismatched."
+    )
+    meta['leaves_copied'] = n_copied
+    meta['leaves_new'] = n_new
+    meta['leaves_shape_mismatch'] = n_skipped_shape
+    meta['params_copied'] = copied_total
+    meta['params_new'] = new_total
+    return jax.tree_util.tree_unflatten(tgt_treedef, merged_leaves), meta
+
+
 def zero_module_leaves(params, module_name, log_fn=print):
     """Zero out all leaves in ``params`` whose key path contains ``module_name``.
 

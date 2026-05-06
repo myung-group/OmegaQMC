@@ -48,6 +48,7 @@ os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
 import numpy as np
 import jax
 import yaml
+from flax import nnx
 
 from OmegaQMC.afqmc_3deg import (
     build_3deg_system,
@@ -562,6 +563,7 @@ def _run(cfg, project, run_dir, prefix):
         if load_chkpt:
             from OmegaQMC.nn_checkpoint import (
                 load_nn_checkpoint, load_nn_checkpoint_partial,
+                load_nn_checkpoint_partial_by_path,
             )
             from jax.flatten_util import ravel_pytree
             chkpt_path = Path(load_chkpt)
@@ -571,18 +573,59 @@ def _run(cfg, project, run_dir, prefix):
                 raise FileNotFoundError(
                     f"optimize.load_chkpt: {chkpt_path} not found"
                 )
-            mode_label = "partial transfer" if load_partial else "resume"
-            print(f"\n[{mode_label}] Loading params from {chkpt_path}")
-            loader = (
-                load_nn_checkpoint_partial
-                if load_partial
-                else load_nn_checkpoint
+            # Path-based partial loading: when source has a different
+            # set of optional modules than target (e.g., adding
+            # coord_backflow to a chkpt that didn't have it), nnx's
+            # alphabetical leaf order shifts existing leaves so the
+            # index-based partial loader misaligns.  Path-based load
+            # avoids this by matching leaves on key path.  User
+            # supplies ``load_chkpt_source_overrides`` — ansatz-field
+            # overrides describing the source's config relative to
+            # the current target.
+            src_overrides = _get(
+                cfg, 'optimize.load_chkpt_source_overrides', None,
             )
-            if opt_type == 'sr':
-                template = opt.unravel(opt.params_flat)
-                loaded, meta = loader(str(chkpt_path), template)
+            mode_label = (
+                "partial transfer (path)" if (load_partial and src_overrides)
+                else ("partial transfer" if load_partial else "resume")
+            )
+            print(f"\n[{mode_label}] Loading params from {chkpt_path}")
+            if load_partial and src_overrides:
+                # Build shadow-source pytree to derive the chkpt's paths.
+                shadow_cfg_dict = {**cfg}
+                shadow_cfg_dict['ansatz'] = {
+                    **cfg.get('ansatz', {}), **src_overrides,
+                }
+                shadow_config = _build_psiformer_config(
+                    shadow_cfg_dict, n_up, n_down, L, dim=dim,
+                )
+                from OmegaQMC.psi.nn.heg_wf_module import (
+                    build_heg_psiformer_wf,
+                )
+                shadow_model = build_heg_psiformer_wf(
+                    shadow_config, nnx.Rngs(int(seed)),
+                )
+                shadow_state = nnx.state(shadow_model, nnx.Param)
+                if opt_type == 'sr':
+                    template = opt.unravel(opt.params_flat)
+                    loaded, meta = load_nn_checkpoint_partial_by_path(
+                        str(chkpt_path), template, shadow_state,
+                    )
+                else:
+                    loaded, meta = load_nn_checkpoint_partial_by_path(
+                        str(chkpt_path), opt.params, shadow_state,
+                    )
             else:
-                loaded, meta = loader(str(chkpt_path), opt.params)
+                loader = (
+                    load_nn_checkpoint_partial
+                    if load_partial
+                    else load_nn_checkpoint
+                )
+                if opt_type == 'sr':
+                    template = opt.unravel(opt.params_flat)
+                    loaded, meta = loader(str(chkpt_path), template)
+                else:
+                    loaded, meta = loader(str(chkpt_path), opt.params)
 
             # Optional: reset specific module(s) to zero after load.
             # Useful for transfer learning: keep MPNN body + Jastrow
