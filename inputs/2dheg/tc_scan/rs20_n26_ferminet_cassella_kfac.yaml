@@ -46,15 +46,15 @@ optimize:
   iters: 15000
   walkers: 1024
   load_chkpt: runs/rs20_n26_ferminet_cassella/rs20_n26_ferminet_cassella.chk.h5
-  lr: 0.05                             # FermiNet's lr
-  lr_decay: 1.0e3                      # lr_t = lr / (1 + t/lr_decay)
-  kfac_damping: 1.0e-3
+  lr: 0.005
+  lr_decay: 1.0e3
+  kfac_damping: 0.1
   kfac_damping_adapt: true
   kfac_damping_decay: 0.9
   kfac_damping_lookback: 5
   kfac_damping_min: 1.0e-5
   kfac_damping_max: 1.0e3
-  kfac_norm_constraint: 1.0e-3
+  kfac_norm_constraint: 1.0e-4
   kfac_capture_activations: false
   kfac_fixed_scale: false
   sampler: metropolis
