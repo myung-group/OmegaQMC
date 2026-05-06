@@ -66,14 +66,11 @@ from .gnn.edge_features_periodic import (
     PeriodicDistancePowerEdgeFeature,
     PeriodicSinCosFeature,
 )
-from .gnn.electron_gnn import ElectronGNN, ElectronGNNLayer
-from .gnn.update_features import (
-    NodeAttentionElectronUpdateFeature,
-    NodeSumElectronUpdateFeature,
-    ResidualElectronUpdateFeature,
-)
+from .gnn.electron_gnn import ElectronGNN
+from .heg_layer_ferminet import _build_heg_ferminet_layer
+from .heg_layer_psiformer import _build_heg_gnn_layer
 from .heg_wf import PeriodicPairJastrow, _make_heg_phys_conf
-from .layers import MLP, ResidualConnection, SumPool
+from .layers import MLP, SumPool
 from .omni import Backflow, OmniNet
 from .periodic import (
     PeriodicLattice,
@@ -375,6 +372,7 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         pair_jastrow=None,
         coord_backflow=None,
         smith_deep_jastrow=None,
+        full_determinant: bool = False,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -387,6 +385,7 @@ class HEGPsiFormerWaveFunction(nnx.Module):
         self.pair_jastrow = pair_jastrow
         self.coord_backflow = coord_backflow
         self.smith_deep_jastrow = smith_deep_jastrow
+        self.full_determinant = bool(full_determinant)
 
     @property
     def _spin_slices(self):
@@ -419,9 +418,15 @@ class HEGPsiFormerWaveFunction(nnx.Module):
             r_bf = r + self.coord_backflow(emb)
             pc = _make_heg_phys_conf(r_bf)
         orb = self.envelope(pc)
-        orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
-        orb_up = orb_up[:, :self.n_up]
-        orb_down = orb_down[:, self.n_up:]
+        if self.full_determinant:
+            # Full-det: both spins share the (n_det, n_elec, n_elec) envelope;
+            # only row-slice to extract per-spin row blocks.
+            orb_up = orb[:, :self.n_up]
+            orb_down = orb[:, self.n_up:]
+        else:
+            orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
+            orb_up = orb_up[:, :self.n_up]
+            orb_down = orb_down[:, self.n_up:]
         if fs is not None:
             orb_up = apply_heg_backflow_mult(orb_up, fs[0])
             if orb_down.shape[-1] > 0:
@@ -459,12 +464,19 @@ class HEGPsiFormerWaveFunction(nnx.Module):
             pc_bf = pc
 
         # Envelope orbitals.
-        orb = self.envelope(pc_bf)  # (n_det, n_elec, n_up + n_down)
+        orb = self.envelope(pc_bf)  # (n_det, n_elec, n_orb_total)
 
-        # full_determinant=False convention: split columns, slice rows.
-        orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
-        orb_up = orb_up[:, :self.n_up]        # (n_det, n_up, n_up)
-        orb_down = orb_down[:, self.n_up:]    # (n_det, n_dn, n_dn)
+        if self.full_determinant:
+            # Full-det: envelope is (n_det, n_elec, n_elec); both spins
+            # share the same orbital matrix.  Only row-slice to obtain
+            # per-spin row blocks.
+            orb_up = orb[:, :self.n_up]       # (n_det, n_up, n_elec)
+            orb_down = orb[:, self.n_up:]     # (n_det, n_dn, n_elec)
+        else:
+            # Split columns at n_up and slice corresponding rows.
+            orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
+            orb_up = orb_up[:, :self.n_up]        # (n_det, n_up, n_up)
+            orb_down = orb_down[:, self.n_up:]    # (n_det, n_dn, n_dn)
 
         # Apply multiplicative backflow.
         if fs is not None:
@@ -472,11 +484,16 @@ class HEGPsiFormerWaveFunction(nnx.Module):
             if orb_down.shape[-1] > 0:
                 orb_down = apply_heg_backflow_mult(orb_down, fs[1])
 
-        # Multi-det Slater-determinant combination (sum pool).
-        sign_u, log_u = eval_log_slater(orb_up)
-        sign_d, log_d = eval_log_slater(orb_down)
-        sign = sign_u * sign_d
-        xs = log_u + log_d
+        if self.full_determinant:
+            # Single slogdet of the full (n_det, n_elec, n_elec) matrix.
+            orb_full = jnp.concatenate([orb_up, orb_down], axis=-2)
+            sign, xs = eval_log_slater(orb_full)
+        else:
+            # Multi-det Slater-determinant combination (sum pool).
+            sign_u, log_u = eval_log_slater(orb_up)
+            sign_d, log_d = eval_log_slater(orb_down)
+            sign = sign_u * sign_d
+            xs = log_u + log_d
 
         xs_shift = jnp.max(xs)
         xs_shift = jnp.where(
@@ -774,12 +791,20 @@ def build_heg_psiformer_wf(
         # ``n_det > 1`` is structurally degenerate.  ``det_jitter``
         # seeds dets d>=1 with a small random perturbation so they
         # start as distinct particle-hole admixtures of the Fermi sea.
-        pw_basis_size = max(n_up, n_down, 1) + int(config.n_virt_pw)
+        # Under full_determinant, occupied count is n_elec (both spins
+        # contribute distinct orbitals via the basis-shift init), so
+        # the basis must hold n_elec + n_virt_pw plane waves to leave
+        # the same headroom for virtual excitations.
+        if config.full_determinant:
+            pw_basis_size = (n_up + n_down) + int(config.n_virt_pw)
+        else:
+            pw_basis_size = max(n_up, n_down, 1) + int(config.n_virt_pw)
         envelope = PlaneWaveEnvelope(
             n_up=n_up, n_down=n_down, n_det=n_det, L=L,
             init_pw_count=pw_basis_size,
             det_jitter=config.det_jitter,
             dim=dim,
+            full_determinant=config.full_determinant,
         )
     elif envelope_type == 'crystal_gaussian':
         if dim != 2:
@@ -820,7 +845,7 @@ def build_heg_psiformer_wf(
     if backbone == 'mpnqs':
         emb_dim = int(getattr(config, 'mpnqs_d1', 32))
 
-    if backbone == 'psiformer':
+    if backbone in ('psiformer', 'ferminet'):
         # --- Electron embedding: spin-typed, optionally ghost-atom enriched.
         electron_embedding = HEGElectronEmbedding(
             n_up=n_up, n_down=n_down,
@@ -849,17 +874,30 @@ def build_heg_psiformer_wf(
             ),
         ])
 
-    # --- PsiFormer-specific GNN scaffolding (skipped for MP-NQS) ---
-    if backbone == 'psiformer':
-        edge_types = ['same', 'anti']
+    # --- PsiFormer / FermiNet GNN scaffolding (skipped for MP-NQS) ---
+    if backbone in ('psiformer', 'ferminet'):
+        if backbone == 'psiformer':
+            # Edges grouped by SAME-spin / ANTI-spin pair (PsiFormer
+            # convention).  Attention aggregator within each group.
+            edge_types = ['same', 'anti']
+        else:
+            # Edges grouped by SENDER spin (FermiNet convention).  Each
+            # electron sees all others, split into messages from up
+            # senders vs from down senders.  EdgeSum aggregator within
+            # each group.
+            edge_types = ['up', 'down']
         edge_features = {et: _periodic_ee_feature() for et in edge_types}
-        # Dim of the 'same'/'anti' edge feature: 2*dim (sin+cos) + 1 (|r|).
+        # Dim of the periodic edge feature: 2*dim (sin+cos) + 1 (|r|).
         # 3D: 6 + 1 = 7; 2D: 4 + 1 = 5.
         ee_feat_dim = 2 * dim + 1
 
+        layer_builder = (
+            _build_heg_gnn_layer if backbone == 'psiformer'
+            else _build_heg_ferminet_layer
+        )
         layers = []
         for idx in range(config.n_interactions):
-            layer = _build_heg_gnn_layer(
+            layer = layer_builder(
                 config, idx=idx,
                 emb_dim=emb_dim, tp_dim=tp_dim,
                 edge_types=edge_types,
@@ -873,9 +911,11 @@ def build_heg_psiformer_wf(
         edge_features = None
         layers = None
 
-    # --- Assemble GNN backbone.  The PsiFormer (single-stream
-    # attention) path uses ElectronGNN; the MP-NQS path uses MPNqsGnn
-    # which is a drop-in replacement (same GraphNodes interface).
+    # --- Assemble GNN backbone.  PsiFormer (single-stream attention)
+    # and FermiNet (single-stream EdgeSum/sender-spin edges) both use
+    # the same ElectronGNN engine with different layer configurations;
+    # the MP-NQS path uses MPNqsGnn which is a drop-in replacement
+    # (same GraphNodes interface).
     if backbone == 'mpnqs':
         from .gnn.mpnqs import MPNqsGnn
         gnn = MPNqsGnn(
@@ -1062,97 +1102,7 @@ def build_heg_psiformer_wf(
         pair_jastrow=pair_jastrow,
         coord_backflow=coord_backflow,
         smith_deep_jastrow=smith_deep_jastrow,
-    )
-
-
-def _build_heg_gnn_layer(
-    config, *, idx,
-    emb_dim, tp_dim,
-    edge_types,
-    ee_feat_dim,
-    n_up, n_down,
-    rngs,
-):
-    """Build one PsiFormer-style layer for the HEG GNN.
-
-    Mirrors the molecular ``_build_gnn_layer`` but with a fixed,
-    HEG-specific update-feature set (no nuclear convolution) and
-    pre-chosen MLP widths.
-    """
-    def _subnet(in_d, out_d):
-        return MLP(
-            in_d, out_d,
-            hidden_layers=config.mlp_hidden_layers,
-            bias=True,
-            last_linear=False,
-            activation='tanh',
-            init='ferminet',
-            rngs=rngs,
-        )
-
-    def _g_subnet(in_d, out_d):
-        return MLP(
-            in_d, out_d,
-            hidden_layers=config.g_mlp_hidden_layers,
-            bias=False,
-            last_linear=False,
-            activation='tanh',
-            init='ferminet',
-            rngs=rngs,
-        )
-
-    electron_residual = ResidualConnection(normalize=False)
-    tp_residual = ResidualConnection(normalize=False)
-
-    # On layer 0 the incoming node dim is the raw embedding, on
-    # later layers it is emb_dim (after subnet projection).
-    node_dim = emb_dim
-    edge_feat_dim = ee_feat_dim if idx == 0 else tp_dim
-
-    # Update features: residual + per-spin node sum + attention.
-    uf_list = [
-        ResidualElectronUpdateFeature(node_dim),
-        NodeSumElectronUpdateFeature(
-            node_dim, n_up, n_down,
-            node_types=['up', 'down'],
-            normalize=True,
-        ),
-        NodeAttentionElectronUpdateFeature(
-            node_dim,
-            num_heads=config.n_attention_heads,
-            mlp_factory=(
-                lambda ind, outd: MLP(
-                    ind, outd,
-                    hidden_layers=config.mlp_hidden_layers,
-                    bias=True,
-                    last_linear=False,
-                    activation='tanh',
-                    init='ferminet',
-                    rngs=rngs,
-                )
-            ),
-            attention_residual=ResidualConnection(normalize=False),
-            mlp_residual=ResidualConnection(normalize=False),
-            rngs=rngs,
-        ),
-    ]
-    uf_total_dim = sum(uf.output_dim for uf in uf_list)
-
-    subnet = _subnet(uf_total_dim, emb_dim)
-    g_subnet = _g_subnet(edge_feat_dim, tp_dim)
-
-    return ElectronGNNLayer(
-        embedding_dim=emb_dim,
-        two_particle_stream_dim=tp_dim,
-        edge_types=edge_types,
-        subnet=subnet,
-        subnet_g=g_subnet,
-        electron_residual=electron_residual,
-        nucleus_residual=None,
-        two_particle_residual=tp_residual,
-        deep_features='shared',
-        update_rule='concatenate',
-        update_features=uf_list,
+        full_determinant=config.full_determinant,
     )
 
 
@@ -1224,6 +1174,7 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         pair_jastrow=None,
         coord_backflow=None,
         smith_deep_jastrow=None,
+        full_determinant: bool = False,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -1236,6 +1187,7 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         self.pair_jastrow = pair_jastrow
         self.coord_backflow = coord_backflow
         self.smith_deep_jastrow = smith_deep_jastrow
+        self.full_determinant = bool(full_determinant)
 
     @property
     def _spin_slices(self):
@@ -1260,11 +1212,15 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
             pc_bf = pc
 
         # Envelope orbitals — complex.
-        orb = self.envelope(pc_bf)  # complex (n_det, n_elec, n_up+n_down)
+        orb = self.envelope(pc_bf)  # complex (n_det, n_elec, n_orb_total)
 
-        orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
-        orb_up = orb_up[:, :self.n_up]
-        orb_down = orb_down[:, self.n_up:]
+        if self.full_determinant:
+            orb_up = orb[:, :self.n_up]
+            orb_down = orb[:, self.n_up:]
+        else:
+            orb_up, orb_down = jnp.split(orb, [self.n_up], axis=-1)
+            orb_up = orb_up[:, :self.n_up]
+            orb_down = orb_down[:, self.n_up:]
 
         # Apply multiplicative backflow (real factor × complex orb).
         if fs is not None:
@@ -1272,11 +1228,15 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
             if orb_down.shape[-1] > 0:
                 orb_down = apply_heg_backflow_mult(orb_down, fs[1])
 
-        # Complex Slater determinant — slogdet handles complex inputs.
-        sign_u, log_u = eval_log_slater(orb_up)
-        sign_d, log_d = eval_log_slater(orb_down)
-        sign = sign_u * sign_d      # (n_det,) unit-magnitude complex
-        xs = log_u + log_d          # (n_det,) real
+        if self.full_determinant:
+            orb_full = jnp.concatenate([orb_up, orb_down], axis=-2)
+            sign, xs = eval_log_slater(orb_full)
+        else:
+            # Complex Slater determinant — slogdet handles complex inputs.
+            sign_u, log_u = eval_log_slater(orb_up)
+            sign_d, log_d = eval_log_slater(orb_down)
+            sign = sign_u * sign_d      # (n_det,) unit-magnitude complex
+            xs = log_u + log_d          # (n_det,) real
 
         xs_shift = jnp.max(xs)
         xs_shift = jnp.where(
@@ -1366,4 +1326,5 @@ def build_heg_psiformer_wf_complex(
         lattice=lattice,
         cusp_electrons=base.cusp_electrons,
         pair_jastrow=base.pair_jastrow,
+        full_determinant=config.full_determinant,
     )

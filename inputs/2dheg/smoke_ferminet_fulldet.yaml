@@ -1,0 +1,78 @@
+# End-to-end smoke for FermiNet HEG (Cassella 2022 style):
+# backbone='ferminet' + full_determinant=True + n_det=16.
+# 2D HEG N=10 unpolarized rs=2 (closed-shell, fast benchmark).
+# 100 iters, vanilla SR + Metropolis on local RTX 4070 Ti.
+#
+# Verifies: log_psi finite, no NaN, BF disp bounded, variance descending,
+# energy descends from non-HF init toward (eventually below) HF.
+#
+# Architecture is intentionally smaller than the Cassella production
+# config (emb=128 vs 256; layers=3 vs 4) so SMW solve fits 12GB easily.
+
+project: smoke_ferminet_fulldet
+
+system:
+  dim: 2
+  rs: 2.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  n_det: 16
+  full_determinant: true
+  embedding_dim: 128
+  layers: 3
+  two_particle_dim: 32
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 7
+  det_jitter: 0.04
+  walker_init: gas
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 100
+  walkers: 512
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 100
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 100
+
+eval:
+  walkers: 512
+  blocks: 10
+  equil_blocks: 10
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

@@ -293,6 +293,12 @@ class PlaneWaveEnvelope(nnx.Module):
         init_pw_count: Number of plane waves to include in the
             basis; must be at least ``max(n_up, n_down)``.  Default
             is ``max(n_up, n_down)`` (closed-shell Fermi sea only).
+        full_determinant: If True, both spin coefficient blocks are
+            applied to *all* electron rows (no spin-zero-pad).  Down
+            coefficients init at basis indices shifted by ``n_up``
+            (so the resulting orbital matrix is rank ``n_elec`` at
+            init).  Forces ``spin_restricted=False`` and bumps
+            ``init_pw_count`` to ``n_up + n_down``.
     """
 
     def __init__(
@@ -306,7 +312,16 @@ class PlaneWaveEnvelope(nnx.Module):
         init_pw_count: Optional[int] = None,
         det_jitter: float = 0.0,
         dim: int = 3,
+        full_determinant: bool = False,
     ):
+        if full_determinant:
+            if spin_restricted:
+                # Cannot share coefficients across spins under full-det:
+                # rows would be linearly dependent and slogdet → -inf.
+                spin_restricted = False
+            min_pw = max(n_up + n_down, 1)
+            if init_pw_count is None or init_pw_count < min_pw:
+                init_pw_count = min_pw
         if init_pw_count is None:
             init_pw_count = max(n_up, n_down, 1)
 
@@ -321,6 +336,7 @@ class PlaneWaveEnvelope(nnx.Module):
         self.n_down = n_down
         self.n_det = n_det
         self.spin_restricted = spin_restricted
+        self.full_determinant = bool(full_determinant)
         self.n_pw = int(basis.kvecs.shape[0])
         self._det_jitter = float(det_jitter)
 
@@ -343,6 +359,11 @@ class PlaneWaveEnvelope(nnx.Module):
         self.coeff_cos_up = nnx.Param(coeff_cos_up)
         self.coeff_sin_up = nnx.Param(coeff_sin_up)
 
+        # Under full-det, init the down channel at the NEXT shell (basis
+        # indices shifted by n_up) so up- and down-spin orbital columns
+        # are linearly independent at det 0 (rank n_elec).
+        dn_basis_offset = n_up if self.full_determinant else 0
+
         if spin_restricted:
             # Down spins will read the up coefficients (for n_up=n_down)
             # via _call_one_spin.  We still store independent params
@@ -350,10 +371,12 @@ class PlaneWaveEnvelope(nnx.Module):
             if n_down > 0:
                 coeff_cos_dn = self._init_coeffs(
                     n_det, n_down, basis, det_jitter=det_jitter,
+                    basis_offset=dn_basis_offset,
                 )
                 coeff_sin_dn = self._init_coeffs(
                     n_det, n_down, basis, take_sin=True,
                     det_jitter=det_jitter,
+                    basis_offset=dn_basis_offset,
                 )
                 self.coeff_cos_dn = nnx.Param(coeff_cos_dn)
                 self.coeff_sin_dn = nnx.Param(coeff_sin_dn)
@@ -361,10 +384,12 @@ class PlaneWaveEnvelope(nnx.Module):
             if n_down > 0:
                 coeff_cos_dn = self._init_coeffs(
                     n_det, n_down, basis, det_jitter=det_jitter,
+                    basis_offset=dn_basis_offset,
                 )
                 coeff_sin_dn = self._init_coeffs(
                     n_det, n_down, basis, take_sin=True,
                     det_jitter=det_jitter,
+                    basis_offset=dn_basis_offset,
                 )
                 self.coeff_cos_dn = nnx.Param(coeff_cos_dn)
                 self.coeff_sin_dn = nnx.Param(coeff_sin_dn)
@@ -377,6 +402,7 @@ class PlaneWaveEnvelope(nnx.Module):
         *, take_sin: bool = False,
         jitter: float = 0.0,
         det_jitter: float = 0.0,
+        basis_offset: int = 0,
     ) -> jax.Array:
         """Initialise coefficients to free-electron basis functions.
 
@@ -412,8 +438,17 @@ class PlaneWaveEnvelope(nnx.Module):
         """
         n_pw = basis.kvecs.shape[0]
         coeff = np.zeros((n_det, n_orb, n_pw), dtype=np.float64)
-        is_sin = np.asarray(basis.basis_is_sin[:n_orb])
-        idx = np.asarray(basis.basis_idx[:n_orb])
+        if basis_offset + n_orb > len(basis.basis_idx):
+            raise ValueError(
+                f"basis_offset={basis_offset} + n_orb={n_orb} exceeds "
+                f"available basis size {len(basis.basis_idx)}",
+            )
+        is_sin = np.asarray(
+            basis.basis_is_sin[basis_offset:basis_offset + n_orb],
+        )
+        idx = np.asarray(
+            basis.basis_idx[basis_offset:basis_offset + n_orb],
+        )
         for i in range(n_orb):
             if take_sin and is_sin[i] == 1:
                 coeff[:, i, idx[i]] = 1.0
@@ -489,6 +524,34 @@ class PlaneWaveEnvelope(nnx.Module):
         cos_kr = jnp.cos(kr_all)
         sin_kr = jnp.sin(kr_all)
 
+        n_det = self.n_det
+        n_up = self.n_up
+        n_dn = self.n_down
+        n_elec = n_up + n_dn
+
+        if self.full_determinant:
+            # Apply each spin's coefficient block to ALL electron
+            # positions (no spin-zero-pad).  Output is
+            # (n_det, n_elec, n_up + n_dn) = (n_det, n_elec, n_elec).
+            orb_up_full = self._call_one_spin(
+                r, cos_kr, sin_kr,
+                param_value(self.coeff_cos_up),
+                param_value(self.coeff_sin_up),
+            )
+            if self._has_down:
+                orb_dn_full = self._call_one_spin(
+                    r, cos_kr, sin_kr,
+                    param_value(self.coeff_cos_dn),
+                    param_value(self.coeff_sin_dn),
+                )
+            else:
+                orb_dn_full = jnp.zeros(
+                    (n_det, n_elec, 0), dtype=orb_up_full.dtype,
+                )
+            return jnp.concatenate(
+                [orb_up_full, orb_dn_full], axis=-1,
+            )
+
         r_up = r[:self.n_up]
         r_dn = r[self.n_up:]
         cos_up, sin_up = cos_kr[:self.n_up], sin_kr[:self.n_up]
@@ -499,8 +562,6 @@ class PlaneWaveEnvelope(nnx.Module):
             param_value(self.coeff_cos_up),
             param_value(self.coeff_sin_up),
         )
-
-        n_elec = self.n_up + self.n_down
 
         if self._has_down:
             orb_dn = self._call_one_spin(
@@ -518,9 +579,6 @@ class PlaneWaveEnvelope(nnx.Module):
         # columns [0:n_up] are up-spin orbitals, columns [n_up:] are
         # down-spin orbitals.  Each spin's electrons occupy their
         # own row block.
-        n_det = self.n_det
-        n_up = self.n_up
-        n_dn = self.n_down
 
         # Padded matrices that align rows and columns.
         # orb_up_padded: (n_det, n_elec, n_up) — up electrons active,

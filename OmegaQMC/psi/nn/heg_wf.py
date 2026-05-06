@@ -386,7 +386,7 @@ class HEGPsiFormerConfig(NamedTuple):
     # producing a spurious ``−1/√eps`` kinetic term and the
     # ``⟨E⟩ < E_DMC`` variational-violation at init.  All three
     # are now fixed (see
-    # :class:`~OmegaQMC.psi.nn.heg_psiformer.PeriodicElectronicCusp`
+    # :class:`~OmegaQMC.psi.nn.heg_wf_module.PeriodicElectronicCusp`
     # for (i) softplus-parameterised α and (ii) smooth
     # cell-face cutoff, and
     # :func:`OmegaQMC.observables.ewald.ewald_pair_potential`
@@ -622,7 +622,7 @@ def make_heg_log_psi_complex(
       * :class:`HEGConfig` → complex Slater-Jastrow
         (:class:`HEGSlaterJastrowComplex`).
       * :class:`HEGPsiFormerConfig` → complex PsiFormer
-        (:class:`~.heg_psiformer.HEGPsiFormerWaveFunctionComplex`).
+        (:class:`~.heg_wf_module.HEGPsiFormerWaveFunctionComplex`).
 
     In both cases the returned ``log_psi`` is complex-scalar-valued.
     Downstream code (kinetic energy, Metropolis) splits it into
@@ -639,7 +639,7 @@ def make_heg_log_psi_complex(
     """
     rngs = nnx.Rngs(rng_key)
     if isinstance(config, HEGPsiFormerConfig):
-        from .heg_psiformer import build_heg_psiformer_wf_complex
+        from .heg_wf_module import build_heg_psiformer_wf_complex
         model = build_heg_psiformer_wf_complex(
             config, rngs, kappa=kappa,
         )
@@ -782,7 +782,7 @@ def make_heg_psiformer_log_psi(
     Returns:
         ``(log_psi, init_params, graphdef)``.
     """
-    from .heg_psiformer import (
+    from .heg_wf_module import (
         build_heg_psiformer_wf, _make_heg_phys_conf,
         _pair_distances_mi_full,
     )

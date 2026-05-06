@@ -131,7 +131,7 @@ from .psi.nn.heg_wf import (
     HEGPsiFormerConfig,
     make_heg_log_psi_any as make_heg_log_psi,
 )
-from .psi.nn.heg_psiformer import build_heg_psiformer_wf
+from .psi.nn.heg_wf_module import build_heg_psiformer_wf
 from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy

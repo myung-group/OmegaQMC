@@ -1,0 +1,96 @@
+# Smith-spec PRODUCTION run for N=26, rs=20 unpolarized fluid.
+# Single-GPU on frodo A100 (gpu2). Cold start.
+#
+# Goal: test whether Smith-level architecture (~50k params) breaks
+# through the lite-arch plateau at -44.5 mHa for N=26.
+# Validated lite recipe at N=18 reached -46.46 mHa; N=26 lite plateau
+# at -44.5 mHa is suspected to be capacity-limited.
+#
+# Architecture matches Smith 2024 (PRL 133, 266504):
+#   MP-NQS d1=32, d2=26, hidden=32, T=4 layers
+#   Smith deep Jastrow hidden=32, L=4 layers
+#   n_det=1 single Slater
+#   N_k=3N=78 plane waves/orbital → n_virt_pw = 78-13 = 65
+#
+# Optimizer: vanilla SR + cosine annealing (no SGDR) + Metropolis.
+# We deliberately do NOT use Smith's SPRING+MALA stack because it
+# produced a variational catastrophe in our prior runs.
+
+project: rs20_n26_smith_prod
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 32                      # Smith
+  mpnqs_d2: 26                      # Smith
+  mpnqs_hidden: 32                  # Smith
+  mpnqs_n_layers: 4                 # Smith T (inferred default)
+  mpnqs_use_layer_norm: false
+  n_det: 1                          # Smith (single Slater)
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false       # locked at Kato slope
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true      # Smith eqs. 20-21
+  smith_jastrow_hidden: 32          # Smith hidden
+  smith_jastrow_n_layers: 4         # Smith L=4
+  use_backflow: false
+  use_coord_backflow: true          # Smith eq. 19
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 65                     # N_k = 13 + 65 = 78 = 3N
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0                          # cold start (Smith protocol)
+
+optimize:
+  type: sr
+  iters: 50000
+  walkers: 1024                     # Smith count
+  lr: 0.05                          # standard vanilla SR lr
+  lr_schedule: cosine
+  lr_min: 5.0e-5                    # 1000x decay over the run
+  lr_T_max: 50000
+  lr_n_restarts: 0                  # no SGDR; let cosine anneal cleanly
+  spring_mu: 0.0                    # vanilla SR (no momentum)
+  spring_norm_clip: 0               # no F-norm clip
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20                       # ignored (SMW)
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

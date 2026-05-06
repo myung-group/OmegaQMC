@@ -101,6 +101,25 @@ def _get(d, key, default=None):
     return cur
 
 
+_VALID_BACKBONES = ('psiformer', 'mpnqs', 'ferminet')
+
+
+def _validated_backbone(value):
+    """Normalise + validate the ``ansatz.backbone`` YAML field.
+
+    A typo would silently fall through and produce an opaque
+    AttributeError later in the GNN builder; raise here instead so the
+    user sees the bad value next to the valid options.
+    """
+    bb = str(value).lower()
+    if bb not in _VALID_BACKBONES:
+        raise ValueError(
+            f"ansatz.backbone={value!r} is not recognised; "
+            f"valid choices are {_VALID_BACKBONES}.",
+        )
+    return bb
+
+
 def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
     a = cfg.get('ansatz', {})
     jas_act = a.get('jas_activation', 'tanh')
@@ -128,9 +147,10 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
         # Backflow on/off — defaults to True (FermiNet/PsiFormer recipe).
         use_backflow=bool(a.get('use_backflow', True)),
-        # Backbone choice: 'psiformer' (default attention GNN) or
-        # 'mpnqs' (Smith 2024 / Pescia 2024 message-passing GNN).
-        backbone=str(a.get('backbone', 'psiformer')),
+        # Backbone choice: 'psiformer' (default attention GNN), 'mpnqs'
+        # (Smith 2024 / Pescia 2024 message-passing GNN), or 'ferminet'
+        # (Pfau 2020 dual-stream-with-EdgeSum on sender-spin edges).
+        backbone=_validated_backbone(a.get('backbone', 'psiformer')),
         mpnqs_d1=int(a.get('mpnqs_d1', 32)),
         mpnqs_d2=int(a.get('mpnqs_d2', 26)),
         mpnqs_hidden=int(a.get('mpnqs_hidden', 32)),
@@ -321,7 +341,7 @@ def _run(cfg, project, run_dir, prefix):
     if ansatz_type in ('nn_heg', 'psiformer'):
         config = _build_psiformer_config(cfg, n_up, n_down, L, dim=dim)
         a = cfg['ansatz']
-        backbone = str(a.get('backbone', 'psiformer')).lower()
+        backbone = _validated_backbone(a.get('backbone', 'psiformer'))
         if backbone == 'mpnqs':
             print(
                 f"  Ansatz: nn_heg / MP-NQS (dim={dim}) - "
@@ -330,6 +350,15 @@ def _run(cfg, project, run_dir, prefix):
                 f"hidden={a.get('mpnqs_hidden', 32)}, "
                 f"T={a.get('mpnqs_n_layers', 4)}, "
                 f"n_det={a.get('n_det', 1)}"
+            )
+        elif backbone == 'ferminet':
+            print(
+                f"  Ansatz: nn_heg / FermiNet (dim={dim}) - "
+                f"emb={a.get('embedding_dim', 64)}, "
+                f"layers={a.get('layers', 2)}, "
+                f"tp_dim={a.get('two_particle_dim', 16)}, "
+                f"n_det={a.get('n_det', 1)}, "
+                f"full_det={a.get('full_determinant', False)}"
             )
         else:
             print(

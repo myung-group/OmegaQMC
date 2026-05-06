@@ -66,7 +66,7 @@ import optax
 from flax import nnx
 
 from .psi.nn.env_periodic import enumerate_real_pw_basis
-from .psi.nn.heg_psiformer import (
+from .psi.nn.heg_wf_module import (
     _make_heg_phys_conf,
     build_heg_psiformer_wf,
 )

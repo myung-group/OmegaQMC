@@ -1,0 +1,76 @@
+# Smoke test: PsiFormer + full_determinant=True at N=10 unpolarized.
+# Verifies the head dispatch (HEGPsiFormerWaveFunction.__call__) and
+# envelope changes (PlaneWaveEnvelope full_determinant mode + basis-shifted
+# down init) compose correctly.  5 iters; expects:
+#   - log_psi finite
+#   - no NaN / shape errors
+#   - init energy ABOVE HF (~tens of mHa) since down channel inits at
+#     excited shell; SR should descend within iters
+
+project: smoke_no_full_det_psiformer
+
+system:
+  dim: 2
+  rs: 2.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: psiformer
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 7
+  det_jitter: 0.0
+  walker_init: gas
+  embedding_dim: 32
+  layers: 1
+  two_particle_dim: 8
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 5
+  walkers: 256
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 5
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 10
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 100
+
+eval:
+  walkers: 256
+  blocks: 5
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6
