@@ -132,7 +132,10 @@ from .psi.nn.heg_wf import (
     make_heg_log_psi_any as make_heg_log_psi,
 )
 from .psi.nn.heg_wf_module import build_heg_psiformer_wf
-from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
+from .psi.nn.periodic import (
+    wrap_to_cell, make_cubic_lattice, make_square_lattice,
+)
+from .observables.ewald_dispatch import build_ewald_tables_dim
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy
 
@@ -663,6 +666,7 @@ class _HEGKFACOptimizer:
         else:
             self._pmap_axis = None
         self.L = float(config.L)
+        self.dim = int(getattr(config, 'dim', 3))
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
@@ -686,9 +690,16 @@ class _HEGKFACOptimizer:
         self.capture_activations = bool(capture_activations)
         self.multi_device = bool(multi_device)
 
-        self.lattice = make_cubic_lattice(self.L)
-        self.ewald = build_ewald_tables(
-            self.L, eta=ewald_eta,
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+        elif self.dim == 2:
+            self.lattice = make_square_lattice(self.L)
+        else:
+            raise ValueError(
+                f"KFAC HEG only supports dim=2 or 3, got {self.dim}"
+            )
+        self.ewald = build_ewald_tables_dim(
+            self.L, dim=self.dim, eta=ewald_eta,
             n_real=ewald_n_real, n_recip=ewald_n_recip,
         )
         tables = self.ewald
@@ -773,7 +784,7 @@ class _HEGKFACOptimizer:
         # Per-walker primitives.
         def kin_only(r, params):
             def f_flat(r_flat):
-                return log_psi_pytree(r_flat.reshape(nelec, 3), params)
+                return log_psi_pytree(r_flat.reshape(nelec, self.dim), params)
             lap_val, grad_val = laplacian(f_flat)(r.reshape(-1))
             return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
@@ -798,9 +809,12 @@ class _HEGKFACOptimizer:
 
         # Ewald potential (chunked over walkers — same as SR driver).
         self._pot_chunk_size = 32
-        self._pot_chunk = jax.jit(
-            lambda w: ewald_pair_energy(w, tables),
-        )
+        if self.dim == 3:
+            pot_fn = lambda w: ewald_pair_energy(w, tables)
+        else:
+            from .observables.ewald_2d import ewald_2d_pair_energy
+            pot_fn = lambda w: ewald_2d_pair_energy(w, tables)
+        self._pot_chunk = jax.jit(pot_fn)
 
         # Per-walker gradient of log|ψ| wrt every param leaf.
         # Returns pytree mirroring params, each leaf with leading W axis.
@@ -1047,7 +1061,7 @@ class _HEGKFACOptimizer:
 
     def initialize_walkers(self, rng_key, num_walkers):
         return self.L * jax.random.uniform(
-            rng_key, (num_walkers, self.nelec, 3),
+            rng_key, (num_walkers, self.nelec, self.dim),
         )
 
     def _pot_batch(self, w):
