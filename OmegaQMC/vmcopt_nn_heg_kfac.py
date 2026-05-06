@@ -1060,6 +1060,41 @@ class _HEGKFACOptimizer:
     # -----------------------------------------------------
 
     def initialize_walkers(self, rng_key, num_walkers):
+        # Mirror SR's logic: honour ``ansatz.walker_init`` from config.
+        # 'auto' picks 'crystal_perturbed' when the envelope is the
+        # localised-crystal one (2D only), else 'uniform'.  At low
+        # density (rs >> 1) crystal_perturbed init is much closer to
+        # the converged |psi|^2 than uniform-random in the cell, so
+        # 400 equil sweeps actually equilibrate (uniform init at rs=20
+        # leaves walkers stranded in low-|psi|^2 regions, biasing
+        # E_loc by ~25 mHa/elec).
+        walker_init = str(getattr(
+            self.config, 'walker_init', 'auto',
+        )).lower()
+        envelope_type = getattr(
+            self.config, 'envelope_type', 'plane_wave',
+        )
+        if walker_init == 'auto':
+            walker_init = (
+                'crystal_perturbed'
+                if (envelope_type == 'crystal_gaussian'
+                    and self.dim == 2)
+                else 'uniform'
+            )
+        if walker_init == 'crystal_perturbed' and self.dim == 2:
+            from .psi.nn.env_localized_2d import (
+                crystal_init_walkers_2d,
+            )
+            return crystal_init_walkers_2d(
+                rng_key, num_walkers,
+                n_up=self.n_up, n_down=self.n_down, L=self.L,
+                sigma_init=float(getattr(
+                    self.config, 'crystal_sigma_init', 0.25,
+                )),
+                spin_pattern=str(getattr(
+                    self.config, 'crystal_spin_pattern', 'neel',
+                )),
+            )
         return self.L * jax.random.uniform(
             rng_key, (num_walkers, self.nelec, self.dim),
         )
