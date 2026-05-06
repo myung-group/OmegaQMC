@@ -344,6 +344,21 @@ class HEGPsiFormerConfig(NamedTuple):
     mpnqs_d2: int = 26
     mpnqs_hidden: int = 32
     mpnqs_n_layers: int = 4
+    # Smith 2024 supplement (page 7) applies layer normalization in
+    # the MPNN.  Bounds activation magnitude after each residual sum.
+    # Critical when coord-backflow is enabled — without LayerNorm the
+    # h_i^(T) features grow during training, making W_bf · h_i^(T)
+    # large enough to collapse electron coordinates and produce
+    # near-singular Slater determinants (a sub-DMC bias).
+    mpnqs_use_layer_norm: bool = False
+    # LayerNorm placement (only used when mpnqs_use_layer_norm=True):
+    #   'post_each':       LN after residual sum every layer (most restrictive,
+    #                      Smith's most-likely default, but over-bounds h_i^(T))
+    #   'pre_each':        LN inputs to f1/f2 every layer (residuals can grow)
+    #   'post_final_only': LN only on final h_i/h_ij (surgical: bounds the
+    #                      input to BF readout without restricting per-layer
+    #                      dynamics)
+    mpnqs_layer_norm_mode: str = 'post_each'
     # Coord-transform backflow (Smith 2024 PRL 133 266504, eq. 19):
     # x_i = r_i + W_bf · h_i^(T).  When True, a small Linear readout
     # from the post-GNN one-body stream produces a per-electron
@@ -754,6 +769,12 @@ def make_heg_psiformer_log_psi(
     and optimizer drivers consume it unchanged — a HEGPsiFormer is
     drop-in for the minimal Slater-Jastrow.
 
+    When ``config.use_coord_backflow`` is True, the returned ``log_psi``
+    function gets an attribute ``log_psi.bf_diagnostics`` — a callable
+    ``(walkers, params) -> dict`` that returns BF displacement and
+    quasiparticle-separation statistics.  Used by the SR training loop
+    to monitor for coord-collapse pathology (``min_pair_sep_min → 0``).
+
     Args:
         config: :class:`HEGPsiFormerConfig`.
         rng_key: JAX PRNG key.
@@ -761,7 +782,10 @@ def make_heg_psiformer_log_psi(
     Returns:
         ``(log_psi, init_params, graphdef)``.
     """
-    from .heg_psiformer import build_heg_psiformer_wf
+    from .heg_psiformer import (
+        build_heg_psiformer_wf, _make_heg_phys_conf,
+        _pair_distances_mi_full,
+    )
 
     rngs = nnx.Rngs(rng_key)
     model = build_heg_psiformer_wf(config, rngs)
@@ -770,6 +794,52 @@ def make_heg_psiformer_log_psi(
     def log_psi(r, params):
         mdl = nnx.merge(graphdef, params, other)
         return mdl(r).log
+
+    # Attach BF diagnostics callable when coord backflow is active.
+    # Walks through the GNN + coord_backflow on every walker, computes
+    # per-walker statistics, then aggregates across walkers.
+    has_bf = bool(getattr(config, 'use_coord_backflow', False))
+    if has_bf:
+        @jax.jit
+        def bf_diagnostics(walkers, params):
+            mdl = nnx.merge(graphdef, params, other)
+
+            def per_walker(r):
+                pc = _make_heg_phys_conf(r)
+                _, _, _, emb = mdl.omni(pc)
+                disp = mdl.coord_backflow(emb)        # (n_elec, dim)
+                x_bf = r + disp
+                disp_norms = jnp.linalg.norm(disp, axis=-1)  # (n_elec,)
+                # Min-image pair distances of QUASIPARTICLES (post-BF).
+                # Diagonal is 0 — we mask it before taking min.
+                d_full = _pair_distances_mi_full(x_bf, mdl.lattice)
+                n = x_bf.shape[0]
+                # Set diagonal to +inf so min skips it.
+                d_offdiag = d_full + jnp.eye(n, dtype=d_full.dtype) * 1e30
+                return jnp.array([
+                    jnp.mean(disp_norms),     # mean displacement / walker
+                    jnp.max(disp_norms),      # max displacement / walker
+                    jnp.min(d_offdiag),       # min quasiparticle pair sep
+                ])
+
+            # Flatten any leading axes (handles pmap shape
+            # (n_dev, n_w/dev, n_elec, dim) as well as plain
+            # (n_w, n_elec, dim)) so vmap iterates over walkers.
+            n_elec = walkers.shape[-2]
+            dim = walkers.shape[-1]
+            walkers_flat = walkers.reshape(-1, n_elec, dim)
+            stats = jax.vmap(per_walker)(walkers_flat)  # (n_w_total, 3)
+            return {
+                'mean_disp_avg':       jnp.mean(stats[:, 0]),
+                'max_disp_avg':        jnp.mean(stats[:, 1]),
+                'max_disp_max':        jnp.max(stats[:, 1]),
+                'min_pair_sep_avg':    jnp.mean(stats[:, 2]),
+                'min_pair_sep_min':    jnp.min(stats[:, 2]),
+            }
+
+        log_psi.bf_diagnostics = bf_diagnostics
+    else:
+        log_psi.bf_diagnostics = None
 
     return log_psi, params, graphdef
 

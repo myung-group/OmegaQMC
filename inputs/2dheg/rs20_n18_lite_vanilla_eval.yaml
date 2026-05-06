@@ -1,0 +1,98 @@
+# Eval-only diagnostic: load iter 2500 chkpt of rs20_n18_lite_vanilla,
+# run NO training, just an extended eval phase with 4× walkers.
+#
+# Goal: test whether E/N = -46.67 mHa is robust to walker count, or
+# whether it's biased downward by finite-walker MCMC noise.
+#
+# Setup:
+#   - Same architecture as rs20_n18_lite_vanilla (chkpt loads cleanly)
+#   - optimize.iters: 0  → skip training
+#   - optimize.load_chkpt → load iter 2500 chkpt
+#   - eval.walkers: 4096 (4× the optimization walker count)
+#   - eval.blocks: 100, steps_per_block: 50  → long MCMC
+#   - observables ON for g(r), S(k), density sanity checks
+#
+# Expected outcomes:
+#   (a) E shifts UP by >0.05 mHa with 4× walkers → estimator was
+#       biased low at 1024 walkers
+#   (b) E stays at -46.67 ± 0.02 → number is robust, not noise
+#   (c) Observables show pile-up at e-e coalescence → cusp broken
+#       (despite being "locked")
+
+project: rs20_n18_lite_vanilla_eval
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24
+  mpnqs_d2: 16
+  mpnqs_hidden: 24
+  mpnqs_n_layers: 3
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 45
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 0                                            # SKIP TRAINING
+  load_chkpt: runs/rs20_n18_lite_vanilla/rs20_n18_lite_vanilla.chk.h5
+  walkers: 1024
+  lr: 0.05                                            # ignored (iters=0)
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 8000
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 0
+
+eval:
+  walkers: 4096                                       # 4× optimization
+  blocks: 100                                         # 2× normal
+  equil_blocks: 30                                    # generous warmup
+  steps_per_block: 50                                 # longer between samples
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 4096
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

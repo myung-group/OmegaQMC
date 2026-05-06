@@ -46,7 +46,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from .psi.nn.heg_wf import (
     HEGConfig,
@@ -306,9 +305,16 @@ class _HEGSROptimizer:
             new = jnp.where(accept, proposed, r)
             return new, accept
 
-        self._metropolis_move_allw = jax.jit(jax.vmap(
-            metropolis_move, in_axes=(0, 0, None, None),
-        ))
+        # Multi-GPU: each device handles n_walkers/n_devices walkers.
+        # Outer pmap distributes across devices (axis_name='dev'),
+        # inner vmap parallelises over the device-local walker batch.
+        # in_axes=(0, 0, None, None): rng_key + walkers are sharded
+        # along device axis; step_size + p_flat are replicated.
+        self._metropolis_move_pmap = jax.pmap(
+            jax.vmap(metropolis_move, in_axes=(0, 0, None, None)),
+            in_axes=(0, 0, None, None),
+            axis_name='dev',
+        )
 
         # ---- MALA (Metropolis-adjusted Langevin) sampler ------------
         # Smith 2024 Eq. 22:
@@ -360,142 +366,147 @@ class _HEGSROptimizer:
             new = jnp.where(accept, proposed, r)
             return new, accept
 
-        self._mala_move_allw = jax.jit(jax.vmap(
-            mala_move, in_axes=(0, 0, None, None),
-        ))
+        self._mala_move_pmap = jax.pmap(
+            jax.vmap(mala_move, in_axes=(0, 0, None, None)),
+            in_axes=(0, 0, None, None),
+            axis_name='dev',
+        )
 
-        # Per-walker quantities for SR.
-        self._kin_batch = jax.jit(jax.vmap(kin_only, in_axes=(0, None)))
         log_psi_grad_flat = jax.grad(log_psi_flat, argnums=1)
-        self._o_batch = jax.jit(jax.vmap(
-            log_psi_grad_flat, in_axes=(0, None),
-        ))
 
         # Ewald potential: chunked over walkers to avoid XLA's
         # fusion bomb at (n_real=3, n_recip=6).  See vmcopt_nn_heg.
-        # Bumped to 1024 for sharded execution: Python-level chunking
-        # of a sharded array forces gathers that defeat the
-        # parallelism.  At 80 GB/A100 the larger chunk fits fine for
-        # typical n_real/n_recip.  Drop to 32 if hitting OOM at small
-        # GPUs.
-        self._pot_chunk_size = 1024
         if dim == 3:
-            self._pot_chunk = jax.jit(
-                lambda w: ewald_pair_energy(w, tables),
-            )
+            pot_fn = lambda w: ewald_pair_energy(w, tables)
         else:
             from .observables.ewald_2d import ewald_2d_pair_energy
-            self._pot_chunk = jax.jit(
-                lambda w: ewald_2d_pair_energy(w, tables),
-            )
+            pot_fn = lambda w: ewald_2d_pair_energy(w, tables)
 
-        # ---- Multi-GPU sharding setup (must precede sr_update_core
-        # so its closure can capture replicated_sharding) ----
+        # Multi-GPU device set-up.  pmap distributes across leading
+        # axis = device axis.
         self.devices = jax.devices()
         self.n_devices = len(self.devices)
-        self.mesh = Mesh(np.asarray(self.devices), ('walker',))
-        self.walker_sharding = NamedSharding(self.mesh, P('walker'))
-        self.replicated_sharding = NamedSharding(self.mesh, P())
-        replicated_sharding = self.replicated_sharding   # closure capture
 
-        # ---- SR step (jitted end-to-end, takes walkers & flat params)
+        # Per-device kinetic+potential (no cross-device communication
+        # needed; each device computes its own walkers' E_loc).
+        def kin_pot_local(walkers, p_flat):
+            e_kin = jax.vmap(kin_only, in_axes=(0, None))(walkers, p_flat)
+            e_pot = pot_fn(walkers)
+            return e_kin + e_pot
+
+        self._eloc_pmap = jax.pmap(
+            kin_pot_local,
+            in_axes=(0, None),
+            axis_name='dev',
+        )
+
+        # ---- SR step (pmap'd, all-gather o across devices) ----
         var_weight_arr = jnp.asarray(
             self.var_weight, dtype=jnp.float64,
         )
-        n_cg_static = self.n_cg
 
-        @jax.jit
-        def sr_update_core(
-            walkers, p_flat, e_loc,
-            prev_dtheta, damping, lambda_mu, c_clip,
-        ):
-            """Perform one SR step, given pre-computed E_L.
+        # Closure-capture the global walker count (statically known
+        # at __call__ time; we re-create the pmap'd function in
+        # __call__ so this is a Python int, suitable for jnp.eye).
+        n_devices_static = self.n_devices
 
-            SPRING (Goldshlager 2024 / Smith 2024):
-                dθ_t = (S + λI)^{-1} (g + λμ dθ_{t-1})
+        def make_sr_step(num_walkers):
+            n_w_local = num_walkers // n_devices_static
 
-            Plus optional KFAC-style F-norm clip:
-                ||dθ||_F = sqrt(dθ^T S dθ) ≤ c_clip
-            (active when c_clip > 0 — pass 0 to disable.)
+            def sr_step(
+                walkers, p_flat, e_loc,
+                prev_dtheta, damping, lambda_mu, c_clip,
+            ):
+                """One SR step, per-device.  Cross-device collectives
+                via psum / all_gather under axis_name='dev'.
 
-            Returns ``(δθ, e_mean, var, g_norm, clip_scale)``.
-            """
-            n = walkers.shape[0]
+                Inputs (per device):
+                  walkers:    (n_w_local, nelec, dim)
+                  p_flat:     (n_p,)              replicated
+                  e_loc:      (n_w_local,)
+                  prev_dtheta:(n_p,)              replicated
+                  damping, lambda_mu, c_clip:     scalars, replicated
 
-            o = jax.vmap(log_psi_grad_flat, in_axes=(0, None))(
-                walkers, p_flat,
+                Returns (per device, all replicated outputs):
+                  dtheta:    (n_p,)
+                  e_mean:    scalar
+                  var:       scalar
+                  g_norm:    scalar
+                  scale:     scalar
+                """
+                # Per-walker o = ∇_θ log|Ψ| (local walkers).
+                o_local = jax.vmap(
+                    log_psi_grad_flat, in_axes=(0, None),
+                )(walkers, p_flat)                          # (n_w_local, n_p)
+
+                # Global mean energy (across all devices).
+                e_sum_local = jnp.sum(e_loc)
+                e_sum = jax.lax.psum(e_sum_local, axis_name='dev')
+                e_mean = e_sum / num_walkers
+                de_local = e_loc - e_mean
+                var_sum = jax.lax.psum(
+                    jnp.sum(de_local ** 2), axis_name='dev',
+                )
+                var = var_sum / num_walkers
+
+                # Global mean of o (across all devices).
+                o_sum_local = jnp.sum(o_local, axis=0)      # (n_p,)
+                o_sum = jax.lax.psum(o_sum_local, axis_name='dev')
+                o_mean = o_sum / num_walkers
+                do_local = o_local - o_mean[None, :]        # (n_w_local, n_p)
+
+                # Force g (gradient).
+                de_mix_local = de_local + var_weight_arr * (
+                    de_local ** 2 - var
+                )
+                g_partial = de_mix_local @ do_local         # (n_p,)
+                g_full = jax.lax.psum(g_partial, axis_name='dev')
+                g = 2.0 * g_full / num_walkers
+
+                # SPRING RHS.
+                rhs = g + lambda_mu * prev_dtheta
+
+                # ===== SMW dual-form SR =====
+                # Need full do (n_w, n_p) on every device for the
+                # K = do @ do.T solve.  all_gather along device axis
+                # tiles the local do shards into the global matrix.
+                # Memory: n_w × n_p × 8 bytes (e.g. 1024 × 53k × 8 =
+                # 437 MB at production, fits easily in 80 GB A100).
+                do = jax.lax.all_gather(
+                    do_local, axis_name='dev', tiled=True,
+                )                                           # (n_w, n_p)
+
+                inv_λn = 1.0 / (damping * num_walkers)
+                K = (do @ do.T) * inv_λn                    # (n_w, n_w)
+                I_plus_K = K + jnp.eye(num_walkers, dtype=K.dtype)
+                o_rhs = (do @ rhs) * inv_λn                 # (n_w,)
+                u = jnp.linalg.solve(I_plus_K, o_rhs)       # (n_w,)
+                dtheta = (rhs - do.T @ u) / damping         # (n_p,)
+
+                # F-norm clip: S dθ via (1/n) do^T (do dθ).
+                s_dtheta = (do.T @ (do @ dtheta)) / num_walkers
+                f_norm_sq = jnp.maximum(
+                    jnp.dot(dtheta, s_dtheta), 1e-20,
+                )
+                f_norm = jnp.sqrt(f_norm_sq)
+                raw_scale = c_clip / (f_norm + 1e-20)
+                scale = jnp.where(
+                    c_clip > 0.0,
+                    jnp.minimum(1.0, raw_scale),
+                    jnp.ones_like(raw_scale),
+                )
+                dtheta = scale * dtheta
+
+                g_norm = jnp.sqrt(jnp.sum(g ** 2))
+                return dtheta, e_mean, var, g_norm, scale
+
+            return jax.pmap(
+                sr_step,
+                in_axes=(0, None, 0, None, None, None, None),
+                axis_name='dev',
             )
 
-            e_mean = jnp.mean(e_loc)
-            de = e_loc - e_mean
-            var = jnp.mean(de ** 2)
-
-            o_mean = jnp.mean(o, axis=0)
-            do = o - o_mean[None, :]
-
-            de_mix = de + var_weight_arr * (de ** 2 - var)
-            g = 2.0 * (de_mix @ do) / n
-
-            # SPRING: momentum lives inside the RHS.
-            rhs = g + lambda_mu * prev_dtheta
-
-            # ===== Sherman-Morrison-Woodbury dual-form SR =====
-            # Smith 2024 supplement page 8: "we take advantage of the
-            # sparsity of Fisher matrix S when the number of samples
-            # is smaller than the number of parameters, and apply the
-            # Sherman-Morrison-Woodbury formula".  In NQS, walkers
-            # (1024) << params (~50k-200k), so the n_w-dim kernel is
-            # cheaper than 20 CG iterations on the n_p-dim system.
-            #
-            # Identity:
-            #   (λI + (1/n) O^T O)^{-1} v
-            #     = (1/λ)[v − (1/n) O^T u]
-            #   where u = (I + (1/(λn)) O O^T)^{-1} (O v / (λn))
-            #
-            # Multi-GPU notes (sharded execution):
-            # - ``do`` is sharded along walker axis 0.
-            # - K = do @ do.T is naturally walker×walker; we force it
-            #   replicated so the linear solve runs in parallel on
-            #   all devices (otherwise it gathers to one device).
-            # - dtheta is in param space → replicated for the update.
-            inv_λn = 1.0 / (damping * n)
-            K = (do @ do.T) * inv_λn                              # (n_w, n_w)
-            # Force K replicated across devices: jnp.linalg.solve
-            # doesn't shard, so without this it would gather K to one
-            # device and idle the others.  After this constraint, all
-            # devices run the same solve in parallel — fast (8 MB at
-            # 1024 walkers).
-            K = jax.lax.with_sharding_constraint(
-                K, replicated_sharding,
-            )
-            I_plus_K = K + jnp.eye(n, dtype=K.dtype)              # (n_w, n_w)
-            o_rhs = (do @ rhs) * inv_λn                           # (n_w,)
-            o_rhs = jax.lax.with_sharding_constraint(
-                o_rhs, replicated_sharding,
-            )
-            u = jnp.linalg.solve(I_plus_K, o_rhs)                 # (n_w,)
-            dtheta = (rhs - do.T @ u) / damping                   # (n_p,)
-            dtheta = jax.lax.with_sharding_constraint(
-                dtheta, replicated_sharding,
-            )
-
-            # F-norm clip.  S dθ via (1/n) do^T (do dθ) — same memory
-            # cost as in CG matvec.
-            s_dtheta = (do.T @ (do @ dtheta)) / n
-            f_norm_sq = jnp.maximum(jnp.dot(dtheta, s_dtheta), 1e-20)
-            f_norm = jnp.sqrt(f_norm_sq)
-            raw_scale = c_clip / (f_norm + 1e-20)
-            scale = jnp.where(
-                c_clip > 0.0,
-                jnp.minimum(1.0, raw_scale),
-                jnp.ones_like(raw_scale),
-            )
-            dtheta = scale * dtheta
-
-            g_norm = jnp.sqrt(jnp.sum(g ** 2))
-            return dtheta, e_mean, var, g_norm, scale
-
-        self._sr_update_core = sr_update_core
+        self._make_sr_step = make_sr_step
 
     # -----------------------------------------------------
     # Learning-rate scheduler
@@ -616,16 +627,8 @@ class _HEGSROptimizer:
     # Training loop
     # -----------------------------------------------------
 
-    def _pot_batch(self, w):
-        """Chunked Ewald pair energy (matches Adam driver)."""
-        n = w.shape[0]
-        chunk = self._pot_chunk_size
-        if n <= chunk:
-            return self._pot_chunk(w)
-        return jnp.concatenate([
-            self._pot_chunk(w[k:k + chunk])
-            for k in range(0, n, chunk)
-        ], axis=0)
+    # NOTE: _pot_batch removed in pmap port — kinetic+potential
+    # are computed together by the pmap'd ``_eloc_pmap``.
 
     def __call__(
         self,
@@ -667,41 +670,69 @@ class _HEGSROptimizer:
         # Pick sampler.  MALA's drift contribution is large at small
         # step size, so we start at smaller (3·mc_timestep)^½.
         if self.sampler == 'mala':
-            mcmc_move_allw = self._mala_move_allw
+            mcmc_move_pmap = self._mala_move_pmap
         else:
-            mcmc_move_allw = self._metropolis_move_allw
-        kin_batch = self._kin_batch
-        sr_update_core = self._sr_update_core
+            mcmc_move_pmap = self._metropolis_move_pmap
+        eloc_pmap = self._eloc_pmap
+
+        # ---- pmap walker shape -----------------------------------
+        # Reshape sharded data to (n_dev, n_w_local, ...) so pmap
+        # distributes the leading axis across devices.  Replicated
+        # data (params, scalars) keep their bare shape; pmap is told
+        # via in_axes=None in each pmap'd function.
+        n_dev = self.n_devices
+        if num_walkers % n_dev != 0:
+            raise ValueError(
+                f"num_walkers ({num_walkers}) must be divisible by "
+                f"n_devices ({n_dev}) for pmap walker sharding."
+            )
+        n_w_local = num_walkers // n_dev
 
         rng_key, init_key = jax.random.split(rng_key)
         walkers = self.initialize_walkers(init_key, num_walkers)
-        # Multi-GPU: shard walkers along axis 0.  On a single device
-        # this is a no-op; on N devices each gets num_walkers/N
-        # walkers.  num_walkers must be divisible by N.
-        if num_walkers % self.n_devices != 0:
-            raise ValueError(
-                f"num_walkers ({num_walkers}) must be divisible by "
-                f"n_devices ({self.n_devices}) for walker sharding."
-            )
-        walkers = jax.device_put(walkers, self.walker_sharding)
-        # params, prev_dtheta, scalars are replicated across devices.
-        params_flat = jax.device_put(params_flat, self.replicated_sharding)
-        step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
+        walkers = walkers.reshape(
+            n_dev, n_w_local, self.nelec, self.dim,
+        )
 
-        # Equilibration.  Keep step_size as a device-resident jax
-        # array — converting to Python float each step would force
-        # a host sync (allreduce + transfer) and blow up multi-GPU
-        # throughput.  Convert once at end for printing only.
-        ar_jax = jnp.zeros(())
-        for _ in range(num_equil_steps):
+        # Build the SR step pmap with statically-known num_walkers.
+        sr_update_pmap = self._make_sr_step(num_walkers)
+
+        # Step size is a scalar; pmap'd MCMC takes it via in_axes=None.
+        step_size = jnp.asarray(
+            (3 * mc_timestep) ** 0.5, dtype=jnp.float64,
+        )
+
+        # Pre-jitted single MCMC step.  pmap distributes walkers,
+        # vmap parallelises within each device.  acc reduction is a
+        # pmean across devices so the same step_size update is seen
+        # everywhere.
+        @jax.jit
+        def _mcmc_step(rng_key, walkers, step_size, params_flat):
+            # rng_key shape (n_dev,) — one key per device.
+            # Each device splits its key into n_w_local sub-keys.
+            keys_per_dev = jax.vmap(
+                lambda k: jax.random.split(k, n_w_local),
+            )(rng_key)                                # (n_dev, n_w_local, 2)
+            walkers, acc = mcmc_move_pmap(
+                keys_per_dev, walkers, step_size, params_flat,
+            )                                         # walkers: (n_dev,n_w_local,...)
+            ar = jnp.mean(acc).astype(jnp.float64)    # global mean across all
+            new_step = _adapt_step_size(step_size, ar)
+            return walkers, new_step, ar
+
+        # Equilibration.  Python loop over jitted steps; per-iter
+        # sync via float() at the end blocks just enough to keep
+        # async dispatch from over-staging.
+        ar_jax = jnp.zeros((), dtype=jnp.float64)
+        for i in range(num_equil_steps):
             rng_key, sub = jax.random.split(rng_key)
-            keys = jax.random.split(sub, num_walkers)
-            walkers, acc = mcmc_move_allw(
-                keys, walkers, step_size, params_flat,
+            keys_dev = jax.random.split(sub, n_dev)
+            walkers, step_size, ar_jax = _mcmc_step(
+                keys_dev, walkers, step_size, params_flat,
             )
-            ar_jax = jnp.mean(acc)
-            step_size = _adapt_step_size(step_size, ar_jax)
-        ar = float(ar_jax)   # sync once after the loop
+            if i % 20 == 19:
+                step_size.block_until_ready()
+        ar = float(ar_jax)
 
         if verbose >= 1:
             extras = []
@@ -774,10 +805,10 @@ class _HEGSROptimizer:
         prev_sigterm = signal.signal(signal.SIGTERM, _stop_handler)
         prev_sigint = signal.signal(signal.SIGINT, _stop_handler)
 
-        # SPRING momentum buffer (zero-init).  Replicated across devices.
-        prev_dtheta = jax.device_put(
-            jnp.zeros_like(params_flat), self.replicated_sharding,
-        )
+        # SPRING momentum buffer (zero-init).  Replicated across devices
+        # by virtue of being a single-host array passed through pmap
+        # with in_axes=None.
+        prev_dtheta = jnp.zeros_like(params_flat)
         spring_mu = self.spring_mu
         c_clip = self.spring_norm_clip   # 0.0 → disabled inside core
         damping_now = float(self.damping)
@@ -789,36 +820,43 @@ class _HEGSROptimizer:
         clip_scale = 1.0
 
         for it in range(1, num_iters + 1):
-            # Decorrelate walkers.  step_size stays on-device — no
-            # float() sync per step (multi-GPU killer; 30 syncs/iter
-            # × 50ms/sync = 1.5s wasted).
+            # Decorrelate walkers (pmap'd, distributes across devices).
             for _ in range(mcmc_decorr_steps):
                 rng_key, sub = jax.random.split(rng_key)
-                keys = jax.random.split(sub, num_walkers)
-                walkers, acc = mcmc_move_allw(
-                    keys, walkers, step_size, params_flat,
-                )
-                step_size = _adapt_step_size(
-                    step_size, jnp.mean(acc),
+                keys_dev = jax.random.split(sub, n_dev)
+                walkers, step_size, _ = _mcmc_step(
+                    keys_dev, walkers, step_size, params_flat,
                 )
 
-            # Local energies (kin + pot).
-            e_kin = kin_batch(walkers, params_flat)
-            e_pot = self._pot_batch(walkers)
-            e_loc = e_kin + e_pot
+            # Local energies (per-device kin + pot, no cross-device
+            # communication needed).
+            e_loc = eloc_pmap(walkers, params_flat)
+            # e_loc shape (n_dev, n_w_local) — leave in pmap shape;
+            # the SR step's pmap wants this shape via in_axes=0.
 
             # SPRING coupling: λμ.  When μ=0 the RHS is just g (vanilla SR).
             lambda_mu = damping_now * spring_mu
 
-            # SR update — F-norm clip is inside the jitted core.
-            dtheta, e_mean, var, g_norm, clip_scale_arr = sr_update_core(
-                walkers, params_flat, e_loc,
-                prev_dtheta,
-                jnp.asarray(damping_now, dtype=jnp.float64),
-                jnp.asarray(lambda_mu, dtype=jnp.float64),
-                jnp.asarray(c_clip, dtype=jnp.float64),
+            # SR update — pmap'd; outputs are per-device but
+            # all-reduced internally so every device returns the same
+            # values.  Take [0] to get the host-side scalar/array.
+            dtheta_pdev, e_mean_pdev, var_pdev, g_norm_pdev, clip_scale_pdev = (
+                sr_update_pmap(
+                    walkers, params_flat, e_loc,
+                    prev_dtheta,
+                    jnp.asarray(damping_now, dtype=jnp.float64),
+                    jnp.asarray(lambda_mu, dtype=jnp.float64),
+                    jnp.asarray(c_clip, dtype=jnp.float64),
+                )
             )
-            clip_scale = float(clip_scale_arr)
+            # Outputs from pmap have leading device axis; replicated
+            # values are identical across [0..n_dev], so we just take
+            # device 0.
+            dtheta = dtheta_pdev[0]
+            e_mean = e_mean_pdev[0]
+            var = var_pdev[0]
+            g_norm = g_norm_pdev[0]
+            clip_scale = float(clip_scale_pdev[0])
             if spring_mu > 0.0:
                 prev_dtheta = dtheta
 
@@ -871,6 +909,25 @@ class _HEGSROptimizer:
                     f"{float(var):>12.4e}  "
                     f"{float(g_norm):>12.4e}  "
                     f"{dt:>8.3f}",
+                    file=fout,
+                )
+
+            # BF diagnostics (every 100 iters when coord BF is active).
+            # Tracks displacement magnitude and min quasiparticle pair
+            # separation — direct evidence for coord-collapse pathology.
+            # min_pair_sep_min → 0 = electrons colliding in coord space →
+            # singular Slater determinant → biased E_L estimator.
+            bf_diag_fn = getattr(self.log_psi_pytree, 'bf_diagnostics', None)
+            if (verbose >= 1 and bf_diag_fn is not None
+                    and (it == 1 or it % 100 == 0)):
+                stats = bf_diag_fn(walkers, self.unravel(params_flat))
+                print(
+                    f"  [bf] iter {it:>5d}  "
+                    f"disp(mean/walker)={float(stats['mean_disp_avg']):.3f}  "
+                    f"disp(max/walker)={float(stats['max_disp_avg']):.3f}  "
+                    f"disp_max_overall={float(stats['max_disp_max']):.3f}  "
+                    f"min_qp_sep(avg/walker)={float(stats['min_pair_sep_avg']):.4f}  "
+                    f"min_qp_sep(global)={float(stats['min_pair_sep_min']):.4f}",
                     file=fout,
                 )
 

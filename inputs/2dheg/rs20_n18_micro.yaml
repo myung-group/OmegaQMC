@@ -1,0 +1,82 @@
+# MICRO N=18 run — even smaller than rs20_n18_smith_lite_lr1.yaml.
+# Purpose: rapid hyperparameter iteration (~25 min per full run).
+#
+# Architecture: d1=16/d2=12/hidden=16/T=2 → ~6k params (vs lite's 17k).
+# Same Smith components present (cusp + deep Jastrow + coord BF, all on).
+# Same proven optimizer recipe: SPRING+MALA+adaptive damping+lr decay.
+#
+# Expected variational ceiling: probably -43 to -45 mHa (less capacity
+# than lite, which reached -45.85).  Goal here is fast iteration on
+# OPTIMIZER, not pushing for the variational floor.
+
+project: rs20_n18_micro_vanilla
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 16
+  mpnqs_d2: 12
+  mpnqs_hidden: 16
+  mpnqs_n_layers: 2
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 16
+  smith_jastrow_n_layers: 2
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 27                     # N_k = 9 + 27 = 36 = 2N (lighter than 3N)
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 5000
+  walkers: 1024                     # same as lite; small system has tiny mem footprint
+  lr: 0.05                          # vanilla SR appropriate (no momentum amplification)
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 5000                    # full-run anneal
+  lr_n_restarts: 0
+  spring_mu: 0.0                    # vanilla SR (no SPRING momentum)
+  spring_norm_clip: 0               # no clip
+  damping_adapt: false              # fixed damping
+  sampler: metropolis               # plain Metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30             # more decorr than MALA (less aggressive proposals)
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: false                    # skip for speed; this is hyperparam iteration
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

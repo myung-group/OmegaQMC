@@ -1,0 +1,99 @@
+# Smith production-class run: SPRING + MALA + adaptive damping +
+# inverse-T lr decay + locked cusp.  Single-A100 (frodo GPU 1) at
+# 768 walkers — the largest count that fits in 80 GiB after the
+# 1024-walker version hit OOM (~91 GiB requested).  768 = 75% of
+# Smith's 1024 walker count, the closest single-GPU approximation.
+#
+# Two deliberate deviations from Smith (both safety-driven):
+#   1. lr=0.05 vs Smith's lr=10. Our earlier lr=10 + SPRING run
+#      produced a variational catastrophe (cusp drift + bias
+#      amplification).  lr=0.05 is the proven-stable value.
+#   2. cusp_trainable_alpha=false. We lock α at Kato slope
+#      (anti-spin α=1, same-spin α=½) after our prior cusp drift
+#      to 6.86 created an unphysical sub-DMC energy.
+#
+# Architecture is exact-Smith: d1=32, d2=26, hidden=32, T=4 layers,
+# n_det=1 single Slater, N_k=3N=168 plane waves/orbital, ~53k params.
+#
+# Run length: 50000 iters at ~0.5-1 s/iter → ~7-14 hr wall time.
+
+project: rs20_n50_smith_spring_768w
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 32                      # Smith
+  mpnqs_d2: 26                      # Smith
+  mpnqs_hidden: 32                  # Smith
+  mpnqs_n_layers: 4                 # Smith T
+  n_det: 1                          # Smith single Slater
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false       # locked at Kato (the safety lock)
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true      # Smith eqs. 20-21
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: false
+  use_coord_backflow: true          # Smith eq. 19
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 143                    # N_k = 25 + 143 = 168 ≈ 3N
+  det_jitter: 0.05
+  walker_init: crystal_perturbed    # Smith protocol
+
+pretrain:
+  iters: 0                          # cold start (Smith protocol)
+
+optimize:
+  type: sr
+  iters: 50000
+  walkers: 768                      # single-A100 ceiling (1024 OOMs)
+  lr: 0.05                          # safe lr (vs Smith's 10)
+  lr_schedule: inverse              # Smith decay
+  lr_decay_T: 1000                  # Smith T
+  spring_mu: 0.9                    # Smith momentum
+  spring_norm_clip: 0.05            # Smith C = lr
+  damping_adapt: true               # Smith adaptive λ
+  damping_min: 1.0e-5
+  damping_max: 1.0e-1
+  damping_factor: 2.0
+  damping_lookback: 100
+  sampler: mala                     # Smith
+  mala_grad_clip: 1.0
+  var_weight: 0.0
+  mcmc_decorr_steps: 20             # Smith
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3                # Smith λ_init
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 768
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 768
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

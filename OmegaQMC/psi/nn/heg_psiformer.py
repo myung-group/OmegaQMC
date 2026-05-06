@@ -272,6 +272,21 @@ class SmithDeepJastrow(nnx.Module):
     def __call__(self, h: jax.Array, x: jax.Array) -> jax.Array:
         """Compute scalar log-Jastrow contribution.
 
+        Smith 2024 supplement Eq. 20:
+            U({r_i}) = Σ_i J(h_i^(T), GELU ∘ Linear_pre(x_i))
+        Eq. 21:
+            J = Linear_L ∘ GELU ∘ ... ∘ Linear_1
+        Plus from page 7 of supplement:
+            "We also apply skip connections between all the hidden
+             layers of J to facilitate optimization."
+
+        So:
+        - GELU between Linear_pre and the concat with h_i^(T)
+        - Residual connections between equally-shaped hidden layers
+          (i.e., for every hidden→hidden Linear; no residual into the
+          first projection from 2·d1→hidden or out of the final
+          hidden→1 readout, since shapes differ).
+
         Args:
             h: One-body stream, ``(n_elec, d1)``.
             x: Backflow-shifted positions, ``(n_elec, dim)``.
@@ -279,12 +294,19 @@ class SmithDeepJastrow(nnx.Module):
         Returns:
             Scalar — sum over electrons of per-electron J-output.
         """
-        x_proj = self.linear_pre(x)
+        # GELU after Linear_pre (Smith Eq. 20: GELU ∘ Linear_pre).
+        x_proj = nnx.gelu(self.linear_pre(x))
         z = jnp.concatenate([h, x_proj], axis=-1)
         for li, layer in enumerate(self.layers):
+            z_in = z
             z = layer(z)
             if li < len(self.layers) - 1:
                 z = nnx.gelu(z)
+                # Skip connection only when shapes match (hidden→hidden).
+                # The first layer maps 2·d1→hidden so shapes differ and
+                # no skip is added; subsequent hidden→hidden layers do.
+                if z.shape == z_in.shape:
+                    z = z + z_in
         return z.squeeze(-1).sum()
 
 
@@ -864,6 +886,12 @@ def build_heg_psiformer_wf(
             d2=int(getattr(config, 'mpnqs_d2', 26)),
             hidden=int(getattr(config, 'mpnqs_hidden', 32)),
             include_spin_in_v_ij=True,
+            use_layer_norm=bool(getattr(
+                config, 'mpnqs_use_layer_norm', False,
+            )),
+            layer_norm_mode=str(getattr(
+                config, 'mpnqs_layer_norm_mode', 'post_each',
+            )),
             rngs=rngs,
         )
     else:

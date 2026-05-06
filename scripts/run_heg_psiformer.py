@@ -135,6 +135,8 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         mpnqs_d2=int(a.get('mpnqs_d2', 26)),
         mpnqs_hidden=int(a.get('mpnqs_hidden', 32)),
         mpnqs_n_layers=int(a.get('mpnqs_n_layers', 4)),
+        mpnqs_use_layer_norm=bool(a.get('mpnqs_use_layer_norm', False)),
+        mpnqs_layer_norm_mode=str(a.get('mpnqs_layer_norm_mode', 'post_each')),
         # Coord-transform backflow (Smith 2024).  Off by default; set
         # ``use_coord_backflow: true`` in YAML to enable.
         use_coord_backflow=bool(a.get('use_coord_backflow', False)),
@@ -519,9 +521,19 @@ def _run(cfg, project, run_dir, prefix):
                 opt.params = pretrained_params
 
         # Resume from a previous checkpoint (overrides pretrain).
+        # ``load_chkpt_partial: true`` enables transfer learning from
+        # a checkpoint with different shapes — e.g. transferring the
+        # MPNN body / deep Jastrow / coord BF (N-independent) from a
+        # smaller-N run while keeping fresh init for the orbital
+        # coefficients (N-dependent).
         load_chkpt = _get(cfg, 'optimize.load_chkpt', None)
+        load_partial = bool(_get(
+            cfg, 'optimize.load_chkpt_partial', False,
+        ))
         if load_chkpt:
-            from OmegaQMC.nn_checkpoint import load_nn_checkpoint
+            from OmegaQMC.nn_checkpoint import (
+                load_nn_checkpoint, load_nn_checkpoint_partial,
+            )
             from jax.flatten_util import ravel_pytree
             chkpt_path = Path(load_chkpt)
             if not chkpt_path.is_absolute():
@@ -530,23 +542,42 @@ def _run(cfg, project, run_dir, prefix):
                 raise FileNotFoundError(
                     f"optimize.load_chkpt: {chkpt_path} not found"
                 )
-            print(f"\n[resume] Loading params from {chkpt_path}")
+            mode_label = "partial transfer" if load_partial else "resume"
+            print(f"\n[{mode_label}] Loading params from {chkpt_path}")
+            loader = (
+                load_nn_checkpoint_partial
+                if load_partial
+                else load_nn_checkpoint
+            )
             if opt_type == 'sr':
                 template = opt.unravel(opt.params_flat)
-                loaded, meta = load_nn_checkpoint(
-                    str(chkpt_path), template,
-                )
+                loaded, meta = loader(str(chkpt_path), template)
+            else:
+                loaded, meta = loader(str(chkpt_path), opt.params)
+
+            # Optional: reset specific module(s) to zero after load.
+            # Useful for transfer learning: keep MPNN body + Jastrow
+            # from source, but reset coord_backflow so the optimizer
+            # learns BF fresh at the new system size (avoids over-
+            # shifted BF when N changes — h_i^(T) magnitudes differ
+            # because aggregation is sum-not-mean).
+            reset_bf = bool(_get(
+                cfg, 'optimize.load_chkpt_reset_bf', False,
+            ))
+            if reset_bf:
+                from OmegaQMC.nn_checkpoint import zero_module_leaves
+                loaded = zero_module_leaves(loaded, 'coord_backflow')
+
+            if opt_type == 'sr':
                 opt.params_flat = ravel_pytree(loaded)[0]
             else:
-                loaded, meta = load_nn_checkpoint(
-                    str(chkpt_path), opt.params,
-                )
                 opt.params = loaded
+
             ep_meta = meta.get('epoch', '?')
             e_meta = meta.get('energy', None)
             e_str = (f"{float(e_meta):+.6f} Ha"
                      if e_meta is not None else "n/a")
-            print(f"  resumed @ epoch={ep_meta}, energy={e_str}")
+            print(f"  source @ epoch={ep_meta}, energy={e_str}")
 
         opt_result = opt(
             opt_key,

@@ -106,6 +106,122 @@ def load_nn_checkpoint(filepath, template_params):
     return jax.tree.unflatten(treedef, leaves), meta
 
 
+def load_nn_checkpoint_partial(filepath, template_params, log_fn=print):
+    """Load NN parameters with shape-mismatch tolerance.
+
+    For each leaf in ``template_params`` (from a fresh
+    initialisation of the TARGET model), copy the value
+    from the corresponding leaf in *filepath* IF the
+    shapes match.  Otherwise keep the template's random
+    init (skip the source leaf).
+
+    Designed for transfer learning between different N
+    values: MPNN body / deep Jastrow / coord BF have
+    N-independent shapes (will copy), while orbital
+    coefficients have N-dependent shapes (will skip,
+    keeping fresh init).
+
+    Args:
+        filepath: Path to source ``.chk.h5`` file.
+        template_params: TARGET pytree with random init.
+            Must have the same tree STRUCTURE as the
+            source (same number of leaves in same order).
+        log_fn: Callable to print/log messages.  Pass
+            ``log_fn=lambda *a, **k: None`` to silence.
+
+    Returns:
+        Tuple ``(params, meta)`` — params is the merged
+        pytree, meta includes per-leaf load status.
+    """
+    target_leaves, treedef = jax.tree.flatten(template_params)
+    n_target = len(target_leaves)
+
+    with h5py.File(filepath, 'r') as f:
+        pg = f['params']
+        n_source = int(pg.attrs['num_leaves'])
+        meta = {}
+        if 'meta' in f:
+            mg = f['meta']
+            for k in mg.attrs:
+                meta[k] = mg.attrs[k]
+            if 'charges' in mg:
+                meta['charges'] = np.asarray(mg['charges'])
+            if 'coords' in mg:
+                meta['coords'] = np.asarray(mg['coords'])
+
+        if n_source != n_target:
+            log_fn(
+                f"  [load_partial] source has {n_source} leaves, "
+                f"target has {n_target}.  Skipping all -- tree "
+                f"structures incompatible."
+            )
+            meta['leaves_copied'] = 0
+            meta['leaves_skipped'] = n_target
+            return jax.tree.unflatten(treedef, target_leaves), meta
+
+        merged_leaves = []
+        n_copied = 0
+        n_skipped = 0
+        copied_total_params = 0
+        skipped_total_params = 0
+        for i in range(n_target):
+            src = jnp.asarray(pg[str(i)][()])
+            tgt = target_leaves[i]
+            if src.shape == tgt.shape and src.dtype == tgt.dtype:
+                merged_leaves.append(src)
+                n_copied += 1
+                copied_total_params += int(np.prod(src.shape))
+            else:
+                merged_leaves.append(tgt)
+                n_skipped += 1
+                skipped_total_params += int(np.prod(tgt.shape))
+
+    log_fn(
+        f"  [load_partial] copied {n_copied}/{n_target} leaves "
+        f"({copied_total_params} params), skipped {n_skipped} "
+        f"({skipped_total_params} params kept at fresh init)."
+    )
+    meta['leaves_copied'] = n_copied
+    meta['leaves_skipped'] = n_skipped
+    meta['params_copied'] = copied_total_params
+    meta['params_skipped'] = skipped_total_params
+    return jax.tree.unflatten(treedef, merged_leaves), meta
+
+
+def zero_module_leaves(params, module_name, log_fn=print):
+    """Zero out all leaves in ``params`` whose key path contains ``module_name``.
+
+    Used after partial transfer to reset specific submodules (e.g.,
+    coord_backflow) to their natural zero-init, so the optimizer can
+    re-learn them from scratch even when the rest of the network is
+    transferred.
+
+    Args:
+        params: NNX parameter pytree.
+        module_name: Substring matched against each leaf's key path.
+        log_fn: Callable for status messages.
+
+    Returns:
+        Modified pytree with matching leaves replaced by zeros.
+    """
+    n_zeroed = 0
+
+    def fn(path, leaf):
+        nonlocal n_zeroed
+        path_str = jax.tree_util.keystr(path)
+        if module_name in path_str:
+            n_zeroed += 1
+            return jnp.zeros_like(leaf)
+        return leaf
+
+    out = jax.tree_util.tree_map_with_path(fn, params)
+    log_fn(
+        f"  [zero_module] reset {n_zeroed} leaves matching "
+        f"{module_name!r} to zero."
+    )
+    return out
+
+
 def append_vmc_results(filepath, results):
     """Append VMC results to an existing checkpoint.
 

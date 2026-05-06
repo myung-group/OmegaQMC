@@ -1,0 +1,87 @@
+# TC 1989 reproduction scan, Phase 1: N=58, rs=20 unpolarized fluid.
+# Direct comparison to TC 1989 Table I (PRB 39, 5005):
+#   N=58 at rs=20.0 VMC: -0.09176(5) Ry = -45.88 mHa/electron (Hartree)
+#   E_58^GFMC at rs=20:  -0.09273(2) Ry = -46.365 mHa/electron
+# AND to Attaccalite 2002 Table I:
+#   N=58 PW DMC: -46.241 mHa
+#   N=58 BF DMC: -46.283 mHa
+#
+# This is THE direct apples-to-apples comparison run with literature.
+# Our recipe (validated A) target: match or beat -46.28 mHa (Attaccalite BF DMC).
+#
+# N=58 unpolarized closed shell on square cell:
+#   shells through |k|² = 9 cumulative gives 29 spatial states/spin
+# N_k = 3N = 174 per orbital → n_virt_pw = 174 - 29 = 145
+
+project: rs20_n58_lite
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 58
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24
+  mpnqs_d2: 16
+  mpnqs_hidden: 24
+  mpnqs_n_layers: 3
+  mpnqs_use_layer_norm: false
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 145
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 8000
+  walkers: 1024
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 8000
+  lr_n_restarts: 2     # SGDR: 3 cosine cycles to escape local minima at N >= 26
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

@@ -1,0 +1,98 @@
+# Smith production-class run, REVISION 2: lr=1.0 + tight clip.
+#
+# Replaces rs20_n50_smith_spring_768w.yaml (lr=0.05) which showed
+# zero descent over 70 iters.  The lite N=18 validation confirmed
+# lr=1.0 + spring_norm_clip=0.1 produces clean descent from -34
+# to -45 mHa in 100 iters without instability.
+#
+# Why lr=0.05 failed: SPRING momentum (μ=0.9) needs base lr large
+# enough to seed accumulation.  At lr=0.05 the early dθ are too
+# tiny → momentum never builds → effective step stays small.
+#
+# Why not Smith's lr=10: tested, exploded by iter 4 (variance went
+# 1.4 → 1.9e6 → 1e10).  Smith's specific implementation (param
+# init scale, larger N=56 averaging, etc.) tolerates lr=10; ours
+# does not.
+#
+# Single-A100 frodo GPU 1, 768 walkers, 50000 iters → ~5-15 days.
+
+project: rs20_n50_smith_spring_768w_lr1
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 32
+  mpnqs_d2: 26
+  mpnqs_hidden: 32
+  mpnqs_n_layers: 4
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false       # locked at Kato (safety)
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 143
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 50000
+  walkers: 768                      # single-A100 ceiling
+  lr: 1.0                           # PROVEN at lite N=18 (vs 0.05 stalls, 10 explodes)
+  lr_schedule: inverse              # Smith decay
+  lr_decay_T: 2000                  # delay decay so lr stays high during basin escape
+  spring_mu: 0.9                    # Smith momentum
+  spring_norm_clip: 0.1             # tight (catches runaway before damage)
+  damping_adapt: true
+  damping_min: 1.0e-5
+  damping_max: 1.0e-1
+  damping_factor: 2.0
+  damping_lookback: 100
+  sampler: mala
+  mala_grad_clip: 1.0
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 768
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 768
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

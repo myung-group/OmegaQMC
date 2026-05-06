@@ -1,0 +1,71 @@
+# pmap + metropolis sampler diagnostic.  Same arch + walker count
+# as smoke_shard2_spring, but uses metropolis (no MALA) and vanilla
+# SR (no SPRING).  This was the proven-working configuration on
+# 2-GPU under jit+sharding.  If pmap also deadlocks here, the issue
+# is NOT MALA/SPRING-specific — it's something about pmap collectives
+# on this JAX/NCCL build.
+
+project: smoke_shard2_metro
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 16
+  mpnqs_d2: 12
+  mpnqs_hidden: 16
+  mpnqs_n_layers: 2
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 16
+  smith_jastrow_n_layers: 2
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 8
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 50
+  walkers: 64
+  lr: 0.05
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  save_every: 0
+
+eval:
+  walkers: 32
+  blocks: 1
+  equil_blocks: 1
+  steps_per_block: 3
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

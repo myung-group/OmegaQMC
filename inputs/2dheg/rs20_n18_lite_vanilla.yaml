@@ -1,0 +1,97 @@
+# Vanilla SR + Metropolis lite comparison run.
+# Same architecture and system as rs20_n18_smith_lite_lr1.yaml
+# (which used SPRING + MALA + adaptive damping + lr=1.0).
+#
+# Purpose: A/B compare optimizer recipes at lite scale.
+#   - Smith stack (SPRING+MALA): reached -45.85 mHa at iter ~1100
+#     in ~13 min wall time.
+#   - This run (vanilla SR+Metropolis): how does it compare in
+#     descent rate and final variational ceiling?
+#
+# Optimizer differences from the SPRING run:
+#   - spring_mu: 0.0          (no momentum)
+#   - spring_norm_clip: 0     (no F-norm clip)
+#   - damping_adapt: false    (fixed damping)
+#   - sampler: metropolis     (no MALA)
+#   - lr: 0.05                (vanilla SR ceiling, no momentum amplification)
+#   - lr_schedule: cosine     (smooth anneal)
+#   - mcmc_decorr_steps: 30   (more steps than MALA's 20 since
+#                              Metropolis proposals are less aggressive)
+
+project: rs20_n18_lite_vanilla
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24
+  mpnqs_d2: 16
+  mpnqs_hidden: 24
+  mpnqs_n_layers: 3
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false       # safety lock (same as SPRING run)
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 45                     # N_k = 9 + 45 = 54 = 3N (Smith)
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 8000
+  walkers: 1024
+  lr: 0.05                          # vanilla SR appropriate (no momentum amplification)
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 8000                    # full-run anneal
+  lr_n_restarts: 0
+  spring_mu: 0.0                    # vanilla SR (no SPRING)
+  spring_norm_clip: 0               # no clip
+  damping_adapt: false              # fixed damping
+  sampler: metropolis               # plain Metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30             # more decorr than MALA
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 400
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

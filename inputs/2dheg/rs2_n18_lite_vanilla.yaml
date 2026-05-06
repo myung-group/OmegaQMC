@@ -1,0 +1,100 @@
+# rs=2 calibration run: identical to rs20_n18_lite_vanilla but at
+# rs=2 instead of rs=20.  Tests whether the framework gives correct
+# energies in a regime where references are well-known.
+#
+# Expected references at rs=2 unpolarized 2D HEG:
+#   HF TD limit:         -175 mHa/e   (T=125 - V_x=300)
+#   DMC TD (interp):     ~-185 to -190 mHa/e
+#   correlation:         ~-15 mHa/e
+#
+# Tanatar-Ceperley (PRB 39, 5005) Table I bracket:
+#   rs=1.0 GFMC TD:  -0.4092(6) Ry = -204.6 mHa/e
+#   rs=5.0 GFMC TD:  -0.2998(1) Ry = -149.9 mHa/e
+#   (no direct rs=2 row, but interpolation suggests ~-185 mHa)
+#
+# Diagnostic interpretation:
+#   - Our energy ≈ -185 mHa → framework calibrated; rs=20 issue is
+#     ansatz-specific or cell-shape, NOT a systematic offset
+#   - Our energy noticeably below DMC bound (~-190+ mHa) → likely
+#     systematic offset (Madelung / Ewald / units bug); same nature
+#     across rs
+#   - Our energy way too high (e.g., -160 mHa) → wavefunction can't
+#     descend at high density; orthogonal issue
+
+project: rs2_n18_lite_vanilla
+
+system:
+  dim: 2
+  rs: 2.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24
+  mpnqs_d2: 16
+  mpnqs_hidden: 24
+  mpnqs_n_layers: 3
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 45
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 8000
+  walkers: 1024
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 8000
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 400
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6
