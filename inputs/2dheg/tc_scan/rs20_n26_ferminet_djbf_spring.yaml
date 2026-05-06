@@ -38,7 +38,7 @@ pretrain:
 optimize:
   type: sr
   iters: 15000
-  walkers: 4096
+  walkers: 2048
   load_chkpt: runs/rs20_n26_ferminet_djbf/rs20_n26_ferminet_djbf.chk.h5
   lr: 1.0
   lr_schedule: cosine
@@ -50,7 +50,7 @@ optimize:
   damping_adapt: false
   sampler: metropolis
   var_weight: 0.0
-  mcmc_decorr_steps: 30
+  mcmc_decorr_steps: 60
   mc_timestep: 0.1
   sr_damping: 1.0e-3
   sr_n_cg: 20
