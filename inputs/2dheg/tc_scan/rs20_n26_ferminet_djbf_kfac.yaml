@@ -51,8 +51,8 @@ optimize:
   kfac_damping_min: 1.0e-5
   kfac_damping_max: 1.0e3
   kfac_norm_constraint: 1.0e-3
-  kfac_capture_activations: true
-  kfac_fixed_scale: true
+  kfac_capture_activations: false
+  kfac_fixed_scale: false
   sampler: metropolis
   var_weight: 0.0
   mcmc_decorr_steps: 30
