@@ -1,0 +1,99 @@
+# Continuation of rs20_n26_ferminet_cassella WITH Smith deep Jastrow added.
+# Tests the hypothesis that adding an explicit Jastrow head provides
+# residual correlation that FermiNet's multiplicative backflow cannot
+# capture on its own.
+#
+# Departs from Cassella-faithful: Cassella explicitly does NOT use a
+# Jastrow factor (Cassella 2022 Eqs. 2,5).  Here we keep the FermiNet
+# backbone + multi-det + full_det + multiplicative BF, then ADD Smith's
+# deep Jastrow (eqs. 20-21) as a strictly additive log-Jastrow term.
+#
+# Init mechanics:
+#   - load_chkpt_partial copies all shape-matching leaves (envelope,
+#     BF MLPs, GNN, cusp) from the Cassella chkpt snapshot.
+#   - The Smith deep Jastrow is a NEW module (its leaves have no match
+#     in the source); the partial loader leaves them at fresh init.
+#   - SmithDeepJastrow uses zero_init_last=True, so at iter 0 the
+#     Jastrow contributes EXACTLY 0 to log psi.  The wave function at
+#     iter 0 of this run is identical to the Cassella chkpt's wf.
+#   - SR then drives the Jastrow's MLP to specialize.
+#
+# Source chkpt: rs20_n26_ferminet_cassella iter 2500, E/N=-46.035 mHa.
+
+project: rs20_n26_ferminet_cassella_jastrow
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true       # ← THE CHANGE: Smith deep Jastrow added
+  smith_jastrow_hidden: 32           # Smith's hidden width
+  smith_jastrow_n_layers: 4          # Smith L=4
+  use_backflow: true
+  use_coord_backflow: false          # kept off (would need new W_bf params)
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52
+  det_jitter: 0.04
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 25000
+  walkers: 1024
+  load_chkpt: runs/rs20_n26_ferminet_cassella_jastrow/source_snapshot.chk.h5
+  load_chkpt_partial: true           # tolerates new (Jastrow) leaves
+  lr: 0.03                           # moderate restart lr; mostly to drive Jastrow
+  lr_schedule: cosine
+  lr_min: 5.0e-5
+  lr_T_max: 25000
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6
