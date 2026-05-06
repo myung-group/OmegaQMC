@@ -149,11 +149,11 @@ def load_nn_checkpoint_partial(filepath, template_params, log_fn=print):
             if 'coords' in mg:
                 meta['coords'] = np.asarray(mg['coords'])
 
-        if n_source != n_target:
+        if n_source > n_target:
             log_fn(
                 f"  [load_partial] source has {n_source} leaves, "
-                f"target has {n_target}.  Skipping all -- tree "
-                f"structures incompatible."
+                f"target has only {n_target}.  Skipping all -- "
+                f"target tree is missing leaves the source has."
             )
             meta['leaves_copied'] = 0
             meta['leaves_skipped'] = n_target
@@ -164,9 +164,21 @@ def load_nn_checkpoint_partial(filepath, template_params, log_fn=print):
         n_skipped = 0
         copied_total_params = 0
         skipped_total_params = 0
+        # When target has MORE leaves than source (e.g., a new
+        # submodule was added in the target), only the first
+        # n_source positions can be copied; the rest must keep
+        # their fresh init.  This relies on the new submodule's
+        # leaves landing at the END of the target's flat order
+        # (i.e., the new attribute being declared after the
+        # existing ones in the target module's __init__).
         for i in range(n_target):
-            src = jnp.asarray(pg[str(i)][()])
             tgt = target_leaves[i]
+            if i >= n_source:
+                merged_leaves.append(tgt)
+                n_skipped += 1
+                skipped_total_params += int(np.prod(tgt.shape))
+                continue
+            src = jnp.asarray(pg[str(i)][()])
             if src.shape == tgt.shape and src.dtype == tgt.dtype:
                 merged_leaves.append(src)
                 n_copied += 1
