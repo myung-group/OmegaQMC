@@ -250,7 +250,19 @@ def populate_fragment_symmops(mol: gto.Mole):
     Supported point groups: C1, Cs, C2v, C2h, D2h, C4v, D4h
     Linear molecules (Coov, Dooh) are mapped to C4v, D4h respectively.
     """
+    import numpy as _np
+
     mol.map_frag_symmops = {}
+    # Per-fragment axes from PySCF's detect_symm: rows
+    # are the standard-orientation axes expressed in the
+    # lab frame.  Used by build_frag_reflect_data so that
+    # ``Rz180``, ``sx`` etc. are interpreted relative to
+    # the fragment's actual symmetry axes (PySCF puts the
+    # principal C_n along local-z), instead of the SVD
+    # principal-moments frame which puts the plane normal
+    # along local-z and silently rotates about the wrong
+    # axis for C2v / C2h / etc.
+    mol.map_frag_axes = {}
 
     # Build atom list with fragment assignments
     # (from parse_molecular_inspheres)
@@ -270,9 +282,22 @@ def populate_fragment_symmops(mol: gto.Mole):
 
         # Detect point group for this fragment
         try:
-            gpname, _, _ = symm.geom.detect_symm(frag_atoms)
+            gpname, _, frag_axes = symm.geom.detect_symm(frag_atoms)
+            frag_axes = _np.asarray(frag_axes, dtype=float)
+            # detect_symm may return an improper rotation
+            # (det = -1).  apply_single_frag_symmop only
+            # uses Vh as a basis change; both signs give a
+            # consistent "lab ↔ local" map, but flipping
+            # to a proper rotation keeps downstream ops
+            # (e.g. operation matrices, atom permutations)
+            # in a single chirality.
+            if _np.linalg.det(frag_axes) < 0:
+                frag_axes = frag_axes.copy()
+                frag_axes[0] = -frag_axes[0]
+            mol.map_frag_axes[frag_id] = frag_axes
         except Exception:
             gpname = 'C1'
+            mol.map_frag_axes[frag_id] = _np.eye(3)
 
         # Map to supported operations (default to C1 if unknown)
         if gpname in POINT_GROUP_OPS:

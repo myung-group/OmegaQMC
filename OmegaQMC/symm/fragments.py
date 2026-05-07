@@ -50,6 +50,7 @@ def build_frag_reflect_data(mol, nuc_crds):
     """
     if hasattr(mol, 'map_frag_symmops'):
         frag_ids = sorted(mol.map_frag_ctr.keys())
+        frag_axes_map = getattr(mol, 'map_frag_axes', None)
 
         centroids_list = []
         inradii_list = []
@@ -71,7 +72,23 @@ def build_frag_reflect_data(mol, nuc_crds):
             centroids_list.append(centroid)
             inradii_list.append(mol.inradii[fid])
 
-            if is_planar:
+            # Prefer PySCF's standard-orientation axes
+            # (populate_fragment_symmops stashes them on
+            # ``mol.map_frag_axes``) so operations like
+            # ``Rz180`` rotate about the fragment's actual
+            # principal C_n axis.  SVD's principal-moments
+            # frame is only a fallback — for C2v / C2h /
+            # D2h fragments it puts the plane normal
+            # along local-z and turns ``Rz180`` into an
+            # axis-misaligned rotation that is *not* a
+            # self-symmetry of the fragment.
+            frag_Vh = None
+            if frag_axes_map is not None and fid in frag_axes_map:
+                frag_Vh = jnp.asarray(frag_axes_map[fid])
+
+            if frag_Vh is not None:
+                Vh_list.append(frag_Vh)
+            elif is_planar:
                 frag_nuc = nuc_crds[
                     jnp.array(frag_atom_indices)
                 ]
