@@ -1,0 +1,99 @@
+# djbf + KFAC (capture mode) + 4000 walkers on mango GH200.
+#
+# Tests the freshly-fixed capture_activations=True path with the
+# 4D-edge-Linear flattening fix (commit 968bfab).  This is the
+# principled KFAC algorithm — per-Linear Kronecker factors estimated
+# from W·n_samples_per_layer samples, vs M^T M biased mode's W
+# samples.  At W=4000, N=26: per-electron Linears get 4000×26 =
+# 104k samples; per-edge Linears get 4000×676 = 2.7M samples.
+#
+# Architecture: FermiNet + Smith DJ (periodic, fixed in 6dceb3e) +
+# coord BF (zero-init).  Path-based partial load from cassella iter
+# ~9500+ chkpt (already validated -46.30 mHa, S(k)=1.28 matches Smith).
+#
+# Goal: see whether principled KFAC + 4× walkers + djbf-style
+# enrichments can reach -46.30 mHa or below — the cassella floor.
+
+project: rs20_n26_ferminet_djbf_kfac_capture
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52
+  det_jitter: 0.04
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: kfac
+  iters: 15000
+  walkers: 4000
+  load_chkpt: runs/cassella_validation/source_v2.chk.h5
+  load_chkpt_partial: true
+  load_chkpt_source_overrides:
+    use_smith_deep_jastrow: false
+    use_coord_backflow: false
+  lr: 0.005                            # warm-start conservative
+  lr_decay: 1.0e3
+  kfac_damping: 0.1
+  kfac_damping_adapt: true
+  kfac_damping_decay: 0.9
+  kfac_damping_lookback: 5
+  kfac_damping_min: 1.0e-5
+  kfac_damping_max: 1.0e3
+  kfac_norm_constraint: 1.0e-4
+  kfac_capture_activations: true       # ← principled KFAC mode (new!)
+  kfac_fixed_scale: false              # safer for warm start
+  kfac_ema_decay: 0.95
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 60
+  mc_timestep: 0.1
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6
