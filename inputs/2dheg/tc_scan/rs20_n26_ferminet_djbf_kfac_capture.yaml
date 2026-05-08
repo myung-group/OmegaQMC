@@ -52,7 +52,7 @@ pretrain:
 optimize:
   type: kfac
   iters: 15000
-  walkers: 4000
+  walkers: 2048              # 4000 OOMed on GH200 (per-walker grads + capture AAT)
   load_chkpt: runs/cassella_validation/source_v2.chk.h5
   load_chkpt_partial: true
   load_chkpt_source_overrides:
