@@ -228,6 +228,15 @@ class SmithDeepJastrow(nnx.Module):
         hidden: Hidden width.
         n_layers: Number of Linear layers ``L`` (default 4 → 3 hidden).
         zero_init_last: Zero-initialise the final layer (default True).
+        lattice: :class:`PeriodicLattice`.  When provided (the default
+            in periodic systems), the position is fed in via a periodic
+            sin/cos embedding so log|ψ| respects ``ψ(r + L) = ψ(r)``
+            — required for Γ-point HEG.  Without this, ``Linear_pre(r)``
+            is non-periodic and breaks the Γ-point boundary condition
+            (verified by single-electron L-shift test failing by ~5
+            log units).  When ``None``, falls back to Smith's original
+            unbounded-Coulomb ``Linear_pre(r)`` formulation (use only
+            for non-periodic problems).
         rngs: NNX RNG state.
     """
 
@@ -239,13 +248,16 @@ class SmithDeepJastrow(nnx.Module):
         hidden: int = 32,
         n_layers: int = 4,
         zero_init_last: bool = True,
+        lattice=None,
         rngs: nnx.Rngs,
     ):
         self.d1 = int(d1)
         self.dim = int(dim)
-        # Linear_pre: dim → d1 (so the position projection is on the
-        # same scale as h_i before concatenation).
-        self.linear_pre = nnx.Linear(dim, d1, rngs=rngs)
+        self.lattice = nnx.data(lattice) if lattice is not None else None
+        # Linear_pre input dim: dim (raw position, unbounded) or
+        # 2·dim (sin+cos periodic features).
+        in_pre = (2 * dim) if lattice is not None else dim
+        self.linear_pre = nnx.Linear(in_pre, d1, rngs=rngs)
         # MLP J: in_dim = d1 + d1 (concat of h_i and Linear_pre(x_i)).
         in_dim = 2 * d1
         layers = []
@@ -292,7 +304,16 @@ class SmithDeepJastrow(nnx.Module):
             Scalar — sum over electrons of per-electron J-output.
         """
         # GELU after Linear_pre (Smith Eq. 20: GELU ∘ Linear_pre).
-        x_proj = nnx.gelu(self.linear_pre(x))
+        # When a lattice is configured, project the position onto periodic
+        # sin/cos features first so ψ respects Γ-point PBC.
+        if self.lattice is not None:
+            phase = 2.0 * jnp.pi * (x @ self.lattice.A_inv.T)
+            x_periodic = jnp.concatenate(
+                [jnp.sin(phase), jnp.cos(phase)], axis=-1,
+            )
+            x_proj = nnx.gelu(self.linear_pre(x_periodic))
+        else:
+            x_proj = nnx.gelu(self.linear_pre(x))
         z = jnp.concatenate([h, x_proj], axis=-1)
         for li, layer in enumerate(self.layers):
             z_in = z
@@ -1078,6 +1099,7 @@ def build_heg_psiformer_wf(
             hidden=int(getattr(config, 'smith_jastrow_hidden', 32)),
             n_layers=int(getattr(config, 'smith_jastrow_n_layers', 4)),
             zero_init_last=True,
+            lattice=lattice,
             rngs=rngs,
         )
 
