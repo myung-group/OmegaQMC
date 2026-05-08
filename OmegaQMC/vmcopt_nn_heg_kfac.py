@@ -283,6 +283,15 @@ def _per_electron_factors(
     a_we = captured_input
     if a_we.ndim == 2:                             # (W, in) — global Linear
         a_we = a_we[:, None, :]
+    elif a_we.ndim > 3:
+        # Per-edge / multi-sample Linear (e.g., FermiNet's g_subnet
+        # processing (n_e, n_e, in_dim) edge features).  Flatten all
+        # sample dims into one — KFAC factor accumulation works on
+        # any sample population, treating each (walker, sample) pair
+        # equivalently.  E.g., shape (W, n_e, n_e, in) → (W, n_e², in).
+        W_ = a_we.shape[0]
+        in_dim_ = a_we.shape[-1]
+        a_we = a_we.reshape(W_, -1, in_dim_)
     W, n_e, in_dim = a_we.shape
     out_dim = per_walker_dW.shape[2]
 
