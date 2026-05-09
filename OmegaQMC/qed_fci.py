@@ -7,13 +7,27 @@ Constructs the full Hamiltonian in the product basis:
 and diagonalizes using scipy.linalg.eigh.
 
 Supports the dipole gauge Pauli-Fierz Hamiltonian:
-    H = H_elec + DSE + √(Ω/2)(a+a†) D + Ω a†a
+
+    H = H_elec + DSE + √(Ω/2)·(â+â†)·D + Ω·â†â
 
 where:
-    DSE = ½(λ ε·Σ_i r_i)²  (dipole self-energy, purely electronic)
-    D   = λ Σ_ij <i|r·ε|j> c†_iσ c_jσ  (dipole operator)
+    DSE = (1/2)·λ²·(ε·∑_i r̂_i)²    (dipole self-energy, electronic)
+    D   = λ·∑_pq ⟨p|ε·r̂|q⟩·Ê_pq    (dipole operator, second-quantized)
 
 Reference: arXiv:2410.18838
+
+Note on DSE basis-set treatment (proper_dse flag):
+  In a truncated basis, the operator-squared form D̂² is NOT the same
+  as the true (∑_i ε·r̂_i)². They agree only in the complete-basis
+  limit via resolution of identity. Specifically, the 1-body part of
+  the DSE involves the quadrupole matrix Q_pq = ⟨p|(ε·r̂)²|q⟩, which
+  in a truncated basis differs from the matrix product (d²)_pq =
+  ∑_q ⟨p|ε·r̂|r⟩⟨r|ε·r̂|q⟩ by the basis-incompleteness residual.
+
+  The default ``proper_dse=True`` adds a one-body correction
+  (1/2)·λ²·(Q − d̃²) to h1e so the implemented Hamiltonian matches the
+  true Pauli-Fierz form in any basis. Set ``proper_dse=False`` to
+  reproduce the legacy (operator-squared) behaviour.
 """
 
 import numpy as np
@@ -70,14 +84,14 @@ def _build_fci_matrices(h1e, eri, dip_mo, norb, nelec, enuc):
     return H_mat, D_mat, ndim
 
 
-def qed_fci(mf, omega, coupling_vec, nph_max=10):
+def qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
     """QED-FCI: exact diagonalization of the Pauli-Fierz Hamiltonian.
 
     Builds the full Hamiltonian in the product basis |FCI⟩ ⊗ |n_ph⟩
     and finds the ground state energy.
 
     Dipole gauge:
-        H = H_elec + DSE + √(Ω/2)(a+a†) D + Ω a†a
+        H = H_elec + DSE + √(Ω/2)·(â+â†)·D + Ω·â†â
 
     The photon Fock space is truncated at nph_max photons.
 
@@ -87,6 +101,12 @@ def qed_fci(mf, omega, coupling_vec, nph_max=10):
         coupling_vec: Light-matter coupling vector (3,). Direction gives
             polarization ε, magnitude gives coupling strength λ.
         nph_max: Maximum number of photons in Fock space truncation.
+        proper_dse: If True (default), add the one-body correction
+            (1/2)·λ²·(Q − d̃²) to h1e where Q is the true quadrupole
+            matrix ⟨p|(ε·r̂)²|q⟩ and d̃² is the matrix product of
+            dipole matrices. This makes the DSE exact in any basis.
+            If False, use the legacy operator-squared form (D̂²) which
+            is exact only in the complete-basis limit.
 
     Returns:
         dict with:
@@ -98,6 +118,11 @@ def qed_fci(mf, omega, coupling_vec, nph_max=10):
             'ndim_elec': electronic FCI dimension.
             'ndim_total': total product space dimension.
             'n_photon': expectation value of photon number in ground state.
+            'proper_dse': whether the proper-DSE 1-body correction was
+                applied.
+            'dse_correction_norm': Frobenius norm of the 1-body correction
+                (Ha) — non-zero only in incomplete bases; gauges the
+                basis-set residual.
     """
     mol = mf.mol
     norb = mol.nao_nr()
@@ -130,11 +155,45 @@ def qed_fci(mf, omega, coupling_vec, nph_max=10):
 
     # --- Add DSE to two-electron integrals ---
     # DSE: (pq|rs) += d_pq * d_rs  (chemist notation)
+    # In the chemist 2-body convention (1/2)·∑(pq|rs)·Ê_pq Ê_rs, this
+    # contributes (1/2)·(d²)·Ê + (1/2)·∑ d_pq d_rs · Ω_{pq,rs} where
+    # (d²)_ps = ∑_q d_pq d_qs is the *matrix product* — exact in CBS but
+    # truncated in finite basis.
     eri_mo_dse = eri_mo_full + np.einsum('pq,rs->pqrs', dip_mo, dip_mo)
+
+    # --- Proper-DSE 1-body correction ---
+    # The true Pauli-Fierz DSE has a 1-body part (1/2)·λ²·Q_pq·Ê_pq
+    # where Q_pq = ⟨p|(ε·r̂)²|q⟩ is the quadrupole matrix element.
+    # The chemist 2-body convention above instead delivers
+    # (1/2)·(d²)_pq·Ê_pq = (1/2)·λ²·(d̃²)_pq·Ê_pq where d̃²=d̃·d̃
+    # is the matrix product (= Q only in the complete-basis limit).
+    # We add the difference to h1e so the implemented Hamiltonian
+    # matches the true PF form regardless of basis.
+    h1e_used = h1e
+    dse_correction_norm = 0.0
+    if proper_dse and lam > 0:
+        # ⟨p|r̂_α r̂_β|q⟩ — comp=9 returns shape (9, nao, nao);
+        # reshape to (3, 3, nao, nao) row-major so axes match (α, β).
+        quad_ao = mol.intor('int1e_rr', comp=9).reshape(
+            3, 3, norb, norb,
+        )
+        # Project onto (ε·r̂)² = ε_α ε_β r̂_α r̂_β
+        quad_ao_proj = np.einsum('a,b,abpq->pq', epsilon, epsilon, quad_ao)
+        quad_mo = mo_coeff.T @ quad_ao_proj @ mo_coeff
+
+        # Note: dip_mo above has been multiplied by λ already, so
+        # dip_mo @ dip_mo = λ²·d̃². The needed correction is
+        # (1/2)·λ²·Q − (1/2)·(dip_mo @ dip_mo).
+        dse_correction_h1e = 0.5 * (lam ** 2) * quad_mo \
+                             - 0.5 * (dip_mo @ dip_mo)
+        h1e_used = h1e + dse_correction_h1e
+        dse_correction_norm = float(
+            np.linalg.norm(dse_correction_h1e),
+        )
 
     # --- Build FCI matrices ---
     H_elec, D_elec, ndim_elec = _build_fci_matrices(
-        h1e, eri_mo_dse, dip_mo, norb, nelec, enuc)
+        h1e_used, eri_mo_dse, dip_mo, norb, nelec, enuc)
 
     # Symmetrize (should already be symmetric, but ensure numerical stability)
     H_elec = 0.5 * (H_elec + H_elec.T)
@@ -190,4 +249,6 @@ def qed_fci(mf, omega, coupling_vec, nph_max=10):
         'ndim_elec': ndim_elec,
         'ndim_total': ndim_total,
         'n_photon': n_photon,
+        'proper_dse': bool(proper_dse and lam > 0),
+        'dse_correction_norm': dse_correction_norm,
     }
