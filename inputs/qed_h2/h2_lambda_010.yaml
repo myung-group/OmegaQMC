@@ -1,0 +1,59 @@
+# =====================================================================
+# QED-NN-VMC: H2 at λ=0.1, ω=0.5, εz polarization
+#
+# Pairs with h2_decoupling_pilot.yaml (λ=0). The differential
+# ΔE(λ=0.1) − ΔE(λ=0) should match the QED-FCI differential of
+# −4.251 mHa (London dispersion via cavity polarizability term).
+#
+# QED-FCI reference (STO-6G):
+#   E(λ=0)   = −1.1459220563 Ha
+#   E(λ=0.1) = −1.1501728244 Ha
+#   ΔE       = −4.251 mHa
+#
+# The PsiFormer ansatz (CBS) yields E(λ=0) ≈ −1.172 Ha; we expect
+# E(λ=0.1) ≈ −1.176 Ha if the cavity effect is captured correctly.
+# =====================================================================
+
+project: qed_h2_lambda_010
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 1.4010
+
+cavity:
+  omega: 0.5
+  lambda: 0.1
+  polarization: [0.0, 0.0, 1.0]   # along H-H axis (εz)
+
+ansatz:
+  type: psiformer
+
+optimizer:
+  alpha_init: 0.0       # ⟨ε·d⟩=0 by symmetry → perturbative α=0
+  alpha_train: false    # symmetric system; α-Jacobian collapses anyway
+  nph_max: 6
+
+  train:
+    num_iters: 100
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0

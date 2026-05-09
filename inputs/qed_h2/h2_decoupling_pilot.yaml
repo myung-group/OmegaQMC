@@ -1,0 +1,59 @@
+# =====================================================================
+# QED-NN-VMC pilot run: H2 at λ=0 (decoupling test)
+#
+# Goal:  Verify that the SR optimization pipeline runs end-to-end on
+#        mango GH200 and produces a sensible H2 ground-state energy
+#        (target: -1.13 Ha on STO-6G after convergence). Production
+#        run; expected wall-clock ~15 min on GH200.
+#
+# Validation criterion: E_VMC_eval should approach the standard
+# electronic-only NN-VMC value at λ=0 (perfect cavity decoupling
+# means QED-NN-VMC reduces to standard NN-VMC for the bare electronic
+# wavefunction).
+#
+# Run:   python scripts/run_qed_vmc.py inputs/qed_h2/h2_decoupling_pilot.yaml
+# =====================================================================
+
+project: qed_h2_decoupling_pilot
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 1.4010
+
+cavity:
+  omega: 0.5            # Ha; arbitrary; λ=0 means it doesn't matter
+  lambda: 0.0           # decoupled cavity
+  polarization: [0.0, 0.0, 1.0]   # along H-H axis
+
+ansatz:
+  type: psiformer
+
+optimizer:
+  alpha_init: 0.0       # No coherent shift at λ=0
+  alpha_train: false    # No need to train α at λ=0
+  nph_max: 4
+
+  train:
+    num_iters: 100
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0
