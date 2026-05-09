@@ -53,8 +53,10 @@ __all__ = [
     "make_qed_nn_log_psi",
     "make_qed_nn_log_psi_n_aware",
     "make_qed_nn_log_psi_hybrid",
+    "make_qed_nn_log_psi_signed_hybrid",
     "analytical_alpha_perturbative",
     "FockHead",
+    "SignedFockHead",
 ]
 
 
@@ -500,3 +502,244 @@ def make_qed_nn_log_psi_hybrid(
             return log_elec + log_chi + delta
 
     return log_psi, init_params, elec_graphdef
+
+
+# ===================================================================
+# Phase 2g: Signed-Ψ joint ansatz (psi.sign threaded through)
+# ===================================================================
+
+class SignedFockHead(nnx.Module):
+    """Fock head with separate magnitude and sign outputs.
+
+    Outputs ``(log_mag_correction, sign_correction)`` per (n, feature):
+      * ``log_mag_correction`` — real, additive to log|Ψ|
+      * ``sign_correction`` — real signed scalar (not constrained to ±1);
+        contributes its sign to sign(Ψ) and ``log|sign_correction|`` to
+        log|Ψ|.
+
+    At initialisation:
+      * ``out_log`` zeros-init → ``log_mag_correction = 0``.
+      * ``out_sign`` kernel zeros-init + bias init = 1.0
+        → ``sign_correction = +1``.
+    So at iter 0 the head is exactly the identity (Ψ unchanged).
+
+    During training, ``sign_correction`` can become negative, allowing
+    the joint Ψ(r, n) to flip sign across Fock sectors in an
+    r-dependent way (driven by the head's input feature, e.g. ε·d̂_e).
+    This is what unlocks bilinear-coupling capture for symmetric
+    systems where the polariton GS has sign-changing structure across
+    Fock sectors (e.g. σ_g σ_u-like component in n=1 sector for H₂).
+    """
+
+    def __init__(
+        self,
+        nph_max: int,
+        n_features: int,
+        hidden_dim: int,
+        rngs: nnx.Rngs,
+    ):
+        self.nph_max = int(nph_max)
+        self.embed = nnx.Embed(
+            num_embeddings=nph_max + 1,
+            features=hidden_dim,
+            rngs=rngs,
+        )
+        self.feature_proj = nnx.Linear(
+            in_features=n_features,
+            out_features=hidden_dim,
+            rngs=rngs,
+        )
+        # Magnitude head: zero-init so initial correction = 0.
+        self.out_log = nnx.Linear(
+            in_features=hidden_dim,
+            out_features=1,
+            use_bias=False,
+            kernel_init=nnx.initializers.zeros_init(),
+            rngs=rngs,
+        )
+        # Sign head: zero kernel + bias init at +1.0 so initial sign
+        # correction is +1 (no sign flip at iter 0). The bias is a
+        # learnable per-Fock-sector offset; the kernel learns r-feature
+        # dependence.
+        self.out_sign = nnx.Linear(
+            in_features=hidden_dim,
+            out_features=1,
+            use_bias=True,
+            kernel_init=nnx.initializers.zeros_init(),
+            bias_init=nnx.initializers.constant(1.0),
+            rngs=rngs,
+        )
+
+    def __call__(self, n: jax.Array, features: jax.Array):
+        n_emb = self.embed(n)
+        feat_emb = self.feature_proj(features)
+        h = jnp.tanh(n_emb + feat_emb)
+        log_corr = self.out_log(h)[0]
+        sign_corr = self.out_sign(h)[0]   # signed real scalar
+        return log_corr, sign_corr
+
+
+def _make_signed_elec_psi(config, mol_info, rng_key):
+    """Build a signed-output PsiFormer evaluator returning (log, sign).
+
+    Mirrors the inner workings of :func:`make_nn_log_psi` but exposes
+    ``psi.sign`` alongside ``psi.log`` instead of discarding it.
+    """
+    from .config import load_nn_config
+    from .types import PhysicalConfiguration
+    from .build import build_nn_wf
+
+    if isinstance(config, str):
+        config = load_nn_config(config)
+
+    rngs = nnx.Rngs(rng_key)
+    model = build_nn_wf(config, mol_info, rngs)
+    graphdef, params, other = nnx.split(model, nnx.Param, ...)
+    init_params = params
+
+    def log_psi_signed(elec_crds, nuc_crds, params):
+        # Reorder: interleaved alpha/beta → grouped (matches make_nn_log_psi).
+        r_up = elec_crds[::2]
+        r_dn = elec_crds[1::2]
+        r_grouped = jnp.concatenate([r_up, r_dn], axis=0)
+        phys_conf = PhysicalConfiguration(
+            R=nuc_crds, r=r_grouped, mol_idx=jnp.array(0),
+        )
+        mdl = nnx.merge(graphdef, params, other)
+        psi = mdl(phys_conf)
+        return psi.log, psi.sign
+
+    return log_psi_signed, init_params, graphdef
+
+
+def make_qed_nn_log_psi_signed_hybrid(
+    config,
+    mol_info,
+    rng_key,
+    *,
+    omega: float,
+    coupling_vec: jax.Array,
+    nph_max: int = 5,
+    fock_hidden_dim: int = 64,
+    alpha_init: float = 0.0,
+    alpha_train: bool = False,
+) -> Tuple[Callable, QEDLogPsiParams, Any]:
+    """Phase 2g: hybrid signed-Ψ joint electron-photon ansatz.
+
+    Form:
+
+        Ψ(r, n) = Ψ_e(r) · ⟨n|α⟩ · sign_corr(n; ε·d̂_e(r)) · exp(log_corr(n; ε·d̂_e(r)))
+
+    with Ψ_e returned by PsiFormer including its own sign (psi.sign), the
+    coherent envelope ⟨n|α⟩ contributing magnitude, and ``SignedFockHead``
+    contributing both a log-magnitude correction and a signed multiplier
+    that can become negative during training.
+
+    Returned ``log_psi_fn(elec, nuc, n, params) -> (log|Ψ|, sign(Ψ))``.
+
+    Args (same as ``make_qed_nn_log_psi_hybrid``):
+        config, mol_info, rng_key, omega, coupling_vec, nph_max,
+        fock_hidden_dim, alpha_init, alpha_train.
+
+    Returns:
+        ``(log_psi_signed_fn, init_params, graphdef)``:
+          - ``log_psi_signed_fn(r, R, n, params) -> (log|Ψ|, sign(Ψ))``
+          - ``init_params`` dict with keys ``'nn'``, ``'fock_head'``,
+            and (if ``alpha_train``) ``'alpha'``.
+          - ``graphdef``: electronic-NN graphdef.
+
+    For walkers (Metropolis sampling), the local-energy estimator
+    :func:`OmegaQMC.psi.nn.qed_physics.pauli_fierz_local_energy_signed`
+    consumes this signed signature directly. For sampling proposals
+    based on |Ψ|² only, take the first element of the returned tuple.
+    """
+    # 1. Build the signed electronic NN (returns (log, sign) from PsiFormer).
+    elec_log_psi_signed, elec_init_params, elec_graphdef = _make_signed_elec_psi(
+        config, mol_info, rng_key,
+    )
+
+    # 2. Build the SignedFockHead.
+    rng_key, head_key = jax.random.split(rng_key)
+    head_rngs = nnx.Rngs(head_key)
+    fock_head = SignedFockHead(
+        nph_max=nph_max,
+        n_features=1,
+        hidden_dim=fock_hidden_dim,
+        rngs=head_rngs,
+    )
+    head_graphdef, head_params, head_other = nnx.split(
+        fock_head, nnx.Param, ...,
+    )
+
+    # 3. Cache unit polarisation and α₀.
+    cv = jnp.asarray(coupling_vec, dtype=jnp.float64)
+    eps_unit = cv / (jnp.linalg.norm(cv) + 1e-30)
+    alpha0 = jnp.asarray(alpha_init, dtype=jnp.float64)
+
+    # 4. Pack params.
+    if alpha_train:
+        init_params: QEDLogPsiParams = {
+            "nn": elec_init_params,
+            "fock_head": head_params,
+            "alpha": alpha0,
+        }
+    else:
+        init_params = {
+            "nn": elec_init_params,
+            "fock_head": head_params,
+        }
+
+    _SIGN_FLOOR = 1e-30
+
+    def _log_psi_signed_eval(elec_crds, nuc_crds, n, params, alpha_value):
+        # Electronic
+        log_elec, sign_elec = elec_log_psi_signed(
+            elec_crds, nuc_crds, params["nn"],
+        )
+
+        # Coherent-state envelope ⟨n|α⟩ (magnitude + sign for real α).
+        # log|⟨n|α⟩| computed via existing helper (uses |α|).
+        log_chi_mag = coherent_state_log_amplitude(n, alpha_value)
+        # Sign of ⟨n|α⟩ for real α: sign(α)^n
+        n_int_sign = jnp.asarray(n, dtype=jnp.int32)
+        alpha_sign = jnp.where(alpha_value >= 0.0, 1.0, -1.0)
+        # alpha_sign ** n via integer mod 2 (avoid pow with non-integer dtype)
+        sign_chi = jnp.where(
+            (n_int_sign % 2 == 0),
+            1.0,
+            alpha_sign,
+        ).astype(elec_crds.dtype)
+
+        # Fock head — signed correction.
+        proj_dip = _projected_dipole(elec_crds, eps_unit)
+        feat = jnp.atleast_1d(proj_dip).astype(elec_crds.dtype)
+        n_idx = jnp.asarray(n, dtype=jnp.int32)
+        head = nnx.merge(head_graphdef, params["fock_head"], head_other)
+        log_corr, sign_corr = head(n_idx, feat)
+        log_corr = log_corr.astype(elec_crds.dtype)
+        sign_corr = sign_corr.astype(elec_crds.dtype)
+
+        # Aggregate
+        log_mag = (
+            log_elec
+            + log_chi_mag
+            + log_corr
+            + jnp.log(jnp.abs(sign_corr) + _SIGN_FLOOR)
+        )
+        sign_total = sign_elec * sign_chi * jnp.sign(sign_corr)
+        return log_mag, sign_total
+
+    if alpha_train:
+        def log_psi_signed(elec_crds, nuc_crds, n, params):
+            return _log_psi_signed_eval(
+                elec_crds, nuc_crds, n, params, params["alpha"],
+            )
+    else:
+        alpha_frozen = alpha0
+
+        def log_psi_signed(elec_crds, nuc_crds, n, params):
+            return _log_psi_signed_eval(
+                elec_crds, nuc_crds, n, params, alpha_frozen,
+            )
+
+    return log_psi_signed, init_params, elec_graphdef

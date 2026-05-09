@@ -42,8 +42,13 @@ from .psi.nn.qed_adapter import (
     make_qed_nn_log_psi,
     make_qed_nn_log_psi_n_aware,
     make_qed_nn_log_psi_hybrid,
+    make_qed_nn_log_psi_signed_hybrid,
 )
-from .psi.nn.qed_physics import pauli_fierz_local_energy, coulomb_nn
+from .psi.nn.qed_physics import (
+    pauli_fierz_local_energy,
+    pauli_fierz_local_energy_signed,
+    coulomb_nn,
+)
 from .constants import MIN_DIST_THRESHOLD
 
 
@@ -85,13 +90,14 @@ class _QEDVMCDriverNN:
         # otherwise fall back to the legacy ``n_aware`` bool.
         if arch is None:
             arch = "n_aware" if n_aware else "factorized"
-        if arch not in ("factorized", "n_aware", "hybrid"):
+        if arch not in ("factorized", "n_aware", "hybrid", "signed_hybrid"):
             raise ValueError(
                 f"Unknown arch={arch!r}; expected "
-                "'factorized' | 'n_aware' | 'hybrid'.",
+                "'factorized' | 'n_aware' | 'hybrid' | 'signed_hybrid'.",
             )
         self.arch = arch
         self.n_aware = (arch == "n_aware")
+        self.is_signed = (arch == "signed_hybrid")
 
         # Geometry caches.
         self.nuc_crds = jnp.asarray(mol_info.coords, dtype=jnp.float64)
@@ -117,6 +123,7 @@ class _QEDVMCDriverNN:
                 nph_max=self.nph_max,
                 fock_hidden_dim=fock_hidden_dim,
             )
+            self._log_psi_signed = None
         elif arch == "hybrid":
             log_psi, init_params, graphdef = make_qed_nn_log_psi_hybrid(
                 config, mol_info, init_key,
@@ -127,6 +134,27 @@ class _QEDVMCDriverNN:
                 alpha_init=alpha_init,
                 alpha_train=alpha_train,
             )
+            self._log_psi_signed = None
+        elif arch == "signed_hybrid":
+            (log_psi_signed, init_params, graphdef
+             ) = make_qed_nn_log_psi_signed_hybrid(
+                config, mol_info, init_key,
+                omega=self.omega,
+                coupling_vec=self.coupling_vec,
+                nph_max=self.nph_max,
+                fock_hidden_dim=fock_hidden_dim,
+                alpha_init=alpha_init,
+                alpha_train=alpha_train,
+            )
+            self._log_psi_signed = log_psi_signed
+            # Sampling / Jacobian uses log magnitude only (sign doesn't
+            # affect |Ψ|² walker distribution and the SR Jacobian wants
+            # ∂log|Ψ|/∂params).
+            def log_psi(elec_crds, nuc_crds, n, params):
+                log_mag, _sign = log_psi_signed(
+                    elec_crds, nuc_crds, n, params,
+                )
+                return log_mag
         else:  # factorized
             log_psi, init_params, graphdef = make_qed_nn_log_psi(
                 config, mol_info, init_key,
@@ -135,6 +163,7 @@ class _QEDVMCDriverNN:
                 alpha_init=alpha_init,
                 alpha_train=alpha_train,
             )
+            self._log_psi_signed = None
         self.log_psi = log_psi
         self.params = init_params
         self.graphdef = graphdef
@@ -147,20 +176,38 @@ class _QEDVMCDriverNN:
         charges_loc = self.charges
         enuc_loc = self.enuc
 
-        @jax.jit
-        def local_energy_one(elec_crds, n, params):
-            return pauli_fierz_local_energy(
-                log_psi,
-                params,
-                elec_crds,
-                n,
-                nuc_loc,
-                charges_loc,
-                omega_loc,
-                cv_loc,
-                nph_loc,
-                enuc=enuc_loc,
-            )
+        if self.is_signed:
+            log_psi_signed_for_le = self._log_psi_signed
+
+            @jax.jit
+            def local_energy_one(elec_crds, n, params):
+                return pauli_fierz_local_energy_signed(
+                    log_psi_signed_for_le,
+                    params,
+                    elec_crds,
+                    n,
+                    nuc_loc,
+                    charges_loc,
+                    omega_loc,
+                    cv_loc,
+                    nph_loc,
+                    enuc=enuc_loc,
+                )
+        else:
+            @jax.jit
+            def local_energy_one(elec_crds, n, params):
+                return pauli_fierz_local_energy(
+                    log_psi,
+                    params,
+                    elec_crds,
+                    n,
+                    nuc_loc,
+                    charges_loc,
+                    omega_loc,
+                    cv_loc,
+                    nph_loc,
+                    enuc=enuc_loc,
+                )
 
         self._local_energy_one = local_energy_one
         self._local_energy_batch = jax.jit(

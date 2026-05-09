@@ -353,18 +353,23 @@ def get_qed_vmcopt_nn_sr_func(
     """Construct an SR optimizer driver for QED-NN-VMC.
 
     Architecture selection (in order of precedence):
-      * ``arch='factorized'`` — Phase 2b form Ψ_e(r)·⟨n|α⟩.
-      * ``arch='n_aware'``    — Phase 2f-1 Path A form Ψ_e(r) + Fock head.
-      * ``arch='hybrid'``     — Phase 2f-1 Path B form
-        Ψ_e(r)·⟨n|α⟩ + Fock head (envelope provides the Fock prior;
-        the head adds learned r-n entanglement). Recommended for
-        production runs.
+      * ``arch='factorized'``    — Phase 2b form Ψ_e(r)·⟨n|α⟩.
+      * ``arch='n_aware'``       — Phase 2f-1 Path A: Ψ_e(r) + Fock head.
+      * ``arch='hybrid'``        — Phase 2f-1 Path B: Ψ_e(r)·⟨n|α⟩
+        + Fock head; positive-Ψ ansatz.
+      * ``arch='signed_hybrid'`` — Phase 2g: same factorisation as
+        hybrid but with PsiFormer's psi.sign threaded through and a
+        SignedFockHead that outputs both magnitude and sign
+        corrections. Allows the joint Ψ(r, n) to flip sign across Fock
+        sectors with r-dependence — required for capturing polariton
+        ground-state stabilisation in symmetric systems.
 
     For backward compatibility, ``arch`` defaults to ``None`` and is
     inferred from the legacy ``n_aware`` bool when omitted.
 
     ``alpha_*`` arguments apply when α is part of the chosen architecture
-    (factorized and hybrid). With ``arch='n_aware'`` they are ignored.
+    (factorized, hybrid, signed_hybrid). With ``arch='n_aware'`` they are
+    ignored.
 
     See :class:`_QEDVMCOptDriverNN_SR.__call__` for run-time hyperparameters.
     """

@@ -52,6 +52,7 @@ __all__ = [
     "coulomb_nn",
     "coherent_state_log_amplitude",
     "pauli_fierz_local_energy",
+    "pauli_fierz_local_energy_signed",
 ]
 
 
@@ -380,6 +381,119 @@ def pauli_fierz_local_energy(
     )
 
     # 7. Dipole self-energy: (1/2) λ² (ε·d_e)²  (sign-invariant under d_e → -d_e)
+    e_dse = 0.5 * lam ** 2 * eps_dot_d ** 2
+
+    return e_ke + e_ee + e_en + e_nn + e_ph + e_bilinear + e_dse
+
+
+# ===================================================================
+# Signed-Ψ variant of the Pauli-Fierz local energy (Phase 2g).
+# ===================================================================
+#
+# For symmetric systems with ⟨ε·d̂_e⟩ = 0, the polariton ground state has
+# Ψ(r, n+1) with r-DEPENDENT sign opposite to Ψ(r, n) in some r regions
+# (e.g. node along z=0 for σ_g σ_u + σ_u σ_g singly excited photon-1
+# sector of H₂). A positive-only ansatz (returning only log|Ψ|) cannot
+# represent this and the variational minimum is stuck above the true GS
+# by the missing bilinear-coupling stabilisation.
+#
+# This signed variant takes a ``log_psi_signed_fn`` that returns a
+# (log_magnitude, signed_amplitude) tuple. The Fock-ladder ratio used in
+# the bilinear local energy is computed as a SIGNED real number via
+#
+#     Ψ(r, n+1) / Ψ(r, n)
+#         = (signed_amp_{n+1} / signed_amp_n) · exp(log|Ψ_{n+1}| − log|Ψ_n|)
+#
+# allowing per-walker signed contributions. The DSE term is unchanged
+# (sign-invariant). Kinetic, Coulomb, photon energy unchanged.
+
+def pauli_fierz_local_energy_signed(
+    log_psi_signed_fn,       # (elec, nuc, n, params) -> (log_mag, signed_amp)
+    params,
+    elec_crds: jax.Array,
+    n: jax.Array,
+    nuc_crds: jax.Array,
+    charges: jax.Array,
+    omega: float,
+    coupling_vec: jax.Array,
+    nph_max: int,
+    enuc: jax.Array | float | None = None,
+) -> jax.Array:
+    """Pauli-Fierz local energy with signed Ψ across Fock sectors.
+
+    Args:
+        log_psi_signed_fn: callable
+            ``(elec_crds, nuc_crds, n, params) -> (log_mag, signed_amp)``.
+            ``log_mag`` is the log of |Ψ| **without** the signed_amp factor;
+            i.e. the FULL wavefunction is ``signed_amp * exp(log_mag)``.
+            For backward compatibility with positive-only ansatzes,
+            wrap them so they return ``(log_psi(...), 1.0)``.
+        params: parameter pytree.
+        elec_crds, n, nuc_crds, charges, omega, coupling_vec, nph_max,
+        enuc: same as :func:`pauli_fierz_local_energy`.
+
+    Returns:
+        Scalar local energy (Ha).
+    """
+    # 1. Kinetic energy uses log magnitude only (Bijl-Jastrow form is
+    #    insensitive to the sign of Ψ since it acts on log|Ψ|).
+    def _logmag_r_only(r):
+        log_mag, _ = log_psi_signed_fn(r, nuc_crds, n, params)
+        return log_mag
+
+    e_ke = electronic_kinetic_energy(_logmag_r_only, elec_crds)
+
+    # 2-4. Coulomb terms (sign-independent).
+    e_ee = coulomb_ee(elec_crds)
+    e_en = coulomb_en(elec_crds, nuc_crds, charges)
+    if enuc is None:
+        e_nn = coulomb_nn(nuc_crds, charges)
+    else:
+        e_nn = jnp.asarray(enuc)
+
+    # 5. Photon energy.
+    e_ph = omega * jnp.asarray(n, dtype=elec_crds.dtype)
+
+    # 6. Bilinear coupling — uses signed ratios.
+    lam = jnp.linalg.norm(coupling_vec)
+    safe_lam = jnp.where(lam < _EPS, _EPS, lam)
+    eps = coupling_vec / safe_lam
+    d_e = real_space_dipole_electronic(elec_crds)
+    eps_dot_d = jnp.dot(eps, d_e)
+
+    log_n, sign_n = log_psi_signed_fn(elec_crds, nuc_crds, n, params)
+    n_int = jnp.asarray(n, dtype=jnp.int32)
+    safe_sign_n = jnp.where(jnp.abs(sign_n) < _EPS, _EPS, sign_n)
+
+    # +1 ladder term: ⟨n+1|b+b†|n⟩ = √(n+1)
+    n_plus = n_int + 1
+    log_np1, sign_np1 = log_psi_signed_fn(
+        elec_crds, nuc_crds, n_plus, params,
+    )
+    ratio_up = (sign_np1 / safe_sign_n) * jnp.exp(log_np1 - log_n)
+    in_bounds_up = (n_plus <= nph_max).astype(elec_crds.dtype)
+    bilinear_up = jnp.sqrt(
+        jnp.asarray(n_plus, dtype=elec_crds.dtype)
+    ) * ratio_up * in_bounds_up
+
+    # -1 ladder term: ⟨n-1|b+b†|n⟩ = √n
+    n_minus = jnp.maximum(n_int - 1, 0)
+    log_nm1, sign_nm1 = log_psi_signed_fn(
+        elec_crds, nuc_crds, n_minus, params,
+    )
+    ratio_dn = (sign_nm1 / safe_sign_n) * jnp.exp(log_nm1 - log_n)
+    in_bounds_dn = (n_int >= 1).astype(elec_crds.dtype)
+    bilinear_dn = jnp.sqrt(
+        jnp.asarray(n_int, dtype=elec_crds.dtype)
+    ) * ratio_dn * in_bounds_dn
+
+    # Same convention as positive-Ψ variant (minus sign in front to match
+    # Tang/standard PF when expressed in terms of ε·d̂_e).
+    e_bilinear = -jnp.sqrt(omega / 2.0) * lam * eps_dot_d * (
+        bilinear_up + bilinear_dn
+    )
+
+    # 7. DSE — sign-independent.
     e_dse = 0.5 * lam ** 2 * eps_dot_d ** 2
 
     return e_ke + e_ee + e_en + e_nn + e_ph + e_bilinear + e_dse
