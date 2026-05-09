@@ -557,15 +557,25 @@ class SignedFockHead(nnx.Module):
             kernel_init=nnx.initializers.zeros_init(),
             rngs=rngs,
         )
-        # Sign head: zero kernel + bias init at +1.0 so initial sign
-        # correction is +1 (no sign flip at iter 0). The bias is a
-        # learnable per-Fock-sector offset; the kernel learns r-feature
-        # dependence.
+        # Sign head: SMALL-RANDOM kernel + bias init at +1.0.
+        #
+        # We deliberately do NOT zero-init the kernel: at iter 0 we want
+        # sign_correction to differ slightly across walkers / Fock
+        # sectors, so the SR optimiser has a non-degenerate signal to
+        # push it toward sign-flipped configurations when those lower
+        # the energy. Zero kernel + bias=1.0 makes sign_correction
+        # uniformly +1 → degenerate saddle in sign-space → SR cannot
+        # escape positive-Ψ family even though the architecture supports
+        # it. (Phase 2g v1 used zeros and showed exactly this issue.)
+        # The std=0.1 normal init keeps the initial wavefunction close
+        # to the positive-Ψ baseline (sign output ≈ 1 ± 0.8 typically)
+        # while breaking the symmetry needed for the optimiser to
+        # explore sign space.
         self.out_sign = nnx.Linear(
             in_features=hidden_dim,
             out_features=1,
             use_bias=True,
-            kernel_init=nnx.initializers.zeros_init(),
+            kernel_init=nnx.initializers.normal(stddev=0.1),
             bias_init=nnx.initializers.constant(1.0),
             rngs=rngs,
         )
