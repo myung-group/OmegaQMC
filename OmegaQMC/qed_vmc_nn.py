@@ -38,7 +38,10 @@ import jax
 import jax.numpy as jnp
 
 from .utils import Mole_custom, do_binning_analysis
-from .psi.nn.qed_adapter import make_qed_nn_log_psi
+from .psi.nn.qed_adapter import (
+    make_qed_nn_log_psi,
+    make_qed_nn_log_psi_n_aware,
+)
 from .psi.nn.qed_physics import pauli_fierz_local_energy, coulomb_nn
 from .constants import MIN_DIST_THRESHOLD
 
@@ -68,11 +71,14 @@ class _QEDVMCDriverNN:
         alpha_init: float = 0.0,
         alpha_train: bool = False,
         nph_max: int = 10,
+        n_aware: bool = False,
+        fock_hidden_dim: int = 64,
     ):
         self.mol_info = mol_info
         self.omega = float(omega)
         self.coupling_vec = jnp.asarray(coupling_vec, dtype=jnp.float64)
         self.nph_max = int(nph_max)
+        self.n_aware = bool(n_aware)
 
         # Geometry caches.
         self.nuc_crds = jnp.asarray(mol_info.coords, dtype=jnp.float64)
@@ -80,14 +86,26 @@ class _QEDVMCDriverNN:
         self.nelec = mol_info.n_up + mol_info.n_down
         self.enuc = float(coulomb_nn(self.nuc_crds, self.charges))
 
-        # Build the joint coherent-state-shifted electron-photon ansatz.
-        log_psi, init_params, graphdef = make_qed_nn_log_psi(
-            config, mol_info, init_key,
-            omega=self.omega,
-            coupling_vec=self.coupling_vec,
-            alpha_init=alpha_init,
-            alpha_train=alpha_train,
-        )
+        # Build the joint electron-photon ansatz.
+        # Two architectures available:
+        #   - factorized + coherent-state shift (default; legacy v1)
+        #   - n-aware Fock-head (Tang-inspired; Phase 2f-1)
+        if self.n_aware:
+            log_psi, init_params, graphdef = make_qed_nn_log_psi_n_aware(
+                config, mol_info, init_key,
+                omega=self.omega,
+                coupling_vec=self.coupling_vec,
+                nph_max=self.nph_max,
+                fock_hidden_dim=fock_hidden_dim,
+            )
+        else:
+            log_psi, init_params, graphdef = make_qed_nn_log_psi(
+                config, mol_info, init_key,
+                omega=self.omega,
+                coupling_vec=self.coupling_vec,
+                alpha_init=alpha_init,
+                alpha_train=alpha_train,
+            )
         self.log_psi = log_psi
         self.params = init_params
         self.graphdef = graphdef
@@ -383,6 +401,8 @@ def get_qed_vmc_nn_func(
     alpha_init: float = 0.0,
     alpha_train: bool = False,
     nph_max: int = 10,
+    n_aware: bool = False,
+    fock_hidden_dim: int = 64,
 ) -> _QEDVMCDriverNN:
     """Construct a QED-VMC driver for a cavity-coupled molecule.
 
@@ -417,4 +437,5 @@ def get_qed_vmc_nn_func(
         omega=omega, coupling_vec=coupling_vec,
         alpha_init=alpha_init, alpha_train=alpha_train,
         nph_max=nph_max,
+        n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
     )

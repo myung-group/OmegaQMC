@@ -42,6 +42,7 @@ from typing import Callable, Tuple, Any
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 from .adapter import make_nn_log_psi
 from .qed_physics import coherent_state_log_amplitude
@@ -50,7 +51,9 @@ from .qed_physics import coherent_state_log_amplitude
 __all__ = [
     "QEDLogPsiParams",
     "make_qed_nn_log_psi",
+    "make_qed_nn_log_psi_n_aware",
     "analytical_alpha_perturbative",
+    "FockHead",
 ]
 
 
@@ -194,3 +197,177 @@ def make_qed_nn_log_psi(
             return log_elec + log_chi
 
     return log_psi, init_params, graphdef
+
+
+# ===================================================================
+# n-aware ansatz (Phase 2f-1) — Tang-style: NN takes (r, n) jointly.
+# ===================================================================
+
+class FockHead(nnx.Module):
+    """Small MLP head that produces an n-dependent log correction.
+
+    Input: discrete photon Fock index ``n`` and a vector of global
+    r-derived features (e.g. projected dipole ε·d̂_e). Output:
+    scalar correction added to the electronic log|Ψ_e(r)|.
+
+    Output layer is zero-initialised, so the head produces a
+    correction of exactly 0 at initialisation. This means the joint
+    ansatz behaves identically to the standard electronic NN at
+    iter 0; the SR optimiser then learns deviations.
+    """
+
+    def __init__(
+        self,
+        nph_max: int,
+        n_features: int,
+        hidden_dim: int,
+        rngs: nnx.Rngs,
+    ):
+        self.nph_max = int(nph_max)
+        self.embed = nnx.Embed(
+            num_embeddings=nph_max + 1,
+            features=hidden_dim,
+            rngs=rngs,
+        )
+        self.feature_proj = nnx.Linear(
+            in_features=n_features,
+            out_features=hidden_dim,
+            rngs=rngs,
+        )
+        # Zero-init output layer: the head adds 0 at init.
+        self.out = nnx.Linear(
+            in_features=hidden_dim,
+            out_features=1,
+            use_bias=False,
+            kernel_init=nnx.initializers.zeros_init(),
+            rngs=rngs,
+        )
+
+    def __call__(self, n: jax.Array, features: jax.Array) -> jax.Array:
+        # n: () int; features: (n_features,) float
+        n_emb = self.embed(n)              # (hidden_dim,)
+        feat_emb = self.feature_proj(features)  # (hidden_dim,)
+        h = jnp.tanh(n_emb + feat_emb)
+        return self.out(h)[0]              # scalar
+
+
+def _projected_dipole(elec_crds: jax.Array, eps_unit: jax.Array) -> jax.Array:
+    """ε · d̂_e with electronic dipole d̂_e = -Σ r_i."""
+    return -jnp.dot(eps_unit, jnp.sum(elec_crds, axis=0))
+
+
+def make_qed_nn_log_psi_n_aware(
+    config,
+    mol_info,
+    rng_key,
+    *,
+    omega: float,
+    coupling_vec: jax.Array,
+    nph_max: int = 5,
+    fock_hidden_dim: int = 64,
+) -> Tuple[Callable, QEDLogPsiParams, Any]:
+    """Joint (r, n) NN ansatz with output-side n-dependence (Tang-style v1).
+
+    Form:
+
+    .. math::
+        \\log \\Psi(r, n) = \\log \\Psi_e(r) + g_\\theta(n;\\,
+        \\boldsymbol\\varepsilon \\cdot \\hat{\\mathbf d}_e(r))
+
+    where :math:`g_\\theta` is a small MLP-style head (:class:`FockHead`)
+    that takes the discrete photon Fock index ``n`` and a single
+    global feature — the projected electronic dipole
+    :math:`\\boldsymbol\\varepsilon \\cdot \\hat{\\mathbf d}_e(r)` —
+    and returns a scalar correction to the electronic log-amplitude.
+
+    Why this form
+    -------------
+    The factorized form
+    :math:`\\Psi(r,n) = \\Psi_e(r) \\langle n|\\alpha\\rangle`
+    has Fock-ladder ratios
+    :math:`\\Psi(r,n+1)/\\Psi(r,n) = \\alpha/\\sqrt{n+1}` independent
+    of *r*; this zeroes the bilinear-coupling local-energy
+    contribution for symmetric systems (Phase 2e finding). With
+    :math:`g_\\theta(n;\\,\\varepsilon\\cdot\\hat{\\mathbf d}_e(r))`
+    the ratio becomes
+    :math:`\\exp[g_\\theta(n+1;f) - g_\\theta(n;f)]` with
+    :math:`f = \\varepsilon\\cdot\\hat{\\mathbf d}_e(r)`, i.e. an *r*-dependent
+    learnable function. This is sufficient to capture bilinear coupling.
+
+    This is a lightweight approximation to Tang et al. 2025
+    (arXiv:2503.15644 §II.C), who append a one-hot encoding of ``n``
+    *inside* the per-electron embeddings of the PauliNet2 GNN. Our
+    output-side head is less expressive (it sees only the projected
+    dipole, not full per-electron features) but does not require
+    modifying the existing PsiFormer/PauliNet architecture. A future
+    Phase 2f-2 may switch to deeper injection if the head's
+    expressivity proves insufficient.
+
+    The head's output layer is zero-initialised: at iter 0 the
+    correction is exactly 0 and the joint ansatz reduces to the
+    standard electronic NN. SR then learns deviations.
+
+    Args:
+        config, mol_info, rng_key: passed through to
+            :func:`make_nn_log_psi`.
+        omega: cavity-mode frequency (Ha). Stored for diagnostics; the
+            head does not directly use ω.
+        coupling_vec: ``(3,)`` light-matter coupling
+            (norm = λ, direction = ε). The polarisation direction
+            defines the projected-dipole feature.
+        nph_max: photon Fock cutoff (the head's discrete embedding
+            covers ``[0, nph_max]``).
+        fock_hidden_dim: hidden width of the Fock head MLP.
+
+    Returns:
+        ``(log_psi, init_params, graphdef)``:
+          - ``log_psi(elec_crds, nuc_crds, n, params)`` returns scalar
+            ``log|Ψ(r, n)|``.
+          - ``init_params`` is a dict ``{'nn': <nnx_state>,
+            'fock_head': <nnx_state>}``.
+          - ``graphdef`` is the electronic-NN graphdef. The Fock
+            head's graphdef is captured in the closure (it is small
+            enough that exposing it isn't currently needed).
+    """
+    # 1. Build the standard electronic NN.
+    elec_log_psi, elec_init_params, elec_graphdef = make_nn_log_psi(
+        config, mol_info, rng_key,
+    )
+
+    # 2. Build the Fock head (small MLP).
+    rng_key, head_key = jax.random.split(rng_key)
+    head_rngs = nnx.Rngs(head_key)
+    fock_head = FockHead(
+        nph_max=nph_max,
+        n_features=1,                  # only projected dipole for now
+        hidden_dim=fock_hidden_dim,
+        rngs=head_rngs,
+    )
+    head_graphdef, head_params, head_other = nnx.split(
+        fock_head, nnx.Param, ...,
+    )
+
+    # 3. Cache the unit polarisation vector.
+    cv = jnp.asarray(coupling_vec, dtype=jnp.float64)
+    eps_unit = cv / (jnp.linalg.norm(cv) + 1e-30)
+
+    init_params: QEDLogPsiParams = {
+        "nn": elec_init_params,
+        "fock_head": head_params,
+    }
+
+    def log_psi(elec_crds, nuc_crds, n, params):
+        log_elec = elec_log_psi(elec_crds, nuc_crds, params["nn"])
+
+        # Global r-feature: projected electronic dipole.
+        proj_dip = _projected_dipole(elec_crds, eps_unit)
+        feat = jnp.atleast_1d(proj_dip).astype(elec_crds.dtype)
+
+        # Fock-aware correction.
+        n_idx = jnp.asarray(n, dtype=jnp.int32)
+        head = nnx.merge(head_graphdef, params["fock_head"], head_other)
+        delta = head(n_idx, feat).astype(elec_crds.dtype)
+
+        return log_elec + delta
+
+    return log_psi, init_params, elec_graphdef

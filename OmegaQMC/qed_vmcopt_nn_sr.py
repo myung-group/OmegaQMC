@@ -79,6 +79,8 @@ class _QEDVMCOptDriverNN_SR:
         alpha_init: float = 0.0,
         alpha_train: bool = True,
         nph_max: int = 10,
+        n_aware: bool = False,
+        fock_hidden_dim: int = 64,
     ):
         # Build a QED driver — provides log_psi, sampler, local energy.
         self.driver = get_qed_vmc_nn_func(
@@ -86,8 +88,10 @@ class _QEDVMCOptDriverNN_SR:
             omega=omega, coupling_vec=coupling_vec,
             alpha_init=alpha_init, alpha_train=alpha_train,
             nph_max=nph_max,
+            n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
         )
         self.alpha_train = alpha_train
+        self.n_aware = n_aware
         self.init_params = self.driver.params
         self.log_psi = self.driver.log_psi
         self.nuc_crds = self.driver.nuc_crds
@@ -336,10 +340,16 @@ def get_qed_vmcopt_nn_sr_func(
     alpha_init: float = 0.0,
     alpha_train: bool = True,
     nph_max: int = 10,
+    n_aware: bool = False,
+    fock_hidden_dim: int = 64,
 ) -> _QEDVMCOptDriverNN_SR:
     """Construct an SR optimizer driver for QED-NN-VMC.
 
     Default ``alpha_train=True`` (we want α to learn during optimization).
+    Set ``n_aware=True`` to use the Tang-style joint (r, n) ansatz with a
+    Fock-head log correction (Phase 2f-1) instead of the factorized
+    coherent-state form. When ``n_aware=True``, the ``alpha_init`` and
+    ``alpha_train`` arguments are ignored (no α parameter exists).
     See :class:`_QEDVMCOptDriverNN_SR.__call__` for run-time hyperparameters.
     """
     return _QEDVMCOptDriverNN_SR(
@@ -347,4 +357,5 @@ def get_qed_vmcopt_nn_sr_func(
         omega=omega, coupling_vec=coupling_vec,
         alpha_init=alpha_init, alpha_train=alpha_train,
         nph_max=nph_max,
+        n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
     )
