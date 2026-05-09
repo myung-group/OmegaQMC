@@ -52,6 +52,7 @@ __all__ = [
     "QEDLogPsiParams",
     "make_qed_nn_log_psi",
     "make_qed_nn_log_psi_n_aware",
+    "make_qed_nn_log_psi_hybrid",
     "analytical_alpha_perturbative",
     "FockHead",
 ]
@@ -369,5 +370,133 @@ def make_qed_nn_log_psi_n_aware(
         delta = head(n_idx, feat).astype(elec_crds.dtype)
 
         return log_elec + delta
+
+    return log_psi, init_params, elec_graphdef
+
+
+def make_qed_nn_log_psi_hybrid(
+    config,
+    mol_info,
+    rng_key,
+    *,
+    omega: float,
+    coupling_vec: jax.Array,
+    nph_max: int = 5,
+    fock_hidden_dim: int = 64,
+    alpha_init: float = 0.0,
+    alpha_train: bool = False,
+) -> Tuple[Callable, QEDLogPsiParams, Any]:
+    """Hybrid coherent-state-shifted joint (r, n) NN ansatz (Phase 2f-1, Path B).
+
+    Form:
+
+    .. math::
+        \\log \\Psi(r, n) =
+            \\log \\Psi_e(r)
+            + \\log \\langle n | \\alpha\\rangle
+            + g_\\theta(n;\\, \\boldsymbol\\varepsilon \\cdot \\hat{\\mathbf d}_e(r))
+
+    Combines three components:
+      1. Standard electronic NN log|Ψ_e(r)|.
+      2. **Coherent-state envelope** ⟨n|α⟩ — provides the analytical
+         vacuum-centered (or α-centered) Fock distribution as a
+         physical prior. At α=0 the envelope is δ_{n,0}; at α≠0 it is
+         the Poisson distribution centered at |α|².
+      3. **n-aware Fock head** g_θ(n; ε·d_e(r)) — adds learnable
+         r-dependent corrections that capture (r, n) entanglement
+         beyond the analytical envelope.
+
+    The envelope sets the right *photon* prior so SR doesn't need to
+    discover the vacuum from a uniform Fock distribution (which would
+    take ~10⁴ iterations as in Tang et al. 2025). The Fock head's
+    output layer is zero-initialised, so at iter 0 the joint ansatz
+    reduces to ``factorized * envelope`` (same as Phase 2b's form).
+    SR then learns the head's deviations.
+
+    This is the architecture our locked-thesis paper targets: the
+    envelope gives **efficient Fock representation** at ultrastrong
+    coupling, the Fock head gives **expressive (r, n) entanglement**
+    at all coupling strengths.
+
+    Args:
+        config, mol_info, rng_key: passed to :func:`make_nn_log_psi`.
+        omega: cavity-mode frequency (Ha).
+        coupling_vec: ``(3,)`` light-matter coupling
+            (norm = λ, direction = ε).
+        nph_max: photon Fock cutoff. With the coherent-state shift,
+            5 is typically sufficient even at λ ~ 1; without shift,
+            may need ≥ 30 at large λ.
+        fock_hidden_dim: hidden width of the Fock head MLP.
+        alpha_init: initial coherent-state displacement. For
+            symmetric systems α=0 is the perturbative optimum;
+            for polar systems use :func:`analytical_alpha_perturbative`.
+        alpha_train: if True, α is included in trainable params.
+
+    Returns:
+        ``(log_psi, init_params, graphdef)``:
+          - ``log_psi(r, R, n, params) -> log|Ψ(r, n)|`` real scalar.
+          - ``init_params`` dict with keys ``'nn'``, ``'fock_head'``,
+            and (if ``alpha_train=True``) ``'alpha'``.
+          - ``graphdef``: electronic-NN graphdef (head graphdef is
+            in the closure).
+    """
+    # 1. Build the standard electronic NN.
+    elec_log_psi, elec_init_params, elec_graphdef = make_nn_log_psi(
+        config, mol_info, rng_key,
+    )
+
+    # 2. Build the Fock head.
+    rng_key, head_key = jax.random.split(rng_key)
+    head_rngs = nnx.Rngs(head_key)
+    fock_head = FockHead(
+        nph_max=nph_max,
+        n_features=1,
+        hidden_dim=fock_hidden_dim,
+        rngs=head_rngs,
+    )
+    head_graphdef, head_params, head_other = nnx.split(
+        fock_head, nnx.Param, ...,
+    )
+
+    # 3. Cache unit polarisation and α₀.
+    cv = jnp.asarray(coupling_vec, dtype=jnp.float64)
+    eps_unit = cv / (jnp.linalg.norm(cv) + 1e-30)
+    alpha0 = jnp.asarray(alpha_init, dtype=jnp.float64)
+
+    # 4. Pack params.
+    if alpha_train:
+        init_params: QEDLogPsiParams = {
+            "nn": elec_init_params,
+            "fock_head": head_params,
+            "alpha": alpha0,
+        }
+    else:
+        init_params = {
+            "nn": elec_init_params,
+            "fock_head": head_params,
+        }
+
+    if alpha_train:
+        def log_psi(elec_crds, nuc_crds, n, params):
+            log_elec = elec_log_psi(elec_crds, nuc_crds, params["nn"])
+            log_chi = coherent_state_log_amplitude(n, params["alpha"])
+            proj_dip = _projected_dipole(elec_crds, eps_unit)
+            feat = jnp.atleast_1d(proj_dip).astype(elec_crds.dtype)
+            n_idx = jnp.asarray(n, dtype=jnp.int32)
+            head = nnx.merge(head_graphdef, params["fock_head"], head_other)
+            delta = head(n_idx, feat).astype(elec_crds.dtype)
+            return log_elec + log_chi + delta
+    else:
+        alpha_frozen = alpha0
+
+        def log_psi(elec_crds, nuc_crds, n, params):
+            log_elec = elec_log_psi(elec_crds, nuc_crds, params["nn"])
+            log_chi = coherent_state_log_amplitude(n, alpha_frozen)
+            proj_dip = _projected_dipole(elec_crds, eps_unit)
+            feat = jnp.atleast_1d(proj_dip).astype(elec_crds.dtype)
+            n_idx = jnp.asarray(n, dtype=jnp.int32)
+            head = nnx.merge(head_graphdef, params["fock_head"], head_other)
+            delta = head(n_idx, feat).astype(elec_crds.dtype)
+            return log_elec + log_chi + delta
 
     return log_psi, init_params, elec_graphdef

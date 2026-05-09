@@ -127,6 +127,7 @@ def main():
         nph_max=nph_max,
         n_aware=bool(opt_cfg.get("n_aware", False)),
         fock_hidden_dim=int(opt_cfg.get("fock_hidden_dim", 64)),
+        arch=opt_cfg.get("arch"),
     )
 
     # Train.

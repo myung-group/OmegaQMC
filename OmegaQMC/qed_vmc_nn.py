@@ -41,6 +41,7 @@ from .utils import Mole_custom, do_binning_analysis
 from .psi.nn.qed_adapter import (
     make_qed_nn_log_psi,
     make_qed_nn_log_psi_n_aware,
+    make_qed_nn_log_psi_hybrid,
 )
 from .psi.nn.qed_physics import pauli_fierz_local_energy, coulomb_nn
 from .constants import MIN_DIST_THRESHOLD
@@ -73,12 +74,24 @@ class _QEDVMCDriverNN:
         nph_max: int = 10,
         n_aware: bool = False,
         fock_hidden_dim: int = 64,
+        arch: str | None = None,
     ):
         self.mol_info = mol_info
         self.omega = float(omega)
         self.coupling_vec = jnp.asarray(coupling_vec, dtype=jnp.float64)
         self.nph_max = int(nph_max)
-        self.n_aware = bool(n_aware)
+
+        # Resolve architecture flag. ``arch`` (if given) takes precedence;
+        # otherwise fall back to the legacy ``n_aware`` bool.
+        if arch is None:
+            arch = "n_aware" if n_aware else "factorized"
+        if arch not in ("factorized", "n_aware", "hybrid"):
+            raise ValueError(
+                f"Unknown arch={arch!r}; expected "
+                "'factorized' | 'n_aware' | 'hybrid'.",
+            )
+        self.arch = arch
+        self.n_aware = (arch == "n_aware")
 
         # Geometry caches.
         self.nuc_crds = jnp.asarray(mol_info.coords, dtype=jnp.float64)
@@ -87,10 +100,16 @@ class _QEDVMCDriverNN:
         self.enuc = float(coulomb_nn(self.nuc_crds, self.charges))
 
         # Build the joint electron-photon ansatz.
-        # Two architectures available:
-        #   - factorized + coherent-state shift (default; legacy v1)
-        #   - n-aware Fock-head (Tang-inspired; Phase 2f-1)
-        if self.n_aware:
+        # Three architectures available:
+        #   * factorized        — Phase 2b: Ψ_e(r)·⟨n|α⟩
+        #   * n_aware           — Phase 2f-1 Path A: Ψ_e(r) + Fock head
+        #                         (no envelope; matches Tang's pure form
+        #                         conceptually). Slow convergence.
+        #   * hybrid            — Phase 2f-1 Path B: Ψ_e(r)·⟨n|α⟩ + Fock head
+        #                         envelope provides the right Fock prior;
+        #                         head adds (r,n) entanglement. Targets
+        #                         our locked-thesis ultrastrong-coupling regime.
+        if arch == "n_aware":
             log_psi, init_params, graphdef = make_qed_nn_log_psi_n_aware(
                 config, mol_info, init_key,
                 omega=self.omega,
@@ -98,7 +117,17 @@ class _QEDVMCDriverNN:
                 nph_max=self.nph_max,
                 fock_hidden_dim=fock_hidden_dim,
             )
-        else:
+        elif arch == "hybrid":
+            log_psi, init_params, graphdef = make_qed_nn_log_psi_hybrid(
+                config, mol_info, init_key,
+                omega=self.omega,
+                coupling_vec=self.coupling_vec,
+                nph_max=self.nph_max,
+                fock_hidden_dim=fock_hidden_dim,
+                alpha_init=alpha_init,
+                alpha_train=alpha_train,
+            )
+        else:  # factorized
             log_psi, init_params, graphdef = make_qed_nn_log_psi(
                 config, mol_info, init_key,
                 omega=self.omega,
@@ -403,6 +432,7 @@ def get_qed_vmc_nn_func(
     nph_max: int = 10,
     n_aware: bool = False,
     fock_hidden_dim: int = 64,
+    arch: str | None = None,
 ) -> _QEDVMCDriverNN:
     """Construct a QED-VMC driver for a cavity-coupled molecule.
 
@@ -438,4 +468,5 @@ def get_qed_vmc_nn_func(
         alpha_init=alpha_init, alpha_train=alpha_train,
         nph_max=nph_max,
         n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
+        arch=arch,
     )

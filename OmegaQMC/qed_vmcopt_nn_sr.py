@@ -81,6 +81,7 @@ class _QEDVMCOptDriverNN_SR:
         nph_max: int = 10,
         n_aware: bool = False,
         fock_hidden_dim: int = 64,
+        arch: str | None = None,
     ):
         # Build a QED driver — provides log_psi, sampler, local energy.
         self.driver = get_qed_vmc_nn_func(
@@ -89,9 +90,14 @@ class _QEDVMCOptDriverNN_SR:
             alpha_init=alpha_init, alpha_train=alpha_train,
             nph_max=nph_max,
             n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
+            arch=arch,
         )
-        self.alpha_train = alpha_train
-        self.n_aware = n_aware
+        self.arch = self.driver.arch
+        self.alpha_train = (
+            alpha_train and self.arch in ("factorized", "hybrid")
+            and "alpha" in self.driver.params
+        )
+        self.n_aware = (self.arch == "n_aware")
         self.init_params = self.driver.params
         self.log_psi = self.driver.log_psi
         self.nuc_crds = self.driver.nuc_crds
@@ -342,14 +348,24 @@ def get_qed_vmcopt_nn_sr_func(
     nph_max: int = 10,
     n_aware: bool = False,
     fock_hidden_dim: int = 64,
+    arch: str | None = None,
 ) -> _QEDVMCOptDriverNN_SR:
     """Construct an SR optimizer driver for QED-NN-VMC.
 
-    Default ``alpha_train=True`` (we want α to learn during optimization).
-    Set ``n_aware=True`` to use the Tang-style joint (r, n) ansatz with a
-    Fock-head log correction (Phase 2f-1) instead of the factorized
-    coherent-state form. When ``n_aware=True``, the ``alpha_init`` and
-    ``alpha_train`` arguments are ignored (no α parameter exists).
+    Architecture selection (in order of precedence):
+      * ``arch='factorized'`` — Phase 2b form Ψ_e(r)·⟨n|α⟩.
+      * ``arch='n_aware'``    — Phase 2f-1 Path A form Ψ_e(r) + Fock head.
+      * ``arch='hybrid'``     — Phase 2f-1 Path B form
+        Ψ_e(r)·⟨n|α⟩ + Fock head (envelope provides the Fock prior;
+        the head adds learned r-n entanglement). Recommended for
+        production runs.
+
+    For backward compatibility, ``arch`` defaults to ``None`` and is
+    inferred from the legacy ``n_aware`` bool when omitted.
+
+    ``alpha_*`` arguments apply when α is part of the chosen architecture
+    (factorized and hybrid). With ``arch='n_aware'`` they are ignored.
+
     See :class:`_QEDVMCOptDriverNN_SR.__call__` for run-time hyperparameters.
     """
     return _QEDVMCOptDriverNN_SR(
@@ -358,4 +374,5 @@ def get_qed_vmcopt_nn_sr_func(
         alpha_init=alpha_init, alpha_train=alpha_train,
         nph_max=nph_max,
         n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
+        arch=arch,
     )
