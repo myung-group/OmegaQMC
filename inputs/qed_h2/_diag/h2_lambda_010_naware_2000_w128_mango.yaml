@@ -1,0 +1,41 @@
+ansatz:
+  type: psiformer
+cavity:
+  lambda: 0.1
+  omega: 0.5
+  polarization:
+  - 0.0
+  - 0.0
+  - 1.0
+optimizer:
+  alpha_init: 0.0
+  alpha_train: false
+  eval:
+    enabled: true
+    mc_timestep: 0.1
+    num_blocks: 30
+    num_blocks_equil: 10
+    num_steps_per_block: 30
+    num_walkers: 256
+    verbose: 0
+  fock_hidden_dim: 64
+  n_aware: true
+  nph_max: 6
+  train:
+    cg_maxiter: 100
+    damping: 1e-3
+    jac_batch_size: 32
+    lr: 0.05
+    max_param_change: 0.5
+    mc_timestep: 0.1
+    num_blocks_equil: 5
+    num_iters: 2000
+    num_steps_decorr: 5
+    num_steps_per_block: 30
+    num_walkers: 128
+    verbose: 1
+project: qed_h2_lambda_010_naware_2000iter_w128_mango
+seed: 42
+system:
+  R_bohr: 1.401
+  type: h2
