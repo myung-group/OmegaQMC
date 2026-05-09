@@ -73,6 +73,22 @@ def build_molecule(system_cfg: dict):
     raise ValueError(f"unknown system type: {sys_type}")
 
 
+class _Tee:
+    """Mirror writes to multiple file handles (e.g. stdout + log file)."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="path to YAML config")
@@ -87,6 +103,14 @@ def main():
     log_dir = osp.join("logs", project)
     os.makedirs(log_dir, exist_ok=True)
     shutil.copy(args.config, osp.join(log_dir, osp.basename(args.config)))
+
+    # Persistent stdout log — stream all training/eval prints to a file
+    # so progress can be `tail -f`ed even when invoked over ssh.
+    log_path = osp.join(log_dir, "run.log")
+    _log_fh = open(log_path, "w", buffering=1)  # line-buffered
+    sys.stdout = _Tee(sys.__stdout__, _log_fh)
+    sys.stderr = _Tee(sys.__stderr__, _log_fh)
+    print(f"[run.log] persistent log path: {log_path}", flush=True)
 
     print(f"==== QED-VMC run: {project} ====", flush=True)
     print(f"host:    {os.uname().nodename}", flush=True)
