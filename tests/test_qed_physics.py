@@ -141,7 +141,10 @@ def test_pauli_fierz_bilinear_coupling_n_zero():
     e_ee = 1.0
     e_en = -(1/0.1 + 1/1.3 + 1/1.1 + 1/0.3)
     e_nn = 1/1.4
-    e_bilin = np.sqrt(omega/2) * lam * 0.2 * 0.3
+    # Bilinear has Tang/standard convention sign: H_bilin = +√(ω/2)·λ·(ε·∑rᵢ)·(b+b†).
+    # In our local-energy estimator this enters as −√(ω/2)·λ·(ε·d_e)·... since
+    # ε·d_e = -ε·∑rᵢ. Hence the leading minus on e_bilin below.
+    e_bilin = -np.sqrt(omega/2) * lam * 0.2 * 0.3
     e_dse = 0.5 * lam**2 * 0.2**2
     expected = e_K + e_ee + e_en + e_nn + 0.0 + e_bilin + e_dse
     np.testing.assert_allclose(float(e_loc), expected, atol=1e-4)
@@ -178,7 +181,8 @@ def test_pauli_fierz_bilinear_coupling_n_two():
     e_en = -(1/0.1 + 1/1.3 + 1/1.1 + 1/0.3)
     e_nn = 1/1.4
     e_ph = omega * 2
-    e_bilin = np.sqrt(omega/2) * lam * eps_dot_d * bilin_factor
+    # Bilinear has Tang/standard convention sign (see other test for context).
+    e_bilin = -np.sqrt(omega/2) * lam * eps_dot_d * bilin_factor
     e_dse = 0.5 * lam**2 * eps_dot_d**2
     expected = e_K + e_ee + e_en + e_nn + e_ph + e_bilin + e_dse
     np.testing.assert_allclose(float(e_loc), expected, atol=1e-4)
@@ -206,7 +210,7 @@ def test_pauli_fierz_at_truncation_boundary():
     # Bilinear should only have the down-branch sqrt(n) = sqrt(3) contribution
     bilin_factor = np.sqrt(float(nph_max))  # only down branch
     eps_dot_d = 0.2
-    expected_bilin = np.sqrt(omega/2) * lam * eps_dot_d * bilin_factor
+    expected_bilin = -np.sqrt(omega/2) * lam * eps_dot_d * bilin_factor
     # Test indirectly: compare to nph_max=10 (no truncation) result
     e_loc_full = pauli_fierz_local_energy(
         constant_n_dep_log_psi, None, elec, jnp.array(nph_max),
@@ -216,7 +220,7 @@ def test_pauli_fierz_at_truncation_boundary():
     )
     # Difference should be exactly the up-branch contribution that got removed
     diff = float(e_loc_full) - float(e_loc_truncated)
-    expected_up_branch = np.sqrt(omega/2) * lam * eps_dot_d * np.sqrt(float(nph_max + 1))
+    expected_up_branch = -np.sqrt(omega/2) * lam * eps_dot_d * np.sqrt(float(nph_max + 1))
     np.testing.assert_allclose(diff, expected_up_branch, atol=1e-6)
 
 

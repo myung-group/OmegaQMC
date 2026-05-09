@@ -369,11 +369,17 @@ def pauli_fierz_local_energy(
     in_bounds_dn = (n_int >= 1).astype(elec_crds.dtype)
     bilinear_dn = jnp.sqrt(jnp.asarray(n_int, dtype=elec_crds.dtype)) * ratio_dn * in_bounds_dn
 
-    e_bilinear = jnp.sqrt(omega / 2.0) * lam * eps_dot_d * (
+    # Tang / standard PF convention: H_bilin = +√(ω/2)·λ·(ε·∑ᵢ r̂ᵢ)·(b̂+b̂†).
+    # In our code ε·d̂_e = -ε·∑ᵢ r̂ᵢ (electronic dipole with electron-charge sign),
+    # so the sign in front of (ε·d̂_e) in this expression is NEGATIVE. This
+    # places the polariton ground state in the c_e > 0 branch where a
+    # positive-Ψ variational ansatz (returning only log|Ψ|) can represent
+    # it. See module docstring for the unitary-equivalence discussion.
+    e_bilinear = -jnp.sqrt(omega / 2.0) * lam * eps_dot_d * (
         bilinear_up + bilinear_dn
     )
 
-    # 7. Dipole self-energy: (1/2) lambda^2 (eps . d_e)^2
+    # 7. Dipole self-energy: (1/2) λ² (ε·d_e)²  (sign-invariant under d_e → -d_e)
     e_dse = 0.5 * lam ** 2 * eps_dot_d ** 2
 
     return e_ke + e_ee + e_en + e_nn + e_ph + e_bilinear + e_dse
