@@ -463,7 +463,17 @@ def pauli_fierz_local_energy_signed(
 
     log_n, sign_n = log_psi_signed_fn(elec_crds, nuc_crds, n, params)
     n_int = jnp.asarray(n, dtype=jnp.int32)
-    safe_sign_n = jnp.where(jnp.abs(sign_n) < _EPS, _EPS, sign_n)
+    # Sign-preserving floor: avoid division blow-up while keeping sign.
+    # The previous form `where(|x| < eps, eps, x)` flipped the sign of
+    # tiny negative values to +eps. Now we use a sign-preserving floor:
+    # for small magnitudes, we pad with +-eps matching the sign of x
+    # (defaulting to +eps if x is exactly zero).
+    sign_n_dir = jnp.where(sign_n >= 0.0, 1.0, -1.0)
+    safe_sign_n = jnp.where(
+        jnp.abs(sign_n) < _EPS,
+        _EPS * sign_n_dir,
+        sign_n,
+    )
 
     # +1 ladder term: ⟨n+1|b+b†|n⟩ = √(n+1)
     n_plus = n_int + 1
