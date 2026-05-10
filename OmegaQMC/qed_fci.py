@@ -181,11 +181,15 @@ def qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
         quad_ao_proj = np.einsum('a,b,abpq->pq', epsilon, epsilon, quad_ao)
         quad_mo = mo_coeff.T @ quad_ao_proj @ mo_coeff
 
-        # Note: dip_mo above has been multiplied by λ already, so
-        # dip_mo @ dip_mo = λ²·d̃². The needed correction is
-        # (1/2)·λ²·Q − (1/2)·(dip_mo @ dip_mo).
-        dse_correction_h1e = 0.5 * (lam ** 2) * quad_mo \
-                             - 0.5 * (dip_mo @ dip_mo)
+        # The true Pauli-Fierz DSE in 2nd quant has 1-body part
+        #     (1/2) λ² Q_pq E_pq   (Q is exact quadrupole matrix element)
+        # and 2-body part = (1/2) × [2-body part of D̂²] (cross-particle).
+        # PySCF's chemist 2-body convention with the δ_qr Wick subtraction
+        # already supplies exactly the (1/2) × [2-body of D̂²] when we
+        # augment ERI with d⊗d. So the missing piece is just the proper
+        # 1-body (1/2) λ² Q. (Subtracting d̃² here was a bug — that piece
+        # is already removed by the chemist convention.)
+        dse_correction_h1e = 0.5 * (lam ** 2) * quad_mo
         h1e_used = h1e + dse_correction_h1e
         dse_correction_norm = float(
             np.linalg.norm(dse_correction_h1e),
