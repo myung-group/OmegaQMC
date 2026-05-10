@@ -753,3 +753,84 @@ def make_qed_nn_log_psi_signed_hybrid(
             )
 
     return log_psi_signed, init_params, elec_graphdef
+
+
+# -----------------------------------------------------------------------
+# Phase 2g: Tang-native n-injection (per-electron one-hot in GNN body)
+# -----------------------------------------------------------------------
+
+def make_qed_nn_log_psi_tang_native(
+    config,
+    mol_info,
+    rng_key,
+    *,
+    nph_max: int = 5,
+) -> Tuple[Callable, Any, Any]:
+    """Tang-native joint electron-photon ansatz on FermiNet+Jastrow+backflow.
+
+    Implements Tang et al. 2025 (arXiv:2503.15644) Section II.C: a
+    per-electron one-hot encoding of the photon Fock index n is appended
+    to the electronic embeddings *inside* the GNN. The full electronic
+    network (FermiNet body, deep Jastrow, backflow, Slater determinants)
+    then sees ``n`` from its very first layer, allowing tight r-n
+    correlation through every message-passing step.
+
+    Unlike :func:`make_qed_nn_log_psi_signed_hybrid`, there is **no**
+    coherent-state envelope ⟨n|α⟩ and **no** external Fock head — the
+    network learns the photon statistics directly from the Pauli-Fierz
+    local energy. The wavefunction sign is the native Slater determinant
+    sign (no separate sign output, no log|sign| gradient barrier).
+
+    Args:
+        config: ``NNAnsatzConfig`` or preset name (e.g. ``"ferminet"``).
+            ``qed_nph_max`` and ``project_to_embedding_dim`` are forced
+            on internally.
+        mol_info: Molecule descriptor (matches ``build_nn_wf``).
+        rng_key: JAX PRNG key.
+        nph_max: Photon Fock truncation (matches local-energy estimator).
+
+    Returns:
+        ``(log_psi_signed_fn, init_params, graphdef)``:
+          - ``log_psi_signed_fn(r, R, n, params) -> (log|Ψ|, sign(Ψ))``
+          - ``init_params`` is a dict ``{"nn": <flax NNX params>}``.
+          - ``graphdef`` is the NN graph definition.
+    """
+    import dataclasses
+    from .config import load_nn_config, NNAnsatzConfig
+    from .types import PhysicalConfiguration
+    from .build import build_nn_wf
+
+    if isinstance(config, str):
+        config = load_nn_config(config)
+
+    # Force the QED toggles on. Projection MUST be enabled so that the
+    # extra one-hot dimensions are absorbed before downstream GNN layers
+    # see the embedding.
+    config = dataclasses.replace(
+        config,
+        qed_nph_max=nph_max,
+        project_to_embedding_dim=True,
+    )
+
+    rngs = nnx.Rngs(rng_key)
+    model = build_nn_wf(config, mol_info, rngs)
+    graphdef, params, other = nnx.split(model, nnx.Param, ...)
+    init_params = {"nn": params}
+
+    def log_psi_signed(elec_crds, nuc_crds, n, params):
+        # Reorder interleaved alpha/beta -> grouped (matches make_nn_log_psi).
+        r_up = elec_crds[::2]
+        r_dn = elec_crds[1::2]
+        r_grouped = jnp.concatenate([r_up, r_dn], axis=0)
+        n_idx = jnp.asarray(n, dtype=jnp.int32)
+        phys_conf = PhysicalConfiguration(
+            R=nuc_crds,
+            r=r_grouped,
+            mol_idx=jnp.array(0),
+            n=n_idx,
+        )
+        mdl = nnx.merge(graphdef, params["nn"], other)
+        psi = mdl(phys_conf)
+        return psi.log, psi.sign
+
+    return log_psi_signed, init_params, graphdef

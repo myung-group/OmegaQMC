@@ -43,6 +43,7 @@ from .psi.nn.qed_adapter import (
     make_qed_nn_log_psi_n_aware,
     make_qed_nn_log_psi_hybrid,
     make_qed_nn_log_psi_signed_hybrid,
+    make_qed_nn_log_psi_tang_native,
 )
 from .psi.nn.qed_physics import (
     pauli_fierz_local_energy,
@@ -90,14 +91,18 @@ class _QEDVMCDriverNN:
         # otherwise fall back to the legacy ``n_aware`` bool.
         if arch is None:
             arch = "n_aware" if n_aware else "factorized"
-        if arch not in ("factorized", "n_aware", "hybrid", "signed_hybrid"):
+        if arch not in (
+            "factorized", "n_aware", "hybrid",
+            "signed_hybrid", "tang_native",
+        ):
             raise ValueError(
                 f"Unknown arch={arch!r}; expected "
-                "'factorized' | 'n_aware' | 'hybrid' | 'signed_hybrid'.",
+                "'factorized' | 'n_aware' | 'hybrid' | "
+                "'signed_hybrid' | 'tang_native'.",
             )
         self.arch = arch
         self.n_aware = (arch == "n_aware")
-        self.is_signed = (arch == "signed_hybrid")
+        self.is_signed = arch in ("signed_hybrid", "tang_native")
 
         # Geometry caches.
         self.nuc_crds = jnp.asarray(mol_info.coords, dtype=jnp.float64)
@@ -150,6 +155,22 @@ class _QEDVMCDriverNN:
             # Sampling / Jacobian uses log magnitude only (sign doesn't
             # affect |Ψ|² walker distribution and the SR Jacobian wants
             # ∂log|Ψ|/∂params).
+            def log_psi(elec_crds, nuc_crds, n, params):
+                log_mag, _sign = log_psi_signed(
+                    elec_crds, nuc_crds, n, params,
+                )
+                return log_mag
+        elif arch == "tang_native":
+            # Phase 2g: per-electron one-hot(n) injected inside the GNN
+            # (Tang 2025 Sec. II.C). Native Slater sign — no Fock head,
+            # no coherent-state envelope.
+            (log_psi_signed, init_params, graphdef
+             ) = make_qed_nn_log_psi_tang_native(
+                config, mol_info, init_key,
+                nph_max=self.nph_max,
+            )
+            self._log_psi_signed = log_psi_signed
+
             def log_psi(elec_crds, nuc_crds, n, params):
                 log_mag, _sign = log_psi_signed(
                     elec_crds, nuc_crds, n, params,

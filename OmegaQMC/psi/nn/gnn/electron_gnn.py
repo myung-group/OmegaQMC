@@ -58,6 +58,7 @@ class ElectronEmbedding(nnx.Module):
         positional_embedding_ne,
         use_spin, project_to_embedding_dim,
         rngs,
+        qed_nph_max=None,
     ):
         self.n_nuc = n_nuc
         self.n_up = n_up
@@ -65,11 +66,18 @@ class ElectronEmbedding(nnx.Module):
         self.embedding_dim = embedding_dim
         self.ne_embed = positional_embedding_ne
         self.use_spin = use_spin
+        # Tang-style per-electron one-hot photon injection.
+        # When set, append one_hot(phys_conf.n) of size
+        # nph_max+1 to each electron's input feature vector
+        # before the projection layer (Tang 2025 Sec. II.C).
+        self.qed_nph_max = qed_nph_max
 
         if positional_embedding_ne is not None:
             in_dim = ne_feat_dim * n_nuc
             if use_spin:
                 in_dim += 1
+            if qed_nph_max is not None:
+                in_dim += qed_nph_max + 1
             if project_to_embedding_dim:
                 self.proj = nnx.Linear(
                     in_dim, embedding_dim,
@@ -128,6 +136,19 @@ class ElectronEmbedding(nnx.Module):
                 x = jnp.concatenate(
                     [x, spins], axis=1,
                 )
+            if self.qed_nph_max is not None:
+                # Per-electron one-hot photon Fock index.
+                n_el = self.n_up + self.n_down
+                n_oh = jax.nn.one_hot(
+                    phys_conf.n,
+                    self.qed_nph_max + 1,
+                    dtype=x.dtype,
+                )
+                n_oh = jnp.broadcast_to(
+                    n_oh[None, :],
+                    (n_el, self.qed_nph_max + 1),
+                )
+                x = jnp.concatenate([x, n_oh], axis=1)
             if self.proj is not None:
                 x = self.proj(x)
         else:

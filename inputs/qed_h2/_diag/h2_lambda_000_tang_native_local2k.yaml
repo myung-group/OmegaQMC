@@ -1,0 +1,53 @@
+# =====================================================================
+# Local λ=0 convergence run for Tang-native ansatz.
+#
+# Goal: confirm the ansatz can drive E_VMC -> bare H2 ground state
+# at λ=0 within a 2k-iter / 256-walker SR budget. Watch ⟨n⟩ -> 0.
+#
+# Run: python scripts/run_qed_vmc.py inputs/qed_h2/_diag/h2_lambda_000_tang_native_local2k.yaml
+# =====================================================================
+
+project: qed_h2_lambda000_tang_native_local2k
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 1.4010
+
+cavity:
+  omega: 0.5
+  lambda: 0.0
+  polarization: [0.0, 0.0, 1.0]
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 2000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0

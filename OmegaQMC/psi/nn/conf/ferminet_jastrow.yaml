@@ -1,0 +1,77 @@
+# FermiNet preset + deep Jastrow head enabled.
+# Used by the Tang-native QED ansatz (Phase 2g) to match Tang's
+# PauliNet2 baseline as closely as the OmegaQMC body permits:
+# FermiNet-style GNN updates, native backflow, deep Jastrow scalar
+# correction, and signed Slater determinants.
+#
+# Diff vs. stock ferminet.yaml: use_jastrow: true.
+
+n_determinants: 16
+full_determinant: true
+backflow_transform: mult
+
+envelope_isotropic: true
+envelope_per_shell: false
+envelope_per_orbital_exponent: true
+envelope_spin_restricted: false
+envelope_init_to_ones: true
+envelope_softplus_zeta: false
+
+cusp_electrons: false
+cusp_nuclei: false
+
+embedding_dim: 256
+use_jastrow: true
+use_backflow: true
+n_interactions: 4
+two_particle_stream_dim: 32
+self_interaction: true
+deep_features: shared
+update_rule: concatenate
+
+mlp_hidden_layers: [log, 1]
+mlp_bias: true
+mlp_activation: tanh
+mlp_init: ferminet
+
+g_mlp_hidden_layers: [log, 1]
+g_mlp_bias: false
+g_mlp_last_linear: false
+g_mlp_activation: tanh
+g_mlp_init: ferminet
+
+bf_mlp_hidden_layers: [log, 1]
+bf_mlp_bias: false
+bf_mlp_last_linear: true
+bf_mlp_activation: null
+bf_mlp_init: ferminet
+
+jas_mlp_hidden_layers: [log, 1]
+jas_mlp_bias: false
+jas_mlp_last_linear: true
+jas_mlp_activation: null
+jas_mlp_init: ferminet
+jas_sum_first: true
+
+conf_coeff: sum_pool
+
+edge_types: [up, down]
+
+ne_powers: [1]
+ne_log_rescale: false
+
+use_spin_embedding: false
+project_to_embedding_dim: false
+
+electron_residual_normalize: true
+two_particle_residual_normalize: true
+nucleus_residual: false
+
+update_features:
+  - type: residual
+  - type: node_sum
+    node_types: [up, down]
+    normalize: true
+  - type: edge_sum
+    edge_types: [up, down]
+    normalize: true

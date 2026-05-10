@@ -109,6 +109,13 @@ class NNAnsatzConfig:
     two_particle_residual_normalize: bool = True
     nucleus_residual: bool = False
 
+    # --- QED extension ---
+    # When set, the electron embedding concatenates a
+    # per-electron one-hot encoding of the photon Fock
+    # index n (size nph_max + 1) before projection.
+    # Tang 2025 (2503.15644) Sec. II.C.
+    qed_nph_max: Optional[int] = None
+
     def __post_init__(self):
         """Fill in ``None`` fields with sensible defaults."""
         if self.mlp_hidden_layers is None:
