@@ -116,6 +116,24 @@ class NNAnsatzConfig:
     # Tang 2025 (2503.15644) Sec. II.C.
     qed_nph_max: Optional[int] = None
 
+    # --- Complex-valued wavefunction (chiral cavity QED) ---
+    # When True, the wavefunction is built as a complex
+    # Slater determinant: orbital matrices become complex
+    # (Re + i*Im) via a parallel imaginary-part pathway,
+    # log_psi becomes complex, and Psi.sign is a complex
+    # unit (phase factor exp(i*phi)) instead of +-1.
+    #
+    # Required for time-reversal-broken Hamiltonians such
+    # as a circularly polarized (chiral) cavity, external
+    # magnetic field, or non-equilibrium current-carrying
+    # states. Default False reproduces existing real-Psi
+    # behaviour exactly.
+    #
+    # Downstream consumers (qed_physics local-energy
+    # estimator, SR optimizer) must take Re(E_loc) and
+    # Re(<O^dag O>) appropriately when this flag is set.
+    complex_psi: bool = False
+
     def __post_init__(self):
         """Fill in ``None`` fields with sensible defaults."""
         if self.mlp_hidden_layers is None:
