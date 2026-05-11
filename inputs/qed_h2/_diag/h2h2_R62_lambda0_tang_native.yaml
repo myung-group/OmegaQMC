@@ -1,0 +1,59 @@
+# =====================================================================
+# 2H2 dimer in cavity, lambda=0 reference (cavity off).
+#
+# Geometry: two parallel H2 molecules along x-axis, separated by
+#   R = 6.2 Angstrom = 11.7156 Bohr along z. Intramolecular L = 1.401 Bohr
+#   (Tang 2025 Fig. 2 setup). 4 electrons, singlet.
+#
+# Tang's headline at this geometry: cavity raises GS by >+200 meV
+# at lambda=0.1. This file is the cavity-OFF baseline; lambda=0 means
+# polarization is irrelevant.
+#
+# Compute: mango GH200, ~13 min train + ~1 min eval per run.
+# =====================================================================
+
+project: qed_h2h2_R62_lambda0_tang_native
+
+seed: 42
+
+system:
+  type: h2_h2
+  R_intermol_bohr: 11.7156
+  L_h2_bohr: 1.4010
+
+cavity:
+  omega: 0.46672      # 12.7 eV in Hartree
+  lambda: 0.0         # cavity off
+  polarization: [0.0, 0.0, 1.0]   # ignored at lambda=0
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 3000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0
