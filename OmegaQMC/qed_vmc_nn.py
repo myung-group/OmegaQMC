@@ -256,6 +256,36 @@ class _QEDVMCDriverNN:
             ),
         )
 
+        # Per-walker <L_z> estimator -- only meaningful for complex_psi.
+        # Build a per-walker callable that constructs the complex log Psi
+        # callable for fixed (n, params) and evaluates the
+        # angular_momentum_z_local helper.
+        if self.is_signed and self.complex_psi:
+            from OmegaQMC.psi.nn.qed_physics import (
+                angular_momentum_z_local,
+            )
+            log_psi_signed_for_lz = self._log_psi_signed
+
+            @jax.jit
+            def l_z_one(elec_crds, n, params):
+                def log_psi_cx_at_n(r):
+                    lg, sg = log_psi_signed_for_lz(
+                        r, nuc_loc, n, params,
+                    )
+                    return lg.astype(jnp.complex128) \
+                        + 1j * jnp.angle(sg)
+                return angular_momentum_z_local(
+                    log_psi_cx_at_n, elec_crds,
+                )
+
+            self._l_z_one = l_z_one
+            self._l_z_batch = jax.jit(
+                jax.vmap(l_z_one, in_axes=(0, 0, None)),
+            )
+        else:
+            self._l_z_one = None
+            self._l_z_batch = None
+
         # JIT-compiled joint Metropolis-Hastings step (single walker).
         self._mh_step = jax.jit(self._build_mh_step())
         self._mh_step_batch = jax.jit(jax.vmap(
@@ -428,6 +458,7 @@ class _QEDVMCDriverNN:
 
         block_energies = []
         n_photon_means = []
+        l_z_means = []   # only populated when complex_psi
         accept_r_running = 0.0
         accept_n_running = 0.0
         total_r_attempts = 0
@@ -464,6 +495,12 @@ class _QEDVMCDriverNN:
             block_energies.append(block_E[-1])
             n_photon_means.append(block_n[-1])
 
+            # <L_z> observable. Physical value = Re(<L_z_local>) over
+            # |Psi|^2; zero by construction for real Psi.
+            if self._l_z_batch is not None:
+                lz_loc = self._l_z_batch(elec, n_ph, params)
+                l_z_means.append(float(jnp.mean(jnp.real(lz_loc))))
+
             # Adapt sigma_r toward target acceptance during equilibration.
             if blk < num_blocks_equil and total_r_attempts > 0:
                 cur_acc = accept_r_running / max(total_r_attempts, 1.0)
@@ -471,10 +508,15 @@ class _QEDVMCDriverNN:
 
             if verbose:
                 tag = "equil" if blk < num_blocks_equil else "prod"
+                lz_tag = (
+                    f" <L_z>={l_z_means[-1]:+.4f}"
+                    if l_z_means else ""
+                )
                 print(
                     f"[QED-VMC {tag} {blk + 1}/{total_blocks}] "
                     f"E={block_energies[-1]:.6f} "
-                    f"<n>={n_photon_means[-1]:.4f} "
+                    f"<n>={n_photon_means[-1]:.4f}"
+                    f"{lz_tag} "
                     f"sigma_r={sigma_r:.4f}",
                     file=sys.stdout, flush=True,
                 )
@@ -492,7 +534,7 @@ class _QEDVMCDriverNN:
         else:
             e_serr = float(jnp.std(prod_E)) / max(jnp.sqrt(len(prod_E)), 1.0)
 
-        return {
+        result = {
             "E_mean": float(jnp.mean(prod_E)),
             "E_serr": float(e_serr),
             "E_blocks": prod_E,
@@ -506,6 +548,14 @@ class _QEDVMCDriverNN:
             ),
             "sigma_r_final": float(sigma_r),
         }
+        if l_z_means:
+            prod_lz = jnp.array(l_z_means[num_blocks_equil:])
+            result["l_z_mean"] = float(jnp.mean(prod_lz))
+            result["l_z_serr"] = float(
+                jnp.std(prod_lz) / max(jnp.sqrt(len(prod_lz)), 1.0)
+            )
+            result["l_z_blocks"] = prod_lz
+        return result
 
 
 def get_qed_vmc_nn_func(

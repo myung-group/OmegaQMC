@@ -237,10 +237,16 @@ def main():
             verbose=int(eval_cfg.get("verbose", 0)),
         )
         eval_elapsed = (datetime.now() - eval_t0).total_seconds()
+        lz_str = (
+            f" <L_z>={eval_result['l_z_mean']:+.4f} "
+            f"± {eval_result['l_z_serr']:.4f}"
+            if "l_z_mean" in eval_result else ""
+        )
         print(f"eval complete in {eval_elapsed:.1f}s: "
               f"E={eval_result['E_mean']:.6f} ± "
               f"{eval_result['E_serr']:.6f} Ha "
-              f"<n>={eval_result['n_photon_mean']:.4f}",
+              f"<n>={eval_result['n_photon_mean']:.4f}"
+              f"{lz_str}",
               flush=True)
     else:
         eval_result = None
@@ -280,6 +286,13 @@ def main():
             g_eval.create_dataset("E_blocks", data=np.array(eval_result["E_blocks"]))
             g_eval.create_dataset("n_photon_blocks",
                                   data=np.array(eval_result["n_photon_blocks"]))
+            if "l_z_mean" in eval_result:
+                g_eval.attrs["l_z_mean"] = eval_result["l_z_mean"]
+                g_eval.attrs["l_z_serr"] = eval_result["l_z_serr"]
+                g_eval.create_dataset(
+                    "l_z_blocks",
+                    data=np.array(eval_result["l_z_blocks"]),
+                )
 
     print(f"results saved to {out_path}", flush=True)
 
