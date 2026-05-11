@@ -81,11 +81,13 @@ class _QEDVMCDriverNN:
         n_aware: bool = False,
         fock_hidden_dim: int = 64,
         arch: str | None = None,
+        complex_psi: bool = False,
     ):
         self.mol_info = mol_info
         self.omega = float(omega)
         self.coupling_vec = jnp.asarray(coupling_vec, dtype=jnp.float64)
         self.nph_max = int(nph_max)
+        self.complex_psi = complex_psi
 
         # Resolve architecture flag. ``arch`` (if given) takes precedence;
         # otherwise fall back to the legacy ``n_aware`` bool.
@@ -199,6 +201,7 @@ class _QEDVMCDriverNN:
 
         if self.is_signed:
             log_psi_signed_for_le = self._log_psi_signed
+            complex_psi_for_le = self.complex_psi
 
             @jax.jit
             def local_energy_one(elec_crds, n, params):
@@ -213,6 +216,7 @@ class _QEDVMCDriverNN:
                     cv_loc,
                     nph_loc,
                     enuc=enuc_loc,
+                    complex_psi=complex_psi_for_le,
                 )
         else:
             @jax.jit
@@ -501,6 +505,7 @@ def get_qed_vmc_nn_func(
     n_aware: bool = False,
     fock_hidden_dim: int = 64,
     arch: str | None = None,
+    complex_psi: bool = False,
 ) -> _QEDVMCDriverNN:
     """Construct a QED-VMC driver for a cavity-coupled molecule.
 
@@ -537,4 +542,5 @@ def get_qed_vmc_nn_func(
         nph_max=nph_max,
         n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
         arch=arch,
+        complex_psi=complex_psi,
     )

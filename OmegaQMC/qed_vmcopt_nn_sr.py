@@ -82,6 +82,7 @@ class _QEDVMCOptDriverNN_SR:
         n_aware: bool = False,
         fock_hidden_dim: int = 64,
         arch: str | None = None,
+        complex_psi: bool = False,
     ):
         # Build a QED driver — provides log_psi, sampler, local energy.
         self.driver = get_qed_vmc_nn_func(
@@ -91,6 +92,7 @@ class _QEDVMCOptDriverNN_SR:
             nph_max=nph_max,
             n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
             arch=arch,
+            complex_psi=complex_psi,
         )
         self.arch = self.driver.arch
         self.alpha_train = (
@@ -101,6 +103,21 @@ class _QEDVMCOptDriverNN_SR:
         self.init_params = self.driver.params
         self.log_psi = self.driver.log_psi
         self.nuc_crds = self.driver.nuc_crds
+
+        # Complex-Psi mode: the wavefunction is built as a complex
+        # Slater determinant, so the SR natural-gradient computation
+        # needs the phase Jacobian d(phase)/d(theta) in addition to
+        # the magnitude Jacobian d(log|Psi|)/d(theta). Requires the
+        # driver to expose `_log_psi_signed` (the (log_mag, sign)
+        # callable) -- which holds for arch in {signed_hybrid,
+        # tang_native}.
+        self.complex_psi = complex_psi
+        if complex_psi:
+            assert self.driver._log_psi_signed is not None, (
+                "complex_psi=True requires a signed-Psi arch "
+                "(signed_hybrid or tang_native)"
+            )
+        self._log_psi_signed = self.driver._log_psi_signed
 
     # ---- SR step kernels ----
     def _build_sr_kernels(self):
@@ -137,6 +154,74 @@ class _QEDVMCOptDriverNN_SR:
             return delta_p, info
 
         return jac_batch_fn, sr_cg_solve, unravel_fn
+
+    # ---- Complex-Psi SR kernels ----
+    def _build_sr_kernels_complex(self):
+        """Build SR kernels for complex-valued wavefunctions.
+
+        For complex Psi = R * exp(i*phi), we need two real Jacobians:
+          J_re = d log|Psi| / d theta     (same as real-Psi case)
+          J_im = d phi / d theta          (phase response)
+        Both real-valued (theta is real). The natural-gradient
+        Fisher matrix is:
+          S = (J_re^T J_re + J_im^T J_im) / N
+        and the force vector is:
+          f = (dE_re @ dJ_re + dE_im @ dJ_im) / N
+        where dE_re = Re(E_loc) - <Re(E_loc)> and dE_im = Im(E_loc) -
+        <Im(E_loc)>. The CG solver is the standard symmetric positive
+        system as before.
+
+        For real-Psi (TR-symmetric) the phase is piecewise constant
+        (= 0 or +-pi from sign(Psi)) so J_im is zero everywhere and
+        the complex SR reduces to the real one (just with 2x work).
+        """
+        log_psi_signed = self._log_psi_signed
+        nuc = self.nuc_crds
+
+        _, unravel_fn = _flatten_params(self.init_params)
+
+        def log_R_of_flat(fp, r, n):
+            log_mag, _ = log_psi_signed(r, nuc, n, unravel_fn(fp))
+            return log_mag
+
+        def phase_of_flat(fp, r, n):
+            _, sign = log_psi_signed(r, nuc, n, unravel_fn(fp))
+            return jnp.angle(sign)
+
+        @jax.jit
+        def jac_batch_fn_complex(flat_params, r_batch, n_batch):
+            """Return (J_re, J_im) of shape (batch, n_params) each."""
+            J_re = jax.vmap(
+                jax.grad(log_R_of_flat),
+                in_axes=(None, 0, 0),
+            )(flat_params, r_batch, n_batch).astype(jnp.float32)
+            J_im = jax.vmap(
+                jax.grad(phase_of_flat),
+                in_axes=(None, 0, 0),
+            )(flat_params, r_batch, n_batch).astype(jnp.float32)
+            return J_re, J_im
+
+        @jax.jit
+        def sr_cg_solve_complex(
+            dJ_re, dJ_im, f, x0, damping, maxiter,
+        ):
+            nw = dJ_re.shape[0]
+            dmp = jnp.float32(damping)
+
+            def s_matvec(v):
+                t_re = dJ_re @ v
+                t_im = dJ_im @ v
+                Sv = (
+                    dJ_re.T @ t_re + dJ_im.T @ t_im
+                ) / nw
+                return Sv + dmp * v
+
+            delta_p, info = jax.scipy.sparse.linalg.cg(
+                s_matvec, f, x0=x0, maxiter=maxiter,
+            )
+            return delta_p, info
+
+        return jac_batch_fn_complex, sr_cg_solve_complex, unravel_fn
 
     # ---- Optimization loop ----
     def __call__(
@@ -194,7 +279,14 @@ class _QEDVMCOptDriverNN_SR:
                 flush=True,
             )
 
-        jac_batch_fn, sr_cg_solve, unravel_fn = self._build_sr_kernels()
+        if self.complex_psi:
+            jac_batch_fn, sr_cg_solve, unravel_fn = (
+                self._build_sr_kernels_complex()
+            )
+        else:
+            jac_batch_fn, sr_cg_solve, unravel_fn = (
+                self._build_sr_kernels()
+            )
 
         # Initialize walkers (r, n) and equilibrate.
         rng_key, key_init = jax.random.split(rng_key)
@@ -253,34 +345,79 @@ class _QEDVMCOptDriverNN_SR:
                 n_decorr_acc_n += float(jnp.sum(acc_n & ~was_r))
                 n_decorr_was_n += float(jnp.sum(~was_r))
 
-            # (b) local energies
+            # (b) local energies. For complex_psi, e_loc is complex;
+            #     the physical energy is Re(<e_loc>).
             e_loc = self.driver._local_energy_batch(elec, n_ph, params)
-            E_mean = float(jnp.mean(e_loc))
-            E_serr = float(jnp.std(e_loc) / jnp.sqrt(num_walkers))
+            if self.complex_psi:
+                e_loc_re = jnp.real(e_loc)
+                E_mean = float(jnp.mean(e_loc_re))
+                E_serr = float(jnp.std(e_loc_re) / jnp.sqrt(num_walkers))
+            else:
+                E_mean = float(jnp.mean(e_loc))
+                E_serr = float(jnp.std(e_loc) / jnp.sqrt(num_walkers))
 
-            # (c) Jacobian of log|Ψ| in batches
-            O_parts = []
-            for i_start in range(0, num_walkers, jac_batch_size):
-                i_end = min(i_start + jac_batch_size, num_walkers)
-                O_parts.append(
-                    jac_batch_fn(
+            # (c) Jacobian of log|Ψ| (or (log|Ψ|, phase) for complex_psi)
+            #     evaluated walker-by-walker in batches.
+            if self.complex_psi:
+                Jre_parts, Jim_parts = [], []
+                for i_start in range(
+                    0, num_walkers, jac_batch_size,
+                ):
+                    i_end = min(
+                        i_start + jac_batch_size, num_walkers,
+                    )
+                    j_re, j_im = jac_batch_fn(
                         flat_params,
                         elec[i_start:i_end],
                         n_ph[i_start:i_end],
                     )
-                )
-            O = jnp.concatenate(O_parts, axis=0)
+                    Jre_parts.append(j_re)
+                    Jim_parts.append(j_im)
+                O_re = jnp.concatenate(Jre_parts, axis=0)
+                O_im = jnp.concatenate(Jim_parts, axis=0)
+            else:
+                O_parts = []
+                for i_start in range(
+                    0, num_walkers, jac_batch_size,
+                ):
+                    i_end = min(
+                        i_start + jac_batch_size, num_walkers,
+                    )
+                    O_parts.append(
+                        jac_batch_fn(
+                            flat_params,
+                            elec[i_start:i_end],
+                            n_ph[i_start:i_end],
+                        )
+                    )
+                O = jnp.concatenate(O_parts, axis=0)
 
             # (d) centered force vector
-            O_mean = jnp.mean(O, axis=0)
-            dO = O - O_mean[None, :]
-            dE = (e_loc - jnp.mean(e_loc)).astype(jnp.float32)
-            f = (dE @ dO) / num_walkers
+            if self.complex_psi:
+                e_re = jnp.real(e_loc).astype(jnp.float32)
+                e_im = jnp.imag(e_loc).astype(jnp.float32)
+                dE_re = e_re - jnp.mean(e_re)
+                dE_im = e_im - jnp.mean(e_im)
+                dO_re = O_re - jnp.mean(O_re, axis=0)[None, :]
+                dO_im = O_im - jnp.mean(O_im, axis=0)[None, :]
+                f = (
+                    dE_re @ dO_re + dE_im @ dO_im
+                ) / num_walkers
+            else:
+                O_mean = jnp.mean(O, axis=0)
+                dO = O - O_mean[None, :]
+                dE = (e_loc - jnp.mean(e_loc)).astype(jnp.float32)
+                f = (dE @ dO) / num_walkers
 
             # (e) SR CG solve
-            delta_p, _cg_info = sr_cg_solve(
-                dO, f, prev_delta, damping, cg_maxiter,
-            )
+            if self.complex_psi:
+                delta_p, _cg_info = sr_cg_solve(
+                    dO_re, dO_im, f, prev_delta, damping, cg_maxiter,
+                )
+            else:
+                delta_p, _cg_info = sr_cg_solve(
+                    dO, f, prev_delta, damping, cg_maxiter,
+                )
             prev_delta = delta_p
 
             # (f) apply update with optional α scaling and clip
@@ -349,6 +486,7 @@ def get_qed_vmcopt_nn_sr_func(
     n_aware: bool = False,
     fock_hidden_dim: int = 64,
     arch: str | None = None,
+    complex_psi: bool = False,
 ) -> _QEDVMCOptDriverNN_SR:
     """Construct an SR optimizer driver for QED-NN-VMC.
 
@@ -380,4 +518,5 @@ def get_qed_vmcopt_nn_sr_func(
         nph_max=nph_max,
         n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
         arch=arch,
+        complex_psi=complex_psi,
     )
