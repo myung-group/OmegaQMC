@@ -151,6 +151,12 @@ def main():
     nph_max = int(opt_cfg.get("nph_max", 8))
 
     from OmegaQMC.qed_vmcopt_nn_sr import get_qed_vmcopt_nn_sr_func
+    # complex_psi enables the complex-valued Slater determinant
+    # pathway for chiral cavity QED. Must be paired with an
+    # NNAnsatzConfig that has complex_psi=True (e.g. a custom YAML
+    # ansatz preset with that field set). When True, the SR optimizer
+    # additionally computes the phase Jacobian d(arg Psi)/d(theta).
+    complex_psi_flag = bool(opt_cfg.get("complex_psi", False))
     opt = get_qed_vmcopt_nn_sr_func(
         mol,
         cfg["ansatz"]["type"],   # 'psiformer'
@@ -163,6 +169,7 @@ def main():
         n_aware=bool(opt_cfg.get("n_aware", False)),
         fock_hidden_dim=int(opt_cfg.get("fock_hidden_dim", 64)),
         arch=opt_cfg.get("arch"),
+        complex_psi=complex_psi_flag,
     )
 
     # Train.
