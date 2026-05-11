@@ -335,10 +335,14 @@ class NeuralNetworkWaveFunction(nnx.Module):
         # is a safety wrapper (gradient is zero anyway except at zero
         # crossings).
         # For complex psi: sign = psi / |psi| is a CONTINUOUS phase on
-        # the unit circle; its gradient w.r.t. params encodes the phase
-        # response and must NOT be killed by stop_gradient.
+        # the unit circle; gradients must flow through it so the
+        # optimizer can learn the phase. We compute the unit phase
+        # explicitly because `jnp.sign(complex)` in JAX returns zero
+        # gradient (it treats complex sign as a discrete operation),
+        # whereas the mathematically correct unit phase psi/|psi| is
+        # smoothly differentiable everywhere except psi=0.
         if self.complex_psi:
-            sign_psi = jnp.sign(psi)
+            sign_psi = psi / jnp.abs(psi)
         else:
             sign_psi = jax.lax.stop_gradient(
                 jnp.sign(psi),
