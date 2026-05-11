@@ -153,6 +153,9 @@ def build_nn_wf(
         cusp_nuclei=cusp_nuc,
         backflow_transform=config.backflow_transform,
         conf_coeff=conf_coeff,
+        complex_psi=config.complex_psi,
+        embedding_dim=config.embedding_dim,
+        rngs=rngs,
     )
 
 
