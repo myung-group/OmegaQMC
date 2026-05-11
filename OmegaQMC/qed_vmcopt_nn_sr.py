@@ -83,6 +83,8 @@ class _QEDVMCOptDriverNN_SR:
         fock_hidden_dim: int = 64,
         arch: str | None = None,
         complex_psi: bool = False,
+        chiral_eps_y=None,
+        chiral_handedness: int = 1,
     ):
         # Build a QED driver — provides log_psi, sampler, local energy.
         self.driver = get_qed_vmc_nn_func(
@@ -93,6 +95,8 @@ class _QEDVMCOptDriverNN_SR:
             n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
             arch=arch,
             complex_psi=complex_psi,
+            chiral_eps_y=chiral_eps_y,
+            chiral_handedness=chiral_handedness,
         )
         self.arch = self.driver.arch
         self.alpha_train = (
@@ -487,6 +491,8 @@ def get_qed_vmcopt_nn_sr_func(
     fock_hidden_dim: int = 64,
     arch: str | None = None,
     complex_psi: bool = False,
+    chiral_eps_y=None,
+    chiral_handedness: int = 1,
 ) -> _QEDVMCOptDriverNN_SR:
     """Construct an SR optimizer driver for QED-NN-VMC.
 
@@ -519,4 +525,6 @@ def get_qed_vmcopt_nn_sr_func(
         n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
         arch=arch,
         complex_psi=complex_psi,
+        chiral_eps_y=chiral_eps_y,
+        chiral_handedness=chiral_handedness,
     )

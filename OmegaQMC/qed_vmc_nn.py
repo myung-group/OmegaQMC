@@ -82,12 +82,19 @@ class _QEDVMCDriverNN:
         fock_hidden_dim: int = 64,
         arch: str | None = None,
         complex_psi: bool = False,
+        chiral_eps_y=None,
+        chiral_handedness: int = 1,
     ):
         self.mol_info = mol_info
         self.omega = float(omega)
         self.coupling_vec = jnp.asarray(coupling_vec, dtype=jnp.float64)
         self.nph_max = int(nph_max)
         self.complex_psi = complex_psi
+        self.chiral_eps_y = (
+            None if chiral_eps_y is None
+            else jnp.asarray(chiral_eps_y, dtype=jnp.float64)
+        )
+        self.chiral_handedness = int(chiral_handedness)
 
         # Resolve architecture flag. ``arch`` (if given) takes precedence;
         # otherwise fall back to the legacy ``n_aware`` bool.
@@ -202,6 +209,8 @@ class _QEDVMCDriverNN:
         if self.is_signed:
             log_psi_signed_for_le = self._log_psi_signed
             complex_psi_for_le = self.complex_psi
+            chiral_eps_y_for_le = self.chiral_eps_y
+            chiral_hand_for_le = self.chiral_handedness
 
             @jax.jit
             def local_energy_one(elec_crds, n, params):
@@ -217,6 +226,8 @@ class _QEDVMCDriverNN:
                     nph_loc,
                     enuc=enuc_loc,
                     complex_psi=complex_psi_for_le,
+                    chiral_eps_y=chiral_eps_y_for_le,
+                    chiral_handedness=chiral_hand_for_le,
                 )
         else:
             @jax.jit
@@ -511,6 +522,8 @@ def get_qed_vmc_nn_func(
     fock_hidden_dim: int = 64,
     arch: str | None = None,
     complex_psi: bool = False,
+    chiral_eps_y=None,
+    chiral_handedness: int = 1,
 ) -> _QEDVMCDriverNN:
     """Construct a QED-VMC driver for a cavity-coupled molecule.
 
@@ -548,4 +561,6 @@ def get_qed_vmc_nn_func(
         n_aware=n_aware, fock_hidden_dim=fock_hidden_dim,
         arch=arch,
         complex_psi=complex_psi,
+        chiral_eps_y=chiral_eps_y,
+        chiral_handedness=chiral_handedness,
     )

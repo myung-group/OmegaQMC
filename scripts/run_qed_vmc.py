@@ -141,8 +141,26 @@ def main():
                     dtype=jnp.float64)
     eps = eps / jnp.linalg.norm(eps)
     coupling_vec = lam * eps
-    print(f"cavity:  omega={omega:.4f} Ha, lambda={lam:.4f}, "
-          f"eps={list(eps)}", flush=True)
+
+    # Optional chiral (circular) polarization. When `polarization_y`
+    # is set, the cavity is treated as a single circularly-polarized
+    # mode with eps_x = `polarization` and eps_y = `polarization_y`,
+    # handedness = `chiral_handedness` (+1 for sigma+, -1 for sigma-).
+    # Chiral mode requires complex_psi.
+    chiral_eps_y = None
+    chiral_handedness = 1
+    if "polarization_y" in cav:
+        ey = jnp.array(cav["polarization_y"], dtype=jnp.float64)
+        chiral_eps_y = ey / jnp.linalg.norm(ey)
+        chiral_handedness = int(cav.get("chiral_handedness", 1))
+        print(f"cavity:  omega={omega:.4f} Ha, lambda={lam:.4f}, "
+              f"CHIRAL (s={chiral_handedness})\n"
+              f"         eps_x={list(eps)}\n"
+              f"         eps_y={list(chiral_eps_y)}",
+              flush=True)
+    else:
+        print(f"cavity:  omega={omega:.4f} Ha, lambda={lam:.4f}, "
+              f"eps={list(eps)} (linear)", flush=True)
 
     # Optimizer.
     opt_cfg = cfg["optimizer"]
@@ -170,6 +188,8 @@ def main():
         fock_hidden_dim=int(opt_cfg.get("fock_hidden_dim", 64)),
         arch=opt_cfg.get("arch"),
         complex_psi=complex_psi_flag,
+        chiral_eps_y=chiral_eps_y,
+        chiral_handedness=chiral_handedness,
     )
 
     # Train.

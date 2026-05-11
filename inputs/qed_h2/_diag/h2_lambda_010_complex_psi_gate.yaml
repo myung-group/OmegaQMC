@@ -1,0 +1,66 @@
+# =====================================================================
+# Phase 2n gate test: H2 at lambda=0.1, omega=0.5, LINEAR polarization,
+# using the new complex-Psi pipeline.
+#
+# Time-reversal-symmetric Hamiltonian (linear-pol cavity), so the
+# variational principle guarantees the optimal Psi can be chosen real.
+# The complex-Psi pipeline must therefore drive Im(Psi) -> 0 during
+# training and converge to the same energy as the prior real-Psi run:
+#
+#   Real-Psi prior (commit 4b422a5 mango v2): E_eval = -1.16764 +/- 0.00035 Ha
+#                                              dE = +6.85 mHa vs lambda=0
+#
+# If complex-Psi gives a significantly different number, there is a
+# bug in the complex-Psi machinery.
+#
+# Compute: mango GH200. Per-iter cost ~2-3x real-Psi due to two
+# Jacobians (J_re, J_im); estimated ~13-20 min train + 1 min eval.
+# =====================================================================
+
+project: qed_h2_lambda_010_complex_psi_gate
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 1.4010
+  spin: singlet
+
+cavity:
+  omega: 0.5
+  lambda: 0.1
+  polarization: [0.0, 0.0, 1.0]   # linear polarization along bond axis
+
+ansatz:
+  # Custom preset with complex_psi: true on top of FermiNet+Jastrow+bf.
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow_complex.yaml
+
+optimizer:
+  arch: tang_native
+  complex_psi: true                # MUST match the ansatz preset
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 2000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0
