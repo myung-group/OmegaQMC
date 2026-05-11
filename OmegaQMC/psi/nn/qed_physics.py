@@ -229,6 +229,60 @@ def coherent_state_log_amplitude(
 # Kinetic energy (electronic, photon coordinate is discrete here)
 # ---------------------------------------------------------------
 
+def electronic_kinetic_energy_complex(
+    log_psi_complex_at_n,    # callable: elec_crds (n_elec, 3) -> complex log Psi(r,n)
+    elec_crds: jax.Array,
+) -> jax.Array:
+    """Electronic kinetic local energy for COMPLEX Psi.
+
+    For Psi(r) = R(r) * exp(i*phi(r)) with R = |Psi|, phi = arg(Psi):
+
+      log Psi = log R + i*phi
+
+      T_loc = -1/2 (nabla^2 Psi) / Psi
+            = -1/2 [nabla^2 log Psi + (nabla log Psi).(nabla log Psi)]
+
+      Re(T_loc) = -1/2 [nabla^2 log R + |nabla log R|^2 - |nabla phi|^2]
+      Im(T_loc) = -1/2 [nabla^2 phi + 2 (nabla log R) . (nabla phi)]
+
+    For real Psi (phi piecewise constant): grad phi = 0 and lap phi = 0,
+    so T_loc reduces to the standard real-Psi Bijl-Jastrow formula:
+      T_loc = -1/2 (nabla^2 log|Psi| + |nabla log|Psi||^2).
+
+    Args:
+        log_psi_complex_at_n: callable returning a complex scalar
+            ``log|Psi(r,n)| + i * phase(Psi(r,n))`` for fixed photon n.
+        elec_crds: ``(n_elec, 3)`` electron positions.
+
+    Returns:
+        Complex scalar kinetic energy contribution.
+    """
+    n_elec = elec_crds.shape[-2]
+    r_flat = elec_crds.reshape(-1)
+
+    def log_R_fn(rf):
+        return jnp.real(
+            log_psi_complex_at_n(rf.reshape(n_elec, 3)),
+        )
+
+    def phi_fn(rf):
+        return jnp.imag(
+            log_psi_complex_at_n(rf.reshape(n_elec, 3)),
+        )
+
+    lap_R, grad_R = laplacian(log_R_fn)(r_flat)
+    lap_phi, grad_phi = laplacian(phi_fn)(r_flat)
+
+    t_real = -0.5 * (
+        lap_R + jnp.dot(grad_R, grad_R)
+        - jnp.dot(grad_phi, grad_phi)
+    )
+    t_imag = -0.5 * (
+        lap_phi + 2.0 * jnp.dot(grad_R, grad_phi)
+    )
+    return t_real + 1j * t_imag
+
+
 def electronic_kinetic_energy(
     log_psi_at_n,           # callable: elec_crds (n_elec, 3) -> log|Psi(r,n)|
     elec_crds: jax.Array,
@@ -418,8 +472,17 @@ def pauli_fierz_local_energy_signed(
     coupling_vec: jax.Array,
     nph_max: int,
     enuc: jax.Array | float | None = None,
+    complex_psi: bool = False,
 ) -> jax.Array:
     """Pauli-Fierz local energy with signed Ψ across Fock sectors.
+
+    When ``complex_psi=True`` the trial wavefunction is treated as
+    complex-valued: signed_amp is a complex unit on the unit circle
+    (= exp(i*phi)), and the kinetic-energy term picks up the
+    -1/2 (∇φ)² and cross-derivative contributions. The returned local
+    energy is then a COMPLEX scalar; the physical energy at the
+    expectation level is Re(<E_loc>). The default (False) is the
+    original real-Psi behaviour and returns a real scalar.
 
     Args:
         log_psi_signed_fn: callable
@@ -435,13 +498,35 @@ def pauli_fierz_local_energy_signed(
     Returns:
         Scalar local energy (Ha).
     """
-    # 1. Kinetic energy uses log magnitude only (Bijl-Jastrow form is
-    #    insensitive to the sign of Ψ since it acts on log|Ψ|).
-    def _logmag_r_only(r):
-        log_mag, _ = log_psi_signed_fn(r, nuc_crds, n, params)
-        return log_mag
+    # 1. Kinetic energy. For real signed Psi the standard Bijl-Jastrow
+    #    form uses log magnitude only (sign is locally constant). For
+    #    complex Psi (sign = exp(i*phi) with phi(r) non-trivial), the
+    #    phase contributes to grad / Laplacian -- handled via the
+    #    complex-aware kinetic estimator.
+    if complex_psi:
+        def _logpsi_r_complex(r):
+            log_mag, sign = log_psi_signed_fn(
+                r, nuc_crds, n, params,
+            )
+            # Promote log_mag to complex; angle(sign) is 0 or +-pi for
+            # real sign (constant -> grad = 0), or arg(sign) for
+            # complex unit. Both give the correct complex log Psi.
+            log_mag_c = log_mag.astype(jnp.complex128) \
+                if log_mag.dtype == jnp.float64 \
+                else log_mag.astype(jnp.complex64)
+            return log_mag_c + 1j * jnp.angle(sign)
 
-    e_ke = electronic_kinetic_energy(_logmag_r_only, elec_crds)
+        e_ke = electronic_kinetic_energy_complex(
+            _logpsi_r_complex, elec_crds,
+        )
+    else:
+        def _logmag_r_only(r):
+            log_mag, _ = log_psi_signed_fn(
+                r, nuc_crds, n, params,
+            )
+            return log_mag
+
+        e_ke = electronic_kinetic_energy(_logmag_r_only, elec_crds)
 
     # 2-4. Coulomb terms (sign-independent).
     e_ee = coulomb_ee(elec_crds)
