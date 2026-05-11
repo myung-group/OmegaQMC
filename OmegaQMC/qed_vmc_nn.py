@@ -440,9 +440,14 @@ class _QEDVMCDriverNN:
                 accept_n_running += float(jnp.sum(acc_n & ~was_r))
                 total_n_attempts += float(jnp.sum(~was_r))
 
-            # End of block: estimate local energies.
+            # End of block: estimate local energies. For complex_psi,
+            # e_loc is a complex scalar; the physical energy is the
+            # mean of its real part.
             e_loc = self._local_energy_batch(elec, n_ph, params)
-            block_E.append(float(jnp.mean(e_loc)))
+            if self.complex_psi:
+                block_E.append(float(jnp.mean(jnp.real(e_loc))))
+            else:
+                block_E.append(float(jnp.mean(e_loc)))
             block_n.append(float(jnp.mean(n_ph.astype(jnp.float64))))
 
             block_energies.append(block_E[-1])
