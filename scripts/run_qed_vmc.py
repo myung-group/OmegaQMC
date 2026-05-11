@@ -34,15 +34,23 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(fh)
 
 
-def _build_h2_mol(R_bohr: float):
+def _build_h2_mol(R_bohr: float, spin: str = "singlet"):
+    """H2 molecule along z-axis. spin: 'singlet' (n_up=n_down=1, X¹Σg+)
+    or 'triplet' (n_up=2, n_down=0, Sz=1 component of a³Σu+)."""
     from OmegaQMC.utils import Mole_custom
+    if spin == "triplet":
+        n_up, n_down = 2, 0
+    elif spin == "singlet":
+        n_up, n_down = 1, 1
+    else:
+        raise ValueError(f"unknown spin={spin!r}; expected singlet|triplet")
     return Mole_custom.from_arrays(
         charges=[1, 1],
         coords=[
             [0.0, 0.0, -R_bohr / 2],
             [0.0, 0.0,  R_bohr / 2],
         ],
-        n_up=1, n_down=1,
+        n_up=n_up, n_down=n_down,
     )
 
 
@@ -64,7 +72,10 @@ def _build_h2_h2_mol(R_intermol_bohr: float, L_h2_bohr: float = 1.4010):
 def build_molecule(system_cfg: dict):
     sys_type = system_cfg["type"]
     if sys_type == "h2":
-        return _build_h2_mol(R_bohr=float(system_cfg["R_bohr"]))
+        return _build_h2_mol(
+            R_bohr=float(system_cfg["R_bohr"]),
+            spin=system_cfg.get("spin", "singlet"),
+        )
     if sys_type == "h2_h2":
         return _build_h2_h2_mol(
             R_intermol_bohr=float(system_cfg["R_intermol_bohr"]),
