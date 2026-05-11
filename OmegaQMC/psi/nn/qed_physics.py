@@ -473,6 +473,8 @@ def pauli_fierz_local_energy_signed(
     nph_max: int,
     enuc: jax.Array | float | None = None,
     complex_psi: bool = False,
+    chiral_eps_y: jax.Array | None = None,
+    chiral_handedness: int = 1,
 ) -> jax.Array:
     """Pauli-Fierz local energy with signed Ψ across Fock sectors.
 
@@ -483,6 +485,27 @@ def pauli_fierz_local_energy_signed(
     energy is then a COMPLEX scalar; the physical energy at the
     expectation level is Re(<E_loc>). The default (False) is the
     original real-Psi behaviour and returns a real scalar.
+
+    Chiral cavity mode. When ``chiral_eps_y`` is provided, the cavity
+    is treated as circularly polarized: the bilinear and DSE terms
+    use two orthogonal polarization vectors. ``coupling_vec / |λ|``
+    plays the role of ε_x (in-plane polarization 1) and
+    ``chiral_eps_y`` is ε_y (in-plane polarization 2, orthogonal).
+    ``chiral_handedness=+1`` selects σ+ (left-circular convention),
+    ``-1`` selects σ-. The single-mode chiral coupling reads
+
+      H_int = sqrt(omega/2) * lambda *
+              [ s * (eps_y . d) (b + b†)
+              + i * (eps_x . d) (b† - b) ] / sqrt(2)
+      DSE = (lambda^2 / 4) * [(eps_x . d)^2 + (eps_y . d)^2]
+
+    (the factor 1/sqrt(2) and 1/2 in DSE come from the chiral mode
+    being a normalized linear combination of two transverse linear
+    modes; see Wang Yuen-Zhou for the standard convention.)
+
+    Chiral mode requires complex_psi=True because the i*(b†-b)
+    contribution gives a non-trivial real-energy contribution only
+    through cross-terms with the phase of Ψ.
 
     Args:
         log_psi_signed_fn: callable
@@ -588,13 +611,43 @@ def pauli_fierz_local_energy_signed(
         jnp.asarray(n_int, dtype=elec_crds.dtype)
     ) * ratio_dn * in_bounds_dn
 
-    # Same convention as positive-Ψ variant (minus sign in front to match
-    # Tang/standard PF when expressed in terms of ε·d̂_e).
-    e_bilinear = -jnp.sqrt(omega / 2.0) * lam * eps_dot_d * (
-        bilinear_up + bilinear_dn
-    )
-
-    # 7. DSE — sign-independent.
-    e_dse = 0.5 * lam ** 2 * eps_dot_d ** 2
+    if chiral_eps_y is None:
+        # Linear polarization (original Tang/Riera convention).
+        # Same convention as positive-Ψ variant (minus sign in front to
+        # match standard PF expressed in terms of ε·d̂_e).
+        e_bilinear = -jnp.sqrt(omega / 2.0) * lam * eps_dot_d * (
+            bilinear_up + bilinear_dn
+        )
+        # 7. DSE — sign-independent.
+        e_dse = 0.5 * lam ** 2 * eps_dot_d ** 2
+    else:
+        # Chiral mode: ε_x = coupling_vec / |coupling_vec|, ε_y
+        # supplied separately and assumed orthogonal to ε_x.
+        # Handedness s = +-1 selects sigma+/sigma-.
+        assert complex_psi, (
+            "Chiral cavity coupling (chiral_eps_y != None) requires "
+            "complex_psi=True because the bilinear picks up an "
+            "i*(b^dag - b) term whose contribution vanishes for real Psi."
+        )
+        eps_y = jnp.asarray(chiral_eps_y, dtype=eps.dtype)
+        eps_y_dot_d = jnp.dot(eps_y, d_e)
+        s = float(chiral_handedness)
+        inv_sqrt2 = 1.0 / jnp.sqrt(2.0)
+        # H_int = (lambda * sqrt(omega/2) / sqrt(2)) * [
+        #   s * (eps_y . d) * (b + b^dag) + i * (eps_x . d) * (b^dag - b)
+        # ]
+        prefactor = inv_sqrt2 * jnp.sqrt(omega / 2.0) * lam
+        # Keep the minus-sign convention consistent with the linear
+        # branch so the chiral limit handedness -> 0 with eps_y = 0
+        # reduces to the existing form.
+        e_bilinear = -prefactor * (
+            s * eps_y_dot_d * (bilinear_up + bilinear_dn)
+            + 1j * eps_dot_d * (bilinear_up - bilinear_dn)
+        )
+        # Chiral DSE: |eps_chir . d|^2 = (1/2) [(eps_x.d)^2 + (eps_y.d)^2]
+        # times lambda^2 / 2 -> (lambda^2 / 4) * sum of squares.
+        e_dse = 0.25 * lam ** 2 * (
+            eps_dot_d ** 2 + eps_y_dot_d ** 2
+        )
 
     return e_ke + e_ee + e_en + e_nn + e_ph + e_bilinear + e_dse
