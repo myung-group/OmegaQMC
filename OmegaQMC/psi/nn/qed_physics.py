@@ -463,15 +463,21 @@ def pauli_fierz_local_energy_signed(
 
     log_n, sign_n = log_psi_signed_fn(elec_crds, nuc_crds, n, params)
     n_int = jnp.asarray(n, dtype=jnp.int32)
-    # Sign-preserving floor: avoid division blow-up while keeping sign.
-    # The previous form `where(|x| < eps, eps, x)` flipped the sign of
-    # tiny negative values to +eps. Now we use a sign-preserving floor:
-    # for small magnitudes, we pad with +-eps matching the sign of x
-    # (defaulting to +eps if x is exactly zero).
-    sign_n_dir = jnp.where(sign_n >= 0.0, 1.0, -1.0)
+    # Phase/sign-preserving floor: avoid division blow-up while keeping
+    # the unit direction. Works for both real sign (in {-1, +1}) and
+    # complex unit sign (= exp(i*phi) on the unit circle). The original
+    # form used `where(sign_n >= 0.0, 1.0, -1.0)` which is not type-safe
+    # for complex sign. Generalized: rescale to magnitude _EPS while
+    # preserving phase, or default to +1 if exactly zero.
+    abs_sign_n = jnp.abs(sign_n)
+    sign_n_unit = jnp.where(
+        abs_sign_n > 0,
+        sign_n / jnp.maximum(abs_sign_n, _EPS),
+        jnp.ones_like(sign_n),
+    )
     safe_sign_n = jnp.where(
-        jnp.abs(sign_n) < _EPS,
-        _EPS * sign_n_dir,
+        abs_sign_n < _EPS,
+        _EPS * sign_n_unit,
         sign_n,
     )
 
