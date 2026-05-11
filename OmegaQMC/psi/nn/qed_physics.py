@@ -229,6 +229,59 @@ def coherent_state_log_amplitude(
 # Kinetic energy (electronic, photon coordinate is discrete here)
 # ---------------------------------------------------------------
 
+def angular_momentum_z_local(
+    log_psi_complex_at_n,    # callable: elec_crds (n_elec, 3) -> complex log Psi
+    elec_crds: jax.Array,
+) -> jax.Array:
+    """Local angular-momentum L_z estimator for complex Psi.
+
+    L_z operator: L_z = -i * sum_e (x_e d/dy_e - y_e d/dx_e).
+
+    For complex log Psi = log R + i * phi:
+      L_z |Psi> / Psi
+        = sum_e [(x_e d/dy_e - y_e d/dx_e) phi]                   (real)
+        + i * sum_e [-(x_e d/dy_e - y_e d/dx_e) log R]            (imag)
+
+    Walker average <Re(L_z_local)> over |Psi|^2 gives <L_z> in atomic
+    units (hbar = 1).
+
+    For real Psi (phi = const): real part vanishes; imaginary part is
+    non-zero per walker but averages to zero over |Psi|^2 by TR
+    symmetry. So <L_z> = 0 for any real-Psi state -- which is why
+    chiral observables require complex_psi.
+
+    Args:
+        log_psi_complex_at_n: callable r (n_elec, 3) -> complex scalar
+            log Psi(r,n). Should produce log_R + i*phi.
+        elec_crds: (n_elec, 3) electron positions.
+
+    Returns:
+        Complex scalar L_z_local; physical observable = Re part of
+        Monte Carlo average.
+    """
+    n_elec = elec_crds.shape[-2]
+    r_flat = elec_crds.reshape(-1)
+
+    def log_R_fn(rf):
+        return jnp.real(
+            log_psi_complex_at_n(rf.reshape(n_elec, 3)),
+        )
+
+    def phi_fn(rf):
+        return jnp.imag(
+            log_psi_complex_at_n(rf.reshape(n_elec, 3)),
+        )
+
+    grad_R = jax.grad(log_R_fn)(r_flat).reshape(n_elec, 3)
+    grad_phi = jax.grad(phi_fn)(r_flat).reshape(n_elec, 3)
+
+    x = elec_crds[..., 0]
+    y = elec_crds[..., 1]
+    lz_real = jnp.sum(x * grad_phi[..., 1] - y * grad_phi[..., 0])
+    lz_imag = -jnp.sum(x * grad_R[..., 1] - y * grad_R[..., 0])
+    return lz_real + 1j * lz_imag
+
+
 def electronic_kinetic_energy_complex(
     log_psi_complex_at_n,    # callable: elec_crds (n_elec, 3) -> complex log Psi(r,n)
     elec_crds: jax.Array,
