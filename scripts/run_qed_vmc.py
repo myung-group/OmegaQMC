@@ -221,6 +221,20 @@ def main():
         chiral_handedness=chiral_handedness,
     )
 
+    # Optional warm-start from a previously saved params pickle.
+    # Useful for hard systems (open-shell radicals, large lambda) where
+    # the optimizer benefits from starting near a converged state from a
+    # nearby Hamiltonian rather than from a random init.
+    init_params_path = opt_cfg.get("init_params_path")
+    if init_params_path is not None:
+        import pickle
+        with open(init_params_path, "rb") as fh:
+            loaded = pickle.load(fh)
+        opt.driver.params = loaded
+        opt.init_params = loaded
+        print(f"warm-start: loaded params from {init_params_path}",
+              flush=True)
+
     # Train.
     train_cfg = opt_cfg["train"]
     print(f"train:   "
@@ -250,6 +264,13 @@ def main():
     )
     train_elapsed = (datetime.now() - t0).total_seconds()
     print(f"train complete in {train_elapsed:.1f}s", flush=True)
+
+    # Save trained params for later warm-start.
+    import pickle
+    params_path = osp.join(log_dir, f"{project}.params.pkl")
+    with open(params_path, "wb") as fh:
+        pickle.dump(params, fh)
+    print(f"trained params saved to {params_path}", flush=True)
 
     # Production eval (longer sampling for tight stderr).
     eval_cfg = opt_cfg.get("eval", {})
