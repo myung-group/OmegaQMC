@@ -94,6 +94,25 @@ def _build_ch3_mol(r_ch_bohr: float = 2.039):
     )
 
 
+def _build_no_mol(r_no_bohr: float = 2.175):
+    """Nitric oxide NO• in linear C∞v geometry along z-axis.
+
+    15 electrons (N: 7, O: 8). Doublet GS (2Π), pi* SOMO doubly
+    degenerate (m_l = ±1 about N-O axis). Real molecule with
+    well-studied EPR data. Bond length 2.175 Bohr (1.151 Å, exp).
+    Sz = +1/2: n_up=8, n_down=7.
+    """
+    from OmegaQMC.utils import Mole_custom
+    return Mole_custom.from_arrays(
+        charges=[7, 8],
+        coords=[
+            [0.0, 0.0, -r_no_bohr / 2],
+            [0.0, 0.0,  r_no_bohr / 2],
+        ],
+        n_up=8, n_down=7,
+    )
+
+
 def _build_h6_mol(r_hh_bohr: float = 1.80):
     """Regular hexagonal H6 in xy plane, D6h symmetry.
 
@@ -165,6 +184,10 @@ def build_molecule(system_cfg: dict):
     if sys_type == "h6":
         return _build_h6_mol(
             r_hh_bohr=float(system_cfg.get("r_hh_bohr", 1.80)),
+        )
+    if sys_type == "no":
+        return _build_no_mol(
+            r_no_bohr=float(system_cfg.get("r_no_bohr", 2.175)),
         )
     raise ValueError(f"unknown system type: {sys_type}")
 
