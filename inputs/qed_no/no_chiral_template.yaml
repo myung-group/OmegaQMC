@@ -1,7 +1,7 @@
 project: PROJECT_OVERRIDE
 seed: 42
 system:
-  type: no
+  type: "no"
   r_no_bohr: 2.175
 cavity:
   omega: 0.5

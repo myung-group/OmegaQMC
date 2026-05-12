@@ -1,7 +1,7 @@
 project: qed_no_L0p1_sp
 seed: 42
 system:
-  type: no
+  type: "no"
   r_no_bohr: 2.175
 cavity:
   omega: 0.5
