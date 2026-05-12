@@ -96,3 +96,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+
+# Paper drafts kept locally, not in repo
+papers/
