@@ -61,7 +61,7 @@ DATA = {
     },
     "H3": {
         "n_elec": 3,
-        "category": "open-shell deg",
+        "category": "open-shell deg SOMO",
         "marker": "D",
         "color": "C3",
         "points": {
@@ -70,6 +70,19 @@ DATA = {
             (0.3,  +1): (-1.484,  -0.3436, 0.0087),   # basin-flipped
             (0.5,  +1): (-1.357,  -0.3570, 0.0082),   # basin-flipped
             (0.5,  -1): (-1.366,  -0.2355, 0.0081),
+        },
+    },
+    "NO": {
+        "n_elec": 15,
+        "category": "open-shell deg π* SOMO",
+        "marker": "v",
+        "color": "C4",
+        "points": {
+            # E values undertrained (vacuum gate ~12 Ha above HF); use
+            # |<L_z>| as the meaningful signal.
+            (0.1,  +1): (-121.28, -0.0451, 0.0064),  # basin-flipped
+            (0.3,  +1): (-122.19, +0.0769, 0.0120),
+            (0.1,  -1): (-111.83, -0.1378, 0.0131),  # |<L_z>|=0.14, matches H3!
         },
     },
 }
