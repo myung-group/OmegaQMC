@@ -274,14 +274,19 @@ class NeuralNetworkWaveFunction(nnx.Module):
         orb_up = orb_up[:, :self.n_up]
         orb_down = orb_down[:, self.n_up:]
         if fs is not None:
-            orb_up = self._apply_backflow(
-                orb_up, fs[0],
-                dists_nuc[:self.n_up],
-            )
-            orb_down = self._apply_backflow(
-                orb_down, fs[1],
-                dists_nuc[self.n_up:],
-            )
+            # fs[0] or fs[1] may be None when the corresponding spin
+            # sector is empty (n_up=0 or n_down=0) -- backflow can't
+            # operate on empty embeddings. Skip in that case.
+            if fs[0] is not None:
+                orb_up = self._apply_backflow(
+                    orb_up, fs[0],
+                    dists_nuc[:self.n_up],
+                )
+            if fs[1] is not None:
+                orb_down = self._apply_backflow(
+                    orb_down, fs[1],
+                    dists_nuc[self.n_up:],
+                )
 
         # --- complex-Psi extension: add learnable imaginary part ---
         # After backflow, optionally add an imaginary modulation

@@ -145,11 +145,35 @@ class ExponentialEnvelopes(nnx.Module):
             return self._call_one_spin(
                 zetas[0], pis[0], diffs,
             )
-        orbs = [
-            self._call_one_spin(z, p, d)
-            for z, p, d in zip(
-                zetas, pis,
-                jnp.split(diffs, (self.n_up,)),
+        # Spin-unrestricted. For fully-spin-polarized cases
+        # (n_up=0 or n_down=0), the empty spin block hits an
+        # `unflatten` ZeroDivisionError. Skip the empty side and
+        # pad with a zero array of the matching (n_det, 0, n_orb)
+        # shape using the shape from the non-empty side.
+        splits = jnp.split(diffs, (self.n_up,))
+        n_per = [splits[0].shape[0], splits[1].shape[0]]
+        orbs_partial = []
+        ref_shape = None
+        for z, p, d, n_spin in zip(zetas, pis, splits, n_per):
+            if n_spin > 0:
+                o = self._call_one_spin(z, p, d)
+                orbs_partial.append(o)
+                ref_shape = o.shape
+            else:
+                orbs_partial.append(None)
+        if ref_shape is None:
+            raise ValueError(
+                "envelope: both spin blocks empty"
             )
-        ]
+        orbs = []
+        for o in orbs_partial:
+            if o is None:
+                orbs.append(jnp.zeros(
+                    (ref_shape[0], 0, ref_shape[2]),
+                    dtype=orbs_partial[0].dtype
+                    if orbs_partial[0] is not None
+                    else orbs_partial[1].dtype,
+                ))
+            else:
+                orbs.append(o)
         return jnp.concatenate(orbs, axis=-2)

@@ -273,21 +273,32 @@ class ElectronGNNLayer(nnx.Module):
             feats = [
                 e.single_array for e in objs
             ]
-            sizes = [f.shape[-2] for f in feats]
+            # Filter out edge blocks whose sender axis is empty
+            # (happens for fully-spin-polarized cases: n_down=0 makes
+            # the 'down' spin block have shape[0]=0). JAX requires all
+            # non-concat dims to match, so we can't include empty
+            # arrays in the concat. Keep them in `new_edges` unchanged.
+            non_empty_idx = [
+                i for i, f in enumerate(feats)
+                if f.shape[0] > 0
+            ]
+            if not non_empty_idx:
+                return edges
+            ne_keys = [keys[i] for i in non_empty_idx]
+            ne_objs = [objs[i] for i in non_empty_idx]
+            ne_feats = [feats[i] for i in non_empty_idx]
+            sizes = [f.shape[-2] for f in ne_feats]
             idxs = list(accumulate(sizes[:-1]))
             combined = jnp.concatenate(
-                feats, axis=-2,
+                ne_feats, axis=-2,
             )
             combined = self.subnet_g(combined)
             parts = jnp.split(
                 combined, idxs, axis=-2,
             )
-            new_edges = {
-                k: e.update_from_single_array(p)
-                for k, e, p in zip(
-                    keys, objs, parts,
-                )
-            }
+            new_edges = dict(edges)  # passthrough for empty blocks
+            for k, e, p in zip(ne_keys, ne_objs, parts):
+                new_edges[k] = e.update_from_single_array(p)
         elif self.deep_features == 'separate':
             new_edges = {
                 k: e.update_from_single_array(
