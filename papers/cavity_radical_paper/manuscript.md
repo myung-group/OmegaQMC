@@ -37,7 +37,8 @@ structure — cavity quantum electrodynamics (cavity QED) chemistry — has
 emerged as a rapidly growing area of theoretical chemistry
 [@Mandal2023ChemRev; @Sidler2022Perspective]. Experimental
 demonstrations of cavity-modified chemical reactivity in the vibrational
-strong-coupling regime [@ChemDynamicsSC2021; @OrientationCavityModified2024]
+strong-coupling regime [@Thomas2019TiltingReactivity;
+@ChemDynamicsSC2021; @OrientationCavityModified2024]
 have spurred extensive theoretical work using a hierarchy of methods:
 from mean-field and coupled-cluster QED [@Haugland2020QEDCCSD;
 @QEDCCgradients2024], through complete-active-space treatments
@@ -134,7 +135,8 @@ The final term is the dipole self-energy (DSE) of the chiral mode.
 The chiral Hamiltonian breaks time-reversal symmetry through the
 i·s·λ coupling, so the ground state is generally complex. We
 extend the Tang-native FermiNet+Jastrow+backflow architecture
-[@Tang2025DeepQMCPolaritonic; @FermiNetOpenSource2024] by adding an
+[@Pfau2020FermiNet; @Tang2025DeepQMCPolaritonic; @FermiNetOpenSource2024]
+by adding an
 explicit imaginary-orbital head: each spin-orbital matrix in the
 Slater determinant acquires a learnable imaginary part initialized
 to zero, which the variational optimization populates as required by
@@ -479,10 +481,16 @@ in this manuscript:
 - `@vonGlehn2023PsiFormer` — PsiFormer architecture
 - `@DSEnonadiabatic2024` — Dipole-self-energy non-adiabatic effects
 - `@UnravelingPolarization2023` — Pauli-Fierz polarization analysis
+- `@Pfau2020FermiNet` — Original FermiNet wavefunction ansatz
+- `@Thomas2019TiltingReactivity` — Landmark Ebbesen cavity-modified
+  reactivity experiment
 
-Additional citations to be added: experimental papers on cavity-modified
-chemistry (Ebbesen et al.), FermiNet original paper (Pfau 2020), and
-references for chiral cavity QED proposals (Sentef, Mazza).
+**Citations to be verified before submission:** chiral cavity QED proposals
+(Sentef et al. on inverse Faraday / cavity ferromagnetism, Mazza et al.
+on cavity-induced topology, Schäfer et al. on cavity-modified SOC) are
+referenced in `citations.bib` as TBD items requiring confirmation of
+arXiv IDs and DOIs. These should be located via the references/qed_nn_vmc/
+literature corpus or a targeted Google Scholar search before publication.
 
 ---
 
