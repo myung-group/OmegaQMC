@@ -80,16 +80,28 @@ def main():
 
                 t0 = time.time()
                 print(f"[{idx}/{total}] {run_id}", flush=True)
-                stdout_path = osp.join(run_dir, "stdout.log")
-                with open(stdout_path, "w") as lf:
-                    rc = subprocess.run(
-                        [sys.executable,
-                         "scripts/run_qed_vmc.py", yaml_path],
-                        stdout=lf, stderr=subprocess.STDOUT,
-                    ).returncode
-                if rc != 0:
-                    print(f"  FAILED rc={rc}", flush=True)
-                    continue
+                if osp.exists(h5_path):
+                    print(f"  (skip — h5 already exists)", flush=True)
+                else:
+                    # Stream per-iter output live to both stdout and a
+                    # per-run stdout.log file.
+                    stdout_path = osp.join(run_dir, "stdout.log")
+                    with open(stdout_path, "w") as lf:
+                        proc = subprocess.Popen(
+                            [sys.executable, "-u",
+                             "scripts/run_qed_vmc.py", yaml_path],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                        )
+                        for line in proc.stdout:
+                            print(line, end="", flush=True)
+                            lf.write(line)
+                            lf.flush()
+                        rc = proc.wait()
+                    if rc != 0:
+                        print(f"  FAILED rc={rc}", flush=True)
+                        continue
                 r = _parse_h5(h5_path)
                 lz = r.get("l_z_mean", float("nan"))
                 lzs = r.get("l_z_serr", float("nan"))
