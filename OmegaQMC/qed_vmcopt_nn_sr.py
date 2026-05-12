@@ -316,6 +316,7 @@ class _QEDVMCOptDriverNN_SR:
             "acceptances_n": [],
             "alpha_history": [],
             "param_change_max": [],
+            "l_z_means": [],   # populated only when complex_psi
         }
         prev_delta = jnp.zeros(n_params, dtype=jnp.float32)
 
@@ -457,6 +458,20 @@ class _QEDVMCOptDriverNN_SR:
             if "alpha" in params:
                 history["alpha_history"].append(float(params["alpha"]))
 
+            # Per-iter <L_z> diagnostic. Cheap when complex_psi is on
+            # (one extra batched forward pass); skipped otherwise.
+            # Helps detect basin-flipping during training: if the optimizer
+            # is sliding between sigma+/sigma- chirality basins, <L_z>
+            # will visibly oscillate around zero before settling.
+            lz_iter = None
+            if (
+                self.complex_psi
+                and getattr(self.driver, "_l_z_batch", None) is not None
+            ):
+                lz_loc = self.driver._l_z_batch(elec, n_ph, params)
+                lz_iter = float(jnp.mean(jnp.real(lz_loc)))
+                history["l_z_means"].append(lz_iter)
+
             if verbose:
                 dt = (datetime.now() - t0).total_seconds()
                 msg = (
@@ -465,6 +480,8 @@ class _QEDVMCOptDriverNN_SR:
                     f"|δp|max={max_abs:.4f}  "
                     f"dt={dt:.2f}s"
                 )
+                if lz_iter is not None:
+                    msg += f"  <L_z>={lz_iter:+.4f}"
                 if "alpha" in params:
                     msg += f"  α={float(params['alpha']):.4f}"
                 if verbose >= 2:

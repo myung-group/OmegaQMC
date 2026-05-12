@@ -322,6 +322,8 @@ def main():
         g_train.create_dataset("param_change_max", data=np.array(history["param_change_max"]))
         if history["alpha_history"]:
             g_train.create_dataset("alpha", data=np.array(history["alpha_history"]))
+        if history.get("l_z_means"):
+            g_train.create_dataset("l_z_means", data=np.array(history["l_z_means"]))
         g_train.attrs["elapsed_s"] = train_elapsed
 
         if eval_result is not None:
