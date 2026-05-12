@@ -244,6 +244,7 @@ class _QEDVMCOptDriverNN_SR:
         jac_batch_size: int = 64,
         alpha_lr_scale: float = 1.0,
         verbose: int = 1,
+        chirality_sign_penalty: float = 0.0,
     ):
         """Run SR iterations.
 
@@ -360,6 +361,29 @@ class _QEDVMCOptDriverNN_SR:
             else:
                 E_mean = float(jnp.mean(e_loc))
                 E_serr = float(jnp.std(e_loc) / jnp.sqrt(num_walkers))
+
+            # Chirality sign-constraint penalty (Path B): add -alpha*s*<L_z>
+            # to the SR objective to bias the optimizer toward the
+            # cavity-handedness-matching basin. Penalty is on the
+            # MINIMIZED quantity (effective e_loc); E_mean reported above
+            # is the true energy without penalty.
+            #
+            # The sign of the bias matches the cavity handedness:
+            #   s=+1 (sigma+): minimize E - alpha*<L_z> -> favors <L_z>>0
+            #   s=-1 (sigma-): minimize E + alpha*<L_z> -> favors <L_z><0
+            lz_loc_for_penalty = None
+            if (
+                chirality_sign_penalty != 0.0
+                and self.complex_psi
+                and getattr(self.driver, "_l_z_batch", None) is not None
+            ):
+                lz_loc_for_penalty = jnp.real(
+                    self.driver._l_z_batch(elec, n_ph, params)
+                )
+                s = getattr(self.driver, "chiral_handedness", 1)
+                e_loc = e_loc - (
+                    chirality_sign_penalty * float(s)
+                ) * lz_loc_for_penalty.astype(e_loc.dtype)
 
             # (c) Jacobian of log|Ψ| (or (log|Ψ|, phase) for complex_psi)
             #     evaluated walker-by-walker in batches.

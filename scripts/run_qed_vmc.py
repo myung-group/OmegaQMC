@@ -289,6 +289,9 @@ def main():
         jac_batch_size=int(train_cfg.get("jac_batch_size", 64)),
         alpha_lr_scale=float(train_cfg.get("alpha_lr_scale", 1.0)),
         verbose=int(train_cfg.get("verbose", 1)),
+        chirality_sign_penalty=float(
+            train_cfg.get("chirality_sign_penalty", 0.0)
+        ),
     )
     train_elapsed = (datetime.now() - t0).total_seconds()
     print(f"train complete in {train_elapsed:.1f}s", flush=True)
