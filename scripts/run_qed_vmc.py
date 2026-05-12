@@ -69,6 +69,31 @@ def _build_h2_h2_mol(R_intermol_bohr: float, L_h2_bohr: float = 1.4010):
     )
 
 
+def _build_ch3_mol(r_ch_bohr: float = 2.039):
+    """Methyl radical CH3· in planar D3h geometry.
+
+    Lying in the xy plane (C at origin, H's at 120 deg).
+    Cavity propagation axis = z, polarization in xy plane.
+    Doublet ground state with Sz=+1/2: n_up=5, n_down=4.
+    Standard r_CH=1.079 A = 2.039 Bohr (gas-phase ESR).
+    """
+    import math
+    from OmegaQMC.utils import Mole_custom
+    coords = [[0.0, 0.0, 0.0]]
+    for k in range(3):
+        theta = 2 * math.pi * k / 3
+        coords.append([
+            r_ch_bohr * math.cos(theta),
+            r_ch_bohr * math.sin(theta),
+            0.0,
+        ])
+    return Mole_custom.from_arrays(
+        charges=[6, 1, 1, 1],
+        coords=coords,
+        n_up=5, n_down=4,
+    )
+
+
 def build_molecule(system_cfg: dict):
     sys_type = system_cfg["type"]
     if sys_type == "h2":
@@ -80,6 +105,10 @@ def build_molecule(system_cfg: dict):
         return _build_h2_h2_mol(
             R_intermol_bohr=float(system_cfg["R_intermol_bohr"]),
             L_h2_bohr=float(system_cfg.get("L_h2_bohr", 1.4010)),
+        )
+    if sys_type == "ch3":
+        return _build_ch3_mol(
+            r_ch_bohr=float(system_cfg.get("r_ch_bohr", 2.039)),
         )
     raise ValueError(f"unknown system type: {sys_type}")
 

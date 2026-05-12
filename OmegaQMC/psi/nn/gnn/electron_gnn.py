@@ -287,14 +287,20 @@ class ElectronGNNLayer(nnx.Module):
             ne_keys = [keys[i] for i in non_empty_idx]
             ne_objs = [objs[i] for i in non_empty_idx]
             ne_feats = [feats[i] for i in non_empty_idx]
-            sizes = [f.shape[-2] for f in ne_feats]
+            # Edge features may be (n_sender, n_receiver, feat_dim) where
+            # n_sender varies by edge type (e.g. n_up vs n_down) but the
+            # other dims match across edge types. Concat along the sender
+            # axis (axis 0 for 3D, axis 0 for 2D since 2D edges are
+            # already flattened to (n_edges, feat_dim)) so the MLP can
+            # process them with shared weights, then split back.
+            sizes = [f.shape[0] for f in ne_feats]
             idxs = list(accumulate(sizes[:-1]))
             combined = jnp.concatenate(
-                ne_feats, axis=-2,
+                ne_feats, axis=0,
             )
             combined = self.subnet_g(combined)
             parts = jnp.split(
-                combined, idxs, axis=-2,
+                combined, idxs, axis=0,
             )
             new_edges = dict(edges)  # passthrough for empty blocks
             for k, e, p in zip(ne_keys, ne_objs, parts):

@@ -1,0 +1,60 @@
+# =====================================================================
+# Phase 2p step 1: methyl radical CH3· vacuum gate.
+#
+# 9 electrons, doublet ground state (Sz=+1/2, n_up=5, n_down=4).
+# Planar D3h geometry, r_CH = 2.039 Bohr (1.079 A, gas-phase ESR).
+# Lambda = 0 (cavity decoupled) — pure electronic ground state.
+#
+# Expected: ⟨L_z⟩ = 0 exactly (no chirality, parity-symmetric).
+# E_VMC target: literature CH3· FCI/CBS is around -39.84 Ha; with our
+# minimal NN trial and medium budget we should reach -39.7 to -39.8 Ha
+# (within ~50 mHa of FCI is acceptable for vacuum gate).
+#
+# Budget: 500 iters x 256 walkers ~ 10 min train + 1 min eval on
+# mango GH200 (9 e- ~ 5x H2 per-iter cost).
+# =====================================================================
+
+project: qed_ch3_vacuum_gate
+
+seed: 42
+
+system:
+  type: ch3
+  r_ch_bohr: 2.039
+
+cavity:
+  omega: 0.5
+  lambda: 0.0
+  polarization: [1.0, 0.0, 0.0]   # in-plane, irrelevant at lambda=0
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 500
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0
