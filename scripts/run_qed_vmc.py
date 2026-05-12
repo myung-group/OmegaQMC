@@ -285,6 +285,9 @@ def main():
             num_blocks_equil=int(eval_cfg.get("num_blocks_equil", 10)),
             mc_timestep=float(eval_cfg.get("mc_timestep", 0.1)),
             verbose=int(eval_cfg.get("verbose", 0)),
+            dump_walker_positions=bool(
+                eval_cfg.get("dump_walker_positions", False)
+            ),
         )
         eval_elapsed = (datetime.now() - eval_t0).total_seconds()
         lz_str = (
@@ -347,6 +350,17 @@ def main():
                 )
 
     print(f"results saved to {out_path}", flush=True)
+
+    # Optional walker-position dump (for density chirality post-processing).
+    if eval_result is not None and "walker_positions" in eval_result:
+        wp_path = osp.join(log_dir, f"{project}.walkers.npz")
+        np.savez_compressed(
+            wp_path,
+            walker_positions=eval_result["walker_positions"],
+            nuc_coords=np.array(mol.coords),
+            charges=np.array(mol.charges),
+        )
+        print(f"walker positions saved to {wp_path}", flush=True)
 
 
 if __name__ == "__main__":

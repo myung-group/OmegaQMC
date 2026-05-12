@@ -36,6 +36,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .utils import Mole_custom, do_binning_analysis
 from .psi.nn.qed_adapter import (
@@ -440,6 +441,7 @@ class _QEDVMCDriverNN:
         num_blocks_equil: int = 20,
         mc_timestep: float = 0.1,
         verbose: int = 1,
+        dump_walker_positions: bool = False,
     ):
         """Execute a fixed-parameter QED-VMC run.
 
@@ -459,6 +461,7 @@ class _QEDVMCDriverNN:
         block_energies = []
         n_photon_means = []
         l_z_means = []   # only populated when complex_psi
+        walker_snapshots = []   # only populated when dump_walker_positions
         accept_r_running = 0.0
         accept_n_running = 0.0
         total_r_attempts = 0
@@ -500,6 +503,12 @@ class _QEDVMCDriverNN:
             if self._l_z_batch is not None:
                 lz_loc = self._l_z_batch(elec, n_ph, params)
                 l_z_means.append(float(jnp.mean(jnp.real(lz_loc))))
+
+            # Optional walker-position snapshot for density-chirality
+            # post-processing. Only during production blocks. Cost: trivial
+            # (~100 KB per snapshot for 256 walkers x 9 electrons x 3 coords).
+            if dump_walker_positions and blk >= num_blocks_equil:
+                walker_snapshots.append(np.asarray(elec))
 
             # Adapt sigma_r toward target acceptance during equilibration.
             if blk < num_blocks_equil and total_r_attempts > 0:
@@ -555,6 +564,8 @@ class _QEDVMCDriverNN:
                 jnp.std(prod_lz) / max(jnp.sqrt(len(prod_lz)), 1.0)
             )
             result["l_z_blocks"] = prod_lz
+        if walker_snapshots:
+            result["walker_positions"] = np.stack(walker_snapshots, axis=0)
         return result
 
 
