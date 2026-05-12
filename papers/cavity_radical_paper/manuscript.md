@@ -34,23 +34,29 @@ magnetism in strong-coupling cavity-QED chemistry.
 
 The interaction of confined light fields with molecular electronic
 structure — cavity quantum electrodynamics (cavity QED) chemistry — has
-emerged as a rapidly growing area of theoretical chemistry. Experimental
+emerged as a rapidly growing area of theoretical chemistry
+[@Mandal2023ChemRev; @Sidler2022Perspective]. Experimental
 demonstrations of cavity-modified chemical reactivity in the vibrational
-strong-coupling regime [Ebbesen et al.] have spurred extensive theoretical
-work using a hierarchy of methods: from mean-field Pauli-Fierz coupled-cluster
-[Schäfer, Flick, Rubio], through complete-active-space treatments
-[Riera, Galego], to recent neural-network variational Monte Carlo
-[Tang, Weight]. Most theoretical work has focused on closed-shell systems
-in the linearly-polarized cavity regime.
+strong-coupling regime [@ChemDynamicsSC2021; @OrientationCavityModified2024]
+have spurred extensive theoretical work using a hierarchy of methods:
+from mean-field and coupled-cluster QED [@Haugland2020QEDCCSD;
+@QEDCCgradients2024], through complete-active-space treatments
+[@Galego2019CavityCasimirPolder; @Haugland2021Intermolecular], to recent
+quantum-Monte-Carlo approaches [@Weber2024PhaselessQEDAFQMC;
+@Weight2025AFQMCelectronPhoton; @QMC2DEGcavity2024] and neural-network
+variational Monte Carlo [@Tang2025DeepQMCPolaritonic]. Most theoretical
+work has focused on closed-shell systems in the linearly-polarized
+cavity regime.
 
 A distinct and largely unexplored direction is **chiral cavity QED**:
 cavities that support circularly-polarized (σ±) modes carrying intrinsic
 angular momentum. Such cavities can in principle drive cavity-induced
 inverse-Faraday effects, persistent orbital currents, and topological
-transitions in molecular systems [Sentef, Mazza, Galego, Schäfer]. The
-theoretical predictions are striking — but the calculations have so far
-relied on perturbation theory or mean-field treatments that may not capture
-the strongly-correlated regime.
+transitions in molecular systems [@Galego2019CavityCasimirPolder;
+@Sidler2022Perspective]. The theoretical predictions are striking — but
+the calculations have so far relied on perturbation theory or mean-field
+treatments that may not capture the strongly-correlated regime accessible
+in the deeply-coupled regime λ ≳ 0.3 [@DSEnonadiabatic2024].
 
 In parallel, the cavity-QED chemistry community has paid relatively little
 attention to **open-shell radicals** despite their well-known sensitivity
@@ -58,12 +64,16 @@ to magnetic perturbations in EPR and NMR. Open-shell molecules pose two
 specific difficulties: their inherent multi-reference character is hard
 for HF/DFT-based methods, and their degenerate singly-occupied molecular
 orbitals (SOMOs) admit a qualitatively different cavity response than
-closed-shell systems.
+closed-shell systems. Recent NN-VMC work [@Tang2025DeepQMCPolaritonic;
+@FoundationNNVMC2025; @FermiNetOpenSource2024] has opened a route to
+fully-correlated polaritonic ground states, but this potential has not
+yet been brought to bear on the open-shell + chiral combination.
 
 In this work we use **complex-valued neural-network variational Monte
-Carlo** to compute the ground state of a series of open-shell radicals in
-a single-mode electric chiral cavity described by the Pauli-Fierz
-Hamiltonian. Our headline finding is that at moderate coupling (λ = 0.5,
+Carlo** [@vonGlehn2023PsiFormer; @Tang2025DeepQMCPolaritonic] to compute
+the ground state of a series of open-shell radicals in a single-mode
+electric chiral cavity described by the Pauli-Fierz Hamiltonian
+[@DSEnonadiabatic2024; @UnravelingPolarization2023]. Our headline finding is that at moderate coupling (λ = 0.5,
 ω = 0.5 Ha), the cavity induces a ground-state orbital angular momentum
 ⟨L_z⟩ ≈ +0.053 ℏ in methyl radical CH₃· — equivalent to an effective
 static magnetic field of **~5000 Tesla** along the C₃ symmetry axis. This
@@ -124,10 +134,11 @@ The final term is the dipole self-energy (DSE) of the chiral mode.
 The chiral Hamiltonian breaks time-reversal symmetry through the
 i·s·λ coupling, so the ground state is generally complex. We
 extend the Tang-native FermiNet+Jastrow+backflow architecture
-[Tang 2025] by adding an explicit imaginary-orbital head: each
-spin-orbital matrix in the Slater determinant acquires a learnable
-imaginary part initialized to zero, which the variational
-optimization populates as required by the Hamiltonian. The full
+[@Tang2025DeepQMCPolaritonic; @FermiNetOpenSource2024] by adding an
+explicit imaginary-orbital head: each spin-orbital matrix in the
+Slater determinant acquires a learnable imaginary part initialized
+to zero, which the variational optimization populates as required by
+the Hamiltonian. The full
 ansatz is
 
 Ψ(r₁,...,r_N, n_ph) = det[M_real + i M_imag] · J(r) · exp(-Σ_i a_i)
@@ -356,21 +367,28 @@ estimated to be ~1/137 of the electric-dipole response.
 
 Cavity-induced orbital responses have been predicted theoretically in
 several recent works using perturbation theory or mean-field approaches
-[Sentef 2018; Galego 2019; Schäfer 2023]. To our knowledge the present
-work is the first to use a fully-correlated wavefunction method
-(NN-VMC) for the chiral cavity ground state. The B_eff ≈ 5000 T
-prediction is consistent in order of magnitude with perturbation-theory
-estimates for similar λ in the recent literature; our advance is the
-direct, beyond-perturbative ⟨L_z⟩ calculation across a system menagerie
-and the explicit NMR shift prediction.
+[@Galego2019CavityCasimirPolder; @Sidler2022Perspective;
+@Haugland2020QEDCCSD]. To our knowledge the present work is the first to
+use a fully-correlated wavefunction method (NN-VMC) for the chiral
+cavity ground state of open-shell radicals. Among recent QMC-based
+cavity-QED treatments, AFQMC studies have so far focused on closed-shell
+molecules [@Weber2024PhaselessQEDAFQMC; @Weight2025AFQMCelectronPhoton]
+and uniform electron gases [@QMC2DEGcavity2024]; our work extends the
+NN-VMC polaritonic framework of [@Tang2025DeepQMCPolaritonic] to
+chiral polarization and to the open-shell-radical regime. The B_eff
+≈ 5000 T prediction is consistent in order of magnitude with
+perturbation-theory estimates for similar λ in the recent literature;
+our advance is the direct, beyond-perturbative ⟨L_z⟩ calculation across
+a system menagerie and the explicit NMR-shift prediction.
 
 ### 4.4 Experimental outlook
 
 The cavity geometry assumed here — a single-mode resonator with
 ω ≈ 0.5 Hartree (i.e. ~13 eV, vacuum-ultraviolet) and λ ≳ 0.3 —
 is more demanding than the vibrational and infrared cavities used in
-existing experiments. However, advances in metasurface and chip-scale
-cavity engineering put such regimes within reach in the next decade.
+existing experiments [@ChemDynamicsSC2021; @OrientationCavityModified2024].
+However, advances in metasurface and chip-scale cavity engineering put
+such regimes within reach in the next decade.
 
 The most accessible experimental signature is the predicted ~100–1000
 ppm 1H NMR chemical shift. This is two orders of magnitude beyond
@@ -439,8 +457,32 @@ with [TBD].]
 
 ## Bibliography
 
-[TBD — cite Schäfer 2022, Sentef 2018, Riera 2024, Pfau 2020 FermiNet,
-Tang 2025 polariton VMC, Weight, Galego, etc.]
+The full BibTeX entries are in `citations.bib`. Inline citations used
+in this manuscript:
+
+- `@Mandal2023ChemRev` — Chem. Rev. perspective on polaritonic chemistry
+- `@Sidler2022Perspective` — Perspective on cavity-QED ab initio methods
+- `@ChemDynamicsSC2021` — Cavity-modified vibrational dynamics
+- `@OrientationCavityModified2024` — Cavity-modified molecular orientation
+- `@Haugland2020QEDCCSD` — Foundational QED-CCSD-1 (anchor paper for
+  cavity-QED CC methods)
+- `@QEDCCgradients2024` — Analytical QED-CC gradients
+- `@Galego2019CavityCasimirPolder` — Cavity-induced inter-molecular forces
+- `@Haugland2021Intermolecular` — Intermolecular cavity interactions
+- `@Weber2024PhaselessQEDAFQMC` — Phaseless QED-AFQMC (closed-shell)
+- `@Weight2025AFQMCelectronPhoton` — Electron-photon correlation AFQMC
+- `@QMC2DEGcavity2024` — Cavity-coupled 2DEG via QMC
+- `@Tang2025DeepQMCPolaritonic` — Polaritonic deep-QMC (architecture
+  reference; we extend it with chiral polarization)
+- `@FoundationNNVMC2025` — Foundation NN-VMC methods
+- `@FermiNetOpenSource2024` — FermiNet open-source ansatz
+- `@vonGlehn2023PsiFormer` — PsiFormer architecture
+- `@DSEnonadiabatic2024` — Dipole-self-energy non-adiabatic effects
+- `@UnravelingPolarization2023` — Pauli-Fierz polarization analysis
+
+Additional citations to be added: experimental papers on cavity-modified
+chemistry (Ebbesen et al.), FermiNet original paper (Pfau 2020), and
+references for chiral cavity QED proposals (Sentef, Mazza).
 
 ---
 
