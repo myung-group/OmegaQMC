@@ -1,0 +1,55 @@
+# =====================================================================
+# CH3· sigma+ lambda=0.10 — rerun explicitly to save trained params,
+# which serve as warm-start seed for lambda=0.20 and lambda=0.30 reruns.
+#
+# Same seed/budget as the original lambda=0.10 run, so the trained
+# wavefunction should match (within MC noise of seed +1 RNG).
+# =====================================================================
+
+project: qed_ch3_chiral_L050_test
+
+seed: 42
+
+system:
+  type: ch3
+  r_ch_bohr: 2.039
+
+cavity:
+  omega: 0.5
+  lambda: 0.50
+  polarization:   [1.0, 0.0, 0.0]
+  polarization_y: [0.0, 1.0, 0.0]
+  chiral_handedness: 1
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow_complex.yaml
+
+optimizer:
+  arch: tang_native
+  complex_psi: true
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 2000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.02
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.2
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0
