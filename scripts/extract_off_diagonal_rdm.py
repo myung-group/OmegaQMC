@@ -213,9 +213,11 @@ def main():
             )
             return log_mags.astype(jnp.complex128) + log_signs
 
-    total_real = 0.0
-    total_imag = 0.0
-    total_count = 0
+    # Estimator: γ_kl ≈ <Σ_e φ_k*(r_e) · V_box · <φ_l(r') · Ψ(R')/Ψ(R)>_r'>
+    # We accumulate the SUM over electrons inside each walker
+    # (not the average) — averaging is over walkers only.
+    walker_sums_re = []
+    walker_sums_im = []
 
     t0 = datetime.now()
     for blk in range(args.num_blocks):
@@ -231,19 +233,17 @@ def main():
         n_ph_np = np.asarray(n_ph)
         log_psi_R = np.asarray(log_psi_batch(elec, n_ph))
 
-        # For each walker, for each electron, do swap-trick
+        # For each walker, accumulate the SUM over electrons.
         for w in range(args.num_walkers):
+            walker_sum = 0j
             for e in range(n_elec):
                 r_e = elec_np[w, e]
-                phi_at_re = eval_phi(r_e[None, :])[0]
-                phi_y_at_re = phi_at_re[1]   # real
-                # Sample K aux positions
+                phi_y_at_re = eval_phi(r_e[None, :])[0, 1]
                 r_aux = rng.uniform(
                     -args.box_radius, args.box_radius,
                     size=(args.n_aux, 3),
                 )
-                phi_x_at_aux = eval_phi(r_aux)[:, 0]   # (K,) real
-                # Build perturbed walker configs: replace r_e with each r_aux
+                phi_x_at_aux = eval_phi(r_aux)[:, 0]
                 elec_pert = np.tile(elec_np[w:w+1], (args.n_aux, 1, 1))
                 elec_pert[:, e, :] = r_aux
                 n_ph_pert = np.tile(n_ph_np[w:w+1], (args.n_aux,))
@@ -253,47 +253,57 @@ def main():
                         jnp.asarray(n_ph_pert),
                     )
                 )
-                # Ratio Psi(R')/Psi(R)
-                log_ratio = log_psi_pert - log_psi_R[w]
-                ratio = np.exp(log_ratio)
-                # Estimator contribution for this (w, e):
-                # contrib_k = phi_y(r_e) * phi_x(r'_k) * ratio_k * V_box
-                contrib = (
+                ratio = np.exp(log_psi_pert - log_psi_R[w])
+                contrib_e = (
                     phi_y_at_re * phi_x_at_aux * ratio * V_box
                 ).mean()
-                total_real += float(np.real(contrib))
-                total_imag += float(np.imag(contrib))
-                total_count += 1
+                walker_sum += contrib_e
+            walker_sums_re.append(float(np.real(walker_sum)))
+            walker_sums_im.append(float(np.imag(walker_sum)))
 
         elapsed = (datetime.now() - t0).total_seconds()
-        running_re = total_real / total_count
-        running_im = total_imag / total_count
+        running_re = float(np.mean(walker_sums_re))
+        running_im = float(np.mean(walker_sums_im))
+        running_im_serr = float(
+            np.std(walker_sums_im) / np.sqrt(len(walker_sums_im))
+        )
         running_delta = -2 * running_im
         print(f"  blk {blk+1}/{args.num_blocks}: "
               f"<c_y* c_x>_re={running_re:+.5f} "
               f"<c_y* c_x>_im={running_im:+.5f} "
-              f"delta_e'={running_delta:+.5f} "
-              f"(t={elapsed:.0f}s, samples={total_count})")
+              f"(±{running_im_serr:.5f}) "
+              f"δ_e'={running_delta:+.5f} "
+              f"t={elapsed:.0f}s")
 
-    avg_real = total_real / total_count
-    avg_imag = total_imag / total_count
+    avg_real = float(np.mean(walker_sums_re))
+    avg_imag = float(np.mean(walker_sums_im))
+    serr_real = float(np.std(walker_sums_re) / np.sqrt(len(walker_sums_re)))
+    serr_imag = float(np.std(walker_sums_im) / np.sqrt(len(walker_sums_im)))
     delta_e = -2 * avg_imag
+    delta_e_serr = 2 * serr_imag
 
     out = args.out or osp.join(log_dir, f"{project}.rdm_off_diagonal.npz")
     np.savez(
         out,
         c_yx_real=avg_real, c_yx_imag=avg_imag,
-        delta_e_prime=delta_e,
+        c_yx_real_serr=serr_real, c_yx_imag_serr=serr_imag,
+        delta_e_prime=delta_e, delta_e_prime_serr=delta_e_serr,
         cavity_lambda=lam, chiral_handedness=chiral_handedness,
-        n_samples=total_count,
+        n_walker_samples=len(walker_sums_re),
     )
     print(f"\n=== FINAL ===")
-    print(f"  <c_y^dag c_x>_real = {avg_real:+.5f}")
-    print(f"  <c_y^dag c_x>_imag = {avg_imag:+.5f}")
+    print(f"  <c_y^dag c_x>_real = {avg_real:+.5f} ± {serr_real:.5f}")
+    print(f"  <c_y^dag c_x>_imag = {avg_imag:+.5f} ± {serr_imag:.5f}")
     print(f"  delta_e' = n(e'_+) - n(e'_-) = -2 Im<c_y^dag c_x> = "
-          f"{delta_e:+.5f}")
-    print(f"  <L_z>_VMC was: {-0.0530:+.5f} (sigma+) "
-          f"# compare to delta_e' should match")
+          f"{delta_e:+.5f} ± {delta_e_serr:.5f}")
+    # Predicted value from analytical L_z argument:
+    # <L_z>_e' = -1.56 Im<c_y^dag c_x>, where 1.56 = 2 * 0.78
+    # (0.78 = <e'_+|L_z|e'_+> from MO reference, < 1 hbar due to sp2/H mixing).
+    # So predicted Im<c_y^dag c_x> = -<L_z>/1.56.
+    # Print this for diagnostic; user supplies the relevant <L_z> measurement.
+    print(f"\n  Predicted Im<c_y* c_x> if all <L_z> from e' shell:")
+    print(f"    For <L_z>=+0.053 (L050 sigma+): predict {-0.053/1.56:+.5f}")
+    print(f"    For <L_z>=-0.037 (L050 sigma-): predict {-(-0.037)/1.56:+.5f}")
     print(f"  saved to {out}")
 
 
