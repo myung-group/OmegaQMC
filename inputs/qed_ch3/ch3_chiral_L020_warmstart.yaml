@@ -1,0 +1,64 @@
+# =====================================================================
+# CH3· sigma+ lambda=0.20, WARM-STARTED from converged lambda=0.10 params.
+#
+# Combats the basin-flipping observed in the cold-start scan (where
+# lambda=0.20 came in with <L_z>=+0.004 vs lambda=0.10's +0.011, with
+# the optimizer evidently finding a different basin).
+#
+# Settings hardened vs cold-start template:
+#   - 5000 iters (was 2000) for proper convergence of cavity-dressed state
+#   - lr 0.01 (was 0.02) to slow exploration once near minimum
+#   - max_param_change 0.1 (was 0.2) for tighter step control
+#
+# Expected: <L_z>(0.20) ~ (0.20/0.10)^2 * 0.011 = 0.044 (if lambda^2 holds)
+#           and well within the same basin as lambda=0.10.
+# =====================================================================
+
+project: qed_ch3_chiral_L020_warmstart
+
+seed: 42
+
+system:
+  type: ch3
+  r_ch_bohr: 2.039
+
+cavity:
+  omega: 0.5
+  lambda: 0.20
+  polarization:   [1.0, 0.0, 0.0]
+  polarization_y: [0.0, 1.0, 0.0]
+  chiral_handedness: 1
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow_complex.yaml
+
+optimizer:
+  arch: tang_native
+  complex_psi: true
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+  init_params_path: logs/qed_ch3_chiral_L010_warmstart_seed/qed_ch3_chiral_L010_warmstart_seed.params.pkl
+
+  train:
+    num_iters: 5000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.01
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.1
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0
