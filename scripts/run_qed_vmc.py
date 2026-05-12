@@ -94,6 +94,30 @@ def _build_ch3_mol(r_ch_bohr: float = 2.039):
     )
 
 
+def _build_h6_mol(r_hh_bohr: float = 1.80):
+    """Regular hexagonal H6 in xy plane, D6h symmetry.
+
+    6-electron closed-shell aromatic singlet. Minimal model for an
+    aromatic π ring without the carbon-frame complication. No
+    degenerate SOMO (closed shell), but the doubly-degenerate HOMO/LUMO
+    pair gives large π-ring-current capacity under cavity.
+    H-H nearest-neighbor distance default 1.80 Bohr.
+    """
+    import math
+    from OmegaQMC.utils import Mole_custom
+    # circumradius for regular hexagon with side r_hh
+    R = r_hh_bohr   # circumradius = side length for regular hexagon
+    coords = []
+    for k in range(6):
+        theta = 2 * math.pi * k / 6
+        coords.append([R * math.cos(theta), R * math.sin(theta), 0.0])
+    return Mole_custom.from_arrays(
+        charges=[1, 1, 1, 1, 1, 1],
+        coords=coords,
+        n_up=3, n_down=3,
+    )
+
+
 def _build_h3_mol(r_hh_bohr: float = 1.65):
     """Equilateral H3 in xy plane, D3h symmetry.
 
@@ -137,6 +161,10 @@ def build_molecule(system_cfg: dict):
     if sys_type == "h3":
         return _build_h3_mol(
             r_hh_bohr=float(system_cfg.get("r_hh_bohr", 1.65)),
+        )
+    if sys_type == "h6":
+        return _build_h6_mol(
+            r_hh_bohr=float(system_cfg.get("r_hh_bohr", 1.80)),
         )
     raise ValueError(f"unknown system type: {sys_type}")
 
