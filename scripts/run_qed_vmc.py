@@ -94,6 +94,30 @@ def _build_ch3_mol(r_ch_bohr: float = 2.039):
     )
 
 
+def _build_h3_mol(r_hh_bohr: float = 1.65):
+    """Equilateral H3 in xy plane, D3h symmetry.
+
+    3-electron doublet with degenerate E' SOMO (m_l=+-1 character).
+    H-H distance default 1.65 Bohr ~ short-bond regime where MOs are
+    well-defined; H3 is metastable in vacuum (Jahn-Teller unstable) but
+    valid as a fixed-geometry model system.
+    Sz = +1/2: n_up=2, n_down=1.
+    """
+    import math
+    from OmegaQMC.utils import Mole_custom
+    # circumradius for equilateral triangle with side r_hh
+    R = r_hh_bohr / math.sqrt(3.0)
+    coords = []
+    for k in range(3):
+        theta = 2 * math.pi * k / 3
+        coords.append([R * math.cos(theta), R * math.sin(theta), 0.0])
+    return Mole_custom.from_arrays(
+        charges=[1, 1, 1],
+        coords=coords,
+        n_up=2, n_down=1,
+    )
+
+
 def build_molecule(system_cfg: dict):
     sys_type = system_cfg["type"]
     if sys_type == "h2":
@@ -109,6 +133,10 @@ def build_molecule(system_cfg: dict):
     if sys_type == "ch3":
         return _build_ch3_mol(
             r_ch_bohr=float(system_cfg.get("r_ch_bohr", 2.039)),
+        )
+    if sys_type == "h3":
+        return _build_h3_mol(
+            r_hh_bohr=float(system_cfg.get("r_hh_bohr", 1.65)),
         )
     raise ValueError(f"unknown system type: {sys_type}")
 
