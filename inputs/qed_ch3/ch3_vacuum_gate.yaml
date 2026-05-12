@@ -14,7 +14,7 @@
 # mango GH200 (9 e- ~ 5x H2 per-iter cost).
 # =====================================================================
 
-project: qed_ch3_vacuum_gate
+project: qed_ch3_vacuum_gate_long
 
 seed: 42
 
@@ -37,16 +37,16 @@ optimizer:
   nph_max: 4
 
   train:
-    num_iters: 500
+    num_iters: 2000
     num_walkers: 256
     num_steps_per_block: 30
     num_blocks_equil: 5
     num_steps_decorr: 5
     mc_timestep: 0.1
-    lr: 0.05
+    lr: 0.02
     damping: 1e-3
     cg_maxiter: 100
-    max_param_change: 0.5
+    max_param_change: 0.2
     jac_batch_size: 64
     verbose: 1
 
