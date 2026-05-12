@@ -279,7 +279,11 @@ def main():
     avg_imag = float(np.mean(walker_sums_im))
     serr_real = float(np.std(walker_sums_re) / np.sqrt(len(walker_sums_re)))
     serr_imag = float(np.std(walker_sums_im) / np.sqrt(len(walker_sums_im)))
-    delta_e = -2 * avg_imag
+    # Sign convention derivation:
+    #   c_+ = (c_x + i c_y)/√2, c_- = (c_x - i c_y)/√2
+    #   n_+ - n_- = i (<c_x^† c_y> - <c_y^† c_x>) = +2 Im<c_y^† c_x>
+    # So δ_e' = +2 Im(c_y_dag c_x), NOT -2.
+    delta_e = +2 * avg_imag
     delta_e_serr = 2 * serr_imag
 
     out = args.out or osp.join(log_dir, f"{project}.rdm_off_diagonal.npz")
@@ -294,16 +298,14 @@ def main():
     print(f"\n=== FINAL ===")
     print(f"  <c_y^dag c_x>_real = {avg_real:+.5f} ± {serr_real:.5f}")
     print(f"  <c_y^dag c_x>_imag = {avg_imag:+.5f} ± {serr_imag:.5f}")
-    print(f"  delta_e' = n(e'_+) - n(e'_-) = -2 Im<c_y^dag c_x> = "
+    print(f"  delta_e' = n(e'_+) - n(e'_-) = +2 Im<c_y^dag c_x> = "
           f"{delta_e:+.5f} ± {delta_e_serr:.5f}")
-    # Predicted value from analytical L_z argument:
-    # <L_z>_e' = -1.56 Im<c_y^dag c_x>, where 1.56 = 2 * 0.78
-    # (0.78 = <e'_+|L_z|e'_+> from MO reference, < 1 hbar due to sp2/H mixing).
-    # So predicted Im<c_y^dag c_x> = -<L_z>/1.56.
-    # Print this for diagnostic; user supplies the relevant <L_z> measurement.
-    print(f"\n  Predicted Im<c_y* c_x> if all <L_z> from e' shell:")
-    print(f"    For <L_z>=+0.053 (L050 sigma+): predict {-0.053/1.56:+.5f}")
-    print(f"    For <L_z>=-0.037 (L050 sigma-): predict {-(-0.037)/1.56:+.5f}")
+    # Predicted from analytical L_z argument:
+    # <L_z>_e' = 0.78 (n_+ - n_-) = 0.78 × δ_e' = +1.56 Im<c_y^dag c_x>
+    # So predicted Im<c_y^dag c_x> = <L_z> / 1.56.
+    print(f"\n  Predicted Im<c_y^dag c_x> = <L_z>/1.56 if all <L_z> from e':")
+    print(f"    For <L_z>=+0.053 (L050 sigma+): predict {+0.053/1.56:+.5f}")
+    print(f"    For <L_z>=-0.037 (L050 sigma-): predict {-0.037/1.56:+.5f}")
     print(f"  saved to {out}")
 
 
