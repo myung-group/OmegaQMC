@@ -161,14 +161,7 @@ def main():
     n_elec = mol.n_up + mol.n_down
     nuc_crds = opt.driver.nuc_crds
 
-    @jax.jit
-    def log_psi_complex_at(elec, n_ph):
-        """Returns log(Psi) as complex scalar: log|Psi| + i*phase."""
-        log_mag, sign = log_psi_signed(
-            elec, nuc_crds, n_ph, params,
-        )
-        return log_mag + jnp.log(sign).astype(log_mag.dtype) \
-            if jnp.iscomplexobj(sign) else log_mag
+    # not used; see log_psi_batch below
 
     print(f"running off-diagonal 1-RDM estimator")
     print(f"  config: {args.config}")
@@ -198,15 +191,20 @@ def main():
 
     @jax.jit
     def log_psi_batch(elec_batch, n_ph_batch):
-        """Returns log|Psi| + i*phase for a batch of configurations."""
-        log_mags, signs = jax.vmap(
-            log_psi_signed, in_axes=(0, 0, None),
-        )(elec_batch, n_ph_batch, params)
-        # If signs are complex, take log directly
+        """Returns log|Psi| + i*phase for a batch of configurations.
+
+        log_psi_signed(elec, nuc, n, params) -> (log_mag, sign).
+        For complex_psi, sign = psi/|psi| is complex.
+        """
+        def one(elec_one, n_one):
+            log_mag, sign = log_psi_signed(
+                elec_one, nuc_crds, n_one, params,
+            )
+            return log_mag, sign
+        log_mags, signs = jax.vmap(one)(elec_batch, n_ph_batch)
         if jnp.iscomplexobj(signs):
-            return log_mags + jnp.log(signs)
+            return log_mags.astype(jnp.complex128) + jnp.log(signs)
         else:
-            # Real signs: ±1 → 0 (for +1) or i*pi (for -1)
             log_signs = jnp.where(
                 signs > 0,
                 jnp.zeros_like(log_mags, dtype=jnp.complex128),
