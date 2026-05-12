@@ -94,6 +94,40 @@ def _build_ch3_mol(r_ch_bohr: float = 2.039):
     )
 
 
+def _build_cp_mol(r_cc_bohr: float = 2.70, r_ch_bohr: float = 2.04):
+    """Cyclopentadienyl radical Cp• (C5H5) in planar D5h geometry.
+
+    35 electrons (C5: 30, H5: 5). Doublet GS with degenerate e1''
+    pi SOMO. Paradigm aromatic radical, well-studied EPR. C-C bond
+    2.70 Bohr (1.43 A), C-H bond 2.04 Bohr (1.08 A, radial outward).
+    Ring in xy plane, C5 axis along z.
+    Sz = +1/2: n_up=18, n_down=17.
+    """
+    import math
+    from OmegaQMC.utils import Mole_custom
+    # Regular pentagon: vertex-to-center distance R such that side = r_cc
+    # For regular pentagon with side s: R = s / (2 sin(pi/5))
+    R_cc = r_cc_bohr / (2 * math.sin(math.pi / 5))
+    R_ch = R_cc + r_ch_bohr   # H atoms radially outward
+    coords = []
+    charges = []
+    # 5 C atoms
+    for k in range(5):
+        theta = 2 * math.pi * k / 5 + math.pi / 10  # offset for visual
+        coords.append([R_cc * math.cos(theta), R_cc * math.sin(theta), 0.0])
+        charges.append(6)
+    # 5 H atoms (same angular positions, larger radius)
+    for k in range(5):
+        theta = 2 * math.pi * k / 5 + math.pi / 10
+        coords.append([R_ch * math.cos(theta), R_ch * math.sin(theta), 0.0])
+        charges.append(1)
+    return Mole_custom.from_arrays(
+        charges=charges,
+        coords=coords,
+        n_up=18, n_down=17,
+    )
+
+
 def _build_no_mol(r_no_bohr: float = 2.175):
     """Nitric oxide NO• in linear C∞v geometry along z-axis.
 
@@ -188,6 +222,11 @@ def build_molecule(system_cfg: dict):
     if sys_type == "no":
         return _build_no_mol(
             r_no_bohr=float(system_cfg.get("r_no_bohr", 2.175)),
+        )
+    if sys_type == "cp":
+        return _build_cp_mol(
+            r_cc_bohr=float(system_cfg.get("r_cc_bohr", 2.70)),
+            r_ch_bohr=float(system_cfg.get("r_ch_bohr", 2.04)),
         )
     raise ValueError(f"unknown system type: {sys_type}")
 
