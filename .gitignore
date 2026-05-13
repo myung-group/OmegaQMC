@@ -83,6 +83,11 @@ research/**/papers/
 # Stray log fragments
 *.log.tail
 
+# Top-level analysis-script output figures (compare_*.py, etc.)
+# Paper figures live under research/**/drafts/ and are unaffected.
+/density_*.png
+/sk_*.png
+
 # macOS
 .DS_Store
 
@@ -91,3 +96,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+
+# Paper drafts kept locally, not in repo
+papers/

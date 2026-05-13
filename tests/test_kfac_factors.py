@@ -118,7 +118,7 @@ def test_kfac_factors_match_ground_truth(seed):
     other = jax.tree.map(lambda x: x, params)  # placeholder; real `other` in nnx.split
     # The model materialisation requires nnx.merge.
     rngs = nnx.Rngs(key)
-    from OmegaQMC.psi.nn.heg_psiformer import build_heg_psiformer_wf
+    from OmegaQMC.psi.nn.heg_wf_module import build_heg_psiformer_wf
     model = build_heg_psiformer_wf(cfg, rngs)
 
     n_walkers = 32

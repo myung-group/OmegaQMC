@@ -153,6 +153,9 @@ class NeuralNetworkWaveFunction(nnx.Module):
             'mult', 'add', 'both',
         ],
         conf_coeff,
+        complex_psi: bool = False,
+        embedding_dim: int = 0,
+        rngs=None,
     ):
         self.n_up = mol_info.n_up
         self.n_down = mol_info.n_down
@@ -167,6 +170,43 @@ class NeuralNetworkWaveFunction(nnx.Module):
         self.backflow_op = backflow_op
         self.cusp_electrons = cusp_electrons
         self.cusp_nuclei = cusp_nuclei
+
+        # --- complex-Psi extension (Phase 2n) ---
+        # When enabled, adds a learnable imaginary part to the orbital
+        # matrices via a linear projection of per-electron embeddings.
+        # Initialised to zero (kernel=0) so training starts at the
+        # real-Psi baseline; variational principle drives Im->0 for
+        # TR-symmetric H and Im!=0 for TR-broken H (chiral cavity).
+        self.complex_psi = complex_psi
+        if complex_psi:
+            assert embedding_dim > 0 and rngs is not None, (
+                "complex_psi requires embedding_dim and rngs"
+            )
+            # n_orb per spin depends on full_determinant
+            n_orb_up = (
+                self.n_up + self.n_down
+                if full_determinant else self.n_up
+            )
+            n_orb_down = (
+                self.n_up + self.n_down
+                if full_determinant else self.n_down
+            )
+            # Zero-init kernels so initial imag part = 0
+            zeros_kinit = nnx.initializers.zeros_init()
+            self.imag_head_up = nnx.Linear(
+                embedding_dim, self.n_det * n_orb_up,
+                use_bias=False,
+                kernel_init=zeros_kinit,
+                rngs=rngs,
+            )
+            self.imag_head_down = nnx.Linear(
+                embedding_dim, self.n_det * n_orb_down,
+                use_bias=False,
+                kernel_init=zeros_kinit,
+                rngs=rngs,
+            )
+            self._n_orb_up = n_orb_up
+            self._n_orb_down = n_orb_down
 
     @property
     def spin_slices(self):
@@ -219,10 +259,10 @@ class NeuralNetworkWaveFunction(nnx.Module):
         dists_elec = pairwise_self_distance(
             phys_conf.r, full=True,
         )
-        jastrow, fs, nuc_params = (
+        jastrow, fs, nuc_params, _emb = (
             self.omni(phys_conf)
             if self.omni is not None
-            else (None, None, None)
+            else (None, None, None, None)
         )
         orb = self.envelope(phys_conf, nuc_params)
         if self.full_determinant:
@@ -234,14 +274,42 @@ class NeuralNetworkWaveFunction(nnx.Module):
         orb_up = orb_up[:, :self.n_up]
         orb_down = orb_down[:, self.n_up:]
         if fs is not None:
-            orb_up = self._apply_backflow(
-                orb_up, fs[0],
-                dists_nuc[:self.n_up],
+            # fs[0] or fs[1] may be None when the corresponding spin
+            # sector is empty (n_up=0 or n_down=0) -- backflow can't
+            # operate on empty embeddings. Skip in that case.
+            if fs[0] is not None:
+                orb_up = self._apply_backflow(
+                    orb_up, fs[0],
+                    dists_nuc[:self.n_up],
+                )
+            if fs[1] is not None:
+                orb_down = self._apply_backflow(
+                    orb_down, fs[1],
+                    dists_nuc[self.n_up:],
+                )
+
+        # --- complex-Psi extension: add learnable imaginary part ---
+        # After backflow, optionally add an imaginary modulation
+        # of the orbital matrices driven by per-electron GNN
+        # embeddings. With zero-init weights, this is exactly zero
+        # at start; variational optimization activates it only when
+        # required by the underlying Hamiltonian (e.g. chiral cavity,
+        # external B-field).
+        if self.complex_psi:
+            assert _emb is not None, (
+                "complex_psi requires omni to return per-electron embeddings"
             )
-            orb_down = self._apply_backflow(
-                orb_down, fs[1],
-                dists_nuc[self.n_up:],
-            )
+            emb_up = _emb[:self.n_up]
+            emb_down = _emb[self.n_up:]
+            imag_up = self.imag_head_up(emb_up).reshape(
+                self.n_up, self.n_det, self._n_orb_up,
+            ).swapaxes(0, 1)   # -> (n_det, n_up, n_orb_up)
+            imag_down = self.imag_head_down(emb_down).reshape(
+                self.n_down, self.n_det, self._n_orb_down,
+            ).swapaxes(0, 1)   # -> (n_det, n_down, n_orb_down)
+            orb_up = orb_up + 1j * imag_up
+            orb_down = orb_down + 1j * imag_down
+
         if return_mos:
             return orb_up, orb_down
 
@@ -268,9 +336,22 @@ class NeuralNetworkWaveFunction(nnx.Module):
         log_psi = (
             jnp.log(jnp.abs(psi)) + xs_shift
         )
-        sign_psi = jax.lax.stop_gradient(
-            jnp.sign(psi),
-        )
+        # For real psi: sign is +-1, piecewise-constant; stop_gradient
+        # is a safety wrapper (gradient is zero anyway except at zero
+        # crossings).
+        # For complex psi: sign = psi / |psi| is a CONTINUOUS phase on
+        # the unit circle; gradients must flow through it so the
+        # optimizer can learn the phase. We compute the unit phase
+        # explicitly because `jnp.sign(complex)` in JAX returns zero
+        # gradient (it treats complex sign as a discrete operation),
+        # whereas the mathematically correct unit phase psi/|psi| is
+        # smoothly differentiable everywhere except psi=0.
+        if self.complex_psi:
+            sign_psi = psi / jnp.abs(psi)
+        else:
+            sign_psi = jax.lax.stop_gradient(
+                jnp.sign(psi),
+            )
         if self.cusp_electrons is not None:
             same_dists = jnp.concatenate([
                 triu_flat(dists_elec[idx, idx])

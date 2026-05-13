@@ -1,0 +1,84 @@
+# LITE Smith-style validation run: N=18 (closed-shell 2D, 9+9),
+# small architecture, lr=1 (10x lower than Smith's rs=20 default).
+# Goal: confirm the recipe works at all without committing 5 days of
+# compute to the full N=50 production run.
+
+project: rs20_n18_fluid_smithMP_lite
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 16
+  mpnqs_d2: 12
+  mpnqs_hidden: 16
+  mpnqs_n_layers: 2
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 16
+  smith_jastrow_n_layers: 4
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 30
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 256
+  lr: 1.0                           # 10x lower than Smith — gentler
+  lr_schedule: inverse
+  lr_decay_T: 500                   # match shorter run
+  spring_mu: 0.9
+  spring_norm_clip: 1.0             # C = lr_initial = 1
+  damping_adapt: true
+  damping_min: 1.0e-5
+  damping_max: 1.0e-1
+  damping_factor: 2.0
+  damping_lookback: 50
+  sampler: mala
+  mala_grad_clip: 1.0
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 200
+
+eval:
+  walkers: 256
+  blocks: 30
+  equil_blocks: 10
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 256
+  equil_steps: 200
+  sample_steps: 50
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

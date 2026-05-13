@@ -1,0 +1,95 @@
+# rs=20, N=50 fluid — Smith architecture at LARGER scale (frodo A100).
+#
+# Companion to rs20_n50_fluid_smith2.yaml (local 4070 Ti).  Identical
+# in spirit except scaled up to test the capacity hypothesis: does
+# bigger network break through the -45.78 mHa plateau the local run
+# converged to?
+#
+# Local (smith2)        vs.        this run
+#   emb=48, layers=2                emb=64, layers=3
+#   n_det=2                         n_det=16            ← 8x
+#   n_virt_pw=30                    n_virt_pw=80
+#   walkers=1024                    walkers=2048        ← 2x
+#   ~86k params                     ~250-400k params
+#
+# Optimizer recipe held identical: vanilla SR + cosine annealing
+# (lr 0.05 -> 0.0005 over 20k iters, no warm restarts), Metropolis
+# sampler, cold start.  This is a controlled single-variable test of
+# the capacity hypothesis.
+#
+# Targets: HF -29.15, our crystal -45.91, DMC fluid -46.34, Smith -46.37 mHa.
+
+project: rs20_n50_fluid_smith_big
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 64
+  layers: 3
+  heads: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: true
+  deep_jastrow: true
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 80
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0                         # cold start
+
+optimize:
+  type: sr
+  iters: 20000
+  walkers: 2048                    # 2x local — A100 has plenty of headroom
+  lr: 0.05                         # initial / max for cosine
+  lr_schedule: cosine
+  lr_min: 5.0e-4
+  lr_T_max: 20000
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500                  # graceful kill every 500 iters
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

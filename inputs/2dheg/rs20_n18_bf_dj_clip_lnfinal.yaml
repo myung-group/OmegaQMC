@@ -1,0 +1,85 @@
+# EXPERIMENT C: BF + DJ + cusp + multi-PW Slater, post_final_only LN,
+# vanilla SR + Metropolis + F-norm clip.  Full Smith-style stack at
+# lite scale.
+#
+# Combines all our Smith-aligned safeguards:
+#   - F-norm clip = lr (per Smith convention, C=η_0)
+#   - LayerNorm only on final h_i^(T) before BF readout (least
+#     restrictive placement we can apply)
+#   - Deep Jastrow with GELU + skip connections (Eqs 20-21 + page 7)
+#
+# If this beats both A and B, the combined stack is needed.
+
+project: rs20_n18_bf_dj_clip_lnfinal
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24
+  mpnqs_d2: 16
+  mpnqs_hidden: 24
+  mpnqs_n_layers: 3
+  mpnqs_use_layer_norm: true
+  mpnqs_layer_norm_mode: post_final_only
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 45
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 8000
+  walkers: 1024
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 8000
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0.05      # Smith convention
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

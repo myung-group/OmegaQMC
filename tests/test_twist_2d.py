@@ -9,7 +9,7 @@ from OmegaQMC.heg_2d import (
     build_2deg_system,
     generate_halton_twists_2d,
 )
-from OmegaQMC.psi.nn.heg_psiformer import build_heg_psiformer_wf_complex
+from OmegaQMC.psi.nn.heg_wf_module import build_heg_psiformer_wf_complex
 from OmegaQMC.psi.nn.heg_wf import HEGPsiFormerConfig
 
 

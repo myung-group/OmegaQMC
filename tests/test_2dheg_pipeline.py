@@ -36,7 +36,7 @@ from OmegaQMC.observables.ewald_2d import (
     build_ewald_2d_tables,
     ewald_2d_pair_energy,
 )
-from OmegaQMC.psi.nn.heg_psiformer import build_heg_psiformer_wf
+from OmegaQMC.psi.nn.heg_wf_module import build_heg_psiformer_wf
 from OmegaQMC.psi.nn.heg_wf import HEGPsiFormerConfig
 
 

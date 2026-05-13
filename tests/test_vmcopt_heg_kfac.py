@@ -222,7 +222,7 @@ def test_eager_capture_records_layer_inputs():
     in, one entry per Linear out, with the recorded array equal to
     that Linear's input."""
     from flax import nnx
-    from OmegaQMC.psi.nn.heg_psiformer import build_heg_psiformer_wf
+    from OmegaQMC.psi.nn.heg_wf_module import build_heg_psiformer_wf
     cfg = HEGPsiFormerConfig(
         n_up=7, n_down=7, L=7.77, n_det=2,
         embedding_dim=16, n_interactions=1,

@@ -1,0 +1,88 @@
+# Vanilla SR + Metropolis continuation of the locked-cusp Smith MP-NQS
+# run.  Goal: test whether removing SPRING + MALA eliminates the
+# bias-amplification bouncing we saw at iter ~7700-7800 (E went down to
+# -46.48 then bounced back).
+#
+# Loads the iter 17000 chkpt from rs20_n50_fluid_smithMP_lite_100k
+# (E = -45.374 mHa).  Same lite architecture as before.
+
+project: rs20_n50_fluid_smithMP_vanilla
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 16
+  mpnqs_d2: 12
+  mpnqs_hidden: 16
+  mpnqs_n_layers: 2
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false       # locked Kato slope (the lesson)
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 16
+  smith_jastrow_n_layers: 4
+  use_backflow: false
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 30
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 10000
+  walkers: 512                      # 2x previous run (was 256)
+  lr: 0.005                         # 10x smaller — refinement near
+                                    # the basin minimum, lr=0.05 was
+                                    # overshooting on every step.
+  lr_schedule: cosine
+  lr_min: 5.0e-5
+  lr_T_max: 10000
+  lr_n_restarts: 0
+  spring_mu: 0.0                    # NO momentum (was 0.9 — bias amplifier)
+  spring_norm_clip: 0               # no clip (vanilla SR doesn't need it)
+  damping_adapt: false              # fixed λ
+  sampler: metropolis               # NO MALA (was the bias source)
+  var_weight: 0.0
+  mcmc_decorr_steps: 30             # Metropolis usually needs more steps
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20                       # ignored for SMW; legacy field
+  save_every: 500
+  load_chkpt: runs/rs20_n50_fluid_smithMP_lite_100k/rs20_n50_fluid_smithMP_lite_100k.chk.h5
+
+eval:
+  walkers: 1024                     # large eval for unbiased final E
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

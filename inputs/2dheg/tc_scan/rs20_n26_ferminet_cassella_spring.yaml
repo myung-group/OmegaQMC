@@ -1,0 +1,85 @@
+# SR + SPRING + 4096 walkers fine-tune of rs20_n26_ferminet_cassella.
+# Direct attack on the rank-deficient F estimate that we hypothesise is
+# capping convergence at -46.1 mHa:
+#   - 4x walkers => 4x F-matrix rank, much less biased natural-grad direction
+#   - SPRING momentum + F-norm clip => denoise gradients across iters
+#   - Smith's recipe lr=1.0 + clip=0.1 (the clip protects against the lr)
+#
+# Architecture identical to parent => straight resume.
+# Memory: 4096 walkers x 2.2M params x 4 bytes = 36 GB do_local; fits A100.
+# Per-iter ~20s; 15000 iters ~ 83 hours.
+
+project: rs20_n26_ferminet_cassella_spring
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52
+  det_jitter: 0.04
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 15000
+  walkers: 2048                 # 2x the parent's 1024 — boost F rank (4096 OOMs at fp64)
+  load_chkpt: runs/rs20_n26_ferminet_cassella/rs20_n26_ferminet_cassella.chk.h5
+  lr: 1.0                       # Smith recipe; clip=0.1 caps actual step
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 15000
+  lr_n_restarts: 0
+  spring_mu: 0.9                # SPRING momentum (Smith recipe)
+  spring_norm_clip: 0.1         # F-norm step cap (Smith recipe)
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 60
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

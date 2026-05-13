@@ -1,0 +1,87 @@
+# Full lite ansatz with LayerNorm enabled: BF + DJ + LayerNorm.
+# This is the FIX TEST for our sub-DMC pathology.
+#
+# Same architecture as rs20_n18_lite_vanilla.yaml, but:
+#   - mpnqs_use_layer_norm: true   (NEW — Smith's stabilizer)
+#   - use_coord_backflow: true     (BF re-enabled, the dangerous component)
+#   - use_smith_deep_jastrow: true (kept on)
+#
+# Hypothesis: with LayerNorm bounding h_i^(T), the BF displacement
+# W_bf · h_i^(T) cannot grow unboundedly during training, preventing
+# coord-collapse and the resulting biased estimator.
+#
+# Expected outcome: plateau around -46 mHa (matching DMC, like Smith
+# does), NOT below -46.5 mHa as we saw without LayerNorm.
+
+project: rs20_n18_lite_full_layernorm
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24
+  mpnqs_d2: 16
+  mpnqs_hidden: 24
+  mpnqs_n_layers: 3
+  mpnqs_use_layer_norm: true        # NEW — the fix
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true      # ON
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true          # ON (the dangerous component, now safer)
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 45
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 8000
+  walkers: 1024
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 8000
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

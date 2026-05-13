@@ -161,7 +161,39 @@ class _VMCDriverHEG:
     # ---- Walkers ----
 
     def initialize_walkers(self, rng_key, num_walkers):
-        """Uniformly sample electron positions inside the cell."""
+        """Sample electron positions inside the cell.
+
+        Dispatch order:
+        1. Explicit ``config.walker_init`` (``'uniform'`` or
+           ``'crystal_perturbed'``) wins.
+        2. Otherwise fall back to envelope-based default
+           (``crystal_gaussian`` → ``crystal_perturbed``, else
+           ``uniform``).
+        """
+        walker_init = str(getattr(
+            self.config, 'walker_init', 'auto',
+        )).lower()
+        envelope_type = getattr(self.config, 'envelope_type', 'plane_wave')
+
+        if walker_init == 'auto':
+            walker_init = (
+                'crystal_perturbed'
+                if (envelope_type == 'crystal_gaussian' and self.dim == 2)
+                else 'uniform'
+            )
+
+        if walker_init == 'crystal_perturbed' and self.dim == 2:
+            from .psi.nn.env_localized_2d import crystal_init_walkers_2d
+            return crystal_init_walkers_2d(
+                rng_key, num_walkers,
+                n_up=self.n_up, n_down=self.n_down, L=self.L,
+                sigma_init=float(getattr(
+                    self.config, 'crystal_sigma_init', 0.25,
+                )),
+                spin_pattern=str(getattr(
+                    self.config, 'crystal_spin_pattern', 'neel',
+                )),
+            )
         shape = (num_walkers, self.nelec, self.dim)
         return self.L * jax.random.uniform(rng_key, shape)
 
@@ -525,6 +557,28 @@ class _VMCDriverHEGTwist:
         ))
 
     def initialize_walkers(self, rng_key, num_walkers):
+        walker_init = str(getattr(
+            self.config, 'walker_init', 'auto',
+        )).lower()
+        envelope_type = getattr(self.config, 'envelope_type', 'plane_wave')
+        if walker_init == 'auto':
+            walker_init = (
+                'crystal_perturbed'
+                if (envelope_type == 'crystal_gaussian' and self.dim == 2)
+                else 'uniform'
+            )
+        if walker_init == 'crystal_perturbed' and self.dim == 2:
+            from .psi.nn.env_localized_2d import crystal_init_walkers_2d
+            return crystal_init_walkers_2d(
+                rng_key, num_walkers,
+                n_up=self.n_up, n_down=self.n_down, L=self.L,
+                sigma_init=float(getattr(
+                    self.config, 'crystal_sigma_init', 0.25,
+                )),
+                spin_pattern=str(getattr(
+                    self.config, 'crystal_spin_pattern', 'neel',
+                )),
+            )
         return self.L * jax.random.uniform(
             rng_key, (num_walkers, self.nelec, self.dim),
         )

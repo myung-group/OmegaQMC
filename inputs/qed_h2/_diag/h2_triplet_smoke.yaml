@@ -1,0 +1,60 @@
+# =====================================================================
+# Phase 2o step 1: triplet (Sz=1) smoke test for H2 at R=1.4 Bohr, λ=0.
+#
+# Purpose: confirm that after the fully-spin-polarized fixes (env.py,
+# omni.py, wf.py, update_features.py), a complete training+eval run
+# on the open-shell case actually converges. At λ=0 the triplet a³Σu+
+# state at R=1.4 Bohr is repulsive (above the singlet by ~10 eV);
+# expected E_VMC is around -0.66 to -0.75 Ha (highly trial-dependent,
+# since the antibonding state is dissociative — at R=1.4 the wf is
+# being held compressed by the cusp boundary, not minimum).
+#
+# This is a wiring check, NOT an accuracy claim. Budget tiny (50 iters,
+# 32 walkers) so it runs in ~2 min.
+# =====================================================================
+
+project: qed_h2_triplet_smoke
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 1.4010
+  spin: triplet
+
+cavity:
+  omega: 0.5
+  lambda: 0.0
+  polarization: [0.0, 0.0, 1.0]
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 50
+    num_walkers: 32
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 16
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 64
+    num_steps_per_block: 30
+    num_blocks: 10
+    num_blocks_equil: 5
+    mc_timestep: 0.1
+    verbose: 0

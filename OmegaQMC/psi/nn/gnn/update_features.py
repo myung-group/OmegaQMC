@@ -175,20 +175,26 @@ class NodeSumElectronUpdateFeature(nnx.Module):
             else jnp.sum
         )
         n_el = self.n_up + self.n_down
-        return [
-            GraphNodes(
-                None,
-                jnp.tile(
-                    fn(
-                        nodes.electrons[idx[nt]],
-                        axis=0,
-                        keepdims=True,
-                    ),
-                    (n_el, 1),
-                ),
+        # For empty spin block (fully-polarized states), the mean over
+        # an empty axis would give NaN. Substitute a zero vector of
+        # the embedding dimension instead so downstream concat/MLPs
+        # don't propagate NaN.
+        result = []
+        for nt in self.node_types:
+            sliced = nodes.electrons[idx[nt]]
+            if sliced.shape[0] == 0:
+                summed = jnp.zeros(
+                    (1, sliced.shape[-1]),
+                    dtype=sliced.dtype,
+                )
+            else:
+                summed = fn(sliced, axis=0, keepdims=True)
+            result.append(
+                GraphNodes(
+                    None, jnp.tile(summed, (n_el, 1)),
+                )
             )
-            for nt in self.node_types
-        ]
+        return result
 
 
 class EdgeSumElectronUpdateFeature(nnx.Module):
@@ -236,6 +242,7 @@ class EdgeSumElectronUpdateFeature(nnx.Module):
             *edge_type*, holding the summed edge features.
         """
         updates = []
+        n_el = self.n_up + self.n_down
         for et in self.edge_types:
             if et == 'ee':
                 n = self.n_up + self.n_down
@@ -250,13 +257,21 @@ class EdgeSumElectronUpdateFeature(nnx.Module):
                     GraphNodes(None, val),
                 )
             else:
+                # For fully-spin-polarized cases (e.g. n_down=0,
+                # edges['down'] empty), the edge tensor has shape[0]=0
+                # along the sender axis. sum_senders on an empty sender
+                # axis would still give a zero vector of the original
+                # (untransformed, layer-0) edge_feat_dim, breaking the
+                # downstream subnet's expected tp_dim input width.
+                # Use a zero vector of the configured tp_dim instead so
+                # the per-electron output is always (n_el, _tp_dim).
+                edge = edges[et]
+                if edge.single_array.shape[0] == 0:
+                    val = jnp.zeros((n_el, self._tp_dim))
+                else:
+                    val = edge.sum_senders(self.normalize)
                 updates.append(
-                    GraphNodes(
-                        None,
-                        edges[et].sum_senders(
-                            self.normalize,
-                        ),
-                    ),
+                    GraphNodes(None, val),
                 )
         return updates
 

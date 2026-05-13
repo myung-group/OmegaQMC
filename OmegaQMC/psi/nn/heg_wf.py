@@ -332,6 +332,49 @@ class HEGPsiFormerConfig(NamedTuple):
     jas_mlp_bias: bool = True
     jas_mlp_zero_init_last: bool = True
     use_backflow: bool = True
+    # Backbone choice.  'psiformer' (default) → single-stream attention
+    # GNN (FermiNet/PsiFormer family).  'mpnqs' → dual-stream message-
+    # passing (Pescia 2024 / Smith 2024) with persistent two-body
+    # stream — better inductive bias for HEG-type pair-additive
+    # interactions.  Both feed the same backflow / Jastrow / envelope.
+    backbone: str = 'psiformer'
+    # MP-NQS-specific dims (used when backbone='mpnqs'; Smith uses
+    # d1=32, d2=26, hidden=32, T=4).
+    mpnqs_d1: int = 32
+    mpnqs_d2: int = 26
+    mpnqs_hidden: int = 32
+    mpnqs_n_layers: int = 4
+    # Smith 2024 supplement (page 7) applies layer normalization in
+    # the MPNN.  Bounds activation magnitude after each residual sum.
+    # Critical when coord-backflow is enabled — without LayerNorm the
+    # h_i^(T) features grow during training, making W_bf · h_i^(T)
+    # large enough to collapse electron coordinates and produce
+    # near-singular Slater determinants (a sub-DMC bias).
+    mpnqs_use_layer_norm: bool = False
+    # LayerNorm placement (only used when mpnqs_use_layer_norm=True):
+    #   'post_each':       LN after residual sum every layer (most restrictive,
+    #                      Smith's most-likely default, but over-bounds h_i^(T))
+    #   'pre_each':        LN inputs to f1/f2 every layer (residuals can grow)
+    #   'post_final_only': LN only on final h_i/h_ij (surgical: bounds the
+    #                      input to BF readout without restricting per-layer
+    #                      dynamics)
+    mpnqs_layer_norm_mode: str = 'post_each'
+    # Coord-transform backflow (Smith 2024 PRL 133 266504, eq. 19):
+    # x_i = r_i + W_bf · h_i^(T).  When True, a small Linear readout
+    # from the post-GNN one-body stream produces a per-electron
+    # displacement that shifts positions before the orbital basis is
+    # evaluated.  Multiplicative BF (use_backflow=True) and
+    # coord-transform BF can be enabled simultaneously — they
+    # represent different (non-redundant) families of correlations.
+    use_coord_backflow: bool = False
+    coord_bf_zero_init: bool = True   # zero-init last layer so initial Δr = 0
+    # Smith 2024 deep Jastrow (eqs. 20-21): U(R) = Σ_i J(h_i, Linear_pre(x_i)).
+    # When True, this REPLACES the standard ``use_deep_jastrow`` head —
+    # builder logs an info message and disables the latter to avoid
+    # double counting.
+    use_smith_deep_jastrow: bool = False
+    smith_jastrow_hidden: int = 32        # Smith's hidden width
+    smith_jastrow_n_layers: int = 4       # Smith's L=4 (3 hidden)
     # ``use_cusp`` is ON by default.  Previously it was False
     # because the naïve PsiformerCusp implementation had three
     # separable bugs: (i) unconstrained trainable ``α`` that
@@ -343,7 +386,7 @@ class HEGPsiFormerConfig(NamedTuple):
     # producing a spurious ``−1/√eps`` kinetic term and the
     # ``⟨E⟩ < E_DMC`` variational-violation at init.  All three
     # are now fixed (see
-    # :class:`~OmegaQMC.psi.nn.heg_psiformer.PeriodicElectronicCusp`
+    # :class:`~OmegaQMC.psi.nn.heg_wf_module.PeriodicElectronicCusp`
     # for (i) softplus-parameterised α and (ii) smooth
     # cell-face cutoff, and
     # :func:`OmegaQMC.observables.ewald.ewald_pair_potential`
@@ -351,6 +394,13 @@ class HEGPsiFormerConfig(NamedTuple):
     # enabling the cusp gives a correctly Kato-cusped trial
     # wavefunction from iter 0.
     use_cusp: bool = True
+    # Cusp α trainability.  Default False (locked to the analytic Kato
+    # slope) — runaway α drift caused a variational catastrophe in
+    # 100k-iter MP-NQS runs (E went unphysically below DMC, then var
+    # exploded).  Smith uses an analytical u_2 with hard cusp
+    # constraint; we mirror that here by default.  Set True only for
+    # diagnostic exploration of cusp sensitivity.
+    cusp_trainable_alpha: bool = False
     use_deep_jastrow: bool = False
     use_pair_jastrow: bool = False
     pair_jastrow_hidden: tuple = (16, 16)
@@ -406,6 +456,13 @@ class HEGPsiFormerConfig(NamedTuple):
     crystal_sigma_init: float = 0.25       # fraction of NN spacing
     crystal_spin_pattern: str = 'neel'     # 'neel' (AFM) or 'all_up' (FM)
     crystal_det_jitter: float = 0.0        # site-position jitter for det>=1
+    # Walker initialisation strategy (consumed by the SR/eval drivers).
+    # 'auto' (default) → crystal_perturbed when envelope is
+    # crystal_gaussian, uniform otherwise.  'crystal_perturbed' forces
+    # WC-position init even for plane-wave (fluid) envelopes — Smith
+    # 2024 uses this for both phases (PRL 133, 266504, supplement page
+    # 7).  'uniform' forces uniform init regardless of envelope.
+    walker_init: str = 'auto'
 
 
 def make_heg_log_psi(
@@ -565,7 +622,7 @@ def make_heg_log_psi_complex(
       * :class:`HEGConfig` → complex Slater-Jastrow
         (:class:`HEGSlaterJastrowComplex`).
       * :class:`HEGPsiFormerConfig` → complex PsiFormer
-        (:class:`~.heg_psiformer.HEGPsiFormerWaveFunctionComplex`).
+        (:class:`~.heg_wf_module.HEGPsiFormerWaveFunctionComplex`).
 
     In both cases the returned ``log_psi`` is complex-scalar-valued.
     Downstream code (kinetic energy, Metropolis) splits it into
@@ -582,7 +639,7 @@ def make_heg_log_psi_complex(
     """
     rngs = nnx.Rngs(rng_key)
     if isinstance(config, HEGPsiFormerConfig):
-        from .heg_psiformer import build_heg_psiformer_wf_complex
+        from .heg_wf_module import build_heg_psiformer_wf_complex
         model = build_heg_psiformer_wf_complex(
             config, rngs, kappa=kappa,
         )
@@ -712,6 +769,12 @@ def make_heg_psiformer_log_psi(
     and optimizer drivers consume it unchanged — a HEGPsiFormer is
     drop-in for the minimal Slater-Jastrow.
 
+    When ``config.use_coord_backflow`` is True, the returned ``log_psi``
+    function gets an attribute ``log_psi.bf_diagnostics`` — a callable
+    ``(walkers, params) -> dict`` that returns BF displacement and
+    quasiparticle-separation statistics.  Used by the SR training loop
+    to monitor for coord-collapse pathology (``min_pair_sep_min → 0``).
+
     Args:
         config: :class:`HEGPsiFormerConfig`.
         rng_key: JAX PRNG key.
@@ -719,7 +782,10 @@ def make_heg_psiformer_log_psi(
     Returns:
         ``(log_psi, init_params, graphdef)``.
     """
-    from .heg_psiformer import build_heg_psiformer_wf
+    from .heg_wf_module import (
+        build_heg_psiformer_wf, _make_heg_phys_conf,
+        _pair_distances_mi_full,
+    )
 
     rngs = nnx.Rngs(rng_key)
     model = build_heg_psiformer_wf(config, rngs)
@@ -728,6 +794,52 @@ def make_heg_psiformer_log_psi(
     def log_psi(r, params):
         mdl = nnx.merge(graphdef, params, other)
         return mdl(r).log
+
+    # Attach BF diagnostics callable when coord backflow is active.
+    # Walks through the GNN + coord_backflow on every walker, computes
+    # per-walker statistics, then aggregates across walkers.
+    has_bf = bool(getattr(config, 'use_coord_backflow', False))
+    if has_bf:
+        @jax.jit
+        def bf_diagnostics(walkers, params):
+            mdl = nnx.merge(graphdef, params, other)
+
+            def per_walker(r):
+                pc = _make_heg_phys_conf(r)
+                _, _, _, emb = mdl.omni(pc)
+                disp = mdl.coord_backflow(emb)        # (n_elec, dim)
+                x_bf = r + disp
+                disp_norms = jnp.linalg.norm(disp, axis=-1)  # (n_elec,)
+                # Min-image pair distances of QUASIPARTICLES (post-BF).
+                # Diagonal is 0 — we mask it before taking min.
+                d_full = _pair_distances_mi_full(x_bf, mdl.lattice)
+                n = x_bf.shape[0]
+                # Set diagonal to +inf so min skips it.
+                d_offdiag = d_full + jnp.eye(n, dtype=d_full.dtype) * 1e30
+                return jnp.array([
+                    jnp.mean(disp_norms),     # mean displacement / walker
+                    jnp.max(disp_norms),      # max displacement / walker
+                    jnp.min(d_offdiag),       # min quasiparticle pair sep
+                ])
+
+            # Flatten any leading axes (handles pmap shape
+            # (n_dev, n_w/dev, n_elec, dim) as well as plain
+            # (n_w, n_elec, dim)) so vmap iterates over walkers.
+            n_elec = walkers.shape[-2]
+            dim = walkers.shape[-1]
+            walkers_flat = walkers.reshape(-1, n_elec, dim)
+            stats = jax.vmap(per_walker)(walkers_flat)  # (n_w_total, 3)
+            return {
+                'mean_disp_avg':       jnp.mean(stats[:, 0]),
+                'max_disp_avg':        jnp.mean(stats[:, 1]),
+                'max_disp_max':        jnp.max(stats[:, 1]),
+                'min_pair_sep_avg':    jnp.mean(stats[:, 2]),
+                'min_pair_sep_min':    jnp.min(stats[:, 2]),
+            }
+
+        log_psi.bf_diagnostics = bf_diagnostics
+    else:
+        log_psi.bf_diagnostics = None
 
     return log_psi, params, graphdef
 

@@ -1,0 +1,51 @@
+# =====================================================================
+# 2H2 dimer in cavity, lambda=0.1, polarization along bond axis (x).
+# Tang 2025 Fig. 2 setup: R=6.2 A, omega=12.7 eV.
+# Expected delta-E ~ +220 meV destabilization (~+22 meV more than eps_z).
+# =====================================================================
+
+project: qed_h2h2_R62_lambda01_eps_x_tang_native
+
+seed: 42
+
+system:
+  type: h2_h2
+  R_intermol_bohr: 11.7156
+  L_h2_bohr: 1.4010
+
+cavity:
+  omega: 0.46672
+  lambda: 0.1
+  polarization: [1.0, 0.0, 0.0]   # along bond axis
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+
+  train:
+    num_iters: 3000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0

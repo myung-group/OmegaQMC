@@ -1,0 +1,93 @@
+# FermiNet PRODUCTION run for N=26, rs=20 unpolarized 2D HEG fluid.
+# Single A100 80GB on frodo (gpu1).  Cold start.
+#
+# Goal: head-to-head capacity-matched comparison against
+# rs20_n26_smith_prod (MP-NQS, ~47k params, running on gpu2).  Same
+# system, same envelope/cusp/backflow heads, same optimizer — only
+# the GNN backbone differs (FermiNet's NoAttention + sender-spin
+# EdgeSum vs MP-NQS's pair attention with 4-body bias).
+#
+# Architecture (matched to Smith MP-NQS production param count):
+#   embedding_dim=128, layers=3, two_particle_dim=32 → ~46k params
+#   n_det=16, full_determinant=True → Cassella-style multi-det
+#   coord backflow OFF (FermiNet's multiplicative BF only; same as
+#     Smith MP-NQS prod which had coord_bf_zero_init=true)
+#   N_k=3N=78 plane waves/orbital → n_virt_pw = 78 - 26 = 52
+#     (full_det basis is shifted, so basis must hold 26 + virtuals)
+#
+# Optimizer: vanilla SR + cosine annealing + Metropolis + locked cusp.
+# Same recipe as Smith MP-NQS prod for fair comparison.
+
+project: rs20_n26_ferminet_prod
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 128                # similar param budget to Smith d1=32 4-layer
+  layers: 3
+  two_particle_dim: 32
+  n_det: 16                         # Cassella-style multi-det
+  full_determinant: true            # full (n_elec, n_elec) Slater
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false     # FermiNet doesn't use Smith DJ
+  use_backflow: true                # FermiNet's multiplicative BF
+  use_coord_backflow: false         # off; FermiNet doesn't use coord BF
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52                     # 26 occupied + 52 virt = 78 = 3N
+  det_jitter: 0.04                  # bumped from 0.02 for full_det
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0                          # cold start (matching Smith protocol)
+
+optimize:
+  type: sr
+  iters: 50000
+  walkers: 1024
+  lr: 0.05
+  lr_schedule: cosine
+  lr_min: 5.0e-5
+  lr_T_max: 50000
+  lr_n_restarts: 0                  # clean cosine, no SGDR
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

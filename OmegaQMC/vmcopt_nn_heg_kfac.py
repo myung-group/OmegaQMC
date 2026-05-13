@@ -131,8 +131,11 @@ from .psi.nn.heg_wf import (
     HEGPsiFormerConfig,
     make_heg_log_psi_any as make_heg_log_psi,
 )
-from .psi.nn.heg_psiformer import build_heg_psiformer_wf
-from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
+from .psi.nn.heg_wf_module import build_heg_psiformer_wf
+from .psi.nn.periodic import (
+    wrap_to_cell, make_cubic_lattice, make_square_lattice,
+)
+from .observables.ewald_dispatch import build_ewald_tables_dim
 from .psi.nn.physics import laplacian
 from .observables.ewald import build_ewald_tables, ewald_pair_energy
 
@@ -280,6 +283,15 @@ def _per_electron_factors(
     a_we = captured_input
     if a_we.ndim == 2:                             # (W, in) — global Linear
         a_we = a_we[:, None, :]
+    elif a_we.ndim > 3:
+        # Per-edge / multi-sample Linear (e.g., FermiNet's g_subnet
+        # processing (n_e, n_e, in_dim) edge features).  Flatten all
+        # sample dims into one — KFAC factor accumulation works on
+        # any sample population, treating each (walker, sample) pair
+        # equivalently.  E.g., shape (W, n_e, n_e, in) → (W, n_e², in).
+        W_ = a_we.shape[0]
+        in_dim_ = a_we.shape[-1]
+        a_we = a_we.reshape(W_, -1, in_dim_)
     W, n_e, in_dim = a_we.shape
     out_dim = per_walker_dW.shape[2]
 
@@ -663,6 +675,7 @@ class _HEGKFACOptimizer:
         else:
             self._pmap_axis = None
         self.L = float(config.L)
+        self.dim = int(getattr(config, 'dim', 3))
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
@@ -686,9 +699,16 @@ class _HEGKFACOptimizer:
         self.capture_activations = bool(capture_activations)
         self.multi_device = bool(multi_device)
 
-        self.lattice = make_cubic_lattice(self.L)
-        self.ewald = build_ewald_tables(
-            self.L, eta=ewald_eta,
+        if self.dim == 3:
+            self.lattice = make_cubic_lattice(self.L)
+        elif self.dim == 2:
+            self.lattice = make_square_lattice(self.L)
+        else:
+            raise ValueError(
+                f"KFAC HEG only supports dim=2 or 3, got {self.dim}"
+            )
+        self.ewald = build_ewald_tables_dim(
+            self.L, dim=self.dim, eta=ewald_eta,
             n_real=ewald_n_real, n_recip=ewald_n_recip,
         )
         tables = self.ewald
@@ -773,7 +793,7 @@ class _HEGKFACOptimizer:
         # Per-walker primitives.
         def kin_only(r, params):
             def f_flat(r_flat):
-                return log_psi_pytree(r_flat.reshape(nelec, 3), params)
+                return log_psi_pytree(r_flat.reshape(nelec, self.dim), params)
             lap_val, grad_val = laplacian(f_flat)(r.reshape(-1))
             return -0.5 * (lap_val + jnp.dot(grad_val, grad_val))
 
@@ -798,9 +818,12 @@ class _HEGKFACOptimizer:
 
         # Ewald potential (chunked over walkers — same as SR driver).
         self._pot_chunk_size = 32
-        self._pot_chunk = jax.jit(
-            lambda w: ewald_pair_energy(w, tables),
-        )
+        if self.dim == 3:
+            pot_fn = lambda w: ewald_pair_energy(w, tables)
+        else:
+            from .observables.ewald_2d import ewald_2d_pair_energy
+            pot_fn = lambda w: ewald_2d_pair_energy(w, tables)
+        self._pot_chunk = jax.jit(pot_fn)
 
         # Per-walker gradient of log|ψ| wrt every param leaf.
         # Returns pytree mirroring params, each leaf with leading W axis.
@@ -1046,8 +1069,43 @@ class _HEGKFACOptimizer:
     # -----------------------------------------------------
 
     def initialize_walkers(self, rng_key, num_walkers):
+        # Mirror SR's logic: honour ``ansatz.walker_init`` from config.
+        # 'auto' picks 'crystal_perturbed' when the envelope is the
+        # localised-crystal one (2D only), else 'uniform'.  At low
+        # density (rs >> 1) crystal_perturbed init is much closer to
+        # the converged |psi|^2 than uniform-random in the cell, so
+        # 400 equil sweeps actually equilibrate (uniform init at rs=20
+        # leaves walkers stranded in low-|psi|^2 regions, biasing
+        # E_loc by ~25 mHa/elec).
+        walker_init = str(getattr(
+            self.config, 'walker_init', 'auto',
+        )).lower()
+        envelope_type = getattr(
+            self.config, 'envelope_type', 'plane_wave',
+        )
+        if walker_init == 'auto':
+            walker_init = (
+                'crystal_perturbed'
+                if (envelope_type == 'crystal_gaussian'
+                    and self.dim == 2)
+                else 'uniform'
+            )
+        if walker_init == 'crystal_perturbed' and self.dim == 2:
+            from .psi.nn.env_localized_2d import (
+                crystal_init_walkers_2d,
+            )
+            return crystal_init_walkers_2d(
+                rng_key, num_walkers,
+                n_up=self.n_up, n_down=self.n_down, L=self.L,
+                sigma_init=float(getattr(
+                    self.config, 'crystal_sigma_init', 0.25,
+                )),
+                spin_pattern=str(getattr(
+                    self.config, 'crystal_spin_pattern', 'neel',
+                )),
+            )
         return self.L * jax.random.uniform(
-            rng_key, (num_walkers, self.nelec, 3),
+            rng_key, (num_walkers, self.nelec, self.dim),
         )
 
     def _pot_batch(self, w):

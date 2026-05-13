@@ -1,0 +1,75 @@
+# rs=20, N=50 fluid — PRODUCTION size on frodo A100.
+#
+# Diagnostic v3 of "is light-ansatz fluid under-fit?":
+#   - bare emb=32 (no BF/J)            -> -43.69 mHa  (5000 iters, frodo)
+#   - emb=32 + BF + deep_jastrow       -> -41.5 mHa plateau (local 4070 Ti)
+#   - emb=64 layers=2 n_det=2 + BF/J   -> in progress (local big-net)
+#   - emb=128 layers=3 n_det=4 + BF/J  -> THIS RUN (frodo A100 GPU 2)
+#
+# Smith 2024 (MP)^2NQS target: -46.37 mHa.
+# HF analytic baseline:        -29.15 mHa.
+
+project: rs20_n50_fluid_prod
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 128
+  layers: 3
+  heads: 8
+  two_particle_dim: 64
+  n_det: 4
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: true
+  pair_jastrow: false
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 12
+  det_jitter: 0.05
+
+pretrain:
+  iters: 500
+  walkers: 384
+  lr: 3.0e-3
+
+optimize:
+  type: sr
+  iters: 10000
+  walkers: 512
+  lr: 0.02
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 3.0e-3
+  sr_n_cg: 20
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 512
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

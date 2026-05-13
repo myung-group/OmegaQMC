@@ -48,6 +48,7 @@ os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
 import numpy as np
 import jax
 import yaml
+from flax import nnx
 
 from OmegaQMC.afqmc_3deg import (
     build_3deg_system,
@@ -101,6 +102,25 @@ def _get(d, key, default=None):
     return cur
 
 
+_VALID_BACKBONES = ('psiformer', 'mpnqs', 'ferminet')
+
+
+def _validated_backbone(value):
+    """Normalise + validate the ``ansatz.backbone`` YAML field.
+
+    A typo would silently fall through and produce an opaque
+    AttributeError later in the GNN builder; raise here instead so the
+    user sees the bad value next to the valid options.
+    """
+    bb = str(value).lower()
+    if bb not in _VALID_BACKBONES:
+        raise ValueError(
+            f"ansatz.backbone={value!r} is not recognised; "
+            f"valid choices are {_VALID_BACKBONES}.",
+        )
+    return bb
+
+
 def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
     a = cfg.get('ansatz', {})
     jas_act = a.get('jas_activation', 'tanh')
@@ -113,6 +133,10 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         two_particle_stream_dim=int(a.get('two_particle_dim', 16)),
         n_attention_heads=int(a.get('heads', 2)),
         use_cusp=bool(a.get('use_cusp', True)),
+        # Default False — locked Kato slope.  Trainable α was the
+        # cause of a documented variational catastrophe; opt in only
+        # for diagnostic studies.
+        cusp_trainable_alpha=bool(a.get('cusp_trainable_alpha', False)),
         use_deep_jastrow=bool(a.get('deep_jastrow', False)),
         use_pair_jastrow=bool(a.get('pair_jastrow', False)),
         jas_mlp_activation=(None if jas_act in (None, 'none')
@@ -122,6 +146,37 @@ def _build_psiformer_config(cfg, n_up, n_down, L, dim=3):
         n_virt_pw=int(a.get('n_virt_pw', 12)),
         det_jitter=float(a.get('det_jitter', 0.02)),
         use_ghost_atom=bool(a.get('use_ghost_atom', True)),
+        # Backflow on/off — defaults to True (FermiNet/PsiFormer recipe).
+        use_backflow=bool(a.get('use_backflow', True)),
+        # Backbone choice: 'psiformer' (default attention GNN), 'mpnqs'
+        # (Smith 2024 / Pescia 2024 message-passing GNN), or 'ferminet'
+        # (Pfau 2020 dual-stream-with-EdgeSum on sender-spin edges).
+        backbone=_validated_backbone(a.get('backbone', 'psiformer')),
+        mpnqs_d1=int(a.get('mpnqs_d1', 32)),
+        mpnqs_d2=int(a.get('mpnqs_d2', 26)),
+        mpnqs_hidden=int(a.get('mpnqs_hidden', 32)),
+        mpnqs_n_layers=int(a.get('mpnqs_n_layers', 4)),
+        mpnqs_use_layer_norm=bool(a.get('mpnqs_use_layer_norm', False)),
+        mpnqs_layer_norm_mode=str(a.get('mpnqs_layer_norm_mode', 'post_each')),
+        # Coord-transform backflow (Smith 2024).  Off by default; set
+        # ``use_coord_backflow: true`` in YAML to enable.
+        use_coord_backflow=bool(a.get('use_coord_backflow', False)),
+        coord_bf_zero_init=bool(a.get('coord_bf_zero_init', True)),
+        # Smith deep Jastrow (eqs. 20-21).  Replaces the standard
+        # deep_jastrow when enabled.
+        use_smith_deep_jastrow=bool(
+            a.get('use_smith_deep_jastrow', False),
+        ),
+        smith_jastrow_hidden=int(a.get('smith_jastrow_hidden', 32)),
+        smith_jastrow_n_layers=int(a.get('smith_jastrow_n_layers', 4)),
+        # Envelope choice — 'plane_wave' (Fermi-sea Slater) or
+        # 'crystal_gaussian' (localised Gaussians on triangular Bravais
+        # lattice for the Wigner-crystal sector).
+        envelope_type=str(a.get('envelope_type', 'plane_wave')),
+        crystal_sigma_init=float(a.get('crystal_sigma_init', 0.25)),
+        crystal_spin_pattern=str(a.get('crystal_spin_pattern', 'neel')),
+        crystal_det_jitter=float(a.get('crystal_det_jitter', 0.0)),
+        walker_init=str(a.get('walker_init', 'auto')),
         dim=int(dim),
     )
 
@@ -277,23 +332,56 @@ def _run(cfg, project, run_dir, prefix):
               f"e_M={hf_2d['madelung']:.6f}  Ha/elec")
 
     # --- Ansatz ---
-    ansatz_type = _get(cfg, 'ansatz.type', 'psiformer')
-    if ansatz_type == 'psiformer':
+    # ``ansatz.type`` selects the *config dataclass* and the matching
+    # builder pipeline.  Within ``nn_heg`` (PsiFormer/MP-NQS family),
+    # the actual GNN backbone is selected by ``ansatz.backbone``
+    # ('psiformer' single-stream attention vs. 'mpnqs' Pescia/Smith
+    # dual-stream message passing).  ``type: psiformer`` is kept as a
+    # backward-compat alias for existing YAMLs.
+    ansatz_type = str(_get(cfg, 'ansatz.type', 'nn_heg')).lower()
+    if ansatz_type in ('nn_heg', 'psiformer'):
         config = _build_psiformer_config(cfg, n_up, n_down, L, dim=dim)
         a = cfg['ansatz']
-        print(f"  Ansatz: PsiFormer (dim={dim}) - "
-              f"emb={a.get('embedding_dim', 64)}, "
-              f"layers={a.get('layers', 2)}, "
-              f"tp_dim={a.get('two_particle_dim', 16)}, "
-              f"heads={a.get('heads', 2)}, "
-              f"n_det={a.get('n_det', 1)}")
+        backbone = _validated_backbone(a.get('backbone', 'psiformer'))
+        if backbone == 'mpnqs':
+            print(
+                f"  Ansatz: nn_heg / MP-NQS (dim={dim}) - "
+                f"d1={a.get('mpnqs_d1', 32)}, "
+                f"d2={a.get('mpnqs_d2', 26)}, "
+                f"hidden={a.get('mpnqs_hidden', 32)}, "
+                f"T={a.get('mpnqs_n_layers', 4)}, "
+                f"n_det={a.get('n_det', 1)}"
+            )
+        elif backbone == 'ferminet':
+            print(
+                f"  Ansatz: nn_heg / FermiNet (dim={dim}) - "
+                f"emb={a.get('embedding_dim', 64)}, "
+                f"layers={a.get('layers', 2)}, "
+                f"tp_dim={a.get('two_particle_dim', 16)}, "
+                f"n_det={a.get('n_det', 1)}, "
+                f"full_det={a.get('full_determinant', False)}"
+            )
+        else:
+            print(
+                f"  Ansatz: nn_heg / PsiFormer (dim={dim}) - "
+                f"emb={a.get('embedding_dim', 64)}, "
+                f"layers={a.get('layers', 2)}, "
+                f"tp_dim={a.get('two_particle_dim', 16)}, "
+                f"heads={a.get('heads', 2)}, "
+                f"n_det={a.get('n_det', 1)}"
+            )
     elif ansatz_type in ('slater_jastrow', 'sj'):
         config = _build_slater_jastrow_config(
             cfg, n_up, n_down, L, dim=dim,
         )
         print(f"  Ansatz: Slater-Jastrow (dim={dim})")
     else:
-        raise ValueError(f"Unknown ansatz.type: {ansatz_type!r}")
+        raise ValueError(
+            f"Unknown ansatz.type: {ansatz_type!r}.  "
+            f"Valid: 'nn_heg' (=PsiFormer/MP-NQS pipeline; backbone "
+            f"selectable), 'psiformer' (legacy alias for 'nn_heg'), "
+            f"'slater_jastrow' (or 'sj')."
+        )
 
     # --- RNG keys ---
     rng = jax.random.key(seed)
@@ -307,9 +395,9 @@ def _run(cfg, project, run_dir, prefix):
     pretrained_params = None
     pretrain_iters = int(_get(cfg, 'pretrain.iters', 0))
     if pretrain_iters > 0:
-        if ansatz_type != 'psiformer':
+        if ansatz_type not in ('nn_heg', 'psiformer'):
             print("[warn] pretrain.iters > 0 ignored "
-                  "(pretraining is PsiFormer-only)")
+                  "(pretraining only available for nn_heg ansatz)")
         else:
             pre_walkers = int(_get(cfg, 'pretrain.walkers', 256))
             pre_lr = float(_get(cfg, 'pretrain.lr', 1e-3))
@@ -350,12 +438,61 @@ def _run(cfg, project, run_dir, prefix):
         if opt_type == 'sr':
             sr_damp = float(_get(cfg, 'optimize.sr_damping', 1e-3))
             sr_n_cg = int(_get(cfg, 'optimize.sr_n_cg', 30))
+            lr_schedule = str(_get(cfg, 'optimize.lr_schedule', 'auto'))
+            lr_decay_T = _get(cfg, 'optimize.lr_decay_T', None)
+            if lr_decay_T is not None:
+                lr_decay_T = float(lr_decay_T)
+            lr_min = float(_get(cfg, 'optimize.lr_min', 0.0))
+            lr_T_max = _get(cfg, 'optimize.lr_T_max', None)
+            if lr_T_max is not None:
+                lr_T_max = int(lr_T_max)
+            lr_n_restarts = int(_get(cfg, 'optimize.lr_n_restarts', 0))
+            spring_mu = float(_get(cfg, 'optimize.spring_mu', 0.0))
+            spring_norm_clip = _get(cfg, 'optimize.spring_norm_clip', None)
+            if spring_norm_clip is not None:
+                spring_norm_clip = float(spring_norm_clip)
+            damping_adapt = bool(_get(
+                cfg, 'optimize.damping_adapt', False,
+            ))
+            damping_min = float(_get(
+                cfg, 'optimize.damping_min', 1e-5,
+            ))
+            damping_max = float(_get(
+                cfg, 'optimize.damping_max', 1e-1,
+            ))
+            damping_factor = float(_get(
+                cfg, 'optimize.damping_factor', 2.0,
+            ))
+            damping_lookback = int(_get(
+                cfg, 'optimize.damping_lookback', 50,
+            ))
+            sampler = str(_get(cfg, 'optimize.sampler', 'metropolis'))
+            mala_grad_clip = _get(cfg, 'optimize.mala_grad_clip', 1.0)
+            if mala_grad_clip is not None:
+                mala_grad_clip = float(mala_grad_clip)
+            save_every = int(_get(cfg, 'optimize.save_every', 500))
             opt = get_vmcopt_nn_heg_sr_func(
                 config, init_key,
+                prefix=prefix,
                 lr=opt_lr, damping=sr_damp, n_cg=sr_n_cg,
                 var_weight=var_weight,
                 ewald_n_real=ewald_n_real,
                 ewald_n_recip=ewald_n_recip,
+                lr_schedule=lr_schedule,
+                lr_decay_T=lr_decay_T,
+                lr_min=lr_min,
+                lr_T_max=lr_T_max,
+                lr_n_restarts=lr_n_restarts,
+                spring_mu=spring_mu,
+                spring_norm_clip=spring_norm_clip,
+                damping_adapt=damping_adapt,
+                damping_min=damping_min,
+                damping_max=damping_max,
+                damping_factor=damping_factor,
+                damping_lookback=damping_lookback,
+                sampler=sampler,
+                mala_grad_clip=mala_grad_clip,
+                save_every=save_every,
             )
         elif opt_type == 'adam':
             opt = get_vmcopt_nn_heg_func(
@@ -413,6 +550,107 @@ def _run(cfg, project, run_dir, prefix):
             else:
                 opt.params = pretrained_params
 
+        # Resume from a previous checkpoint (overrides pretrain).
+        # ``load_chkpt_partial: true`` enables transfer learning from
+        # a checkpoint with different shapes — e.g. transferring the
+        # MPNN body / deep Jastrow / coord BF (N-independent) from a
+        # smaller-N run while keeping fresh init for the orbital
+        # coefficients (N-dependent).
+        load_chkpt = _get(cfg, 'optimize.load_chkpt', None)
+        load_partial = bool(_get(
+            cfg, 'optimize.load_chkpt_partial', False,
+        ))
+        if load_chkpt:
+            from OmegaQMC.nn_checkpoint import (
+                load_nn_checkpoint, load_nn_checkpoint_partial,
+                load_nn_checkpoint_partial_by_path,
+            )
+            from jax.flatten_util import ravel_pytree
+            chkpt_path = Path(load_chkpt)
+            if not chkpt_path.is_absolute():
+                chkpt_path = Path.cwd() / chkpt_path
+            if not chkpt_path.is_file():
+                raise FileNotFoundError(
+                    f"optimize.load_chkpt: {chkpt_path} not found"
+                )
+            # Path-based partial loading: when source has a different
+            # set of optional modules than target (e.g., adding
+            # coord_backflow to a chkpt that didn't have it), nnx's
+            # alphabetical leaf order shifts existing leaves so the
+            # index-based partial loader misaligns.  Path-based load
+            # avoids this by matching leaves on key path.  User
+            # supplies ``load_chkpt_source_overrides`` — ansatz-field
+            # overrides describing the source's config relative to
+            # the current target.
+            src_overrides = _get(
+                cfg, 'optimize.load_chkpt_source_overrides', None,
+            )
+            mode_label = (
+                "partial transfer (path)" if (load_partial and src_overrides)
+                else ("partial transfer" if load_partial else "resume")
+            )
+            print(f"\n[{mode_label}] Loading params from {chkpt_path}")
+            if load_partial and src_overrides:
+                # Build shadow-source pytree to derive the chkpt's paths.
+                shadow_cfg_dict = {**cfg}
+                shadow_cfg_dict['ansatz'] = {
+                    **cfg.get('ansatz', {}), **src_overrides,
+                }
+                shadow_config = _build_psiformer_config(
+                    shadow_cfg_dict, n_up, n_down, L, dim=dim,
+                )
+                from OmegaQMC.psi.nn.heg_wf_module import (
+                    build_heg_psiformer_wf,
+                )
+                shadow_model = build_heg_psiformer_wf(
+                    shadow_config, nnx.Rngs(int(seed)),
+                )
+                shadow_state = nnx.state(shadow_model, nnx.Param)
+                if opt_type == 'sr':
+                    template = opt.unravel(opt.params_flat)
+                    loaded, meta = load_nn_checkpoint_partial_by_path(
+                        str(chkpt_path), template, shadow_state,
+                    )
+                else:
+                    loaded, meta = load_nn_checkpoint_partial_by_path(
+                        str(chkpt_path), opt.params, shadow_state,
+                    )
+            else:
+                loader = (
+                    load_nn_checkpoint_partial
+                    if load_partial
+                    else load_nn_checkpoint
+                )
+                if opt_type == 'sr':
+                    template = opt.unravel(opt.params_flat)
+                    loaded, meta = loader(str(chkpt_path), template)
+                else:
+                    loaded, meta = loader(str(chkpt_path), opt.params)
+
+            # Optional: reset specific module(s) to zero after load.
+            # Useful for transfer learning: keep MPNN body + Jastrow
+            # from source, but reset coord_backflow so the optimizer
+            # learns BF fresh at the new system size (avoids over-
+            # shifted BF when N changes — h_i^(T) magnitudes differ
+            # because aggregation is sum-not-mean).
+            reset_bf = bool(_get(
+                cfg, 'optimize.load_chkpt_reset_bf', False,
+            ))
+            if reset_bf:
+                from OmegaQMC.nn_checkpoint import zero_module_leaves
+                loaded = zero_module_leaves(loaded, 'coord_backflow')
+
+            if opt_type == 'sr':
+                opt.params_flat = ravel_pytree(loaded)[0]
+            else:
+                opt.params = loaded
+
+            ep_meta = meta.get('epoch', '?')
+            e_meta = meta.get('energy', None)
+            e_str = (f"{float(e_meta):+.6f} Ha"
+                     if e_meta is not None else "n/a")
+            print(f"  source @ epoch={ep_meta}, energy={e_str}")
+
         opt_result = opt(
             opt_key,
             num_iters=opt_iters,
@@ -423,8 +661,12 @@ def _run(cfg, project, run_dir, prefix):
             verbose=1,
         )
         trained_params = opt_result['params']
-        print(f"  Final training E/N: "
-              f"{opt_result['E_final_ha']:.6f} Ha/elec")
+        e_final = opt_result.get('E_final_ha')
+        if e_final is not None:
+            print(f"  Final training E/N: {e_final:.6f} Ha/elec")
+        else:
+            print(f"  (no training iters executed — proceeding to eval "
+                  f"with loaded params)")
     else:
         print("\n[1/2] Skipping training (optimize.skip=true).")
 

@@ -112,6 +112,95 @@ def commensurate_triangular_supercell(
 
 
 # ---------------------------------------------------------------------
+# Crystal-aware walker initialisation
+# ---------------------------------------------------------------------
+
+def crystal_init_walkers_2d(
+    rng_key,
+    num_walkers: int,
+    n_up: int,
+    n_down: int,
+    L: float,
+    *,
+    sigma_init: float = 0.25,
+    spin_pattern: str = 'neel',
+    noise_scale_factor: float = 0.5,
+):
+    """Initialise walkers near triangular Bravais lattice sites.
+
+    For Wigner-crystal trial wavefunctions ``|psi|^2`` is sharply peaked
+    at the lattice sites with width ``sigma ~ sigma_init * a_NN``; the
+    inter-site spacing ``a_NN`` is far larger than any Metropolis step
+    a uniform-init walker can take in a few decorrelation moves.  As a
+    result, walkers initialised uniformly in the cell sit overwhelmingly
+    in low-``|psi|^2`` regions and the SR optimiser then "trains away"
+    the localised character of the envelope.  This helper places each
+    walker's electrons directly at the triangular sites with a small
+    Gaussian noise of width ``noise_scale_factor * sigma_init * a_NN``
+    (default ``0.5 sigma_init a_NN``, half the envelope width — keeps
+    walkers comfortably inside the |psi|^2 peak), which lets MCMC
+    immediately sample the dominant region of |psi|^2.
+
+    Args:
+        rng_key: JAX PRNG key.
+        num_walkers: Number of MCMC walkers.
+        n_up, n_down: Per-spin electron counts.
+        L: Square-cell side length (Bohr).
+        sigma_init: Same as the corresponding
+            :class:`GaussianLocalizedEnvelope2D` parameter.
+        spin_pattern: ``'neel'`` (alternating up/down on adjacent
+            triangular sites) or ``'all_up'``.
+        noise_scale_factor: Multiplier on ``sigma_init * a_NN`` for the
+            walker-position Gaussian noise.
+
+    Returns:
+        ``(num_walkers, n_up + n_down, 2)`` walker positions, in Bohr,
+        wrapped into ``[0, L)^2`` for safety.
+    """
+    if spin_pattern not in ('neel', 'all_up'):
+        raise ValueError(
+            f"spin_pattern must be 'neel' or 'all_up', "
+            f"got {spin_pattern!r}",
+        )
+    n_elec = n_up + n_down
+    rs = L / np.sqrt(np.pi * n_elec)
+    a_nn = np.sqrt(2.0 * np.pi / np.sqrt(3.0)) * rs   # ~ 1.905 * rs
+
+    all_sites = triangular_lattice_sites(rs, n_elec)
+    if spin_pattern == 'neel':
+        up_sites = all_sites[0::2][:n_up]
+        dn_sites = (
+            all_sites[1::2][:n_down] if n_down > 0 else None
+        )
+    else:
+        up_sites = all_sites[:n_up]
+        dn_sites = (
+            all_sites[n_up:n_up + n_down] if n_down > 0 else None
+        )
+
+    # Wrap to cell to match envelope's site convention.
+    up_sites = np.mod(up_sites, L)
+    if dn_sites is not None:
+        dn_sites = np.mod(dn_sites, L)
+        sites = np.concatenate([up_sites, dn_sites], axis=0)
+    else:
+        sites = up_sites
+    sites = jnp.asarray(sites, dtype=jnp.float64)
+
+    noise_scale = float(noise_scale_factor) * float(sigma_init) * a_nn
+    noise = noise_scale * jax.random.normal(
+        rng_key, (num_walkers, n_elec, 2),
+    )
+    walkers = sites[None, :, :] + noise
+
+    # Wrap into [0, L)^2 in case noise pushed walkers outside
+    # (Metropolis sampler also wraps, but this keeps the very first
+    # log_psi evaluation inside the cell for sanity).
+    walkers = jnp.mod(walkers, L)
+    return walkers
+
+
+# ---------------------------------------------------------------------
 # Localised Gaussian envelope
 # ---------------------------------------------------------------------
 

@@ -1,0 +1,118 @@
+# rs=20, N=50 fluid — Smith 2024 (PRL 133, 266504) full recipe
+# (within our codebase's vocabulary).
+#
+# What's enabled relative to prior runs:
+#   1. Multi-PW orbitals: n_virt_pw=125 → ~150 PWs/orbital ≈ Smith's
+#      N_k = 3N at N=50 (Smith uses N=56, N_k=168).
+#   2. ALL three correlation pieces simultaneously:
+#        - pair Jastrow (cusp, Kato)
+#        - deep Jastrow (NN-based, periodic)
+#        - multiplicative backflow (per-orbital, GNN-fed)
+#        - coord-transform backflow (x_i = r_i + W·h_i^(T), Smith eq. 19)
+#   3. WC walker init for fluid (walker_init: crystal_perturbed) —
+#      Smith page 7: "the initial electron configurations are chosen
+#      to be close to the positions of Wigner crystals with a small
+#      Gaussian perturbation" (for both phases).
+#   4. SR with Smith-style hyperparameters:
+#        - lr decay η_t = η_0 / (1 + t/T), T=1000
+#        - SPRING momentum μ=0.9 on the natural-grad update
+#        - MALA sampling instead of plain Metropolis
+#        - 1024 walkers
+#        - n_cg=20
+#   5. Network sized to ~50k params (Smith's d1=32, d2=26, hidden=32):
+#      emb=48, layers=2, n_det=2, heads=4, tp_dim=24.
+#
+# Total params: TBD (logged in train.log on first iter).
+# Expected wall-time on A100: ~per-iter dt × 10000 iters.
+
+project: rs20_n50_fluid_smith
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 48
+  layers: 2
+  heads: 4
+  two_particle_dim: 24
+  n_det: 2
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: true
+  deep_jastrow: true
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true               # multiplicative BF (existing)
+  use_coord_backflow: true         # NEW: Smith-style coord-transform BF
+  coord_bf_zero_init: true         # start from no shift (HF-like)
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 30                    # 4x prior (8) but tractable for
+                                   # 512-1024-walker SR.  Smith uses
+                                   # N_k=3N=150, but they have 1024
+                                   # walkers + lr=10 + SPRING — at our
+                                   # lr=0.05 vanilla SR, 50k cold
+                                   # virtual coefficients drown the
+                                   # gradient signal.  Keep modest.
+  det_jitter: 0.05
+  walker_init: crystal_perturbed   # Smith init for both phases
+
+pretrain:
+  iters: 0                         # cold start (Smith's protocol).
+                                   # The PW envelope is already
+                                   # initialised to a Fermi-sea Slater
+                                   # at det 0 — only the BF/Jastrow
+                                   # heads start random.
+
+optimize:
+  # --- Conservative SR recipe (Smith ARCHITECTURE only) ---
+  # The first-pass run with all Smith optimizer features (SPRING +
+  # F-norm clip + adaptive damping + MALA + lr_decay) stalled near HF
+  # because lr=0.05 + clip=0.05 made effective steps O(1e-3) F-norm.
+  # Smith uses lr=10 + clip=10 (200x our lr) — appropriate with
+  # SPRING.  We don't have SPRING tuned to that scale, so we step
+  # back to vanilla SR at the lr that worked in our prior cont3
+  # chain.  Architecture features (multi-PW, coord-BF, pair+deep
+  # Jastrow, WC walker init) stay on.  Once we confirm convergence,
+  # we can layer in MALA / SPRING / lr_decay as ablations.
+  type: sr
+  iters: 20000
+  walkers: 1024                    # Smith's number — 2x SR Jacobian
+                                   # rank vs 512.  Mem at 512 was 2.1 GB
+                                   # / 12 GB so headroom is fine.
+  lr: 0.05
+  spring_mu: 0.0                   # vanilla SR — no momentum
+  spring_norm_clip: 0              # no F-norm clip
+  damping_adapt: false             # fixed λ
+  sampler: metropolis              # vanilla, Gaussian random walk
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+
+eval:
+  walkers: 512                     # eval can use fewer walkers
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 512
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

@@ -1,0 +1,68 @@
+# Quick verification: same minimal-ansatz crystal config but N=18.
+# Tests whether disabling backflow + jastrow + ghost atom reaches the
+# expected -20 mHa range before committing CPU to the N=58 run.
+#
+# Expected runtime: ~10-20 min on CPU (vs 8h+ for N=58).
+
+project: heg2d_rs50_N18_unpol_crystal_minimal_test
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 18                              # 9/spin closed shell
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 32
+  layers: 1
+  heads: 2
+  two_particle_dim: 8
+  n_det: 1
+  full_determinant: false
+  use_cusp: true
+  deep_jastrow: false
+  pair_jastrow: false
+  use_backflow: false
+  use_ghost_atom: false
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.10
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.0
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 1000
+  walkers: 256
+  lr: 0.05
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.025
+  sr_damping: 1.0e-3
+  sr_n_cg: 15
+
+eval:
+  walkers: 256
+  blocks: 20
+  equil_blocks: 10
+  steps_per_block: 20
+  mc_timestep: 5.0
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 256
+  equil_steps: 150
+  sample_steps: 60
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

@@ -1,0 +1,105 @@
+# Lite N=18 validation run for the Smith SPRING+MALA stack.
+# Single-GPU on frodo GPU 2, parallel with the N=50 production
+# (rs20_n50_smith_spring_768w) on GPU 1.
+#
+# PURPOSE: validate the optimizer + architecture at small scale
+# faster than the production run can, so hyperparameter tweaks
+# can be iterated without waiting days.  No published Smith N=18
+# benchmark exists — this is a stability/self-consistency check,
+# not a quantitative match.
+#
+# Sanity-check expectations:
+#   - HF (analytic, 2D, N=18 rs=20): -30.23 mHa/elec
+#   - Trial wf with cusp + Jastrow + BF should reach
+#     ~-44 to -46 mHa (correlation energy ~14-16 mHa)
+#   - Energy must be ABOVE the true ground state (variational
+#     principle).  If E goes below ~-46.5 mHa we have the cusp
+#     drift / variational catastrophe again.
+#
+# Architecture is a half-size MP-NQS:
+#   - d1=24, d2=16, hidden=24, T=3 (vs production 32/26/32/4)
+#   - ~16-20k params (vs 53k production)
+#
+# Optimizer stack: IDENTICAL to production (Smith's recipe with
+# our two safety overrides for lr and cusp lock).
+
+project: rs20_n18_smith_lite_lr1
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 18
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: mpnqs
+  mpnqs_d1: 24                      # production / 1.33
+  mpnqs_d2: 16                      # production / 1.625
+  mpnqs_hidden: 24                  # production / 1.33
+  mpnqs_n_layers: 3                 # production - 1
+  n_det: 1                          # Smith
+  full_determinant: false
+  use_cusp: true
+  cusp_trainable_alpha: false       # locked at Kato (safety)
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true      # Smith eqs. 20-21
+  smith_jastrow_hidden: 24
+  smith_jastrow_n_layers: 3
+  use_backflow: false
+  use_coord_backflow: true          # Smith eq. 19
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 45                     # N_k = 9 + 45 = 54 = 3N (Smith)
+  det_jitter: 0.05
+  walker_init: crystal_perturbed    # Smith protocol
+
+pretrain:
+  iters: 0                          # cold start (Smith protocol)
+
+optimize:
+  type: sr
+  iters: 8000                       # ~2-4 hr at this scale
+  walkers: 512
+  lr: 1.0                           # 10x safer than Smith's 10 (which exploded for us)
+  lr_schedule: inverse              # Smith decay
+  lr_decay_T: 2000                  # delay decay so lr stays high during basin escape
+  spring_mu: 0.9                    # Smith momentum
+  spring_norm_clip: 0.1             # TIGHT clip — catches runaway before damage
+  damping_adapt: true               # Smith adaptive λ
+  damping_min: 1.0e-5
+  damping_max: 1.0e-1
+  damping_factor: 2.0
+  damping_lookback: 100
+  sampler: mala                     # Smith
+  mala_grad_clip: 1.0
+  var_weight: 0.0
+  mcmc_decorr_steps: 20             # Smith
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3                # Smith λ_init
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 512
+  equil_steps: 400
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

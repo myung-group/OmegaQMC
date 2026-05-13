@@ -1,0 +1,26 @@
+# H3 sigma+/sigma- template. Substitute project/lambda/handedness.
+project: PROJECT_OVERRIDE
+seed: 42
+system:
+  type: h3
+  r_hh_bohr: 1.65
+cavity:
+  omega: 0.5
+  lambda: LAMBDA_OVERRIDE
+  polarization:   [1.0, 0.0, 0.0]
+  polarization_y: [0.0, 1.0, 0.0]
+  chiral_handedness: HAND_OVERRIDE
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow_complex.yaml
+optimizer:
+  arch: tang_native
+  complex_psi: true
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+  train: { num_iters: 1000, num_walkers: 128, num_steps_per_block: 30,
+           num_blocks_equil: 5, num_steps_decorr: 5, mc_timestep: 0.1,
+           lr: 0.02, damping: 1e-3, cg_maxiter: 100,
+           max_param_change: 0.2, jac_batch_size: 32, verbose: 1 }
+  eval:  { enabled: true, num_walkers: 256, num_steps_per_block: 30,
+           num_blocks: 20, num_blocks_equil: 5, mc_timestep: 0.1, verbose: 0 }

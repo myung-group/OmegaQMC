@@ -1,0 +1,48 @@
+# H2 dissociation: lambda=0.5, omega=6 eV at R = 2.5 Bohr.
+# Phase H2-C: high-lambda push for polariton-induced barrier.
+
+project: qed_h2_diss_R2.5_lambda05_omega6
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 2.5
+  spin: singlet
+
+cavity:
+  omega: 0.22043
+  lambda: 0.5
+  polarization: [0.0, 0.0, 1.0]
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 10
+
+  train:
+    num_iters: 2000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0

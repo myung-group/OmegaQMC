@@ -153,6 +153,9 @@ def build_nn_wf(
         cusp_nuclei=cusp_nuc,
         backflow_transform=config.backflow_transform,
         conf_coeff=conf_coeff,
+        complex_psi=config.complex_psi,
+        embedding_dim=config.embedding_dim,
+        rngs=rngs,
     )
 
 
@@ -204,6 +207,7 @@ def _build_omni(
         project_to_embedding_dim=(
             config.project_to_embedding_dim
         ),
+        qed_nph_max=config.qed_nph_max,
         rngs=rngs,
     )
 
@@ -420,9 +424,15 @@ def _build_gnn_layer(
                 )
             )
         elif uf_type == 'edge_sum':
+            # edge_sum is a pure aggregation (no transform),
+            # so its output dim equals the *actual* incoming
+            # edge feature dim on this layer (edge_feat_dim),
+            # not the architectural target tp_dim. They differ
+            # at layer 0 (raw ee features) before deep_features
+            # transforms edges to tp_dim.
             uf_list.append(
                 EdgeSumElectronUpdateFeature(
-                    tp_dim, n_up, n_down,
+                    edge_feat_dim, n_up, n_down,
                     edge_types=uf_spec.get(
                         'edge_types', edge_types,
                     ),

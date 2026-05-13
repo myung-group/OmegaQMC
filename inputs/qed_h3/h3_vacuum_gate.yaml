@@ -1,0 +1,24 @@
+# H3 equilateral, 3 electrons, doublet GS with degenerate E' SOMO.
+# Vacuum gate (lambda=0): verify <L_z>=0 by TR symmetry.
+project: qed_h3_vacuum_gate
+seed: 42
+system:
+  type: h3
+  r_hh_bohr: 1.65
+cavity:
+  omega: 0.5
+  lambda: 0.0
+  polarization: [0.0, 0.0, 1.0]
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 4
+  train: { num_iters: 500, num_walkers: 128, num_steps_per_block: 30,
+           num_blocks_equil: 5, num_steps_decorr: 5, mc_timestep: 0.1,
+           lr: 0.02, damping: 1e-3, cg_maxiter: 100,
+           max_param_change: 0.2, jac_batch_size: 32, verbose: 1 }
+  eval:  { enabled: true, num_walkers: 256, num_steps_per_block: 30,
+           num_blocks: 20, num_blocks_equil: 5, mc_timestep: 0.1, verbose: 0 }

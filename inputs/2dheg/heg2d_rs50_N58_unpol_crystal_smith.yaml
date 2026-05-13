@@ -52,8 +52,11 @@ optimize:
 eval:
   walkers: 512
   blocks: 60
-  equil_blocks: 15
+  equil_blocks: 30                   # 2x more (crystal needs more burn-in)
   steps_per_block: 30
+  mc_timestep: 5.0                   # ~ sigma_init * a_NN / 3 = 0.10*95/3 ~ 3 Bohr;
+                                     # mc_timestep -> step_size = sqrt(3*mc_timestep) ~ 3.9 Bohr.
+                                     # MUCH larger than optimize.mc_timestep=0.025 default.
 
 observables:
   enabled: true

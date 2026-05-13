@@ -1,0 +1,50 @@
+# Tier 2 validation: H2 at Riera 2024 Fig 1 setting
+# omega = 0.3 Ha (= 8.16 eV), lambda = 0.1, R = 1.4 Bohr, polarization along bond axis (z)
+# Riera AFQMC target: dE = +9.5 mHa vs lambda=0 (read off Fig 1, aug-cc-pVDZ)
+# Our QED-FCI/aug-cc-pVDZ at same setting: +5.65 mHa
+
+project: qed_h2_validate_riera_lam01
+
+seed: 42
+
+system:
+  type: h2
+  R_bohr: 1.4
+  spin: singlet
+
+cavity:
+  omega: 0.3
+  lambda: 0.1
+  polarization: [0.0, 0.0, 1.0]
+
+ansatz:
+  type: OmegaQMC/psi/nn/conf/ferminet_jastrow.yaml
+
+optimizer:
+  arch: tang_native
+  alpha_init: 0.0
+  alpha_train: false
+  nph_max: 6
+
+  train:
+    num_iters: 2000
+    num_walkers: 256
+    num_steps_per_block: 30
+    num_blocks_equil: 5
+    num_steps_decorr: 5
+    mc_timestep: 0.1
+    lr: 0.05
+    damping: 1e-3
+    cg_maxiter: 100
+    max_param_change: 0.5
+    jac_batch_size: 64
+    verbose: 1
+
+  eval:
+    enabled: true
+    num_walkers: 512
+    num_steps_per_block: 30
+    num_blocks: 30
+    num_blocks_equil: 10
+    mc_timestep: 0.1
+    verbose: 0

@@ -1,0 +1,97 @@
+# rs=20, N=50 fluid — Smith-architecture + cosine-annealing scheduler.
+#
+# Successor to rs20_n50_fluid_smith.yaml.  The previous run (PID 49520)
+# converged to E ≈ -45.78 mHa over 2400 iters with fixed lr=0.05,
+# clearly plateauing because the fixed step kept overshooting the basin
+# floor.  Switching the scheduler to cosine annealing shrinks step size
+# smoothly as we approach the minimum, which should extract another
+# 0.3-0.6 mHa of refinement.
+#
+# Configuration:
+#   - Same architecture (multi-PW orbitals, coord-BF, pair+deep+mult J/BF,
+#     WC walker init).
+#   - Vanilla SR (no SPRING / MALA / F-norm-clip / adaptive damping).
+#   - lr_schedule: cosine, no warm restarts (we have no evidence of
+#     multiple basins; plateau width matches noise floor exactly,
+#     consistent with "right basin, refine me").
+#   - Cold start (no pretrain).  Run 4 showed cold start gives the
+#     largest initial gradients and fastest descent.
+#   - Periodic chkpt save every 500 iters + SIGTERM handler so kill is
+#     graceful from now on.
+#
+# Targets: HF -29.15, our crystal -45.91, DMC fluid -46.34, Smith -46.37.
+
+project: rs20_n50_fluid_smith2
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: psiformer
+  embedding_dim: 48
+  layers: 2
+  heads: 4
+  two_particle_dim: 24
+  n_det: 2
+  full_determinant: false
+  use_cusp: true
+  pair_jastrow: true
+  deep_jastrow: true
+  jas_activation: tanh
+  jas_zero_init_last: true
+  use_backflow: true
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 30
+  det_jitter: 0.05
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0                         # cold start
+
+optimize:
+  type: sr
+  iters: 20000
+  walkers: 1024
+  lr: 0.05                         # initial / max for cosine
+  lr_schedule: cosine
+  lr_min: 5.0e-4                   # final / min lr (100x smaller)
+  lr_T_max: 20000                  # cosine spans the full run
+  lr_n_restarts: 0                 # no warm restarts (assumed single basin)
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500                  # periodic chkpt — graceful kill safe
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 20
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 6
+  n_walkers: 512
+  equil_steps: 300
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 4
+  n_recip: 8

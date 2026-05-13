@@ -123,8 +123,15 @@ class OmniNet(nnx.Module):
         self.nuclear_gnn_head = nuclear_gnn_head
 
     def __call__(self, phys_conf):
+        # Returns (jastrow, backflow, nuc_params, embeddings).
+        # ``embeddings`` is the per-electron post-GNN feature stream
+        # (n_elec, d1) — exposed so downstream wavefunctions can
+        # add their own readout heads (e.g. coord-transform
+        # backflow x_i = r_i + W·h_i^(T) à la Smith 2024).
+        # Pre-existing callers that unpacked 3 values must be
+        # updated.
         if self.gnn is None:
-            return None, None, None
+            return None, None, None, None
         graph_nodes = self.gnn(phys_conf)
         embeddings = graph_nodes.electrons
         nuc_emb = graph_nodes.nuclei
@@ -140,15 +147,25 @@ class OmniNet(nnx.Module):
         )
         backflow = None
         if self.backflow is not None:
-            backflow = (
-                self.backflow['up'](
-                    embeddings[:self.n_up],
-                ),
-                self.backflow['down'](
-                    embeddings[self.n_up:],
-                ),
+            # Guard the empty-spin-sector case: when n_up=0 or n_down=0
+            # (fully spin-polarized states like Sz=1 triplet on H2),
+            # the corresponding embeddings slice is shape (0, emb_dim)
+            # and the backflow head's internal `unflatten` would hit
+            # a ZeroDivisionError. Return None for the empty spin
+            # block; downstream `_apply_backflow` in wf.py must also
+            # handle a None entry.
+            emb_up = embeddings[:self.n_up]
+            emb_down = embeddings[self.n_up:]
+            bf_up = (
+                self.backflow['up'](emb_up)
+                if emb_up.shape[0] > 0 else None
             )
-        return jastrow, backflow, nuc_params
+            bf_down = (
+                self.backflow['down'](emb_down)
+                if emb_down.shape[0] > 0 else None
+            )
+            backflow = (bf_up, bf_down)
+        return jastrow, backflow, nuc_params, embeddings
 
 
 class NuclearGNNHead(nnx.Module):

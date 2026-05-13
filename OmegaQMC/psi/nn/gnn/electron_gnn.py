@@ -58,6 +58,7 @@ class ElectronEmbedding(nnx.Module):
         positional_embedding_ne,
         use_spin, project_to_embedding_dim,
         rngs,
+        qed_nph_max=None,
     ):
         self.n_nuc = n_nuc
         self.n_up = n_up
@@ -65,11 +66,18 @@ class ElectronEmbedding(nnx.Module):
         self.embedding_dim = embedding_dim
         self.ne_embed = positional_embedding_ne
         self.use_spin = use_spin
+        # Tang-style per-electron one-hot photon injection.
+        # When set, append one_hot(phys_conf.n) of size
+        # nph_max+1 to each electron's input feature vector
+        # before the projection layer (Tang 2025 Sec. II.C).
+        self.qed_nph_max = qed_nph_max
 
         if positional_embedding_ne is not None:
             in_dim = ne_feat_dim * n_nuc
             if use_spin:
                 in_dim += 1
+            if qed_nph_max is not None:
+                in_dim += qed_nph_max + 1
             if project_to_embedding_dim:
                 self.proj = nnx.Linear(
                     in_dim, embedding_dim,
@@ -128,6 +136,19 @@ class ElectronEmbedding(nnx.Module):
                 x = jnp.concatenate(
                     [x, spins], axis=1,
                 )
+            if self.qed_nph_max is not None:
+                # Per-electron one-hot photon Fock index.
+                n_el = self.n_up + self.n_down
+                n_oh = jax.nn.one_hot(
+                    phys_conf.n,
+                    self.qed_nph_max + 1,
+                    dtype=x.dtype,
+                )
+                n_oh = jnp.broadcast_to(
+                    n_oh[None, :],
+                    (n_el, self.qed_nph_max + 1),
+                )
+                x = jnp.concatenate([x, n_oh], axis=1)
             if self.proj is not None:
                 x = self.proj(x)
         else:
@@ -252,21 +273,38 @@ class ElectronGNNLayer(nnx.Module):
             feats = [
                 e.single_array for e in objs
             ]
-            sizes = [f.shape[-2] for f in feats]
+            # Filter out edge blocks whose sender axis is empty
+            # (happens for fully-spin-polarized cases: n_down=0 makes
+            # the 'down' spin block have shape[0]=0). JAX requires all
+            # non-concat dims to match, so we can't include empty
+            # arrays in the concat. Keep them in `new_edges` unchanged.
+            non_empty_idx = [
+                i for i, f in enumerate(feats)
+                if f.shape[0] > 0
+            ]
+            if not non_empty_idx:
+                return edges
+            ne_keys = [keys[i] for i in non_empty_idx]
+            ne_objs = [objs[i] for i in non_empty_idx]
+            ne_feats = [feats[i] for i in non_empty_idx]
+            # Edge features may be (n_sender, n_receiver, feat_dim) where
+            # n_sender varies by edge type (e.g. n_up vs n_down) but the
+            # other dims match across edge types. Concat along the sender
+            # axis (axis 0 for 3D, axis 0 for 2D since 2D edges are
+            # already flattened to (n_edges, feat_dim)) so the MLP can
+            # process them with shared weights, then split back.
+            sizes = [f.shape[0] for f in ne_feats]
             idxs = list(accumulate(sizes[:-1]))
             combined = jnp.concatenate(
-                feats, axis=-2,
+                ne_feats, axis=0,
             )
             combined = self.subnet_g(combined)
             parts = jnp.split(
-                combined, idxs, axis=-2,
+                combined, idxs, axis=0,
             )
-            new_edges = {
-                k: e.update_from_single_array(p)
-                for k, e, p in zip(
-                    keys, objs, parts,
-                )
-            }
+            new_edges = dict(edges)  # passthrough for empty blocks
+            for k, e, p in zip(ne_keys, ne_objs, parts):
+                new_edges[k] = e.update_from_single_array(p)
         elif self.deep_features == 'separate':
             new_edges = {
                 k: e.update_from_single_array(
