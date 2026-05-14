@@ -9,11 +9,16 @@ Hamiltonian in the dipole gauge.
 import numpy as np
 import jax.numpy as jnp
 
-from OmegaQMC.integrals.cholesky import chunked_cholesky
+from OmegaQMC.integrals.cholesky import (
+    chunked_cholesky,
+    DiskChol,
+    h5py,
+)
 
 
 def prepare_qed_integrals(
     mf, omega, coupling_vec, chol_cut=1e-5,
+    chol_h5_path=None, chol_chunk_g=128,
 ):
     """Prepare AFQMC integrals augmented with QED DSE.
 
@@ -26,7 +31,8 @@ def prepare_qed_integrals(
         v_ijkl  = v_ijkl^Coulomb + d_ik * d_jl  (DSE)
         d_ij    = lambda * <i|r.eps|j>
 
-    The DSE adds one extra Cholesky vector (d_ij).
+    The DSE adds one extra Cholesky vector (d_ij), so the augmented
+    tensor has shape ``(naux + 1, nbasis, nbasis)``.
 
     Args:
         mf: PySCF mean-field object
@@ -35,12 +41,19 @@ def prepare_qed_integrals(
         coupling_vec: Light-matter coupling vector (3,).
             Direction = polarization, magnitude = lambda.
         chol_cut: Cholesky decomposition threshold.
+        chol_h5_path: If set, write the augmented Cholesky tensor to
+            this HDF5 file (dataset ``chol_mo``) and return a
+            :class:`DiskChol` as ``chol_qed``. AO→MO transform and v0
+            accumulation are done in ``chol_chunk_g`` slabs so peak
+            RAM is independent of naux.
+        chol_chunk_g: Slab size along the auxiliary axis. Default 128.
 
     Returns:
         dict with keys:
             'h1e': shape (nbasis, nbasis)
             'h1e_mod_0': shape (nbasis, nbasis)
-            'chol_qed': shape (naux+1, nbasis, nbasis)
+            'chol_qed': shape (naux+1, nbasis, nbasis); jnp array
+                        (default) or :class:`DiskChol` if path set
             'dip_mo': shape (nbasis, nbasis)
             'enuc': float
             'nbasis', 'nup', 'ndown': int
@@ -51,55 +64,91 @@ def prepare_qed_integrals(
     nbasis = mol.nao_nr()
     mo_coeff = np.asarray(mf.mo_coeff)
     nup, ndown = mol.nelec
+    nmo = mo_coeff.shape[1]
 
-    # --- Standard electronic integrals ---
+    # --- One-body and dipole integrals ---
     hcore_ao = np.asarray(mf.get_hcore())
     h1e = mo_coeff.T @ hcore_ao @ mo_coeff
 
-    chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)
-    chol_mo = np.einsum(
-        'ab,gbc,cd->gad',
-        mo_coeff.T, chol_ao, mo_coeff,
-    )
-
-    # --- QED: dipole matrix elements ---
-    coupling_vec = np.asarray(
-        coupling_vec, dtype=np.float64,
-    )
+    coupling_vec = np.asarray(coupling_vec, dtype=np.float64)
     lam = np.linalg.norm(coupling_vec)
-
     if lam > 1e-15:
         epsilon = coupling_vec / lam
     else:
         epsilon = np.array([0.0, 0.0, 1.0])
         lam = 0.0
 
-    # Dipole integrals in AO basis: (3, nao, nao)
     dip_ao = mol.intor('int1e_r', comp=3)
-    # Project onto polarization and scale by lambda
-    dip_ao_proj = lam * np.einsum(
-        'k,kpq->pq', epsilon, dip_ao,
-    )
-    # Transform to MO basis
+    dip_ao_proj = lam * np.einsum('k,kpq->pq', epsilon, dip_ao)
     dip_mo = mo_coeff.T @ dip_ao_proj @ mo_coeff
 
-    # --- Augment Cholesky vectors with DSE ---
-    chol_qed = np.concatenate(
-        [chol_mo, dip_mo[None, :, :]], axis=0,
-    )
+    # --- Cholesky in AO basis (chunked_cholesky picks dense/direct) ---
+    chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)
+    naux = chol_ao.shape[0]
 
-    # --- Modified one-body Hamiltonian ---
-    v0 = np.einsum(
-        'gij,gkj->ik', chol_qed, chol_qed,
-    ) * (-0.5)
+    if chol_h5_path is None:
+        # In‑memory path: two GEMMs for AO→MO, single GEMM for v0
+        tmp = chol_ao.reshape(naux * nbasis, nbasis) @ mo_coeff
+        tmp = tmp.reshape(naux, nbasis, nmo)
+        chol_mo = (
+            mo_coeff.T
+            @ tmp.transpose(1, 0, 2).reshape(nbasis, naux * nmo)
+        ).reshape(nmo, naux, nmo).transpose(1, 0, 2)
+
+        # Augment with dipole self‑energy as the (naux+1)-th vector
+        chol_qed = np.concatenate(
+            [chol_mo, dip_mo[None, :, :]], axis=0,
+        )
+
+        # v0[i,k] = -0.5 sum_{g,j} L[g,i,j] L[g,k,j]
+        A = chol_qed.transpose(0, 2, 1).reshape((naux + 1) * nmo, nmo)
+        v0 = -0.5 * (A.T @ A)
+        chol_out = jnp.array(chol_qed)
+
+    else:
+        if h5py is None:
+            raise ImportError(
+                "h5py is required for chol_h5_path — install with "
+                "`pip install h5py`"
+            )
+        v0 = np.zeros((nmo, nmo))
+        with h5py.File(chol_h5_path, 'w') as f:
+            ds = f.create_dataset(
+                'chol_mo',
+                shape=(naux + 1, nmo, nmo),
+                dtype=np.float64,
+                chunks=(min(chol_chunk_g, naux + 1), nmo, nmo),
+            )
+            # Stream AO→MO transform for the naux Coulomb vectors
+            for g0 in range(0, naux, chol_chunk_g):
+                g1 = min(g0 + chol_chunk_g, naux)
+                chunk_ao = chol_ao[g0:g1]
+                ng = g1 - g0
+                tmp = chunk_ao.reshape(ng * nbasis, nbasis) @ mo_coeff
+                tmp = tmp.reshape(ng, nbasis, nmo)
+                chunk_mo = (
+                    mo_coeff.T
+                    @ tmp.transpose(1, 0, 2).reshape(nbasis, ng * nmo)
+                ).reshape(nmo, ng, nmo).transpose(1, 0, 2)
+                ds[g0:g1] = chunk_mo
+                A = chunk_mo.transpose(0, 2, 1).reshape(ng * nmo, nmo)
+                v0 += A.T @ A
+                del tmp, chunk_mo, A
+            # Append the DSE row as the (naux)-th index
+            ds[naux] = dip_mo
+            # DSE contribution: sum_j dip_mo[i,j] * dip_mo[k,j]
+            v0 += dip_mo @ dip_mo.T
+        v0 *= -0.5
+        chol_out = DiskChol(chol_h5_path, dataset='chol_mo',
+                            chunk_g=chol_chunk_g)
+
     h1e_mod_0 = h1e + v0
-
     enuc = mol.energy_nuc()
 
     return {
         'h1e': jnp.array(h1e),
         'h1e_mod_0': jnp.array(h1e_mod_0),
-        'chol_qed': jnp.array(chol_qed),
+        'chol_qed': chol_out,
         'dip_mo': jnp.array(dip_mo),
         'enuc': float(enuc),
         'nbasis': nbasis,

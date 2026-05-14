@@ -119,7 +119,7 @@ AFQMC driver
 QED-AFQMC driver
 -----------------
 
-.. autoclass:: OmegaQMC.qed_afqmc_gto._QEDAFQMCDriver
+.. autoclass:: OmegaQMC.qed_afqmc_gto._QEDAFQMCDriverGTO
    :members: __call__
 
 QED-FCI
