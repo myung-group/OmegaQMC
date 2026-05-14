@@ -11,7 +11,7 @@ from OmegaQMC.vmcopt_nn_sr import get_vmcopt_nn_func
 from OmegaQMC.vmcopt_nn_iradam import get_vmcopt_nn_func as get_vmcopt_nn_iradam_func
 from OmegaQMC.afqmc_gto import get_afqmc_func, extract_casscf_trial
 from OmegaQMC.qed_afqmc_gto import get_qed_afqmc_func
-# from OmegaQMC import psi_gto
+# from OmegaQMC import psi.gto
 # from OmegaQMC import psi_gto_cusp
 # from OmegaQMC import vmc_gto
 

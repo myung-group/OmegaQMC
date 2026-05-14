@@ -1,6 +1,6 @@
 """Unit tests for Ewald pair potential and Madelung constant.
 
-Cross-checks against :mod:`OmegaQMC.afqmc_3deg` and sanity-checks:
+Cross-checks against :mod:`OmegaQMC.afqmc_pw_heg` and sanity-checks:
   * Translation invariance under lattice shifts.
   * Reflection symmetry ``v(r) == v(-r)``.
   * Ewald parameter (η) independence of Madelung.
@@ -19,7 +19,7 @@ from OmegaQMC.observables.ewald import (
     ewald_pair_potential,
     ewald_pair_energy,
 )
-from OmegaQMC.afqmc_3deg import (
+from OmegaQMC.afqmc_pw_heg import (
     build_3deg_system,
     compute_madelung_3d,
 )

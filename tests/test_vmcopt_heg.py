@@ -12,7 +12,7 @@ import pytest
 
 from OmegaQMC.psi.nn.heg_wf import HEGConfig
 from OmegaQMC.vmcopt_nn_heg import get_vmcopt_nn_heg_func
-from OmegaQMC.afqmc_3deg import build_3deg_system, get_afqmc_3deg_func
+from OmegaQMC.afqmc_pw_heg import build_3deg_system, get_afqmc_3deg_func
 
 
 def test_vmcopt_gradient_shape():

@@ -276,7 +276,7 @@ def main():
         # Try to load trained params; fall back to init.
         if chk_path.is_file():
             try:
-                from OmegaQMC.nn_checkpoint import load_nn_checkpoint
+                from OmegaQMC.psi.nn.checkpoint import load_nn_checkpoint
                 params, _ = load_nn_checkpoint(str(chk_path), driver.params)
                 driver.params = params
                 print(f'  loaded {chk_path}')

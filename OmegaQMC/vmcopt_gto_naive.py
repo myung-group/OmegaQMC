@@ -17,8 +17,8 @@ or :mod:`vmcopt_gto_linear` (the linear method).
 import jax
 import jax.numpy as jnp
 import optax
-from .psi_gto import get_psi_fun
-from .cusp import get_cusp_params
+from .psi.gto import get_psi_fun
+from .psi.cusp import get_cusp_params
 from .constants import MIN_DIST_THRESHOLD
 from .vmcopt_gto_irsgd import (
     _build_opt_mask,

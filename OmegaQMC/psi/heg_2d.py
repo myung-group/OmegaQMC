@@ -1,6 +1,6 @@
 """2D HEG system builder, Hartree-Fock reference, and Madelung utilities.
 
-The 2D analog of the relevant parts of :mod:`OmegaQMC.afqmc_3deg`.  The
+The 2D analog of the relevant parts of :mod:`OmegaQMC.afqmc_pw_heg`.  The
 2D HEG lives on a square simulation cell of side
 ``L = sqrt(pi * N) * r_s`` (from the density relation
 ``pi * r_s^2 = A / N``), with electrons on a discrete plane-wave grid

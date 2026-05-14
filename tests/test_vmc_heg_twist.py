@@ -19,7 +19,7 @@ from OmegaQMC.vmc_nn_heg import (
     get_vmc_nn_heg_func,
     get_vmc_nn_heg_twist_func,
 )
-from OmegaQMC.afqmc_3deg import build_3deg_system, get_afqmc_3deg_func
+from OmegaQMC.afqmc_pw_heg import build_3deg_system, get_afqmc_3deg_func
 
 
 def test_twist_driver_constructs_and_local_energy_finite():

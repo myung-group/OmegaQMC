@@ -26,8 +26,8 @@ import jax
 import jax.numpy as jnp
 import optax
 from functools import partial
-from .cusp import get_cusp_params
-from .psi_gto import get_psi_fun, _sanitize_J3_eeI_params
+from .psi.cusp import get_cusp_params
+from .psi.gto import get_psi_fun, _sanitize_J3_eeI_params
 from .constants import MIN_DIST_THRESHOLD
 
 

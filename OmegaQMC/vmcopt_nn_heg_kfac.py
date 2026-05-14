@@ -20,7 +20,8 @@ b. **Per-electron capture (FermiNet-style, exact).**  Set
    ``capture_activations=True`` to use a **capturing twin** of the
    model: every ``nnx.Linear`` is replaced with a ``CapturingLinear``
    (a subclass with an ``nnx.Intermediate`` slot for its input) at
-   build time via :func:`OmegaQMC._kfac_capture.use_capturing_linears`.
+   build time via
+   :func:`OmegaQMC.psi.nn.kfac_capture.use_capturing_linears`.
    A single ``jax.jit(jax.vmap(apply))`` call now returns
    ``(log_psi_W, ∇params_W, captured_inputs_W)`` in one batched
    pass — the captures flow through standard NNX state machinery,
@@ -739,7 +740,7 @@ class _VMCOptDriverNNHEG_KFAC:
         if self.capture_activations and isinstance(
             config, HEGPsiFormerConfig,
         ):
-            from ._kfac_capture import (
+            from .psi.nn.kfac_capture import (
                 use_capturing_linears, captures_to_path_dict,
             )
             self._captures_to_path_dict = captures_to_path_dict

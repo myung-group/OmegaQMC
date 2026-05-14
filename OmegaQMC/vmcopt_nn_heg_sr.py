@@ -554,7 +554,7 @@ class _VMCOptDriverNNHEG_SR:
         """
         if not self.ofname_chkpt:
             return
-        from .nn_checkpoint import save_nn_checkpoint
+        from .psi.nn.checkpoint import save_nn_checkpoint
 
         class _HEGMolInfoStub:
             def __init__(self, n_up, n_down, dim):

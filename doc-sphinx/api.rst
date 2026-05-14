@@ -104,11 +104,11 @@ forming the full overlap matrix.
 NN checkpoints
 ---------------
 
-.. autofunction:: OmegaQMC.nn_checkpoint.save_nn_checkpoint
+.. autofunction:: OmegaQMC.psi.nn.checkpoint.save_nn_checkpoint
 
-.. autofunction:: OmegaQMC.nn_checkpoint.load_nn_checkpoint
+.. autofunction:: OmegaQMC.psi.nn.checkpoint.load_nn_checkpoint
 
-.. autofunction:: OmegaQMC.nn_checkpoint.append_vmc_results
+.. autofunction:: OmegaQMC.psi.nn.checkpoint.append_vmc_results
 
 AFQMC driver
 -------------

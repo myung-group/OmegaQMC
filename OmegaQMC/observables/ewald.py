@@ -26,7 +26,7 @@ a long-ranged reciprocal-space part that converges rapidly once
 
 The Madelung constant ``v_M = lim_{r→0} [v_Ew(r) - 1/|r|]`` is the
 finite self-interaction of a point charge with its own neutralising
-background.  We reuse :func:`~OmegaQMC.afqmc_3deg.compute_madelung_3d`
+background.  We reuse :func:`~OmegaQMC.afqmc_pw_heg.compute_madelung_3d`
 where possible; a standalone implementation is included here so the
 HEG VMC driver has no circular imports.
 """
@@ -198,7 +198,7 @@ def ewald_pair_energy(
     """Electron-electron Coulomb energy via Ewald.
 
     The per-electron Madelung convention of
-    :func:`~OmegaQMC.afqmc_3deg.compute_madelung_3d` is used: the
+    :func:`~OmegaQMC.afqmc_pw_heg.compute_madelung_3d` is used: the
     ``tables.madelung`` value already absorbs the ``1/2`` factor
     from the standard Fraser/Foulkes/Rajagopal formula, so the
     total Madelung contribution is ``N · v_M`` (one copy per

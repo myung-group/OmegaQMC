@@ -198,7 +198,7 @@ class _VMCDriverNNHEG:
         return self.L * jax.random.uniform(rng_key, shape)
 
     def load_checkpoint(self, filepath):
-        from .nn_checkpoint import load_nn_checkpoint
+        from .psi.nn.checkpoint import load_nn_checkpoint
         params, meta = load_nn_checkpoint(filepath, self.params)
         self.params = params
         return meta
@@ -826,7 +826,7 @@ def run_twist_averaged_heg(
     dim = int(getattr(config, 'dim', 3))
     if twists is None:
         if dim == 3:
-            from .afqmc_3deg import generate_halton_twists_3d
+            from .afqmc_pw_heg import generate_halton_twists_3d
             twists = generate_halton_twists_3d(n_twists)
         else:
             from .psi.heg_2d import generate_halton_twists_2d

@@ -17,7 +17,7 @@ import pytest
 
 from OmegaQMC.psi.nn.heg_wf import HEGConfig
 from OmegaQMC.vmcopt_nn_heg import get_vmcopt_nn_heg_func
-from OmegaQMC.afqmc_3deg import build_3deg_system
+from OmegaQMC.afqmc_pw_heg import build_3deg_system
 
 
 def _cfg():

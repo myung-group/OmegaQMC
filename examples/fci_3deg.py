@@ -21,7 +21,7 @@ from itertools import combinations
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import eigsh
 
-from OmegaQMC.afqmc_3deg import (
+from OmegaQMC.afqmc_pw_heg import (
     build_3deg_system,
     prepare_3deg_integrals,
     build_trial_3deg,

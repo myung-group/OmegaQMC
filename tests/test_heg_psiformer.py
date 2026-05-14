@@ -112,7 +112,7 @@ def test_default_init_respects_variational_bound():
     from OmegaQMC.observables.ewald import (
         build_ewald_tables, ewald_pair_energy,
     )
-    from OmegaQMC.afqmc_3deg import (
+    from OmegaQMC.afqmc_pw_heg import (
         build_3deg_system, get_afqmc_3deg_func,
     )
 
@@ -180,7 +180,7 @@ def test_adam_step_reduces_energy():
         build_ewald_tables, ewald_pair_energy,
     )
     from OmegaQMC.psi.nn.physics import laplacian
-    from OmegaQMC.afqmc_3deg import build_3deg_system
+    from OmegaQMC.afqmc_pw_heg import build_3deg_system
 
     cfg = _small_cfg()
     sys = build_3deg_system(2.0, N_elec=14, N_pw=7,

@@ -36,7 +36,7 @@ from jax.flatten_util import ravel_pytree
 from functools import partial
 from datetime import datetime
 
-from .nn_checkpoint import (
+from .psi.nn.checkpoint import (
     save_nn_checkpoint,
     load_nn_checkpoint,
 )

@@ -279,7 +279,7 @@ class _VMCDriverNN:
             Dict of checkpoint metadata (epoch,
             config_name, energy, etc.).
         """
-        from .nn_checkpoint import (
+        from .psi.nn.checkpoint import (
             load_nn_checkpoint,
         )
         params, meta = load_nn_checkpoint(
@@ -664,7 +664,7 @@ class _VMCDriverNN:
             'E_blocks': E_blocks,
         }
 
-        from .nn_checkpoint import append_vmc_results
+        from .psi.nn.checkpoint import append_vmc_results
         append_vmc_results(self.ofname_chkpt, result)
         if verbose >= 1:
             print(f"VMC results written to {self.ofname_chkpt}")

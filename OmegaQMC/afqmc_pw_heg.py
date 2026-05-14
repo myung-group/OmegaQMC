@@ -475,7 +475,7 @@ def local_energy_pw(h1e, chol, Ga, Gb, Ghalfa, Ghalfb,
 # Driver
 # ===================================================================
 
-class _AFQMC3DEGDriver:
+class _AFQMCDriverPWHEG:
     """Phaseless AFQMC driver for the 3D electron gas.
 
     Implements the standard phaseless AFQMC for jellium in a
@@ -943,9 +943,9 @@ def get_afqmc_3deg_func(system, dt=0.005, include_coulomb=True,
         verbose: Print progress.
 
     Returns:
-        _AFQMC3DEGDriver instance (callable).
+        _AFQMCDriverPWHEG instance (callable).
     """
-    return _AFQMC3DEGDriver(system, dt=dt,
+    return _AFQMCDriverPWHEG(system, dt=dt,
                              include_coulomb=include_coulomb,
                              verbose=verbose)
 

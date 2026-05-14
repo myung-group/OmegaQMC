@@ -16,7 +16,7 @@ import sys
 import time
 import numpy as np
 
-from OmegaQMC.afqmc_3deg import (
+from OmegaQMC.afqmc_pw_heg import (
     build_3deg_system,
     get_afqmc_3deg_func,
     run_twist_averaged_afqmc_3deg,

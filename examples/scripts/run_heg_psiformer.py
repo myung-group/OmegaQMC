@@ -50,7 +50,7 @@ import jax
 import yaml
 from flax import nnx
 
-from OmegaQMC.afqmc_3deg import (
+from OmegaQMC.afqmc_pw_heg import (
     build_3deg_system,
     get_afqmc_3deg_func,
     pz_correlation_energy,
@@ -561,7 +561,7 @@ def _run(cfg, project, run_dir, prefix):
             cfg, 'optimize.load_chkpt_partial', False,
         ))
         if load_chkpt:
-            from OmegaQMC.nn_checkpoint import (
+            from OmegaQMC.psi.nn.checkpoint import (
                 load_nn_checkpoint, load_nn_checkpoint_partial,
                 load_nn_checkpoint_partial_by_path,
             )
@@ -637,7 +637,7 @@ def _run(cfg, project, run_dir, prefix):
                 cfg, 'optimize.load_chkpt_reset_bf', False,
             ))
             if reset_bf:
-                from OmegaQMC.nn_checkpoint import zero_module_leaves
+                from OmegaQMC.psi.nn.checkpoint import zero_module_leaves
                 loaded = zero_module_leaves(loaded, 'coord_backflow')
 
             if opt_type == 'sr':

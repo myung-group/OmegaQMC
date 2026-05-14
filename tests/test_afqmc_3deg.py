@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from OmegaQMC.afqmc_3deg import (
+from OmegaQMC.afqmc_pw_heg import (
     _generate_3d_kgrid,
     build_3deg_system,
     build_h1e_pw_3d,

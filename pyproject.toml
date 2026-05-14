@@ -47,3 +47,7 @@ nn = ["flax>=0.10.0", "pyyaml"]
 include = ["OmegaQMC*"]
 exclude = ["runs*", "references*", "tests*", "scripts*"]
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests that take more than a few seconds (deselect with '-m \"not slow\"')",
+]

@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 from pyscf import gto, scf
 
-from OmegaQMC.psi_gto import (
+from OmegaQMC.psi.gto import (
     _build_bspline_coefs,
     _bspline_eval,
     get_psi_fun,

@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import optax
 from functools import partial
 
-from .nn_checkpoint import (
+from .psi.nn.checkpoint import (
     save_nn_checkpoint,
     load_nn_checkpoint,
 )

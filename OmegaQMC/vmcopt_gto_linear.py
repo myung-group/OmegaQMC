@@ -20,8 +20,8 @@ import warnings
 import jax
 import jax.numpy as jnp
 from functools import partial
-from .cusp import get_cusp_params
-from .psi_gto import get_psi_fun
+from .psi.cusp import get_cusp_params
+from .psi.gto import get_psi_fun
 from .constants import MIN_DIST_THRESHOLD
 from .vmcopt_gto_irsgd import (
     _build_opt_mask,
