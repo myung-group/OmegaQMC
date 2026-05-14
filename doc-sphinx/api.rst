@@ -113,7 +113,7 @@ NN checkpoints
 AFQMC driver
 -------------
 
-.. autoclass:: OmegaQMC.afqmc_gto._AFQMCDriver
+.. autoclass:: OmegaQMC.afqmc_gto._AFQMCDriverGTO
    :members: __call__
 
 QED-AFQMC driver
@@ -122,8 +122,77 @@ QED-AFQMC driver
 .. autoclass:: OmegaQMC.qed_afqmc_gto._QEDAFQMCDriverGTO
    :members: __call__
 
-QED-FCI
---------
+HEG drivers
+------------
+
+Drivers specialised for the homogeneous electron gas.  Two families
+are available:
+
+* **Neural-network VMC** on top of the
+  :class:`~OmegaQMC.psi.nn.heg_wf.HEGConfig` ansatz, with optional
+  twist averaging.
+* **Plane-wave AFQMC** in the jellium plane-wave basis, with
+  symmetrised Cholesky vectors and twist averaging.
+
+NN VMC driver
+~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.vmc_nn_heg.get_vmc_nn_heg_func
+
+.. autoclass:: OmegaQMC.vmc_nn_heg._VMCDriverNNHEG
+   :members: __call__, load_checkpoint, initialize_walkers
+
+.. autofunction:: OmegaQMC.vmc_nn_heg.get_vmc_nn_heg_twist_func
+
+.. autoclass:: OmegaQMC.vmc_nn_heg._VMCDriverNNHEG_Twist
+   :members: __call__
+
+.. autofunction:: OmegaQMC.vmc_nn_heg.run_twist_averaged_heg
+
+NN VMC optimizers
+~~~~~~~~~~~~~~~~~
+
+**Stochastic Reconfiguration** (recommended for production runs)
+
+.. autofunction:: OmegaQMC.vmcopt_nn_heg_sr.get_vmcopt_nn_heg_sr_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_heg_sr._VMCOptDriverNNHEG_SR
+   :members: __call__
+
+**KFAC** (Kronecker-factored approximate curvature)
+
+.. autofunction:: OmegaQMC.vmcopt_nn_heg_kfac.get_vmcopt_nn_heg_kfac_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_heg_kfac._VMCOptDriverNNHEG_KFAC
+   :members: __call__
+
+**Adam** (reference / lightweight smoke tests)
+
+.. autofunction:: OmegaQMC.vmcopt_nn_heg.get_vmcopt_nn_heg_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_heg._VMCOptDriverNNHEG_Adam
+   :members: __call__
+
+Plane-wave AFQMC driver
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: OmegaQMC.afqmc_pw_heg.build_3deg_system
+
+.. autofunction:: OmegaQMC.afqmc_pw_heg.get_afqmc_3deg_func
+
+.. autoclass:: OmegaQMC.afqmc_pw_heg._AFQMCDriverPWHEG
+   :members: __call__
+
+.. autofunction:: OmegaQMC.afqmc_pw_heg.run_twist_averaged_afqmc_3deg
+
+Add-on calculators
+-------------------
+
+Non-QMC reference calculators living under :mod:`OmegaQMC.addons`.
+
+.. autofunction:: OmegaQMC.addons.qed_hf.run_qed_hf
+
+.. autofunction:: OmegaQMC.addons.qed_ccsd.run_qed_ccsd
 
 .. autofunction:: OmegaQMC.addons.qed_fci.run_qed_fci
 
