@@ -16,7 +16,7 @@ The Hamiltonian (single-mode cavity, atomic units, electronic dipole):
           (\\boldsymbol\\varepsilon\\cdot\\hat{\\mathbf d}_e)^2
 
 with electronic dipole :math:`\\hat{\\mathbf d}_e = -\\sum_i \\mathbf r_i`
-(matches the convention in ``OmegaQMC.qed_fci`` where the electronic
+(matches the convention in ``OmegaQMC.addons.qed_fci`` where the electronic
 position operator alone is used; nuclear contributions are absorbed into
 the cavity-vacuum reference for neutral systems).
 
@@ -34,7 +34,7 @@ References
 ----------
 - Tang et al. 2025, arXiv:2503.15644 (deep-VMC for polaritonic chemistry)
 - Haugland et al. 2021, arXiv:2012.01080 (intermolecular cavity QED)
-- ``OmegaQMC.qed_fci`` (in-house reference QED-FCI implementation)
+- ``OmegaQMC.addons.qed_fci`` (in-house reference QED-FCI implementation)
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def real_space_dipole_electronic(elec_crds: jax.Array) -> jax.Array:
         ``(3,)`` dipole vector.
 
     Notes:
-        Matches the convention in :mod:`OmegaQMC.qed_fci` where the
+        Matches the convention in :mod:`OmegaQMC.addons.qed_fci` where the
         operator ``int1e_r`` (electronic position only) is used in the
         bilinear coupling. For neutral molecules, the nuclear part is
         absorbed into the cavity-vacuum reference; the residual

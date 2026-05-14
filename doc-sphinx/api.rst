@@ -125,7 +125,7 @@ QED-AFQMC driver
 QED-FCI
 --------
 
-.. autofunction:: OmegaQMC.qed_fci.qed_fci
+.. autofunction:: OmegaQMC.addons.qed_fci.run_qed_fci
 
 Observables
 -----------

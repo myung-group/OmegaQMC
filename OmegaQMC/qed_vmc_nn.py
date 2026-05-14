@@ -601,7 +601,8 @@ def get_qed_vmc_nn_func(
         init_key: JAX PRNG key for NN parameter init.
         omega: cavity-mode frequency (Ha).
         coupling_vec: ``(3,)`` light-matter coupling
-            (norm = λ, direction = ε), matching :mod:`OmegaQMC.qed_fci`.
+            (norm = λ, direction = ε), matching
+            :mod:`OmegaQMC.addons.qed_fci`.
         alpha_init: initial coherent-state shift α. For symmetric
             non-polar systems use 0.0; for polar systems consider
             calling :func:`analytical_alpha_perturbative` first.

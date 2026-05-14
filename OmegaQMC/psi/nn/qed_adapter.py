@@ -133,7 +133,7 @@ def make_qed_nn_log_psi(
             convenience; the local-energy estimator passes it explicitly.
         coupling_vec: ``(3,)`` light-matter coupling vector
             (norm = λ, direction = ε). Same convention as
-            :func:`OmegaQMC.qed_fci.qed_fci`.
+            :func:`OmegaQMC.addons.qed_fci.run_qed_fci`.
         alpha_init: initial coherent-state displacement (real scalar).
             Use 0.0 for "start at the photon vacuum". For neutral
             symmetric dimers (e.g., (H₂)₂ along ε_x), the perturbative

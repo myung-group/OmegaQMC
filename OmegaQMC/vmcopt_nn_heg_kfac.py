@@ -603,10 +603,10 @@ def _generic_natural_gradient(
 # KFAC optimiser
 # ---------------------------------------------------------------------
 
-class _HEGKFACOptimizer:
+class _VMCOptDriverNNHEG_KFAC:
     """KFAC VMC optimiser for HEG ansätze.
 
-    Constructor mirrors :class:`_HEGSROptimizer`.  Per-iter cost is
+    Constructor mirrors :class:`_VMCOptDriverNNHEG_SR`.  Per-iter cost is
     1 forward + 1 vmap-grad (≈ 2× SR's), but per-iter convergence is
     typically 5–10× faster on large networks because the natural-
     gradient direction is closer to optimal.
@@ -1492,13 +1492,13 @@ def get_vmcopt_nn_heg_kfac_func(
 ):
     """Construct a KFAC-VMC optimiser for a HEG ansatz.
 
-    Args: see :class:`_HEGKFACOptimizer`.
+    Args: see :class:`_VMCOptDriverNNHEG_KFAC`.
 
     Returns:
-        :class:`_HEGKFACOptimizer` — callable.
+        :class:`_VMCOptDriverNNHEG_KFAC` — callable.
     """
     del prefix
-    return _HEGKFACOptimizer(
+    return _VMCOptDriverNNHEG_KFAC(
         config, init_key,
         lr=lr, lr_decay=lr_decay,
         damping=damping,

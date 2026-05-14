@@ -15,7 +15,7 @@ import time
 import numpy as np
 from pyscf import gto, scf
 
-from OmegaQMC.qed_fci import qed_fci
+from OmegaQMC.addons.qed_fci import run_qed_fci
 
 
 _R_GRID = [1.0, 1.4, 2.0, 2.5, 3.0, 4.0, 5.0]   # Bohr
@@ -46,7 +46,7 @@ def main():
         mf = scf.RHF(mol).run(verbose=0)
         e_hf = float(mf.e_tot)
         eps = np.array([0., 0., 1.])
-        res = qed_fci(
+        res = run_qed_fci(
             mf, omega=_OMEGA, coupling_vec=_LAMBDA * eps,
             nph_max=_NPH_MAX, proper_dse=True,
         )

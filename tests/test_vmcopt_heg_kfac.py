@@ -8,7 +8,7 @@ import pytest
 
 from OmegaQMC.psi.nn.heg_wf import HEGPsiFormerConfig
 from OmegaQMC.vmcopt_nn_heg_kfac import (
-    _HEGKFACOptimizer,
+    _VMCOptDriverNNHEG_KFAC,
     _classify_params,
     _extract_kron_factors,
     _rank1_decompose,
@@ -133,7 +133,7 @@ def test_kfac_runs_without_error_and_produces_finite_history():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key,
         lr=0.1,
         damping=0.1,
@@ -166,7 +166,7 @@ def test_kfac_classifies_params_into_linear_and_generic():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key, lr=0.1, damping=0.1,
         damping_adapt=False, ema_decay=0.0,
     )
@@ -259,7 +259,7 @@ def test_overshoot_threshold_param_accepted():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key,
         damping_overshoot_threshold=3.0,
         damping_overshoot_factor=4.0,
@@ -283,7 +283,7 @@ def test_fixed_scale_param_accepted():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key,
         capture_activations=True,
         fixed_scale=True,
@@ -319,7 +319,7 @@ def test_lm_ratio_damping_responds_to_actual_vs_predicted():
     # Recipe A: ``fixed_scale=False`` (kernel_scale=1 everywhere) at
     # tiny lr — the quadratic model is very accurate, so the LM ratio
     # should sit near 1 and damping should drift downward.
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key,
         capture_activations=False,
         fixed_scale=False,
@@ -351,7 +351,7 @@ def test_lm_ratio_damping_stabilises_fixed_scale_run():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key,
         capture_activations=True,
         fixed_scale=True,
@@ -383,7 +383,7 @@ def test_damping_decay_param_accepted():
         use_pair_jastrow=False, n_virt_pw=12, det_jitter=0.02,
     )
     init_key = jax.random.key(0)
-    opt = _HEGKFACOptimizer(
+    opt = _VMCOptDriverNNHEG_KFAC(
         cfg, init_key,
         damping_decay=0.9,
     )
@@ -402,7 +402,7 @@ def test_kfac_with_multi_device_falls_back_when_one_gpu():
     )
     init_key = jax.random.key(0)
     n_dev = jax.local_device_count()
-    opt = _HEGKFACOptimizer(cfg, init_key, multi_device=True)
+    opt = _VMCOptDriverNNHEG_KFAC(cfg, init_key, multi_device=True)
     if n_dev < 2:
         # Auto-fallback to single-device.
         assert opt._n_devices == 1

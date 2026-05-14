@@ -47,7 +47,7 @@ def _adapt_step_size(step_size, acceptance_rate):
     )
 
 
-class _HEGAdamOptimizer:
+class _VMCOptDriverNNHEG_Adam:
     """Minimal Adam VMC optimiser for HEG.
 
     Args:
@@ -241,7 +241,7 @@ class _HEGAdamOptimizer:
     def initialize_walkers(self, rng_key, num_walkers):
         """Sample walker positions for the Adam optimiser.
 
-        Crystal-aware: see :class:`_HEGSROptimizer.initialize_walkers`
+        Crystal-aware: see :class:`_VMCOptDriverNNHEG_SR.initialize_walkers`
         for rationale.  Walkers placed at triangular Bravais sites
         with small noise when ``envelope_type='crystal_gaussian'``.
         """
@@ -425,12 +425,12 @@ def get_vmcopt_nn_heg_func(
         ewald_n_real, ewald_n_recip, ewald_eta: Ewald tuning.
 
     Returns:
-        :class:`_HEGAdamOptimizer` — call with
+        :class:`_VMCOptDriverNNHEG_Adam` — call with
         ``opt(rng_key, num_iters=..., ...)``.
     """
     if prefix.endswith(".chk.h5"):
         prefix = prefix[:-len(".chk.h5")]
-    return _HEGAdamOptimizer(
+    return _VMCOptDriverNNHEG_Adam(
         config, init_key,
         lr=lr,
         var_weight=var_weight,

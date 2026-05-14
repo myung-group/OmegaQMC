@@ -119,7 +119,7 @@ def _cg_solve(matvec, rhs, n_iters, tol=1e-6):
 # SR driver
 # ---------------------------------------------------------------------
 
-class _HEGSROptimizer:
+class _VMCOptDriverNNHEG_SR:
     """Natural-gradient (SR) VMC optimiser for HEG ansätze.
 
     Args:
@@ -1022,15 +1022,15 @@ def get_vmcopt_nn_heg_sr_func(
 ):
     """Construct an SR-VMC optimiser for a HEG ansatz.
 
-    Args: see :class:`_HEGSROptimizer`.
+    Args: see :class:`_VMCOptDriverNNHEG_SR`.
 
     Returns:
-        :class:`_HEGSROptimizer` — callable.
+        :class:`_VMCOptDriverNNHEG_SR` — callable.
     """
     if prefix.endswith(".chk.h5"):
         prefix = prefix[: -len(".chk.h5")]
     ofname_chkpt = prefix + ".chk.h5" if prefix else None
-    return _HEGSROptimizer(
+    return _VMCOptDriverNNHEG_SR(
         config, init_key,
         lr=lr,
         damping=damping,

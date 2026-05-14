@@ -9,7 +9,7 @@ import jax
 from pyscf import gto, scf
 
 from OmegaQMC import get_afqmc_func, get_qed_afqmc_func
-from OmegaQMC.qed_fci import qed_fci
+from OmegaQMC.addons.qed_fci import run_qed_fci
 
 
 def test_h2_qed_afqmc_vs_fci():
@@ -28,7 +28,7 @@ def test_h2_qed_afqmc_vs_fci():
     coupling_vec = [0.0, 0.0, lam]
 
     # QED-FCI reference
-    ref = qed_fci(mf, omega=omega, coupling_vec=coupling_vec, nph_max=10)
+    ref = run_qed_fci(mf, omega=omega, coupling_vec=coupling_vec, nph_max=10)
     e_fci_std = ref['e_fci']
     e_qed_fci = ref['e_qed_fci']
     n_ph_fci = ref['n_photon']
@@ -101,7 +101,7 @@ def test_h2o_qed_afqmc_vs_fci():
     coupling_vec = [0.0, 0.0, lam]
 
     # QED-FCI reference
-    ref = qed_fci(mf, omega=omega, coupling_vec=coupling_vec, nph_max=10)
+    ref = run_qed_fci(mf, omega=omega, coupling_vec=coupling_vec, nph_max=10)
     e_fci_std = ref['e_fci']
     e_qed_fci = ref['e_qed_fci']
     n_ph_fci = ref['n_photon']

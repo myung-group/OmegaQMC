@@ -29,7 +29,7 @@ import pytest
 
 from pyscf import gto, scf
 
-from OmegaQMC.qed_fci import qed_fci
+from OmegaQMC.addons.qed_fci import run_qed_fci
 
 
 _R_H2 = 1.401  # Bohr, equilibrium H2
@@ -50,11 +50,11 @@ def _h2_mf():
 def _delta_e_mHa(mf, omega, lam):
     """Return E(lambda) - E(0) in mHa, ground-state shift."""
     eps = np.array([0.0, 0.0, 1.0])
-    res0 = qed_fci(
+    res0 = run_qed_fci(
         mf, omega=omega, coupling_vec=0.0 * eps,
         nph_max=10, proper_dse=True,
     )
-    res1 = qed_fci(
+    res1 = run_qed_fci(
         mf, omega=omega, coupling_vec=lam * eps,
         nph_max=10, proper_dse=True,
     )
@@ -102,7 +102,7 @@ def test_tang_setting_small_positive(h2_mf):
 def test_lambda_zero_decoupling(h2_mf):
     """At lambda=0: QED-FCI must reduce to bare FCI exactly."""
     eps = np.array([0.0, 0.0, 1.0])
-    res = qed_fci(
+    res = run_qed_fci(
         h2_mf, omega=0.3, coupling_vec=0.0 * eps,
         nph_max=10, proper_dse=True,
     )

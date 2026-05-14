@@ -9,7 +9,7 @@ Validates:
 
 from pyscf import gto, scf, fci
 
-from OmegaQMC.qed_fci import qed_fci
+from OmegaQMC.addons.qed_fci import run_qed_fci
 
 
 def test_h2_qed_fci():
@@ -33,7 +33,7 @@ def test_h2_qed_fci():
     print(f"E_FCI = {e_fci:.10f}")
 
     # Test 1: Zero coupling → should recover FCI
-    result = qed_fci(mf, omega=0.5, coupling_vec=[0, 0, 0], nph_max=4)
+    result = run_qed_fci(mf, omega=0.5, coupling_vec=[0, 0, 0], nph_max=4)
     print(f"\nλ=0:    E_QED-FCI = {result['e_qed_fci']:.10f}  "
           f"(should be {e_fci:.10f})")
     assert abs(result['e_qed_fci'] - e_fci) < 1e-10, \
@@ -45,7 +45,7 @@ def test_h2_qed_fci():
     print(f"\nPhoton convergence (ω={omega}, λ={lam}, z-polarized):")
     print(f"  {'nph_max':>8} {'E_QED-FCI':>16} {'n_photon':>12}")
     for nph in [2, 4, 6, 8, 10, 15, 20]:
-        result = qed_fci(mf, omega=omega, coupling_vec=[0, 0, lam],
+        result = run_qed_fci(mf, omega=omega, coupling_vec=[0, 0, lam],
                          nph_max=nph)
         print(f"  {nph:8d} {result['e_qed_fci']:16.10f} "
               f"{result['n_photon']:12.8f}")
@@ -55,7 +55,7 @@ def test_h2_qed_fci():
     print(f"\nCoupling scan (ω={omega}, nph_max=10, z-polarized):")
     print(f"  {'lambda':>8} {'E_QED-FCI':>16} {'ΔE':>12} {'n_ph':>12}")
     for lam in [0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5]:
-        result = qed_fci(mf, omega=omega, coupling_vec=[0, 0, lam],
+        result = run_qed_fci(mf, omega=omega, coupling_vec=[0, 0, lam],
                          nph_max=10)
         dE = result['e_qed_fci'] - e_fci
         print(f"  {lam:8.4f} {result['e_qed_fci']:16.10f} "
@@ -88,7 +88,7 @@ def test_h2o_qed_fci():
     # print(f"FCI dim = {result['ndim_elec']}" if False else "")
 
     # Zero coupling check
-    result = qed_fci(mf, omega=0.5, coupling_vec=[0, 0, 0], nph_max=4)
+    result = run_qed_fci(mf, omega=0.5, coupling_vec=[0, 0, 0], nph_max=4)
     print(f"\nλ=0:    E_QED-FCI = {result['e_qed_fci']:.10f}  "
           f"(FCI dim = {result['ndim_elec']})")
     assert abs(result['e_qed_fci'] - e_fci) < 1e-9, \
@@ -99,7 +99,7 @@ def test_h2o_qed_fci():
     print(f"\nCoupling scan (ω={omega}, nph_max=10, z-polarized):")
     print(f"  {'lambda':>8} {'E_QED-FCI':>16} {'ΔE':>12} {'n_ph':>12}")
     for lam in [0.0, 0.01, 0.05, 0.1, 0.2]:
-        result = qed_fci(mf, omega=omega, coupling_vec=[0, 0, lam],
+        result = run_qed_fci(mf, omega=omega, coupling_vec=[0, 0, lam],
                          nph_max=10)
         dE = result['e_qed_fci'] - e_fci
         print(f"  {lam:8.4f} {result['e_qed_fci']:16.10f} "
@@ -111,7 +111,7 @@ def test_h2o_qed_fci():
     print(f"  {'polar.':>8} {'E_QED-FCI':>16} {'ΔE':>12} {'n_ph':>12}")
     for label, cvec in [('x', [lam, 0, 0]), ('y', [0, lam, 0]),
                         ('z', [0, 0, lam])]:
-        result = qed_fci(mf, omega=omega, coupling_vec=cvec, nph_max=10)
+        result = run_qed_fci(mf, omega=omega, coupling_vec=cvec, nph_max=10)
         dE = result['e_qed_fci'] - e_fci
         print(f"  {label:>8} {result['e_qed_fci']:16.10f} "
               f"{dE:12.8f} {result['n_photon']:12.8f}")

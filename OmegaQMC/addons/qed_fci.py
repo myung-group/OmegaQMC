@@ -84,7 +84,7 @@ def _build_fci_matrices(h1e, eri, dip_mo, norb, nelec, enuc):
     return H_mat, D_mat, ndim
 
 
-def qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
+def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
     """QED-FCI: exact diagonalization of the Pauli-Fierz Hamiltonian.
 
     Builds the full Hamiltonian in the product basis |FCI⟩ ⊗ |n_ph⟩

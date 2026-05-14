@@ -798,7 +798,7 @@ def run_twist_averaged_heg(
             this key seeds the Jastrow re-init that is then
             overwritten by the transferred trained parameters).
         trained_params_real: Params pytree from
-            :class:`~OmegaQMC.vmcopt_nn_heg._HEGAdamOptimizer` or
+            :class:`~OmegaQMC.vmcopt_nn_heg._VMCOptDriverNNHEG_Adam` or
             similar.  Its ``jastrow`` subtree is grafted into every
             per-twist complex ansatz; its envelope subtree is
             discarded (the envelope is re-initialised for each
