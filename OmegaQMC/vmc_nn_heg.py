@@ -54,7 +54,7 @@ def _adapt_step_size(step_size, acceptance_rate):
     )
 
 
-class _VMCDriverHEG:
+class _VMCDriverNNHEG:
     """VMC driver for a HEG trial wavefunction.
 
     Args:
@@ -415,12 +415,12 @@ def get_vmc_nn_heg_func(
         ewald_eta: Ewald splitting parameter (default ``√π / L``).
 
     Returns:
-        :class:`_VMCDriverHEG` instance — call with ``driver(rng_key, ...)``.
+        :class:`_VMCDriverNNHEG` instance — call with ``driver(rng_key, ...)``.
     """
     if prefix.endswith(".chk.h5"):
         prefix = prefix[:-len(".chk.h5")]
     ofname_chkpt = prefix + ".chk.h5"
-    return _VMCDriverHEG(
+    return _VMCDriverNNHEG(
         config, init_key,
         ewald_n_real=ewald_n_real,
         ewald_n_recip=ewald_n_recip,
@@ -433,10 +433,10 @@ def get_vmc_nn_heg_func(
 # Twist-averaged (complex-ansatz) driver
 # =====================================================================
 
-class _VMCDriverHEGTwist:
+class _VMCDriverNNHEG_Twist:
     """VMC driver for a complex (twist-averaged-ready) HEG ansatz.
 
-    Identical in structure to :class:`_VMCDriverHEG` but wired to
+    Identical in structure to :class:`_VMCDriverNNHEG` but wired to
     :func:`make_heg_log_psi_complex` instead of the real pathway, so
     it natively handles an arbitrary Bloch twist ``κ`` and a
     complex-valued trial wavefunction.
@@ -446,7 +446,7 @@ class _VMCDriverHEGTwist:
         init_key: JAX PRNG key for parameter init.
         kappa: Twist ``(3,)`` in fractional coordinates
             ``[-0.5, 0.5)``.  Default ``(0, 0, 0)``.
-        ewald_*: as :class:`_VMCDriverHEG`.
+        ewald_*: as :class:`_VMCDriverNNHEG`.
     """
 
     def __init__(
@@ -747,9 +747,9 @@ def get_vmc_nn_heg_twist_func(
         ewald_*: as :func:`get_vmc_nn_heg_func`.
 
     Returns:
-        :class:`_VMCDriverHEGTwist` instance.
+        :class:`_VMCDriverNNHEG_Twist` instance.
     """
-    return _VMCDriverHEGTwist(
+    return _VMCDriverNNHEG_Twist(
         config, init_key,
         kappa=kappa,
         ewald_n_real=ewald_n_real,
@@ -869,7 +869,7 @@ def run_twist_averaged_heg(
 
     rng = jax.random.key(eval_seed)
     for i, kappa in enumerate(twists):
-        drv = _VMCDriverHEGTwist(
+        drv = _VMCDriverNNHEG_Twist(
             config, init_key,
             kappa=tuple(kappa),
             ewald_n_real=ewald_n_real,
