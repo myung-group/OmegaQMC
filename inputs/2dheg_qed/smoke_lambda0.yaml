@@ -1,0 +1,50 @@
+# Smoke test: cavity-QED 2D HEG at λ=0.
+# Validation: with λ=0 and the vacuum-biased Fock head (init b_n=-3n),
+# walkers stay at n=0 and E_loc reduces exactly to the bare HEG local
+# energy. Trained energy should be close to a bare HEG VMC run at the
+# same system size + ansatz config (no cavity coupling).
+project: smoke_qed_heg_lambda0
+seed: 0
+
+system:
+  dim: 2
+  rs: 10.0
+  N: 26
+  polarization: unpolarized
+
+cavity:
+  omega: 0.1
+  lambda: 0.0
+  polarization: [1.0, 0.0]
+  nph_max: 4
+
+ansatz:
+  embedding_dim: 64
+  n_interactions: 2
+  two_particle_stream_dim: 16
+  n_det: 4
+  full_determinant: true
+  use_cusp: false
+  use_backflow: false
+
+optimize:
+  complex_psi: true
+  iters: 30
+  walkers: 128
+  lr: 0.05
+  damping: 1.0e-3
+  cg_maxiter: 100
+  max_param_change: 0.5
+  jac_batch_size: 32
+  mc_timestep: 0.5
+  equil_blocks: 5
+  steps_per_equil_block: 20
+  decorr_steps: 5
+
+eval:
+  enabled: true
+  walkers: 128
+  blocks: 15
+  equil_blocks: 5
+  steps_per_block: 20
+  mc_timestep: 0.5

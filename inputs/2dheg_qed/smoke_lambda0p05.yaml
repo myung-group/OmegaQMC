@@ -1,0 +1,52 @@
+# Smoke test: cavity-QED 2D HEG at λ=0.05.
+# Small but visible coupling. Expected effects:
+#   - Diamagnetic shift ≈ N·λ²/(4Ω) per walker at n=0 = 26·0.0025/0.4
+#     = 0.1625 Ha (TOTAL, not per electron) = 6.25 mHa/elec.
+#     Compare against smoke_lambda0 result to isolate cavity shift.
+#   - Bilinear paramagnetic is initially 0 (θ_n=0 init), grows during
+#     training as SR finds favorable θ_n that exploit cavity coupling.
+project: smoke_qed_heg_lambda0p05
+seed: 0
+
+system:
+  dim: 2
+  rs: 10.0
+  N: 26
+  polarization: unpolarized
+
+cavity:
+  omega: 0.1
+  lambda: 0.05
+  polarization: [1.0, 0.0]
+  nph_max: 4
+
+ansatz:
+  embedding_dim: 64
+  n_interactions: 2
+  two_particle_stream_dim: 16
+  n_det: 4
+  full_determinant: true
+  use_cusp: false
+  use_backflow: false
+
+optimize:
+  complex_psi: true
+  iters: 30
+  walkers: 128
+  lr: 0.05
+  damping: 1.0e-3
+  cg_maxiter: 100
+  max_param_change: 0.5
+  jac_batch_size: 32
+  mc_timestep: 0.5
+  equil_blocks: 5
+  steps_per_equil_block: 20
+  decorr_steps: 5
+
+eval:
+  enabled: true
+  walkers: 128
+  blocks: 15
+  equil_blocks: 5
+  steps_per_block: 20
+  mc_timestep: 0.5
