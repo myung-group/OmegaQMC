@@ -74,7 +74,7 @@ def local_energy_2body(Ghalfa, Ghalfb, rchol_a, rchol_b):
 
 @partial(jax.jit, static_argnames=[])
 def local_energy(
-    h1e, chol, Ga, Gb, Ghalfa, Ghalfb,
+    h1e, Ga, Gb, Ghalfa, Ghalfb,
     rchol_a, rchol_b, enuc,
 ):
     """Mixed-estimator local energy for all walkers.
@@ -85,7 +85,6 @@ def local_energy(
 
     Args:
         h1e: One-body Hamiltonian, shape (nbasis, nbasis).
-        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
         Ga: Alpha GF, shape (nwalkers, nbasis, nbasis).
         Gb: Beta GF, shape (nwalkers, nbasis, nbasis).
         Ghalfa: Half-rotated alpha GF,

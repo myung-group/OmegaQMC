@@ -68,6 +68,8 @@ from OmegaQMC.integrals.cholesky import (        # noqa: E402
     prepare_afqmc_integrals,
     half_rotate_cholesky,
     half_rotate_cholesky_multidet,
+    DiskChol,
+    _iter_chol_g_chunks,
 )
 
 
@@ -326,6 +328,61 @@ def _apply_exp_vhs(VHS, phi, nmax=6):
     return result
 
 
+def _build_vhs(xshifted_w, chol, dt, chol_chunk_g):
+    """VHS = 1j*sqrt(dt) * sum_g xshifted_w[w,g] * chol[g], streaming g."""
+    nb = chol.shape[1]
+    nw = xshifted_w.shape[0]
+    sqdt = jnp.sqrt(dt)
+    VHS = jnp.zeros((nw, nb, nb), dtype=jnp.complex128)
+    for g0, g1, chunk in _iter_chol_g_chunks(chol, chol_chunk_g):
+        chunk_j = jnp.asarray(chunk)
+        VHS = VHS + 1j * sqdt * jnp.einsum(
+            'wg,gpq->wpq', xshifted_w[:, g0:g1], chunk_j)
+    return VHS
+
+
+def _apply_exp_vhs_from_chol(xshifted, chol, phia, phib, dt, nmax=6,
+                             chunk_size=None, chol_chunk_g=None):
+    """Build and apply exp(VHS) over walker × g chunks (memory‑friendly).
+
+    Equivalent to constructing
+        VHS = 1j * sqrt(dt) * einsum('wg,gpq->wpq', xshifted, chol)
+    and then calling _apply_exp_vhs(VHS, phi*, nmax) for each spin, but
+    holds at most (chunk_size, nbasis, nbasis) of VHS at any time, and
+    reads ``chol`` in slabs of ``chol_chunk_g`` along the auxiliary axis
+    — supports both in‑memory and :class:`DiskChol` backings.
+
+    Args:
+        xshifted: shape (nwalkers, naux).
+        chol:     shape (naux, nbasis, nbasis); array or DiskChol.
+        phia:     shape (nwalkers, nbasis, nup).
+        phib:     shape (nwalkers, nbasis, ndown).
+        dt:       time step.
+        nmax:     Taylor expansion order.
+        chunk_size: walkers per chunk; None or >= nwalkers means no
+            walker chunking.
+        chol_chunk_g: g‑axis slab size; None uses the whole tensor
+            (or the DiskChol's own chunk_g).
+
+    Returns:
+        phia_new, phib_new with the same shapes as phia, phib.
+    """
+    nwalkers = phia.shape[0]
+
+    if chunk_size is None or chunk_size >= nwalkers:
+        VHS = _build_vhs(xshifted, chol, dt, chol_chunk_g)
+        return _apply_exp_vhs(VHS, phia, nmax), _apply_exp_vhs(VHS, phib, nmax)
+
+    a_chunks, b_chunks = [], []
+    for start in range(0, nwalkers, chunk_size):
+        end = min(start + chunk_size, nwalkers)
+        VHS_c = _build_vhs(xshifted[start:end], chol, dt, chol_chunk_g)
+        a_chunks.append(_apply_exp_vhs(VHS_c, phia[start:end], nmax))
+        b_chunks.append(_apply_exp_vhs(VHS_c, phib[start:end], nmax))
+    return (jnp.concatenate(a_chunks, axis=0),
+            jnp.concatenate(b_chunks, axis=0))
+
+
 def _update_weights_phaseless(weights, ovlp_old, ovlp_new, cfb, cmf,
                               e_hybrid_old, eshift, dt):
     """Update importance sampling weights with the phaseless approximation.
@@ -374,17 +431,22 @@ def _update_weights_phaseless(weights, ovlp_old, ovlp_new, cfb, cmf,
 
 
 def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt,
-                     G_charge=None):
+                     G_charge=None, chol_chunk_g=None):
     """Build the one-body propagator and mean-field shift.
 
     Args:
         h1e_mod: Modified one-body Hamiltonian, shape (nbasis, nbasis).
-        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
+        chol: Cholesky vectors, shape (naux, nbasis, nbasis). May be an
+            in‑memory array or a :class:`DiskChol`; in the latter case
+            mf_shift and vhs_mf are accumulated by g‑chunks so the full
+            chol tensor never lives in device memory.
         trial_up: Trial alpha orbitals, shape (nbasis, nup).
         trial_dn: Trial beta orbitals, shape (nbasis, ndown).
         dt: Imaginary time step.
         G_charge: Pre-computed charge density matrix for multi-det trials.
                   If None, computed from single-det trial.
+        chol_chunk_g: g‑axis slab size when chol is a DiskChol. None
+            uses the DiskChol's own chunk_g, or no chunking for arrays.
 
     Returns:
         dict with:
@@ -392,20 +454,29 @@ def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt,
             'mf_shift': Mean-field shift, shape (naux,).
             'dt': Time step.
     """
-    # Compute trial one-body density matrix
     if G_charge is None:
         G_trial_a = trial_up @ trial_up.T.conj()
         G_trial_b = trial_dn @ trial_dn.T.conj()
         G_charge = G_trial_a + G_trial_b
 
-    # Mean-field shift (ipie convention)
-    mf_shift = 1j * jnp.einsum('gpq,qp->g', chol, G_charge)
+    naux = chol.shape[0]
+    nbasis = chol.shape[1]
 
-    # Construct the shifted one-body Hamiltonian
-    vhs_mf = 1j * jnp.einsum('g,gpq->pq', mf_shift, chol)
+    # mf_shift[g] = 1j * sum_{p,q} chol[g,p,q] G_charge[q,p]
+    mf_shift = jnp.zeros(naux, dtype=jnp.complex128)
+    for g0, g1, chunk in _iter_chol_g_chunks(chol, chol_chunk_g):
+        chunk_j = jnp.asarray(chunk)
+        contrib = 1j * jnp.einsum('gpq,qp->g', chunk_j, G_charge)
+        mf_shift = mf_shift.at[g0:g1].set(contrib)
+
+    # vhs_mf[p,q] = 1j * sum_g mf_shift[g] chol[g,p,q]
+    vhs_mf = jnp.zeros((nbasis, nbasis), dtype=jnp.complex128)
+    for g0, g1, chunk in _iter_chol_g_chunks(chol, chol_chunk_g):
+        chunk_j = jnp.asarray(chunk)
+        vhs_mf = vhs_mf + 1j * jnp.einsum(
+            'g,gpq->pq', mf_shift[g0:g1], chunk_j)
+
     H1_shifted = h1e_mod - vhs_mf
-
-    # Half-step one-body propagator: exp(-dt/2 * H1_shifted)
     expH1 = expm(-0.5 * dt * H1_shifted)
 
     return {
@@ -415,11 +486,11 @@ def build_propagator(h1e_mod, chol, trial_up, trial_dn, dt,
     }
 
 
-@partial(jax.jit, static_argnames=('exp_nmax',))
 def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
                       propagator, chol, rchol_a, rchol_b,
                       trial_up, trial_dn, eshift, rng_key,
-                      fbbound=None, exp_nmax=6):
+                      fbbound=None, exp_nmax=6, walker_chunk_size=None,
+                      chol_chunk_g=None):
     """Propagate all walkers by one time step with phaseless constraint.
 
     Steps:
@@ -493,12 +564,10 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
     cfb = (jnp.sum(xi * xbar, axis=1)
            - 0.5 * jnp.sum(xbar * xbar, axis=1))
 
-    # 5. Construct and apply VHS
-    VHS = 1j * jnp.sqrt(dt) * jnp.einsum('wg,gpq->wpq', xshifted, chol)
-
-    # Apply exp(VHS) via Taylor expansion
-    phia = _apply_exp_vhs(VHS, phia, exp_nmax)
-    phib = _apply_exp_vhs(VHS, phib, exp_nmax)
+    # 5. Construct and apply VHS (chunked over walkers and g)
+    phia, phib = _apply_exp_vhs_from_chol(
+        xshifted, chol, phia, phib, dt, exp_nmax,
+        walker_chunk_size, chol_chunk_g)
 
     # 6. Apply second half of one-body propagator
     phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
@@ -515,12 +584,13 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
     return phia, phib, weights_new, ovlp_new, e_hybrid_new, rng_key
 
 
-@partial(jax.jit, static_argnames=('exp_nmax',))
 def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
                                propagator, chol, rchols_a, rchols_b,
                                trials_up, trials_dn, ci_coeffs,
                                eshift, rng_key,
-                               fbbound=None, exp_nmax=6):
+                               fbbound=None, exp_nmax=6,
+                               walker_chunk_size=None,
+                               chol_chunk_g=None):
     """Propagate all walkers by one time step using multi-det trial.
 
     Same structure as single-det propagate_walkers but uses
@@ -564,9 +634,15 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
     phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
     phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
 
-    # 3. Force bias from aggregate multi-det GF
-    vbias_a = jnp.einsum('gpq,wqp->gw', chol, Ga)
-    vbias_b = jnp.einsum('gpq,wqp->gw', chol, Gb)
+    # 3. Force bias from aggregate multi-det GF (streamed over g)
+    vbias_a_chunks = []
+    vbias_b_chunks = []
+    for g0, g1, chunk in _iter_chol_g_chunks(chol, chol_chunk_g):
+        chunk_j = jnp.asarray(chunk)
+        vbias_a_chunks.append(jnp.einsum('gpq,wqp->gw', chunk_j, Ga))
+        vbias_b_chunks.append(jnp.einsum('gpq,wqp->gw', chunk_j, Gb))
+    vbias_a = jnp.concatenate(vbias_a_chunks, axis=0)
+    vbias_b = jnp.concatenate(vbias_b_chunks, axis=0)
     vbias = vbias_a + vbias_b
 
     # Optimal shift
@@ -591,11 +667,10 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
     cfb = (jnp.sum(xi * xbar, axis=1)
            - 0.5 * jnp.sum(xbar * xbar, axis=1))
 
-    # 5. Construct and apply VHS
-    VHS = 1j * jnp.sqrt(dt) * jnp.einsum('wg,gpq->wpq', xshifted, chol)
-
-    phia = _apply_exp_vhs(VHS, phia, exp_nmax)
-    phib = _apply_exp_vhs(VHS, phib, exp_nmax)
+    # 5. Construct and apply VHS (chunked over walkers and g)
+    phia, phib = _apply_exp_vhs_from_chol(
+        xshifted, chol, phia, phib, dt, exp_nmax,
+        walker_chunk_size, chol_chunk_g)
 
     # 6. Apply second half of one-body propagator
     phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
@@ -624,7 +699,8 @@ def _autotune_afqmc_walkers(driver, free_mb, mem_frac=0.75, k=4):
     independent storage (Cholesky tensor, half-rotated chol,
     trial orbitals, propagator).  The remainder, divided by
     ``k - 1``, is the per-walker byte cost.  Falls back to
-    1 MB/walker when AOT analysis is unavailable.
+    1 MB/walker when AOT analysis is unavailable (e.g.
+    DiskChol-backed runs cannot be AOT-traced).
     Informational only — caller does not mutate state.
 
     Parameters
@@ -707,7 +783,7 @@ class _AFQMCDriverGTO:
     """
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
-                 trial=None):
+                 trial=None, chol_h5_path=None, chol_chunk_g=128):
         """Prepare integrals and build the propagator.
 
         Args:
@@ -717,20 +793,29 @@ class _AFQMCDriverGTO:
             verbose: Print progress.
             trial: Multi-determinant trial dict from extract_casscf_trial(),
                    or None for single-det HF trial (default).
+            chol_h5_path: If set, the MO‑basis Cholesky tensor is stored
+                in this HDF5 file (dataset ``chol_mo``) and streamed in
+                g‑chunks during the run. Required for large systems
+                (e.g. naphthalene cc‑pVTZ) where ``chol`` would not fit
+                in device memory. Default None keeps ``chol`` in RAM.
+            chol_chunk_g: Slab size along the auxiliary axis used when
+                ``chol`` is disk‑backed. Default 128.
         """
         self.mf = mf
         self.dt = dt
         self.verbose = verbose
         self.multidet = trial is not None
+        self.chol_chunk_g = chol_chunk_g
 
-        # 1. Prepare integrals
         if verbose:
             print("Preparing integrals (Cholesky decomposition)...")
             t0 = time.time()
 
         mo_coeff_override = trial['mo_coeff'] if trial is not None else None
         integrals = prepare_afqmc_integrals(
-            mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override)
+            mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override,
+            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+
         self.h1e = integrals['h1e']
         self.h1e_mod = integrals['h1e_mod']
         self.chol = integrals['chol']
@@ -745,6 +830,9 @@ class _AFQMCDriverGTO:
             print(f"  nbasis={self.nbasis}, nup={self.nup}, "
                   f"ndown={self.ndown}, naux={self.naux}")
             print(f"  Integral preparation took {time.time()-t0:.2f} s")
+            if isinstance(self.chol, DiskChol):
+                print(f"  chol stored on disk: {self.chol.path} "
+                      f"(chunk_g={self.chol_chunk_g})")
 
         if trial is not None:
             # Multi-determinant trial wavefunction
@@ -763,7 +851,8 @@ class _AFQMCDriverGTO:
 
             # Half-rotate Cholesky vectors for all determinants
             self.rchols_a, self.rchols_b = half_rotate_cholesky_multidet(
-                self.chol, self.trials_up, self.trials_dn)
+                self.chol, self.trials_up, self.trials_dn,
+                chunk_g=chol_chunk_g)
 
             if verbose:
                 print(f"  Multi-det trial: {ndet} determinants")
@@ -784,7 +873,7 @@ class _AFQMCDriverGTO:
             self.propagator = build_propagator(
                 self.h1e_mod, self.chol,
                 self.trial_up, self.trial_dn, dt,
-                G_charge=G_charge)
+                G_charge=G_charge, chol_chunk_g=chol_chunk_g)
         else:
             # Single-determinant HF trial
             self.trial_up = jnp.eye(self.nbasis, self.nup)
@@ -792,7 +881,8 @@ class _AFQMCDriverGTO:
 
             # Half-rotate Cholesky vectors
             self.rchol_a, self.rchol_b = half_rotate_cholesky(
-                self.chol, self.trial_up, self.trial_dn)
+                self.chol, self.trial_up, self.trial_dn,
+                chunk_g=chol_chunk_g)
 
             if verbose:
                 print(f"  rchol_a shape: {self.rchol_a.shape}, "
@@ -801,7 +891,8 @@ class _AFQMCDriverGTO:
             # Build propagator
             self.propagator = build_propagator(
                 self.h1e_mod, self.chol,
-                self.trial_up, self.trial_dn, dt)
+                self.trial_up, self.trial_dn, dt,
+                chol_chunk_g=chol_chunk_g)
 
         if verbose:
             print(f"  E_HF = {float(mf.e_tot):.10f}")
@@ -810,7 +901,7 @@ class _AFQMCDriverGTO:
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
                  pop_control_freq=5, num_eqlb_blocks=10,
-                 fname_log="afqmc.log"):
+                 fname_log="afqmc.log", walker_chunk_size=None):
         """Run the AFQMC simulation.
 
         Args:
@@ -823,6 +914,14 @@ class _AFQMCDriverGTO:
             num_eqlb_blocks: Number of equilibration blocks (default 10).
             fname_log: Log file path (default "afqmc.log").
                 If None or "", prints to stdout.
+            walker_chunk_size: If not None, build/apply the two‑body
+                propagator VHS in chunks of this many walkers. Caps peak
+                memory of the (nwalkers, nbasis, nbasis) VHS tensor at
+                (chunk_size, nbasis, nbasis). Required for large bases
+                (e.g., naphthalene cc‑pVTZ) where the full VHS would
+                exceed device memory. Must divide num_walkers cleanly only
+                if you also want even chunks; the last chunk is allowed
+                to be shorter. Default None preserves prior behavior.
 
         Returns:
             dict with:
@@ -860,6 +959,9 @@ class _AFQMCDriverGTO:
         except Exception as e:
             print(f"ℹ️\tGPU capacity estimate unavailable: {e}",
                   file=fout)
+        if verbose and walker_chunk_size is not None:
+            print(f"  walker_chunk_size = {walker_chunk_size} "
+                  f"(VHS built in chunks)", file=fout)
 
         # Initialize walkers
         walkers = Walkers(self.trial_up, self.trial_dn,
@@ -925,7 +1027,9 @@ class _AFQMCDriverGTO:
                             self.propagator, self.chol,
                             self.rchols_a, self.rchols_b,
                             self.trials_up, self.trials_dn,
-                            self.ci_coeffs, eshift, step_key)
+                            self.ci_coeffs, eshift, step_key,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g)
                 else:
                     phia, phib, weights, overlap, e_hybrid, _ = \
                         propagate_walkers(
@@ -933,7 +1037,9 @@ class _AFQMCDriverGTO:
                             self.propagator, self.chol,
                             self.rchol_a, self.rchol_b,
                             self.trial_up, self.trial_dn,
-                            eshift, step_key)
+                            eshift, step_key,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g)
 
                 # Clip weights (ipie convention: skip step 1)
                 if step_count > 1:
@@ -976,7 +1082,7 @@ class _AFQMCDriverGTO:
                     phia, phib, self.trial_up, self.trial_dn)
 
                 e_tot, e_1b, e_2b = local_energy(
-                    self.h1e, self.chol, Ga, Gb, Ghalfa, Ghalfb,
+                    self.h1e, Ga, Gb, Ghalfa, Ghalfb,
                     self.rchol_a, self.rchol_b, self.enuc)
 
             # Weighted average over walkers
@@ -1028,9 +1134,20 @@ class _AFQMCDriverGTO:
             'ehf': float(self.mf.e_tot),
         }
 
+    def close(self):
+        """Release the disk‑backed Cholesky HDF5 file, if any."""
+        if isinstance(self.chol, DiskChol):
+            self.chol.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
-                   trial=None):
+                   trial=None, chol_h5_path=None, chol_chunk_g=128):
     """Create a reusable AFQMC driver.
 
     Args:
@@ -1040,9 +1157,13 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
         verbose: Print progress.
         trial: Multi-determinant trial dict from extract_casscf_trial(),
                or None for single-det HF trial (default).
+        chol_h5_path: If set, MO‑basis Cholesky tensor lives in this
+            HDF5 file and is streamed in g‑chunks during the run.
+        chol_chunk_g: Slab size along the auxiliary axis for disk reads.
 
     Returns:
         _AFQMCDriverGTO instance (callable).
     """
     return _AFQMCDriverGTO(mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
-                        trial=trial)
+                        trial=trial, chol_h5_path=chol_h5_path,
+                        chol_chunk_g=chol_chunk_g)
