@@ -5,7 +5,7 @@ import jax
 import pytest
 from flax import nnx
 
-from OmegaQMC.heg_2d import (
+from OmegaQMC.psi.heg_2d import (
     build_2deg_system,
     generate_halton_twists_2d,
 )

@@ -40,7 +40,7 @@ bash scripts/slurm_2dheg/launch_crystal_scan.sh   # 10 jobs
 | `OmegaQMC/observables/ewald_2d.py` | 2D Ewald (Parry/Heyes) | 250 |
 | `OmegaQMC/observables/ewald_dispatch.py` | Dim-dispatch for Ewald | 60 |
 | `OmegaQMC/observables/structure_factor.py` | S(k), S_spin(k), g(r), n(k) | 230 |
-| `OmegaQMC/heg_2d.py` | 2D system + analytical HF | 320 |
+| `OmegaQMC/psi/heg_2d.py` | 2D system + analytical HF | 320 |
 | `OmegaQMC/psi/nn/env_localized_2d.py` | Wigner-crystal envelope | 240 |
 
 ### Modified modules (dim threading + 2D dispatch)

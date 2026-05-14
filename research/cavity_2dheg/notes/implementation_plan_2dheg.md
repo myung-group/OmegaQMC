@@ -11,7 +11,7 @@ Realistic timeline: **3–4 months** of focused work to a publishable 2D HEG ben
 **Phase 0 is COMPLETE** (all infrastructure written + tested locally):
 
 - ✅ 2D Ewald (Parry/Heyes) — `OmegaQMC/observables/ewald_2d.py` (19 tests)
-- ✅ Analytical 2D HF (TD + finite-N) — `OmegaQMC/heg_2d.py` (60 tests)
+- ✅ Analytical 2D HF (TD + finite-N) — `OmegaQMC/psi/heg_2d.py` (60 tests)
 - ✅ 2D periodic primitives (`make_square_lattice`) — `OmegaQMC/psi/nn/periodic.py` (12 tests)
 - ✅ 2D plane-wave envelope (real + complex) — `OmegaQMC/psi/nn/env_periodic.py` (21 tests)
 - ✅ `dim` threaded through `HEGPsiFormerConfig`, `HEGSlaterJastrow`, `HEGElectronEmbedding`,
@@ -25,7 +25,7 @@ Realistic timeline: **3–4 months** of focused work to a publishable 2D HEG ben
 
 **Phase 1 is partially COMPLETE** (twist-averaging infrastructure):
 
-- ✅ `generate_halton_twists_2d` in `OmegaQMC/heg_2d.py`
+- ✅ `generate_halton_twists_2d` in `OmegaQMC/psi/heg_2d.py`
 - ✅ `run_twist_averaged_heg` dispatches on `config.dim`
 - ✅ Complex 2D PsiFormer with twist `kappa` builds and evaluates (4 tests)
 - ⏳ Production TABC sweeps with N=58 + N=74 (need GPU; YAMLs ready)

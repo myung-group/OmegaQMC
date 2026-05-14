@@ -34,7 +34,7 @@ import yaml
 def _build_wf_from_config(cfg, init_seed=0):
     """Reconstruct the wavefunction module + driver from a YAML config."""
     from OmegaQMC.psi.nn.heg_wf import HEGPsiFormerConfig
-    from OmegaQMC.heg_2d import build_2deg_system
+    from OmegaQMC.psi.heg_2d import build_2deg_system
     from OmegaQMC.vmc_nn_heg import get_vmc_nn_heg_func
 
     # System

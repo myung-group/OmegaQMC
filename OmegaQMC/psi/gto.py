@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 # from functools import partial
-from OmegaQMC.shell import (
+from OmegaQMC.psi.shell import (
     read_shell, evaluate_cusp_s, evaluate_cusp_s_vgl,
 )
 from OmegaQMC.utils import laplacian_linearize

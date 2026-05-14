@@ -1,4 +1,4 @@
-"""Unit tests for OmegaQMC.heg_2d (2D HEG system + analytical HF).
+"""Unit tests for OmegaQMC.psi.heg_2d (2D HEG system + analytical HF).
 
 Verifies:
 * Closed-shell Fermi-sea generation for the standard 2D HEG sizes.
@@ -14,7 +14,7 @@ Verifies:
 import numpy as np
 import pytest
 
-from OmegaQMC.heg_2d import (
+from OmegaQMC.psi.heg_2d import (
     CLOSED_SHELL_PER_SPIN_2D,
     build_2deg_system,
     closed_shell_n_per_spin,

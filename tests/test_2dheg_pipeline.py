@@ -15,7 +15,7 @@ The thermodynamic-limit HF (Stern 1973) is
     E_HF/N = 1/(2 r_s^2) - 4 sqrt(2) / (3 pi r_s)   (unpolarized)
 
 and the analytical finite-N HF closed-form lives in
-:func:`OmegaQMC.heg_2d.hf_energy_2d_finite`.  The test checks the
+:func:`OmegaQMC.psi.heg_2d.hf_energy_2d_finite`.  The test checks the
 PsiFormer's E_HF computed via the production code path matches the
 analytical finite-N HF to ~1 mHa/electron (statistical noise from the
 walker average).
@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
-from OmegaQMC.heg_2d import (
+from OmegaQMC.psi.heg_2d import (
     build_2deg_system,
     hf_energy_2d_finite,
     hf_energy_2d_td,

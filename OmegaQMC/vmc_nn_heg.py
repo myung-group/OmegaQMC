@@ -829,7 +829,7 @@ def run_twist_averaged_heg(
             from .afqmc_3deg import generate_halton_twists_3d
             twists = generate_halton_twists_3d(n_twists)
         else:
-            from .heg_2d import generate_halton_twists_2d
+            from .psi.heg_2d import generate_halton_twists_2d
             twists = generate_halton_twists_2d(n_twists)
     else:
         twists = np.asarray(twists, dtype=np.float64)

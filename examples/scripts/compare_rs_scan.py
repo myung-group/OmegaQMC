@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import numpy as np
 
-from OmegaQMC.heg_2d import (
+from OmegaQMC.psi.heg_2d import (
     build_2deg_system,
     hf_energy_2d_finite,
     hf_energy_2d_td,

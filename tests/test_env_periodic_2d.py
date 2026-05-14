@@ -147,7 +147,7 @@ def test_2d_envelope_slater_det_kinetic_matches_analytic():
     over occupied k must match the analytical sum using the integer
     grid we generated.  This catches off-by-one in the basis ordering.
     """
-    from OmegaQMC.heg_2d import build_2deg_system, hf_energy_2d_finite
+    from OmegaQMC.psi.heg_2d import build_2deg_system, hf_energy_2d_finite
 
     sys = build_2deg_system(rs=2.0, N_elec=58, polarization='unpolarized')
     L = sys['L']
