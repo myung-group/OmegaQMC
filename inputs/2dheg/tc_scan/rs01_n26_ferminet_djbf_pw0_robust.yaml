@@ -1,0 +1,82 @@
+# rs01 pw0 with robust optimizer (Option B): tighter clip + lower momentum + lower lr.
+# Prior pw0 run reached -195.5 mHa stable for 1100 iters then SPRING-spiked.
+# This recipe trades descent speed for outlier robustness.
+# Also exercises the new best-energy chkpt tracking (saves <project>.best.chk.h5
+# whenever current E < running best, started after the first periodic save).
+# Runs on mango LOGIN NODE (nohup), 2048 walkers.
+
+project: rs01_n26_ferminet_djbf_pw0_robust
+
+system:
+  dim: 2
+  rs: 1.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 0
+  det_jitter: 0.04
+  walker_init: uniform
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 15000
+  walkers: 2048
+  lr: 0.5                         # 1.0 → 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 15000
+  lr_n_restarts: 0
+  spring_mu: 0.7                  # 0.9 → 0.7 (less momentum accumulation)
+  spring_norm_clip: 0.03          # 0.1 → 0.03 (tighter outlier guard)
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 60
+  mc_timestep: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500                 # non-overwriting saves (chk_NNNNNN.h5)
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

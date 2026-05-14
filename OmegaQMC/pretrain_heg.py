@@ -230,19 +230,35 @@ class _HEGPreTrainDriver:
         ))
 
         # ---- MSE loss and gradient ----
+        # For full_determinant=True the NN orbital tensors have shape
+        # (W, n_det, n_spin, n_up + n_down) — same-spin block matches HF
+        # det; cross-spin block must be pushed to zero so the pretrained
+        # ansatz reduces to det(up) · det(down) like the HF reference.
+        full_det = bool(getattr(config, 'full_determinant', False))
+
         def mse_loss(params, walkers):
             orb_nn_u, orb_nn_d = jax.vmap(
                 nn_orb, in_axes=(0, None),
             )(walkers, params)
             orb_hf_u, orb_hf_d = jax.vmap(hf_orb)(walkers)
-            # Broadcast HF (no det axis) over n_det.
-            loss = jnp.mean(
-                (orb_nn_u - orb_hf_u[:, None, :, :]) ** 2,
-            )
-            if n_down > 0:
-                loss = loss + jnp.mean(
-                    (orb_nn_d - orb_hf_d[:, None, :, :]) ** 2,
+            if full_det:
+                loss = jnp.mean(
+                    (orb_nn_u[..., :n_up] - orb_hf_u[:, None, :, :]) ** 2,
                 )
+                loss = loss + jnp.mean(orb_nn_u[..., n_up:] ** 2)
+                if n_down > 0:
+                    loss = loss + jnp.mean(
+                        (orb_nn_d[..., n_up:] - orb_hf_d[:, None, :, :]) ** 2,
+                    )
+                    loss = loss + jnp.mean(orb_nn_d[..., :n_up] ** 2)
+            else:
+                loss = jnp.mean(
+                    (orb_nn_u - orb_hf_u[:, None, :, :]) ** 2,
+                )
+                if n_down > 0:
+                    loss = loss + jnp.mean(
+                        (orb_nn_d - orb_hf_d[:, None, :, :]) ** 2,
+                    )
             return loss
 
         self._loss = jax.jit(mse_loss)

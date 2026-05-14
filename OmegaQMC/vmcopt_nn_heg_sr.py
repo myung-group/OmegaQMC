@@ -546,13 +546,14 @@ class _HEGSROptimizer:
     # -----------------------------------------------------
 
     def _save_checkpoint(self, params_flat, epoch, energy=None,
-                         note: str = ""):
-        """Persist params + meta to ``self.ofname_chkpt``.
+                         note: str = "", path: Optional[str] = None):
+        """Persist params + meta to ``path`` (default ``self.ofname_chkpt``).
 
         Failures are logged, never raised — long training runs must
         not crash on a transient I/O hiccup.
         """
-        if not self.ofname_chkpt:
+        target = path if path is not None else self.ofname_chkpt
+        if not target:
             return
         from .nn_checkpoint import save_nn_checkpoint
 
@@ -566,7 +567,7 @@ class _HEGSROptimizer:
         stub = _HEGMolInfoStub(self.n_up, self.n_down, self.dim)
         try:
             save_nn_checkpoint(
-                self.ofname_chkpt,
+                target,
                 self.unravel(params_flat),
                 epoch=int(epoch),
                 config_name='HEG_PsiFormer',
@@ -577,7 +578,7 @@ class _HEGSROptimizer:
         except Exception as e:
             print(
                 f"[warn] checkpoint save failed "
-                f"({self.ofname_chkpt}{', ' + note if note else ''}): {e}",
+                f"({target}{', ' + note if note else ''}): {e}",
             )
             return False
 
@@ -931,19 +932,27 @@ class _HEGSROptimizer:
                     file=fout,
                 )
 
-            # Periodic checkpoint save (in-loop) — caps the worst-case
-            # data loss to ~self.save_every iters when SIGKILLed.
+            # Periodic checkpoint save (in-loop) — unique filename per
+            # save (no overwrite) so the full training history is
+            # preserved.  E.g. ``<project>.chk_000500.h5``.
             if (self.save_every > 0
                     and self.ofname_chkpt
                     and it % self.save_every == 0):
+                if self.ofname_chkpt.endswith('.chk.h5'):
+                    iter_path = self.ofname_chkpt.replace(
+                        '.chk.h5', f'.chk_{it:06d}.h5',
+                    )
+                else:
+                    iter_path = f'{self.ofname_chkpt}_{it:06d}'
                 ok = self._save_checkpoint(
                     params_flat, epoch=it, energy=e_per,
                     note=f"periodic@iter{it}",
+                    path=iter_path,
                 )
                 if ok and verbose >= 1:
                     print(
                         f"  [chkpt] saved at iter {it}, "
-                        f"E/N={e_per:+.6f} Ha → {self.ofname_chkpt}",
+                        f"E/N={e_per:+.6f} Ha → {iter_path}",
                         file=fout,
                     )
 

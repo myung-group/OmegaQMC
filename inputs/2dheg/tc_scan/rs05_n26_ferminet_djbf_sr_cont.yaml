@@ -1,0 +1,81 @@
+# rs05 SR+SPRING continuation from chkpt at iter 765 (E/N = -143.65 mHa).
+# Identical to original rs05_n26_ferminet_djbf.yaml but with load_chkpt.
+# Comparison reference for the KFAC continuation (job 4249 on node3).
+# Runs on mango LOGIN NODE (interactive nohup) for head-to-head comparison.
+
+project: rs05_n26_ferminet_djbf_sr_cont
+
+system:
+  dim: 2
+  rs: 5.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52
+  det_jitter: 0.04
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 50000
+  walkers: 2048
+  load_chkpt: runs/rs05_n26_ferminet_djbf/rs05_n26_ferminet_djbf.chk.h5
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 50000
+  lr_n_restarts: 0
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 60
+  mc_timestep: 0.025
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 30
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6
