@@ -77,8 +77,9 @@ references/
 runs/
 runs_auto/
 
-# Bulk research-paper PDFs kept locally only
-research/**/papers/
+# Research notes / drafts / refs and internal design docs — local only
+research/
+docs/
 
 # Stray log fragments
 *.log.tail
