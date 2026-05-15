@@ -900,7 +900,7 @@ class _AFQMCDriverGTO:
 
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
-                 pop_control_freq=5, num_eqlb_blocks=10,
+                 pop_control_freq=5, num_blocks_equil=10,
                  fname_log="afqmc.log", walker_chunk_size=None):
         """Run the AFQMC simulation.
 
@@ -911,7 +911,7 @@ class _AFQMCDriverGTO:
             num_steps_per_block: MC steps per block (default 25).
             stabilize_freq: QR reorthogonalization frequency (default 5).
             pop_control_freq: Population control frequency (default 5).
-            num_eqlb_blocks: Number of equilibration blocks (default 10).
+            num_blocks_equil: Number of equilibration blocks (default 10).
             fname_log: Log file path (default "afqmc.log").
                 If None or "", prints to stdout.
             walker_chunk_size: If not None, build/apply the two‑body
@@ -984,7 +984,7 @@ class _AFQMCDriverGTO:
                   f"across {len(jax.devices())} devices", file=fout)
 
         # Main QMC loop
-        total_blocks = num_eqlb_blocks + num_blocks
+        total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
         eshift = 0.0
         step_count = 0
@@ -996,7 +996,7 @@ class _AFQMCDriverGTO:
         acc_ehybrid = jnp.zeros((), dtype=jnp.float64)
 
         if verbose:
-            print(f"\nStarting AFQMC: {num_eqlb_blocks} eqlb + "
+            print(f"\nStarting AFQMC: {num_blocks_equil} eqlb + "
                   f"{num_blocks} prod blocks", file=fout)
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps", file=fout)
@@ -1099,7 +1099,7 @@ class _AFQMCDriverGTO:
                 eshift = float(acc_ehybrid) / acc_weight_h
 
             if verbose:
-                is_eqlb = iblock < num_eqlb_blocks
+                is_eqlb = iblock < num_blocks_equil
                 phase = "EQ" if is_eqlb else "  "
                 print(f"{phase}{iblock:4d} {e_block_val:16.10f} "
                       f"{float(eshift):16.10f} "
@@ -1108,7 +1108,7 @@ class _AFQMCDriverGTO:
 
         # Analyze results
         energy_blocks = np.array(energy_blocks)
-        prod_energies = energy_blocks[num_eqlb_blocks:]
+        prod_energies = energy_blocks[num_blocks_equil:]
 
         e_mean, e_err, e_std, kappa = do_binning_analysis(
             jnp.array(prod_energies))

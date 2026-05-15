@@ -403,7 +403,7 @@ Call the driver with a JAX random key and walker / block settings:
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     e_afqmc = result['energy_mean']
@@ -416,7 +416,7 @@ The return value is a dict containing at minimum ``energy_mean`` and
 Key parameters
 ~~~~~~~~~~~~~~
 
-``num_eqlb_blocks``
+``num_blocks_equil``
     Number of equilibration blocks discarded before statistics are
     accumulated.  Set this to roughly 10 % of ``num_blocks``.
 
@@ -491,7 +491,7 @@ keyword argument:
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=20,
+        num_blocks_equil=20,
     )
 
     print(f"E_AFQMC = {result['energy_mean']:.10f} "

@@ -506,7 +506,7 @@ class _QEDAFQMCDriverGTO:
 
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
-                 pop_control_freq=5, num_eqlb_blocks=10,
+                 pop_control_freq=5, num_blocks_equil=10,
                  walker_chunk_size=None):
         """Run the QED-AFQMC simulation.
 
@@ -517,7 +517,7 @@ class _QEDAFQMCDriverGTO:
             num_steps_per_block: MC steps per block.
             stabilize_freq: QR reorthogonalization frequency.
             pop_control_freq: Population control frequency.
-            num_eqlb_blocks: Number of equilibration blocks.
+            num_blocks_equil: Number of equilibration blocks.
             walker_chunk_size: If not None, build/apply both the
                 two‑body VHS and the photon‑coupling VHS_q in chunks of
                 this many walkers. Caps peak memory of the
@@ -557,7 +557,7 @@ class _QEDAFQMCDriverGTO:
                   f"{len(jax.devices())} devices")
 
         # Main QMC loop
-        total_blocks = num_eqlb_blocks + num_blocks
+        total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
         q_mean_blocks = []
         e_ph_blocks = []
@@ -565,7 +565,7 @@ class _QEDAFQMCDriverGTO:
         step_count = 0
 
         if verbose:
-            print(f"\nStarting QED-AFQMC: {num_eqlb_blocks} eqlb + "
+            print(f"\nStarting QED-AFQMC: {num_blocks_equil} eqlb + "
                   f"{num_blocks} prod blocks")
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps")
@@ -651,7 +651,7 @@ class _QEDAFQMCDriverGTO:
                 eshift = float(acc_ehybrid) / acc_weight_h
 
             if verbose:
-                is_eqlb = iblock < num_eqlb_blocks
+                is_eqlb = iblock < num_blocks_equil
                 phase = "EQ" if is_eqlb else "  "
                 print(f"{phase}{iblock:4d} {e_block:16.10f} "
                       f"{float(eshift):16.10f} "
@@ -660,13 +660,13 @@ class _QEDAFQMCDriverGTO:
 
         # Analyze results
         energy_blocks = np.array(energy_blocks)
-        prod_energies = energy_blocks[num_eqlb_blocks:]
+        prod_energies = energy_blocks[num_blocks_equil:]
 
         e_mean, e_err, e_std, kappa = do_binning_analysis(
             jnp.array(prod_energies))
 
-        q_mean_prod = np.array(q_mean_blocks[num_eqlb_blocks:])
-        e_ph_prod = np.array(e_ph_blocks[num_eqlb_blocks:])
+        q_mean_prod = np.array(q_mean_blocks[num_blocks_equil:])
+        e_ph_prod = np.array(e_ph_blocks[num_blocks_equil:])
 
         if verbose:
             print("-" * 80)

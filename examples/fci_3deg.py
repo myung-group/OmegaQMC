@@ -387,7 +387,7 @@ def run_comparison(rs, N_elec, N_pw, polarization, dt, num_walkers,
         system, dt=dt, include_coulomb=True, verbose=verbose)
     result = driver(
         num_walkers=num_walkers, num_blocks=num_blocks,
-        num_steps_per_block=25, num_eqlb_blocks=20)
+        num_steps_per_block=25, num_blocks_equil=20)
 
     e_afqmc = result['energy_mean']
     e_afqmc_err = result['energy_err']
@@ -500,7 +500,7 @@ def main():
         system, dt=args.dt, include_coulomb=True, verbose=True)
     result = driver(
         num_walkers=args.num_walkers, num_blocks=args.num_blocks,
-        num_steps_per_block=25, num_eqlb_blocks=20)
+        num_steps_per_block=25, num_blocks_equil=20)
     t_afqmc = time.time() - t_afqmc_start
 
     e_afqmc = result['energy_mean']

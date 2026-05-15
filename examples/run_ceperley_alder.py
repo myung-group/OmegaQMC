@@ -27,7 +27,7 @@ from OmegaQMC.afqmc_pw_heg import (
 
 
 def run_single_rs(rs, N_elec, N_pw, polarization, dt, num_walkers,
-                  num_blocks, num_steps_per_block, num_eqlb_blocks,
+                  num_blocks, num_steps_per_block, num_blocks_equil,
                   n_twists):
     """Run AFQMC for a single rs value."""
     print(f"\n{'='*70}")
@@ -42,7 +42,7 @@ def run_single_rs(rs, N_elec, N_pw, polarization, dt, num_walkers,
             base_system, n_twists=n_twists, dt=dt,
             num_walkers=num_walkers, num_blocks=num_blocks,
             num_steps_per_block=num_steps_per_block,
-            num_eqlb_blocks=num_eqlb_blocks, verbose=True)
+            num_blocks_equil=num_blocks_equil, verbose=True)
         e_per_elec_ry = result['e_per_elec_ry']
         e_err_ry = result['energy_err'] / N_elec * 2.0
         # Use twist-averaged HF energy so FS errors cancel with QMC
@@ -53,7 +53,7 @@ def run_single_rs(rs, N_elec, N_pw, polarization, dt, num_walkers,
         result = driver(
             num_walkers=num_walkers, num_blocks=num_blocks,
             num_steps_per_block=num_steps_per_block,
-            num_eqlb_blocks=num_eqlb_blocks)
+            num_blocks_equil=num_blocks_equil)
         e_per_elec_ry = result['e_per_elec_ry']
         e_err_ry = result['energy_err'] / N_elec * 2.0
         e_hf_ry = driver.e_trial / N_elec * 2.0
@@ -101,7 +101,7 @@ def main():
         num_walkers = 200
         num_blocks = 50
         num_steps_per_block = 25
-        num_eqlb_blocks = 20
+        num_blocks_equil = 20
         n_twists = 10  # no twist averaging for quick test
     else:
         rs_values = [1, 2, 5, 10, 20]
@@ -109,7 +109,7 @@ def main():
         num_walkers = 200
         num_blocks = 100
         num_steps_per_block = 25
-        num_eqlb_blocks = 20
+        num_blocks_equil = 20
         n_twists = 50
 
     print("=" * 70)
@@ -145,7 +145,7 @@ def main():
         r = run_single_rs(
             rs, n_elec, n_pw, 'unpolarized', dt,
             nw, nb, num_steps_per_block,
-            num_eqlb_blocks, n_twists)
+            num_blocks_equil, n_twists)
         results_para.append(r)
 
     # Run ferromagnetic calculations
@@ -165,7 +165,7 @@ def main():
         r = run_single_rs(
             rs, n_elec, n_pw, 'polarized', dt,
             nw, nb, num_steps_per_block,
-            num_eqlb_blocks, n_twists)
+            num_blocks_equil, n_twists)
         results_ferro.append(r)
 
     # Summary table

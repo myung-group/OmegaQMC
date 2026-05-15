@@ -37,7 +37,7 @@ def test_h2_no_cavity():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     # QED-AFQMC with zero coupling
@@ -53,7 +53,7 @@ def test_h2_no_cavity():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     print("\n" + "=" * 60)
@@ -99,7 +99,7 @@ def test_h2_in_cavity():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     print("\n" + "=" * 60)
@@ -148,7 +148,7 @@ def test_h2_coupling_scan():
             num_steps_per_block=25,
             stabilize_freq=5,
             pop_control_freq=5,
-            num_eqlb_blocks=10,
+            num_blocks_equil=10,
         )
         print(f"{lam:8.4f} {result['energy_mean']:16.10f} "
               f"{result['energy_err']:12.10f} "

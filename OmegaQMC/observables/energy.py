@@ -294,3 +294,84 @@ def local_energy_multidet(
 
     e_tot = e_1b + e_2b
     return e_tot, e_1b, e_2b
+
+
+def local_energy_multidet_streamed(
+    h1e_trials_a, h1e_trials_b,
+    Ghalfa_all, Ghalfb_all,
+    rchols_a, rchols_b, ci_coeffs,
+    ovlp_a_all, ovlp_b_all, enuc, e_chunk_g=16,
+):
+    """Multi-determinant mixed-estimator local energy, streamed.
+
+    Same algebra as ``local_energy_multidet`` but:
+    - 1-body is computed per determinant via precontracted
+      ``h1e_trials_{a,b}`` and the half-rotated Green's
+      function, skipping the (nwalkers, nbasis, nbasis)
+      aggregate-G build.
+    - 2-body slabs the auxiliary axis per determinant via
+      ``local_energy_2body_streamed``, capping the exchange
+      intermediate at (e_chunk_g, nwalkers, nocc, nocc)
+      regardless of ``ndet``.
+
+    Args:
+        h1e_trials_a: Precontracted ``h1e @ trials_up.conj()``,
+            shape (ndet, nbasis, nup).
+        h1e_trials_b: Precontracted ``h1e @ trials_dn.conj()``,
+            shape (ndet, nbasis, ndown).
+        Ghalfa_all: Per-det half-rotated alpha GF,
+            shape (ndet, nwalkers, nup, nbasis).
+        Ghalfb_all: Per-det half-rotated beta GF,
+            shape (ndet, nwalkers, ndown, nbasis).
+        rchols_a: Per-det half-rotated Cholesky (alpha),
+            shape (ndet, naux, nup, nbasis).
+        rchols_b: Per-det half-rotated Cholesky (beta),
+            shape (ndet, naux, ndown, nbasis).
+        ci_coeffs: CI coefficients, shape (ndet,).
+        ovlp_a_all: Per-det alpha overlaps,
+            shape (ndet, nwalkers).
+        ovlp_b_all: Per-det beta overlaps,
+            shape (ndet, nwalkers).
+        enuc: Nuclear repulsion energy.
+        e_chunk_g: Slab size along the auxiliary axis.
+
+    Returns:
+        e_tot, e_1b, e_2b: shape (nwalkers,) each.
+    """
+    ndet = rchols_a.shape[0]
+
+    # Per-det weights and aggregate overlap.
+    w_I = (
+        ci_coeffs.conj()[:, None] * ovlp_a_all * ovlp_b_all
+    )
+    overlap = jnp.sum(w_I, axis=0)
+
+    # Per-det 1-body trace without full G.
+    # einsum('dpi, dwip -> dw', h1e_trials, Ghalf_all)
+    e_1b_per_det_a = jnp.einsum(
+        'dpi,dwip->dw', h1e_trials_a, Ghalfa_all,
+    )
+    e_1b_per_det_b = jnp.einsum(
+        'dpi,dwip->dw', h1e_trials_b, Ghalfb_all,
+    )
+    e_1b_per_det = e_1b_per_det_a + e_1b_per_det_b
+
+    # Aggregate 1-body via weighted average; add enuc once.
+    e_1b = jnp.sum(w_I * e_1b_per_det, axis=0) / overlap + enuc
+
+    # Per-det 2-body via streamed exchange.  Python-for caps
+    # the exchange intermediate at single-det scale regardless
+    # of ndet.
+    e_2b_per_det_list = []
+    for I in range(ndet):
+        e_coul_I, e_exch_I = local_energy_2body_streamed(
+            Ghalfa_all[I], Ghalfb_all[I],
+            rchols_a[I], rchols_b[I], e_chunk_g,
+        )
+        e_2b_per_det_list.append(e_coul_I - e_exch_I)
+    e_2b_per_det = jnp.stack(e_2b_per_det_list, axis=0)
+
+    e_2b = jnp.sum(w_I * e_2b_per_det, axis=0) / overlap
+
+    e_tot = e_1b + e_2b
+    return e_tot, e_1b, e_2b

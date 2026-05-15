@@ -625,7 +625,7 @@ class _AFQMCDriverPWHEG:
 
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
-                 pop_control_freq=5, num_eqlb_blocks=10,
+                 pop_control_freq=5, num_blocks_equil=10,
                  fname_log="afqmc_3deg.log"):
         """Run the AFQMC simulation.
 
@@ -636,7 +636,7 @@ class _AFQMCDriverPWHEG:
             num_steps_per_block: MC steps per block.
             stabilize_freq: QR reorthogonalization frequency.
             pop_control_freq: Population control frequency.
-            num_eqlb_blocks: Equilibration blocks.
+            num_blocks_equil: Equilibration blocks.
             fname_log: Log file path. If None or "", prints to stdout.
 
         Returns:
@@ -682,13 +682,13 @@ class _AFQMCDriverPWHEG:
         rchol_b_eff = self.rchol_b
 
         # Main QMC loop
-        total_blocks = num_eqlb_blocks + num_blocks
+        total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
         eshift = 0.0
         step_count = 0
 
         if verbose:
-            print(f"\nStarting 3DEG AFQMC: {num_eqlb_blocks} eqlb + "
+            print(f"\nStarting 3DEG AFQMC: {num_blocks_equil} eqlb + "
                   f"{num_blocks} prod blocks", file=fout)
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps", file=fout)
@@ -767,7 +767,7 @@ class _AFQMCDriverPWHEG:
             e_block = float(jnp.sum(w * e_tot.real) / w_sum)
             energy_blocks.append(e_block)
 
-            is_eqlb = iblock < num_eqlb_blocks
+            is_eqlb = iblock < num_blocks_equil
 
             acc_weight_h = float(acc_weight)
             if acc_weight_h > 1e-10:
@@ -782,7 +782,7 @@ class _AFQMCDriverPWHEG:
 
         # Analyze results
         energy_blocks = np.array(energy_blocks)
-        prod_energies = energy_blocks[num_eqlb_blocks:]
+        prod_energies = energy_blocks[num_blocks_equil:]
 
         e_mean, e_err, e_std, kappa = do_binning_analysis(
             jnp.array(prod_energies))
@@ -991,7 +991,7 @@ def _build_twisted_system_3d(base_system, kappa):
 def run_twist_averaged_afqmc_3deg(
         base_system, n_twists=20, dt=0.005,
         num_walkers=100, num_blocks=50, num_steps_per_block=25,
-        num_eqlb_blocks=10, verbose=True):
+        num_blocks_equil=10, verbose=True):
     """Run twist-averaged AFQMC for the 3DEG.
 
     For each twist angle: builds a twisted system, runs AFQMC, and
@@ -1004,7 +1004,7 @@ def run_twist_averaged_afqmc_3deg(
         num_walkers: Number of walkers per twist.
         num_blocks: Production blocks per twist.
         num_steps_per_block: Steps per block.
-        num_eqlb_blocks: Equilibration blocks per twist.
+        num_blocks_equil: Equilibration blocks per twist.
         verbose: Print per-twist progress.
 
     Returns:
@@ -1031,7 +1031,7 @@ def run_twist_averaged_afqmc_3deg(
             num_walkers=num_walkers,
             num_blocks=num_blocks,
             num_steps_per_block=num_steps_per_block,
-            num_eqlb_blocks=num_eqlb_blocks,
+            num_blocks_equil=num_blocks_equil,
             fname_log=None)
 
         e_arr[i] = result['energy_mean']

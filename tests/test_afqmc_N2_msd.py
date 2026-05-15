@@ -30,7 +30,7 @@ def test_n2_multidet():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     print(f"E_HF     = {mf.e_tot:.10f}")

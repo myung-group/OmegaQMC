@@ -314,7 +314,7 @@ class TestAFQMCFreeElectron:
             sys, dt=0.01, include_coulomb=False, verbose=False)
         result = driver(
             num_walkers=50, num_blocks=30,
-            num_steps_per_block=10, num_eqlb_blocks=5,
+            num_steps_per_block=10, num_blocks_equil=5,
             fname_log=None)
 
         np.testing.assert_allclose(
@@ -335,14 +335,14 @@ class TestAFQMCWithCoulomb:
             sys, dt=0.01, include_coulomb=False, verbose=False)
         result_free = driver_free(
             num_walkers=50, num_blocks=30,
-            num_steps_per_block=10, num_eqlb_blocks=5,
+            num_steps_per_block=10, num_blocks_equil=5,
             fname_log=None)
 
         driver_coul = get_afqmc_3deg_func(
             sys, dt=0.01, include_coulomb=True, verbose=False)
         result_coul = driver_coul(
             num_walkers=50, num_blocks=30,
-            num_steps_per_block=10, num_eqlb_blocks=5,
+            num_steps_per_block=10, num_blocks_equil=5,
             fname_log=None)
 
         # With exchange, total energy should be lower
@@ -364,7 +364,7 @@ class TestPolarized:
             sys, dt=0.01, include_coulomb=False, verbose=False)
         result = driver(
             num_walkers=50, num_blocks=30,
-            num_steps_per_block=10, num_eqlb_blocks=5,
+            num_steps_per_block=10, num_blocks_equil=5,
             fname_log=None)
 
         np.testing.assert_allclose(

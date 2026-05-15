@@ -42,7 +42,7 @@ def test_h2_qed_afqmc_vs_fci():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=50,
+        num_blocks_equil=50,
     )
 
     # QED-AFQMC
@@ -57,7 +57,7 @@ def test_h2_qed_afqmc_vs_fci():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=50,
+        num_blocks_equil=50,
     )
 
     print("\n" + "=" * 70)
@@ -115,7 +115,7 @@ def test_h2o_qed_afqmc_vs_fci():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=50,
+        num_blocks_equil=50,
     )
 
     # QED-AFQMC
@@ -130,7 +130,7 @@ def test_h2o_qed_afqmc_vs_fci():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=50,
+        num_blocks_equil=50,
     )
 
     print("\n" + "=" * 70)

@@ -1,27 +1,25 @@
 """
 Memory-lean phaseless AFQMC driver.
 
-Drop-in replacement for :class:`_AFQMCDriverGTO` (single-determinant
-trials only) with a smaller GPU footprint:
+Drop-in replacement for :class:`_AFQMCDriverGTO` (single- and
+multi-determinant trials) with a smaller GPU footprint:
 
-* Block-end energy uses :func:`local_energy_streamed` — the exchange
-  tensor is accumulated in slabs of ``e_chunk_g`` auxiliary indices,
-  capping the per-step peak at
-  ``(e_chunk_g, nwalkers, nocc, nocc)`` complex128.
+* Block-end energy uses :func:`local_energy_streamed` (single-det)
+  or :func:`local_energy_multidet_streamed` (multi-det) — the
+  exchange tensor is accumulated in slabs of ``e_chunk_g``
+  auxiliary indices, capping the per-step peak at
+  ``(e_chunk_g, nwalkers, nocc, nocc)`` complex128 regardless of
+  ``ndet``.
 * The one-body trace is taken against the half-rotated Green's
-  function via a precontracted ``h1e @ trial.conj()``, so the
-  full ``(nwalkers, nbasis, nbasis)`` G is never materialized.
+  function via a precontracted ``h1e @ trial.conj()`` (per-det in
+  the multi-det case), so the full ``(nwalkers, nbasis, nbasis)``
+  aggregate G is never materialized.
 * ``walker_chunk_size`` is auto-tuned to fit the propagation VHS
   into a fraction of free GPU memory unless the user passes an
   explicit value.
-
-Multi-determinant trials raise :class:`NotImplementedError`; the
-streamed-G-free path does not generalize without per-det
-re-rotation.  Use :class:`_AFQMCDriverGTO` for CASSCF trials.
 """
 
 import sys
-import time
 
 import numpy as np
 import jax
@@ -38,13 +36,15 @@ from OmegaQMC.afqmc_gto import (
     orthogonalize_walkers,
     population_control_comb,
     propagate_walkers,
+    propagate_walkers_multidet,
 )
-from OmegaQMC.integrals.cholesky import DiskChol
 from OmegaQMC.observables.greens import (
     greens_function_force_bias,
+    greens_function_multidet_force_bias,
 )
 from OmegaQMC.observables.energy import (
     local_energy_streamed,
+    local_energy_multidet_streamed,
 )
 
 
@@ -95,17 +95,27 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
     """
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
-                 chol_h5_path=None, chol_chunk_g=128, e_chunk_g=16):
+                 trial=None, chol_h5_path=None, chol_chunk_g=128,
+                 e_chunk_g=16):
         super().__init__(
             mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
-            trial=None, chol_h5_path=chol_h5_path,
+            trial=trial, chol_h5_path=chol_h5_path,
             chol_chunk_g=chol_chunk_g,
         )
         self.e_chunk_g = e_chunk_g
-        # Precontract h1e with the trial for the streamed 1-body
-        # trace; avoids materializing full G at block-end.
-        self.h1e_trial_a = self.h1e @ self.trial_up.conj()
-        self.h1e_trial_b = self.h1e @ self.trial_dn.conj()
+        # Precontract h1e with the trial(s) for the streamed
+        # 1-body trace; avoids materializing full G at block-end.
+        if self.multidet:
+            # (ndet, nbasis, nocc) per spin.
+            self.h1e_trials_a = jnp.einsum(
+                'pq,dqi->dpi', self.h1e, self.trials_up.conj(),
+            )
+            self.h1e_trials_b = jnp.einsum(
+                'pq,dqi->dpi', self.h1e, self.trials_dn.conj(),
+            )
+        else:
+            self.h1e_trial_a = self.h1e @ self.trial_up.conj()
+            self.h1e_trial_b = self.h1e @ self.trial_dn.conj()
 
         if verbose:
             print(f"  e_chunk_g = {e_chunk_g} "
@@ -113,7 +123,7 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
 
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
-                 pop_control_freq=5, num_eqlb_blocks=10,
+                 pop_control_freq=5, num_blocks_equil=10,
                  fname_log="afqmc.log", walker_chunk_size=None):
         """Run the AFQMC simulation with streamed block-end energy.
 
@@ -187,13 +197,13 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
                   file=fout)
 
         # Main QMC loop
-        total_blocks = num_eqlb_blocks + num_blocks
+        total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
         eshift = 0.0
         step_count = 0
 
         if verbose:
-            print(f"\nStarting AFQMC: {num_eqlb_blocks} eqlb + "
+            print(f"\nStarting AFQMC: {num_blocks_equil} eqlb + "
                   f"{num_blocks} prod blocks", file=fout)
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps",
@@ -216,15 +226,26 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
                     overlap = overlap / jnp.exp(log_detR)
 
                 rng_key, step_key = jax.random.split(rng_key)
-                phia, phib, weights, overlap, e_hybrid, _ = \
-                    propagate_walkers(
-                        phia, phib, weights, overlap, e_hybrid,
-                        self.propagator, self.chol,
-                        self.rchol_a, self.rchol_b,
-                        self.trial_up, self.trial_dn,
-                        eshift, step_key,
-                        walker_chunk_size=walker_chunk_size,
-                        chol_chunk_g=self.chol_chunk_g)
+                if self.multidet:
+                    phia, phib, weights, overlap, e_hybrid, _ = \
+                        propagate_walkers_multidet(
+                            phia, phib, weights, overlap, e_hybrid,
+                            self.propagator, self.chol,
+                            self.rchols_a, self.rchols_b,
+                            self.trials_up, self.trials_dn,
+                            self.ci_coeffs, eshift, step_key,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g)
+                else:
+                    phia, phib, weights, overlap, e_hybrid, _ = \
+                        propagate_walkers(
+                            phia, phib, weights, overlap, e_hybrid,
+                            self.propagator, self.chol,
+                            self.rchol_a, self.rchol_b,
+                            self.trial_up, self.trial_dn,
+                            eshift, step_key,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g)
 
                 if step_count > 1:
                     total_weight = jnp.sum(jnp.abs(weights))
@@ -247,14 +268,28 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
                     w_abs * e_hybrid.real)
 
             # Block-end energy: streamed, no full G.
-            Ghalfa, Ghalfb, ovlp_block = greens_function_force_bias(
-                phia, phib, self.trial_up, self.trial_dn)
-
-            e_tot, e_1b, e_2b = local_energy_streamed(
-                self.h1e_trial_a, self.h1e_trial_b,
-                Ghalfa, Ghalfb,
-                self.rchol_a, self.rchol_b, self.enuc,
-                self.e_chunk_g)
+            if self.multidet:
+                Ghalfa_all, Ghalfb_all, ovlp_block, \
+                    ovlp_a_all, ovlp_b_all = \
+                    greens_function_multidet_force_bias(
+                        phia, phib,
+                        self.trials_up, self.trials_dn,
+                        self.ci_coeffs)
+                e_tot, e_1b, e_2b = local_energy_multidet_streamed(
+                    self.h1e_trials_a, self.h1e_trials_b,
+                    Ghalfa_all, Ghalfb_all,
+                    self.rchols_a, self.rchols_b, self.ci_coeffs,
+                    ovlp_a_all, ovlp_b_all, self.enuc,
+                    self.e_chunk_g)
+            else:
+                Ghalfa, Ghalfb, ovlp_block = \
+                    greens_function_force_bias(
+                        phia, phib, self.trial_up, self.trial_dn)
+                e_tot, e_1b, e_2b = local_energy_streamed(
+                    self.h1e_trial_a, self.h1e_trial_b,
+                    Ghalfa, Ghalfb,
+                    self.rchol_a, self.rchol_b, self.enuc,
+                    self.e_chunk_g)
 
             w = jnp.abs(weights)
             w_sum = jnp.sum(w)
@@ -267,7 +302,7 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
                 eshift = float(acc_ehybrid) / acc_weight_h
 
             if verbose:
-                is_eqlb = iblock < num_eqlb_blocks
+                is_eqlb = iblock < num_blocks_equil
                 phase = "EQ" if is_eqlb else "  "
                 print(f"{phase}{iblock:4d} {e_block_val:16.10f} "
                       f"{float(eshift):16.10f} "
@@ -276,7 +311,7 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
                       file=fout)
 
         energy_blocks = np.array(energy_blocks)
-        prod_energies = energy_blocks[num_eqlb_blocks:]
+        prod_energies = energy_blocks[num_blocks_equil:]
 
         e_mean, e_err, e_std, kappa = do_binning_analysis(
             jnp.array(prod_energies))

@@ -304,3 +304,60 @@ def greens_function_multidet(
         Ga, Gb, Ghalfa_all, Ghalfb_all,
         overlap, ovlp_a_all, ovlp_b_all,
     )
+
+
+@partial(jax.jit, static_argnames=[])
+def greens_function_multidet_force_bias(
+    phia, phib, trials_up, trials_dn, ci_coeffs,
+):
+    """Multi-det Green's function for force bias / streamed energy.
+
+    Specialized variant of :func:`greens_function_multidet`
+    that skips the aggregate full-G einsum.  The streamed
+    multi-det energy estimator and the per-step force-bias
+    path consume only per-det ``Ghalf``, per-det overlaps,
+    and the aggregate scalar overlap.
+
+    Args:
+        phia: Walker alpha orbitals,
+            shape (nwalkers, nbasis, nup).
+        phib: Walker beta orbitals,
+            shape (nwalkers, nbasis, ndown).
+        trials_up: Trial alpha orbitals,
+            shape (ndet, nbasis, nup).
+        trials_dn: Trial beta orbitals,
+            shape (ndet, nbasis, ndown).
+        ci_coeffs: CI coefficients, shape (ndet,).
+
+    Returns:
+        Ghalfa_all, Ghalfb_all: Per-det half-rotated GF
+            (NaN-sanitized),
+            shape (ndet, nwalkers, nocc, nbasis).
+        overlap: Multi-det overlap, shape (nwalkers,).
+        ovlp_a_all, ovlp_b_all: Per-det spin overlaps,
+            shape (ndet, nwalkers).
+    """
+    Ghalfa_all, ovlp_a_all = jax.vmap(
+        _gf_spin_single_det, in_axes=(None, 0),
+    )(phia, trials_up)
+    Ghalfb_all, ovlp_b_all = jax.vmap(
+        _gf_spin_single_det, in_axes=(None, 0),
+    )(phib, trials_dn)
+
+    Ghalfa_all = jnp.where(
+        jnp.isnan(Ghalfa_all), 0.0, Ghalfa_all,
+    )
+    Ghalfb_all = jnp.where(
+        jnp.isnan(Ghalfb_all), 0.0, Ghalfb_all,
+    )
+
+    w_I = (
+        ci_coeffs.conj()[:, None]
+        * ovlp_a_all * ovlp_b_all
+    )
+    overlap = jnp.sum(w_I, axis=0)
+
+    return (
+        Ghalfa_all, Ghalfb_all,
+        overlap, ovlp_a_all, ovlp_b_all,
+    )

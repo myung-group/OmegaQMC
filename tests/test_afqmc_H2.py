@@ -40,7 +40,7 @@ def test_h2_sto6g():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     e_afqmc = result['energy_mean']
@@ -80,7 +80,7 @@ def test_h2_631g():
         num_steps_per_block=25,
         stabilize_freq=5,
         pop_control_freq=5,
-        num_eqlb_blocks=10,
+        num_blocks_equil=10,
     )
 
     e_afqmc = result['energy_mean']

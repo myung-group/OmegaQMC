@@ -60,7 +60,7 @@ def test_LiH_sto6g():
                 num_steps_per_block=25,
                 stabilize_freq=5,
                 pop_control_freq=5,
-                num_eqlb_blocks=10,
+                num_blocks_equil=10,
                 walker_chunk_size=10,  # cap VHS peak memory
             )
         finally:
