@@ -1,0 +1,81 @@
+# Step 4 Phase 1: complex-Ψ infrastructure with hardcoded phase θ_n ≡ 0,
+# at λ=0.05.
+#
+# Acceptance: matches Step 3 λ=0.05 (E_QED ≈ -78.26 mHa) within seed
+# scatter, since at θ=0 the para Re contribution is 0 and the diamag
+# offset is unchanged.
+
+project: step4p1_qed_heg_lambda0p05_smoke
+
+system:
+  dim: 2
+  rs: 10.0
+  N: 26
+  polarization: unpolarized
+
+cavity:
+  omega: 0.1
+  nph_max: 4
+  lambda: 0.05
+  polarization: [1.0, 0.0]
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 128
+  layers: 3
+  two_particle_dim: 16
+  n_det: 8
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 0
+  det_jitter: 0.04
+  walker_init: uniform
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 500
+  walkers: 1024
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 500
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 0
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 10
+  steps_per_block: 20
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

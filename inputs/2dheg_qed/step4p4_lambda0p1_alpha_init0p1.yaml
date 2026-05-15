@@ -1,0 +1,94 @@
+# Step 4 Phase 4 Option B: λ=0.1 with α_1 initialised at 0.1 to break
+# the symmetry of the (cubic) α=0 fixed point.
+#
+# Predicted diamagnetic shift: g²/2 = (0.1)² / (4·0.1) = 25 mHa/elec
+# (matches Step 3 scaling — diamag dominates at this λ).
+#
+# Goal: observe what the α-SR optimizer does from a non-zero start.
+# Three possible outcomes:
+#   (i)   α relaxes to ~0 and E ≈ Step 3 baseline → ansatz too symmetric;
+#   (ii)  α drifts to a stable non-zero value, modest E drop → variational
+#         improvement found (will be small, ~ sub-mHa);
+#   (iii) α runs away or destabilises training → α-SR needs damping/clipping.
+
+project: step4p4_qed_heg_lambda0p1_alpha_init0p1
+
+system:
+  dim: 2
+  rs: 10.0
+  N: 26
+  polarization: unpolarized
+
+cavity:
+  omega: 0.1
+  nph_max: 4
+  lambda: 0.1
+  polarization: [1.0, 0.0]
+  # α_1=0.1 init perturbation; α_0 force-pinned to 0 by optimizer.
+  alpha_init: [0.0, 0.1, 0.0, 0.0, 0.0]
+  # First Phase-4 attempt blew up: α_1 0.065 → +2.04 (iter 100) →
+  # −3.26 (iter 200) — bidirectional cubic-landscape runaway.  Clip
+  # |δα_k| per iter to 5e-3 (over 500 iters max accumulated |Δα| is
+  # 2.5; in practice the optimizer should settle long before this).
+  alpha_step_clip: 0.005
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 128
+  layers: 3
+  two_particle_dim: 16
+  n_det: 8
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 0
+  det_jitter: 0.04
+  walker_init: uniform
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 500
+  walkers: 1024
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 500
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 0
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 10
+  steps_per_block: 20
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6
