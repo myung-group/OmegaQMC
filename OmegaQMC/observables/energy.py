@@ -112,6 +112,128 @@ def local_energy(
 
 
 @partial(jax.jit, static_argnames=[])
+def _e2b_slab_spin(Ghalf, rchol_slab):
+    """Per-slab Coulomb partial and exchange contribution.
+
+    Args:
+        Ghalf: shape (nwalkers, nocc, nbasis).
+        rchol_slab: shape (g_slab, nocc, nbasis).
+
+    Returns:
+        X_slab: shape (g_slab, nwalkers), Coulomb intermediate.
+        e_exch_slab: shape (nwalkers,), exchange contribution from
+            this slab (already 0.5 * sum_g_in_slab Tr(T_g T_g^T)).
+    """
+    X_slab = jnp.einsum('giq,wiq->gw', rchol_slab, Ghalf)
+    T_slab = jnp.einsum('giq,wjq->gwij', rchol_slab, Ghalf)
+    e_exch_slab = 0.5 * jnp.sum(
+        T_slab * T_slab.transpose(0, 1, 3, 2), axis=(0, 2, 3),
+    )
+    return X_slab, e_exch_slab
+
+
+def local_energy_2body_streamed(
+    Ghalfa, Ghalfb, rchol_a, rchol_b, e_chunk_g=16,
+):
+    """Streamed two-body energy: caps exchange-tensor peak memory.
+
+    Computes the same e_coul and e_exch as ``local_energy_2body``
+    but slabs the auxiliary axis so the (g, w, nocc, nocc) exchange
+    intermediate ``T`` is never materialized in full.  Peak slab
+    size is (e_chunk_g, nwalkers, nocc, nocc) complex128 per spin.
+
+    The Coulomb sum (X_a + X_b)^2 mixes the two spins, so we
+    accumulate X_a, X_b per slab and form the cross sum slab-by-slab.
+
+    Args:
+        Ghalfa: shape (nwalkers, nup, nbasis).
+        Ghalfb: shape (nwalkers, ndown, nbasis).
+        rchol_a: shape (naux, nup, nbasis).
+        rchol_b: shape (naux, ndown, nbasis).
+        e_chunk_g: slab size along the auxiliary axis.
+
+    Returns:
+        e_coul: shape (nwalkers,).
+        e_exch: shape (nwalkers,).
+    """
+    naux = rchol_a.shape[0]
+    nw = Ghalfa.shape[0]
+    dtype = Ghalfa.dtype
+
+    e_coul = jnp.zeros((nw,), dtype=dtype)
+    e_exch = jnp.zeros((nw,), dtype=dtype)
+    for g0 in range(0, naux, e_chunk_g):
+        g1 = min(g0 + e_chunk_g, naux)
+        Xa, exa = _e2b_slab_spin(Ghalfa, rchol_a[g0:g1])
+        Xb, exb = _e2b_slab_spin(Ghalfb, rchol_b[g0:g1])
+        e_coul = e_coul + 0.5 * jnp.sum((Xa + Xb) ** 2, axis=0)
+        e_exch = e_exch + exa + exb
+    return e_coul, e_exch
+
+
+@partial(jax.jit, static_argnames=[])
+def _e1b_no_full_g(h1e_trial_a, h1e_trial_b, Ghalfa, Ghalfb, enuc):
+    """One-body trace without building full G.
+
+    Uses Tr(h1e G_s) = Tr((h1e @ trial_s.conj()) Ghalf_s^T):
+
+        e_1b[w] = einsum('pi,wip->w', h1e_trial_a, Ghalfa)
+                + einsum('pi,wip->w', h1e_trial_b, Ghalfb)
+                + enuc
+
+    Args:
+        h1e_trial_a: (nbasis, nup),  h1e @ trial_up.conj().
+        h1e_trial_b: (nbasis, ndown), h1e @ trial_dn.conj().
+        Ghalfa: (nwalkers, nup, nbasis).
+        Ghalfb: (nwalkers, ndown, nbasis).
+        enuc: nuclear repulsion energy.
+
+    Returns:
+        e_1b: (nwalkers,).
+    """
+    e_1b_a = jnp.einsum('pi,wip->w', h1e_trial_a, Ghalfa)
+    e_1b_b = jnp.einsum('pi,wip->w', h1e_trial_b, Ghalfb)
+    return e_1b_a + e_1b_b + enuc
+
+
+def local_energy_streamed(
+    h1e_trial_a, h1e_trial_b, Ghalfa, Ghalfb,
+    rchol_a, rchol_b, enuc, e_chunk_g=16,
+):
+    """Mixed-estimator local energy without full G, streamed two-body.
+
+    Equivalent to ``local_energy`` on the surviving outputs, but:
+    - 1-body trace uses precontracted ``h1e_trial_{a,b}`` and the
+      half-rotated Green's function, skipping the
+      (nwalkers, nbasis, nbasis) full-G materialization.
+    - 2-body uses ``local_energy_2body_streamed`` to cap the exchange
+      intermediate at (e_chunk_g, nwalkers, nocc, nocc).
+
+    Args:
+        h1e_trial_a: (nbasis, nup),  h1e @ trial_up.conj().
+        h1e_trial_b: (nbasis, ndown), h1e @ trial_dn.conj().
+        Ghalfa: (nwalkers, nup, nbasis).
+        Ghalfb: (nwalkers, ndown, nbasis).
+        rchol_a: (naux, nup, nbasis).
+        rchol_b: (naux, ndown, nbasis).
+        enuc: nuclear repulsion energy.
+        e_chunk_g: slab size for the streamed exchange.
+
+    Returns:
+        e_tot, e_1b, e_2b: (nwalkers,) each.
+    """
+    e_1b = _e1b_no_full_g(
+        h1e_trial_a, h1e_trial_b, Ghalfa, Ghalfb, enuc,
+    )
+    e_coul, e_exch = local_energy_2body_streamed(
+        Ghalfa, Ghalfb, rchol_a, rchol_b, e_chunk_g,
+    )
+    e_2b = e_coul - e_exch
+    e_tot = e_1b + e_2b
+    return e_tot, e_1b, e_2b
+
+
+@partial(jax.jit, static_argnames=[])
 def local_energy_multidet(
     h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
     rchols_a, rchols_b, ci_coeffs,
