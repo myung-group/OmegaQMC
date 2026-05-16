@@ -424,7 +424,7 @@ class HEGPsiFormerConfig(NamedTuple):
     # each higher det as a small particle-hole admixture — and is
     # what FermiNet-class wavefunctions rely on to get meaningful
     # multi-det diversity during training.
-    n_virt_pw: int = 12
+    n_virt_pw: int = 0
     det_jitter: float = 0.02
     # Ghost-atom (Z=0 phantom nucleus at cell origin) positional
     # fingerprint in the electron embedding.  Without this, same-spin

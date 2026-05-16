@@ -1,0 +1,72 @@
+# Bare 2D HEG control to match the L5 λ=0 ansatz size.
+# Same FermiNet backbone, embedding_dim, n_det, BF+cusp.  Same SR+SPRING
+# recipe.  Goal: pin down what E/N this ansatz reaches WITHOUT cavity,
+# so we can compare with L5 λ=0 which should give
+#     E_L5/N = E_bare/N + Ω/2  (= +1.92 mHa for Ω=0.1)
+
+project: bare_rs10_N10_match_l5_v3
+
+system:
+  dim: 2
+  rs: 10.0
+  N: 10
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 32
+  layers: 1
+  two_particle_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  use_backflow: true
+  use_coord_backflow: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 1   # minimal increment from 0 (0 crashes in bare HEG runner)
+  det_jitter: 0.04
+  walker_init: gas
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 500
+  walkers: 512
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 500
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 15
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 256
+  blocks: 20
+  equil_blocks: 3
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 2
+  n_recip: 4

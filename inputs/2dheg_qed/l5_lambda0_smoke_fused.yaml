@@ -1,0 +1,65 @@
+# Level 5 regression smoke (Plan C — fused jit train_step).
+# Same ansatz + walkers + iters as l5_lambda0_smoke_smw.yaml.
+# Only change: optimize.use_fused_step=true (one jit per iter).
+# Target: 3-5x per-iter speedup vs SMW-only run (3.0s/iter → ~0.8 s/iter).
+
+project: l5_lambda0_smoke_fused
+
+system:
+  n_up: 5
+  n_down: 5
+  rs: 10.0
+  dim: 2
+
+cavity:
+  omega: 0.1
+  lambda: 0.0
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: false
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true        # plan C: fully-fused jit train_step
+  freeze_mlps: false          # diagnostic flag (true zeros MLP-param
+                              # slice of SR update; preserves architecture)
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 2000
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.2       # 2× headroom to help escape shallow basins
+                              # (0.3 was too aggressive, blew up at iter ~1400)
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+seed: 42

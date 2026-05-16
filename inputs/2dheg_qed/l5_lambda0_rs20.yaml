@@ -1,0 +1,67 @@
+# L5 at rs=20, λ=0 — bare-HEG-times-HO factorization regime.
+# Compare with bare HEG control at rs=20 (more strongly correlated than rs=10,
+# closer to the Wigner-crystal transition rs_c ≈ 30-37).
+#
+# Cell L = rs · √(π·N) = 20 · √(10π) ≈ 112.1 Bohr.
+#
+# Expected at λ=0 (same factorization analysis as rs=10):
+#   E_L5/N = E_bare/N + Ω/(2·N_e) = E_bare(rs=20) + 5.0 mHa per elec.
+
+project: l5_lambda0_rs20
+
+system:
+  n_up: 5
+  n_down: 5
+  rs: 20.0
+  dim: 2
+
+cavity:
+  omega: 0.1
+  lambda: 0.0
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: false
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 20000
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 20000
+  spring_mu: 0.9
+  spring_norm_clip: 0.2       # validated sweet spot at rs=10
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 256
+  blocks: 0          # skip eval (training only)
+  equil_blocks: 3
+  steps_per_block: 10
+
+seed: 42

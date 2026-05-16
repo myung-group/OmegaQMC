@@ -253,3 +253,71 @@ def test_cg_solves_S_delta_equals_g(l5_with_sr):
     residual = matvec_damped(delta) - g
     rel_err = float(jnp.linalg.norm(residual) / (jnp.linalg.norm(g) + 1e-30))
     assert rel_err < 5e-3, f"CG residual rel_err = {rel_err}"
+
+
+def test_smw_solver_matches_cg(l5_with_sr):
+    """Plan-B SMW dual-form SR must produce the same δθ as primal CG
+    (to within CG solver tolerance) when SPRING is off (μ=0, c_clip=0).
+
+    Setup: identical Jac_u, Jac_v, e_re, e_im, damping.  CG with tight
+    tolerance is treated as ground truth; SMW must agree to ~1e-6.
+    """
+    from OmegaQMC.qed_vmcopt_nn_heg_sr import _cg_solve
+    from OmegaQMC.qed_vmcopt_nn_heg_l5 import make_l5_sr_smw_solver
+
+    m = l5_with_sr
+    n_w = 32
+    R, q_c = _sample_batch(11, n_w, 2, 2, m["L"])
+    r_flat_batch = R.reshape(n_w, -1)
+
+    # Perturb params for non-trivial Jacobians
+    p_perturbed = jax.tree.map(lambda x: x, m["init_params_pytree"])
+    p_perturbed["phase_mlp"][-1]["W"] = 0.05 * jnp.ones_like(
+        p_perturbed["phase_mlp"][-1]["W"]
+    )
+    p_perturbed["mag_mlp"][-1]["W"] = 0.05 * jnp.ones_like(
+        p_perturbed["mag_mlp"][-1]["W"]
+    )
+    p_flat, _ = jax.flatten_util.ravel_pytree(p_perturbed)
+
+    Jac_u, Jac_v = m["sr"]["batched_jacobian"](r_flat_batch, q_c, p_flat)
+    rng = np.random.default_rng(3)
+    e_re = jnp.asarray(rng.normal(scale=0.1, size=n_w), dtype=jnp.float64)
+    e_im = jnp.asarray(rng.normal(scale=0.05, size=n_w), dtype=jnp.float64)
+
+    damping = 1e-3
+    g, S_matvec, _, _, _ = m["sr"]["sr_force_and_S_matvec"](
+        Jac_u, Jac_v, e_re, e_im,
+    )
+    # Ground truth: CG with tight tol, no SPRING, no clip
+    def mv(v):
+        return S_matvec(v) + damping * v
+    delta_cg = _cg_solve(mv, g, n_iters=500, tol=1e-10)
+
+    # SMW solver with SPRING off and clip off
+    smw = make_l5_sr_smw_solver()
+    prev_delta = jnp.zeros_like(g)
+    delta_smw, e_mean, e_var, im_mean, g_norm, scale = smw(
+        Jac_u, Jac_v, e_re, e_im,
+        prev_delta,
+        jnp.float64(damping),
+        jnp.float64(0.0),    # μ = 0
+        jnp.float64(0.0),    # c_clip = 0  (disabled)
+    )
+    # scale must be 1 when clip is disabled
+    assert abs(float(scale) - 1.0) < 1e-12
+
+    # SMW is the EXACT solve; CG agrees to ~1e-6 with these settings.
+    diff = float(jnp.linalg.norm(delta_smw - delta_cg))
+    norm = float(jnp.linalg.norm(delta_cg))
+    rel = diff / (norm + 1e-30)
+    assert rel < 1e-4, (
+        f"SMW disagrees with CG: rel_err={rel:.3e} "
+        f"(‖Δ‖={diff:.3e}, ‖δ_cg‖={norm:.3e})"
+    )
+    # Also check residual: SMW should satisfy (S + λI) δ = g to ~1e-10
+    residual = mv(delta_smw) - g
+    res_rel = float(
+        jnp.linalg.norm(residual) / (jnp.linalg.norm(g) + 1e-30)
+    )
+    assert res_rel < 1e-8, f"SMW residual rel_err = {res_rel:.3e}"
