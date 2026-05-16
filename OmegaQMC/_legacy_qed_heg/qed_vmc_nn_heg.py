@@ -98,11 +98,14 @@ class _QEDVMCDriverNNHEG:
             self.coupling_vec / lam if lam > 1e-12
             else jnp.eye(self.dim)[0]
         )
-        log_psi_signed, params, graphdef = make_qed_heg_log_psi_signed(
-            base_wf, nph_max=self.nph_max, L=self.L, eps=eps,
-            init_key=head_key,
+        log_psi_signed, phase_smooth, params, graphdef = (
+            make_qed_heg_log_psi_signed(
+                base_wf, nph_max=self.nph_max, L=self.L, eps=eps,
+                init_key=head_key,
+            )
         )
         self.log_psi_signed = log_psi_signed
+        self.phase_smooth = phase_smooth
         self.params = params
         self.graphdef = graphdef
 
@@ -117,6 +120,8 @@ class _QEDVMCDriverNNHEG:
         def _ewald_pair(r):
             return ewald_pair_energy_dim(r, ewald_tab, dim=dim_loc)
 
+        phase_smooth = self.phase_smooth
+
         @jax.jit
         def local_energy_one(elec, n, params):
             return pauli_fierz_local_energy_velocity_heg(
@@ -124,6 +129,7 @@ class _QEDVMCDriverNNHEG:
                 omega=omega_loc, coupling_vec=cv_loc,
                 nph_max=nph_loc, ewald_pair_fn=_ewald_pair,
                 complex_psi=complex_loc,
+                phase_smooth_fn=phase_smooth,
             )
 
         self._local_energy_one = local_energy_one

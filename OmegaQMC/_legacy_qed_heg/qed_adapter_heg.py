@@ -67,7 +67,6 @@ class HEGFockPhaseHead(nnx.Module):
         self.log_amp = nnx.Param(
             -3.0 * jnp.arange(1, self.nph_max + 1, dtype=jnp.float64),
         )
-        # Phase coefficients θ_n for n=1..nph_max (θ_0=0 gauge).
         self.theta = nnx.Param(jnp.zeros((self.nph_max,), dtype=jnp.float64))
 
     def __call__(self, elec, n):
@@ -93,48 +92,53 @@ def make_qed_heg_log_psi_signed(
 ):
     """Build a signed log-ψ callable for cavity-QED HEG.
 
-    Args:
-        base_wf: an HEG wavefunction module with a callable interface
-            ``base_wf(elec_crds) → log|ψ(r)|`` (real scalar).
-            Typically constructed via
-            :func:`OmegaQMC.psi.nn.heg_wf_module.build_heg_psiformer_wf`.
-        nph_max: photon-Fock truncation.
-        L: simulation cell side length.
-        eps: (dim,) cavity polarization unit vector.
-        init_key: JAX PRNG key for FockHead init.
+    The Fock-state amplitude (vacuum-biased `b_n = -3n`) and phase
+    (initially zero) are **baked into closure constants** rather than
+    held as trainable Params on a separate FockHead module. Reason:
+    nnx-Param subtree filtering for "freeze the FockHead" silently
+    fails at production scale (nested state structure with
+    cusp/BF/DeepJastrow), letting these few rarely-fired params get
+    SR-optimized with near-singular Fisher diagonal → wavefunction
+    drift → variational collapse below DMC. By making them closure
+    constants, only the base electronic ψ is in the trainable param
+    tree, exactly matching bare HEG.
+
+    At finite λ where FockHead needs to be trained, add a separate
+    optimizer state (e.g., Adam) for these scalars rather than mixing
+    them into the SR Fisher of the base ψ.
 
     Returns:
-        ``(log_psi_signed, init_params, graphdef)``:
+        ``(log_psi_signed, phase_smooth, params, graphdef)``:
           * ``log_psi_signed(elec, n, params) → (log_mag, signed_amp)``
-            where ``signed_amp`` is a complex unit ``exp(i·phase)``.
-          * ``init_params``: nnx Param state for {base_wf, fock_head}.
-          * ``graphdef``: nnx graphdef for re-merging.
+          * ``phase_smooth(elec, n, params) → real scalar``
+          * ``params``: nnx Param state for the BASE ψ only.
+          * ``graphdef``: nnx graphdef for re-merging the base.
     """
-    rngs = nnx.Rngs(init_key)
-    fock_head = HEGFockPhaseHead(nph_max, L, eps, rngs=rngs)
+    del init_key  # no FockHead Module → no RNG needed
+    eps = jnp.asarray(eps, dtype=jnp.float64)
+    L_const = float(L)
+    # Vacuum-biased log amplitudes for n=0..nph_max. log|c_0|=0 (gauge).
+    log_amp_table = jnp.concatenate([
+        jnp.zeros((1,), dtype=jnp.float64),
+        -3.0 * jnp.arange(1, nph_max + 1, dtype=jnp.float64),
+    ])
 
-    # Build a combined module so a single graphdef/params split covers
-    # both base_wf and the FockHead.
-    class _Joint(nnx.Module):
-        def __init__(self, base, head):
-            self.base = base
-            self.head = head
-
-        def __call__(self, elec, n):
-            psi = self.base(elec)             # Psi(sign, log)
-            log_amp_n, phase = self.head(elec, n)
-            return psi.log, psi.sign, log_amp_n, phase
-
-    joint = _Joint(base_wf, fock_head)
-    graphdef, params, other = nnx.split(joint, nnx.Param, ...)
+    graphdef, params, other = nnx.split(base_wf, nnx.Param, ...)
 
     def log_psi_signed(elec, n, params):
         mdl = nnx.merge(graphdef, params, other)
-        log_mag_e, slater_sign, log_amp_n, phase = mdl(elec, n)
-        # log|Ψ(r,n)| = log|ψ_e(r)| + log|c_n|.
-        log_mag = log_mag_e + log_amp_n
-        slater_c = slater_sign.astype(jnp.complex128)
-        signed_amp = slater_c * jnp.exp(1j * phase.astype(jnp.complex128))
+        psi = mdl(elec)                       # Psi(sign, log)
+        n_int = jnp.asarray(n, dtype=jnp.int32)
+        log_amp_n = log_amp_table[n_int]
+        log_mag = psi.log + log_amp_n
+        slater_c = psi.sign.astype(jnp.complex128)
+        # Phase is 0 for V1 (FockHead not trained). signed_amp = slater
+        # carried as complex dtype so Fock-ladder ratios broadcast.
+        signed_amp = slater_c
         return log_mag, signed_amp
 
-    return log_psi_signed, params, graphdef
+    def phase_smooth(elec, n, params):
+        del elec, n, params
+        return jnp.asarray(0.0, dtype=jnp.float64)
+
+    return log_psi_signed, phase_smooth, params, graphdef

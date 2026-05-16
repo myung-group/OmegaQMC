@@ -1,0 +1,105 @@
+# Step 5 first cavity-WC run: rs=50, N=42, λ=0.05, Ω=0.1.
+#
+# Phase ansatz K basis: the 4 ε-coupled WC G vectors identified from
+# the bare-WC S(K) measurement.  Each has ε·K = ±0.066 (substantial)
+# and is at the WC's first-shell Bragg position.  The other two
+# strong WC peaks at (0, ±0.0766) have ε·K = 0 → don't couple, omitted.
+#
+# Predicted at λ=0.05:
+#   - Diamag offset: +6.25 mHa/elec
+#   - E_QED ≈ -13.5 mHa/elec (= bare WC -19.77 + diamag +6.25)
+#   - Phase α_k for 4 K vectors: small non-zero values (polariton
+#     activation, finally measurable in HEG due to broken TI in WC)
+#   - Crystal structure: distorted triangular, slight anisotropy along ε
+#   - ⟨Im E_loc⟩/N → 0 (Hermiticity check)
+
+project: step5_cavity_wc_rs50_n42_lam005
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 42
+  polarization: unpolarized
+
+cavity:
+  omega: 0.1
+  nph_max: 4
+  lambda: 0.05
+  polarization: [1.0, 0.0]
+  # 4 ε-coupled K vectors at first-shell triangular WC G positions.
+  # Identified from the bare-WC S(K) measurement.  All have |K|=0.0734.
+  phase_K_vectors:
+    - [+0.0656, +0.0328]
+    - [+0.0656, -0.0328]
+    - [-0.0656, +0.0328]
+    - [-0.0656, -0.0328]
+  # Default coh_alpha_init=0.05; will train.
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 128
+  layers: 3
+  two_particle_dim: 16
+  n_det: 8
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.25
+  crystal_spin_pattern: neel
+  n_virt_pw: 0
+  det_jitter: 0.04
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 500
+  walkers: 1024
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 500
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 20
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 0
+
+eval:
+  walkers: 512
+  blocks: 50
+  equil_blocks: 10
+  steps_per_block: 20
+
+observables:
+  enabled: true
+  triangular_shells: 3
+  cartesian_n_max: 10
+  n_walkers: 512
+  equil_steps: 200
+  sample_steps: 100
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

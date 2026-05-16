@@ -482,11 +482,20 @@ def _run(cfg, project, run_dir, prefix):
             coupling_polarization = _get(
                 cfg, 'cavity.polarization', None,
             )
-            # Step 4 Phase 4: optional non-zero α init for symmetry
-            # breaking from the α=0 fixed point (cubic landscape).
-            alpha_init = _get(cfg, 'cavity.alpha_init', None)
+            # Step 5: Option C multi-K phase + coherent-state c_n.
+            phase_K_vectors = _get(cfg, 'cavity.phase_K_vectors', None)
+            phase_alpha_init = _get(cfg, 'cavity.phase_alpha_init', None)
             alpha_step_clip = float(
                 _get(cfg, 'cavity.alpha_step_clip', 0.005)
+            )
+            coh_alpha_init = float(
+                _get(cfg, 'cavity.coh_alpha_init', 0.05)
+            )
+            coh_alpha_step_clip = float(
+                _get(cfg, 'cavity.coh_alpha_step_clip', 0.005)
+            )
+            coh_alpha_floor = float(
+                _get(cfg, 'cavity.coh_alpha_floor', 1.0e-3)
             )
             opt = get_qed_vmcopt_nn_heg_sr_func(
                 config, init_key,
@@ -514,8 +523,12 @@ def _run(cfg, project, run_dir, prefix):
                 nph_max=nph_max,
                 coupling_lambda=coupling_lambda,
                 coupling_polarization=coupling_polarization,
-                alpha_init=alpha_init,
+                phase_K_vectors=phase_K_vectors,
+                phase_alpha_init=phase_alpha_init,
                 alpha_step_clip=alpha_step_clip,
+                coh_alpha_init=coh_alpha_init,
+                coh_alpha_step_clip=coh_alpha_step_clip,
+                coh_alpha_floor=coh_alpha_floor,
             )
         elif opt_type == 'adam':
             opt = get_vmcopt_nn_heg_func(
@@ -816,7 +829,8 @@ def _run(cfg, project, run_dir, prefix):
             'e_para_re_per_e_ha': float(np.mean(qed_eval_result['E_para_re_blocks'])) / N,
             'e_para_im_per_e_ha': float(np.mean(qed_eval_result['E_para_im_blocks'])) / N,
             'n_ph_avg':           float(np.mean(qed_eval_result['n_ph_blocks'])),
-            'alpha_state':        qed_eval_result.get('alpha_state', []),
+            'phase_alpha':        qed_eval_result.get('phase_alpha', []),
+            'coh_alpha':          qed_eval_result.get('coh_alpha', 0.0),
         }
 
     # --- Observables (S(k), optional) ---

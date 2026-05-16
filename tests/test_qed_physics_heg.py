@@ -52,6 +52,10 @@ def heg_2d_setup():
         log_mag_n = -10.0 * jnp.asarray(n, dtype=elec.dtype)
         return log_mag_e + log_mag_n, jnp.asarray(1.0 + 0.0j)
 
+    def phase_smooth(elec, n, params):
+        # Trivial smooth phase = 0 for all (r, n).
+        return jnp.asarray(0.0, dtype=elec.dtype)
+
     def log_mag_only(elec):
         return -0.5 * jnp.sum((elec / sigma) ** 2)
 
@@ -61,7 +65,8 @@ def heg_2d_setup():
     return {
         "n_elec": n_elec, "dim": dim, "L": L, "omega": omega,
         "nph_max": nph_max, "ewald_fn": ewald_fn,
-        "log_psi_signed": log_psi_signed, "log_mag_only": log_mag_only,
+        "log_psi_signed": log_psi_signed, "phase_smooth": phase_smooth,
+        "log_mag_only": log_mag_only,
         "elec": elec,
     }
 
@@ -78,7 +83,7 @@ def test_zero_coupling_n0_reduces_to_bare_heg(heg_2d_setup):
         s["log_psi_signed"], None, s["elec"], jnp.asarray(0),
         omega=s["omega"], coupling_vec=jnp.zeros(s["dim"]),
         nph_max=s["nph_max"], ewald_pair_fn=s["ewald_fn"],
-        complex_psi=True,
+        complex_psi=True, phase_smooth_fn=s["phase_smooth"],
     )
     assert abs(float(jnp.real(e0)) - _bare_heg_e_loc(s)) < 1e-10
 
@@ -92,7 +97,7 @@ def test_zero_coupling_finite_n_picks_up_photon_energy(heg_2d_setup):
             s["log_psi_signed"], None, s["elec"], jnp.asarray(k),
             omega=s["omega"], coupling_vec=jnp.zeros(s["dim"]),
             nph_max=s["nph_max"], ewald_pair_fn=s["ewald_fn"],
-            complex_psi=True,
+            complex_psi=True, phase_smooth_fn=s["phase_smooth"],
         )
         assert abs(float(jnp.real(e_k)) - (bare + s["omega"] * k)) < 1e-8
 
@@ -105,14 +110,14 @@ def test_diamagnetic_shift_at_small_lambda(heg_2d_setup):
         s["log_psi_signed"], None, s["elec"], jnp.asarray(0),
         omega=s["omega"], coupling_vec=jnp.zeros(s["dim"]),
         nph_max=s["nph_max"], ewald_pair_fn=s["ewald_fn"],
-        complex_psi=True,
+        complex_psi=True, phase_smooth_fn=s["phase_smooth"],
     )
     lam = 0.01
     e_lam = pauli_fierz_local_energy_velocity_heg(
         s["log_psi_signed"], None, s["elec"], jnp.asarray(0),
         omega=s["omega"], coupling_vec=lam * eps,
         nph_max=s["nph_max"], ewald_pair_fn=s["ewald_fn"],
-        complex_psi=True,
+        complex_psi=True, phase_smooth_fn=s["phase_smooth"],
     )
     g = lam / np.sqrt(2.0 * s["omega"])
     expected = s["n_elec"] * g ** 2 / 2.0

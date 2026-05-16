@@ -113,42 +113,40 @@ def _ke_complex(log_psi_complex_at_n, elec_crds):
     return t_real + 1j * t_imag
 
 
-def _log_psi_complex_at_n(log_psi_signed_fn, params, n):
-    """Return r → complex log Ψ(r, n) by combining log_mag + i·arg(sign).
+def _smooth_complex_log_psi_at_n(log_mag_fn, phase_smooth_fn, params, n):
+    """Build r → complex log Ψ(r,n) = log|Ψ| + i·φ_smooth.
 
-    For complex_psi=True the signed_amp is a complex unit (= e^{iφ});
-    arg(sign) recovers φ. For purely real positive ψ (sign = 1) the
-    phase is zero and the function reduces to the real log magnitude.
+    Critically, this does NOT use jnp.angle(signed_amp) — the
+    Slater-sign factor in signed_amp introduces a branch cut that
+    autodiff through it produces delta-function-like spikes at nodes.
+    Using only the SMOOTH FockHead phase φ keeps both kinetic and
+    ε·∇log Ψ derivatives well-defined everywhere.
+
+    Mathematically the dropped piece is log(slater_sign), which is
+    constant w.r.t. (r, θ) almost everywhere (changes only at nodes).
     """
     def f(r):
-        log_mag, sign = log_psi_signed_fn(r, n, params)
+        log_mag = log_mag_fn(r, n, params)
         log_mag_c = log_mag.astype(jnp.complex128) \
             if log_mag.dtype == jnp.float64 \
             else log_mag.astype(jnp.complex64)
-        return log_mag_c + 1j * jnp.angle(sign)
+        return log_mag_c + 1j * phase_smooth_fn(r, n, params)
     return f
 
 
-def _eps_dot_grad_log_psi_complex(log_psi_signed_fn, params, elec_crds, n, eps):
-    """Compute ε·Σᵢ ∇ᵢ log Ψ as a complex scalar.
+def _eps_dot_grad_log_psi_smooth(log_mag_fn, phase_smooth_fn, params,
+                                  elec_crds, n, eps):
+    """ε·Σᵢ ∇ᵢ log Ψ for the smooth complex log Ψ (no Slater branch).
 
     Required for the velocity-gauge bilinear coupling, where the local
     momentum estimator is :math:`(\\varepsilon\\cdot\\hat{\\mathbf P})\\Psi/\\Psi
     = -i \\sum_i \\varepsilon\\cdot\\nabla_i \\log\\Psi`.
-
-    Args:
-        log_psi_signed_fn: callable (r, n, params) → (log_mag, signed_amp).
-        params: parameter pytree.
-        elec_crds: (n_elec, dim) electron positions.
-        n: photon Fock index.
-        eps: (dim,) cavity polarization unit vector.
-
-    Returns:
-        Complex scalar :math:`\\sum_i \\varepsilon\\cdot\\nabla_i \\log\\Psi`.
     """
     n_elec, dim = elec_crds.shape[-2], elec_crds.shape[-1]
     eps = jnp.asarray(eps, dtype=elec_crds.dtype)
-    log_psi_c = _log_psi_complex_at_n(log_psi_signed_fn, params, n)
+    log_psi_c = _smooth_complex_log_psi_at_n(
+        log_mag_fn, phase_smooth_fn, params, n,
+    )
 
     def log_R(rf):
         return jnp.real(log_psi_c(rf.reshape(n_elec, dim)))
@@ -159,7 +157,6 @@ def _eps_dot_grad_log_psi_complex(log_psi_signed_fn, params, elec_crds, n, eps):
     r_flat = elec_crds.reshape(-1)
     grad_R = jax.grad(log_R)(r_flat).reshape(n_elec, dim)
     grad_phi = jax.grad(phi)(r_flat).reshape(n_elec, dim)
-    # ε·Σᵢ ∇ᵢ log R, complex part = ε·Σᵢ ∇ᵢ φ.
     re = jnp.sum(grad_R @ eps)
     im = jnp.sum(grad_phi @ eps)
     return re + 1j * im
@@ -186,6 +183,7 @@ def _ladder_ratio_signed(log_psi_signed_fn, params, elec_crds, n, n_target,
 
 def pauli_fierz_local_energy_velocity_heg(
     log_psi_signed_fn,       # (elec_crds, n, params) → (log_mag, signed_amp)
+                             # — used for Fock-ladder ratios only
     params,
     elec_crds: jax.Array,    # (n_elec, dim), dim ∈ {2, 3}
     n: jax.Array,            # () integer scalar; photon Fock index sample
@@ -194,6 +192,12 @@ def pauli_fierz_local_energy_velocity_heg(
     nph_max: int,
     ewald_pair_fn,           # callable: r → V_ee(r), Ewald pair energy
     complex_psi: bool = True,
+    phase_smooth_fn=None,    # (elec_crds, n, params) → real scalar
+                             # SMOOTH FockHead phase φ(r,n). Required
+                             # for complex_psi=True. Used in both the
+                             # kinetic estimator and ε·∇log Ψ to avoid
+                             # the Slater-sign branch cut spikes near
+                             # nodes that destabilise SR.
 ) -> jax.Array:
     """Velocity-gauge Pauli-Fierz local energy for the HEG.
 
@@ -237,13 +241,23 @@ def pauli_fierz_local_energy_velocity_heg(
     n_elec = elec_crds.shape[-2]
 
     # 1. Kinetic.
+    def _logmag_only_at_n(r, n_, p):
+        log_mag, _ = log_psi_signed_fn(r, n_, p)
+        return log_mag
+
     if complex_psi:
-        log_psi_c = _log_psi_complex_at_n(log_psi_signed_fn, params, n)
+        if phase_smooth_fn is None:
+            raise ValueError(
+                "complex_psi=True requires phase_smooth_fn so the "
+                "kinetic estimator avoids the Slater-sign branch cut."
+            )
+        log_psi_c = _smooth_complex_log_psi_at_n(
+            _logmag_only_at_n, phase_smooth_fn, params, n,
+        )
         e_ke = _ke_complex(log_psi_c, elec_crds)
     else:
         def _logmag_only(r):
-            log_mag, _ = log_psi_signed_fn(r, n, params)
-            return log_mag
+            return _logmag_only_at_n(r, n, params)
         e_ke = _ke_real(_logmag_only, elec_crds)
 
     # 2. Electron-electron Ewald.
@@ -272,8 +286,9 @@ def pauli_fierz_local_energy_velocity_heg(
 
     # 4. Bilinear: -g·(b+b†)·(ε·P̂) where ε·P̂ Ψ/Ψ = -i·Σᵢ ε·∇ᵢ log Ψ.
     if complex_psi:
-        eps_dot_grad = _eps_dot_grad_log_psi_complex(
-            log_psi_signed_fn, params, elec_crds, n_int, eps,
+        eps_dot_grad = _eps_dot_grad_log_psi_smooth(
+            _logmag_only_at_n, phase_smooth_fn, params,
+            elec_crds, n_int, eps,
         )
         # ε·P̂ Ψ/Ψ = -i · eps_dot_grad
         eps_dot_P = -1j * eps_dot_grad
