@@ -1,0 +1,71 @@
+# Phase 5b: finite-λ validation at rs=10.
+# Same settings as the validated λ=0 run (l5_lambda0_smoke_fused.yaml).
+# Only change: cavity.lambda: 0.0 → 0.05.
+#
+# What to look for:
+#   • ⟨Im E_loc⟩/N stays at MCMC-noise level (Hermiticity)
+#   • E/N shifts away from the λ=0 plateau (−81.29 mHa)
+#       perturbatively expect small shift O(λ²) (Lamb-shift-like)
+#   • ⟨q_c²⟩ tightens slightly: 1/(2·Ω_eff) where
+#       Ω_eff = √(Ω² + N·λ²) = √(0.01 + 10·0.0025) ≈ 0.1118
+#       → expected ⟨q_c²⟩ ≈ 1/(2·0.1118) ≈ 4.47 (was 4.99 at λ=0)
+#   • MLP_mag + MLP_phase params drift away from init (now physical signal)
+
+project: l5_lambda005_rs10
+
+system:
+  n_up: 5
+  n_down: 5
+  rs: 10.0
+  dim: 2
+
+cavity:
+  omega: 0.1
+  lambda: 0.05               # finite — turns on polariton coupling
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: false
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 2000
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.2
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+seed: 42

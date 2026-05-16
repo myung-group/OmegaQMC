@@ -1438,7 +1438,9 @@ class _QEDL5Optimizer:
             )
             print(
                 f"<q_c²>       = {qc_sq_mean:.4e}  "
-                f"(expected ≈ 1/(2Ω) = {1.0 / (2.0 * self.omega):.4e})",
+                f"(expected ≈ 1/(2·Ω_eff) = "
+                f"{1.0 / (2.0 * self.omega_eff):.4e}"
+                f"   [Ω_eff=√(Ω²+N·λ²)={self.omega_eff:.4f}])",
                 file=fout,
             )
             print(f"Total eval time: {elapsed:.2f} s", file=fout)
