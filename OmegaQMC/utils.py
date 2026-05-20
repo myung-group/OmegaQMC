@@ -115,6 +115,120 @@ def batched_binning_analysis(x, batch_size=100):
     return xbar_all, serr_all, s_all, kappa_all
 
 
+def blue_combine_states(
+    series_per_label, labels, kappa_per_label=None,
+):
+    """Combine independent block-mean time series via BLUE.
+
+    Builds the K×K covariance matrix Σ of the per-label
+    mean estimators from bin-mean cross-covariance:
+    block series are partitioned into bins of size
+    ``b = ceil(2 · max_k κ_k)`` so that successive bin
+    means are approximately decorrelated, the sample
+    covariance of the (N_b, K) bin-mean matrix gives
+    ``S``, and ``Σ = S / N_b`` is the resulting
+    covariance of the per-label mean estimators —
+    capturing both within-series autocorrelation (via
+    the bin size) and cross-series correlations at
+    matched block index.  The Best Linear Unbiased
+    Estimator under the unit-sum linear constraint is
+    then ``w = Σ⁻¹ 1 / (1ᵀ Σ⁻¹ 1)``, ``μ = wᵀ Ê``,
+    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.
+
+    Parameters
+    ----------
+    series_per_label : dict
+        Maps each label to a 1-D array-like of length
+        ``T`` (per-block scalar estimates of a common
+        expectation).
+    labels : list
+        Ordered labels selecting which series to
+        combine.  The output ``weights`` is in this
+        order.
+    kappa_per_label : dict, optional
+        Per-label integrated autocorrelation time used
+        to set the bin size.  When ``None`` each κ is
+        computed internally via
+        :func:`do_binning_analysis`.
+
+    Returns
+    -------
+    mean : float
+        BLUE-combined mean.
+    err : float
+        Standard error of the BLUE mean.
+    neff : float
+        Effective sample count relative to the first
+        listed label's per-block sample variance,
+        matching the ``N_eff = σ²/Var(mean)``
+        convention of :func:`do_binning_analysis`.
+    weights : np.ndarray, shape (K,)
+        BLUE weights in the order of ``labels``; may
+        include negative entries when series are
+        strongly cross-correlated.
+    bin_size : int
+        Bin size used to build Σ.
+    """
+    K = len(labels)
+    E = np.column_stack(
+        [np.asarray(series_per_label[lbl], dtype=np.float64)
+         for lbl in labels]
+    )  # (T, K)
+    T = E.shape[0]
+
+    if kappa_per_label is None:
+        kappas = [
+            float(
+                do_binning_analysis(
+                    jnp.asarray(series_per_label[lbl])
+                )[3]
+            )
+            for lbl in labels
+        ]
+    else:
+        kappas = [float(kappa_per_label[lbl]) for lbl in labels]
+    kappa_max = max(kappas) if kappas else 1.0
+
+    bin_size = max(1, int(np.ceil(2.0 * kappa_max)))
+    N_b = T // bin_size
+    if N_b < K + 1:
+        # Not enough bins to estimate a (K×K) covariance
+        # — fall back to the smallest viable bin size.
+        bin_size = max(1, T // (K + 1))
+        N_b = T // bin_size
+
+    truncated = E[:N_b * bin_size]
+    bin_means = truncated.reshape(
+        N_b, bin_size, K,
+    ).mean(axis=1)  # (N_b, K)
+
+    centered = bin_means - bin_means.mean(
+        axis=0, keepdims=True,
+    )
+    S = centered.T @ centered / (N_b - 1)  # (K, K)
+    Sigma = S / N_b  # covariance of the means
+
+    ones = np.ones(K)
+    try:
+        sol = np.linalg.solve(Sigma, ones)
+    except np.linalg.LinAlgError:
+        sol = np.linalg.pinv(Sigma) @ ones
+    inv_sum = float(ones @ sol)
+    w = sol / inv_sum
+    var_mu = 1.0 / inv_sum
+
+    state_means = E.mean(axis=0)
+    mean = float(w @ state_means)
+    err = float(np.sqrt(max(var_mu, 0.0)))
+
+    ref_var = float(np.var(E[:, 0], ddof=1))
+    neff = (
+        ref_var / var_mu
+        if var_mu > 0 else float('inf')
+    )
+    return mean, err, neff, w, bin_size
+
+
 def batched_binning_analysis_grds(grd_tot_ls, batch_size=100, weights=None):
     # grd_tot_ls.shape == (num_steps_per_block, num_walkers, num_nuc, xyz)
     n_walkers = grd_tot_ls.shape[1]

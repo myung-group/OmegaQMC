@@ -26,6 +26,7 @@ import jax.numpy as jnp
 
 from ..utils import (
     batched_binning_analysis_grds,
+    blue_combine_states,
     compute_torque_with_error,
 )
 
@@ -1677,8 +1678,18 @@ nuclear forces using PGCS.
                 ref_grd_tot = grd_tot
                 ref_grd_err = grd_err
 
+            # Per-block walker-averaged force vector
+            # (the per-block scalar time series feeding
+            # BLUE in the fragment-wise loop below).
+            if valid_samples_count > 0:
+                grd_block_series = np.asarray(
+                    grd_tot_bw.mean(axis=1)
+                )  # (num_blocks, num_nuc, 3)
+            else:
+                grd_block_series = None
+
             all_state_results[state_label] = (
-                grd_tot, grd_err,
+                grd_tot, grd_err, grd_block_series,
             )
 
             # Write results
@@ -1686,11 +1697,10 @@ nuclear forces using PGCS.
                 precision=12, suppress=True,
             ):
                 if state_label is not None:
-                    print(
-                        "\n--- Secondary state:"
-                        f" {state_label} ---",
-                        file=fout,
-                    )
+                    print("\n--- Secondary state:"
+                          f" {state_label} ---", file=fout)
+                else:
+                    print("\n--- Reference state ---", file=fout)
 
                 print(
                     'NN gradients\n',
@@ -1745,7 +1755,7 @@ nuclear forces using PGCS.
                 )
                 fout.write("\n")
 
-        # --- Fragment-wise averaging of PGCS ---
+        # --- Fragment-wise BLUE averaging of PGCS ---
         if atom_frag_map is not None and combo_labels:
             frag_to_states = {}
             for fid in set(atom_frag_map):
@@ -1758,23 +1768,63 @@ nuclear forces using PGCS.
                         frag_to_states[int(fid_str)].append(label)
                         break
 
-            avg_grd_tot = jnp.zeros((num_nuc, 3))
-            avg_grd_err = jnp.zeros((num_nuc, 3))
+            avg_grd_tot_np = np.zeros((num_nuc, 3))
+            avg_grd_err_np = np.zeros((num_nuc, 3))
 
+            # Per-(atom, direction) BLUE combination across
+            # the states that touched atom i's fragment.
+            # The (num_blocks,) scalar series feeding BLUE
+            # is the per-block walker-averaged force
+            # component ``F_{i,k}`` for each relevant state.
             for i in range(num_nuc):
                 fid = atom_frag_map[i]
-                relevant_states = frag_to_states.get(fid, [None])
-                forces = jnp.stack([all_state_results[s][0][i]
-                                    for s in relevant_states])
-                errors = jnp.stack([all_state_results[s][1][i]
-                                    for s in relevant_states])
-                N = len(relevant_states)
-                avg_grd_tot = avg_grd_tot.at[i].set(forces.mean(axis=0))
-                avg_grd_err = (
-                    avg_grd_err.at[i].set(
-                        jnp.sqrt(jnp.sum(errors**2, axis=0)) / N
-                    )
+                relevant_states = frag_to_states.get(
+                    fid, [None],
                 )
+                series_block = {
+                    s: all_state_results[s][2]
+                    for s in relevant_states
+                }
+                # Fallback when any state has no valid
+                # samples (no time series available): use
+                # the per-state mean/error directly.
+                if any(
+                    series_block[s] is None
+                    for s in relevant_states
+                ):
+                    forces = jnp.stack([
+                        all_state_results[s][0][i]
+                        for s in relevant_states
+                    ])
+                    errors = jnp.stack([
+                        all_state_results[s][1][i]
+                        for s in relevant_states
+                    ])
+                    N = len(relevant_states)
+                    avg_grd_tot_np[i] = np.asarray(
+                        forces.mean(axis=0)
+                    )
+                    avg_grd_err_np[i] = np.asarray(
+                        jnp.sqrt(jnp.sum(errors ** 2, axis=0))
+                        / N
+                    )
+                    continue
+
+                for k in range(3):
+                    series_ik = {
+                        s: series_block[s][:, i, k]
+                        for s in relevant_states
+                    }
+                    mean, err, _, _, _ = (
+                        blue_combine_states(
+                            series_ik, relevant_states,
+                        )
+                    )
+                    avg_grd_tot_np[i, k] = mean
+                    avg_grd_err_np[i, k] = err
+
+            avg_grd_tot = jnp.asarray(avg_grd_tot_np)
+            avg_grd_err = jnp.asarray(avg_grd_err_np)
 
             avg_torque, avg_dtau = (
                 compute_torque_with_error(
@@ -1785,7 +1835,7 @@ nuclear forces using PGCS.
             with jnp.printoptions(
                 precision=12, suppress=True,
             ):
-                fout.write("\n\tFragment-wise averaged forces\n")
+                fout.write("\nℹ️\tFragment-wise averaged forces\n")
                 fout.write("Total gradients (averaged)\n")
                 fout.write(f" {avg_grd_tot}\n")
                 fout.write("Total forces (-gradients, averaged)\n")

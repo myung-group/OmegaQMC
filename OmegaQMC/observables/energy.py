@@ -19,7 +19,7 @@ import numpy as np
 import jax.numpy as jnp
 from functools import partial
 
-from ..utils import do_binning_analysis
+from ..utils import do_binning_analysis, blue_combine_states
 
 
 def local_energy_1body(h1e, Ga, Gb, enuc):
@@ -404,18 +404,42 @@ correlated-sample-averaged VMC energy.
     its statistical error.  The energy analogue of
     :func:`OmegaQMC.observables.force.postproc_h5_pgcs`.
 
-    The recipe mirrors the in-driver computation
-    (``vmc_gto.py``'s ``CS-averaged VMC energy``):
-    each block contributes one scalar per state — the
+    Each block contributes one scalar per state — the
     flat mean of reference local energies, or the
     fragment-weighted global mean of combo local
-    energies (``sum(w·E_trans)/sum(w)``).  The
-    correlated-sample estimate per block is the
-    *unweighted* mean over {reference, combo₁, …};
-    ``do_binning_analysis`` on the block sequence then
-    yields the mean, the autocorrelation-corrected
-    standard error, and the effective sample count
+    energies (``sum(w·E_trans)/sum(w)``).
+    ``do_binning_analysis`` on each per-state block
+    sequence yields the autocorrelation-corrected
+    standard error and effective sample count
     ``N_eff = N_blocks / kappa``.
+
+    The combined VMC energy is then the **Best Linear
+    Unbiased Estimator** (BLUE) of the common
+    expectation under the linear constraint
+    ``sum(w_k) = 1``:
+
+    .. math:: \\hat\\mu_\\mathrm{BLUE}
+        = \\frac{\\mathbf{1}^\\top \\Sigma^{-1}
+        \\hat{\\mathbf{E}}}
+        {\\mathbf{1}^\\top \\Sigma^{-1} \\mathbf{1}},
+        \\quad
+        \\mathrm{Var}(\\hat\\mu_\\mathrm{BLUE})
+        = \\frac{1}{\\mathbf{1}^\\top \\Sigma^{-1}
+        \\mathbf{1}}.
+
+    The :math:`K \\times K` covariance matrix
+    :math:`\\Sigma` of the per-state mean estimators
+    is constructed from bin-mean cross-covariance:
+    block series are partitioned into bins of size
+    ``b = ceil(2 · max_k κ_k)`` so that bin means are
+    approximately decorrelated, the sample covariance
+    of the ``N_b = T // b`` bin-mean vectors gives
+    :math:`S \\in \\mathbb{R}^{K \\times K}`, and
+    :math:`\\Sigma = S / N_b` is the resulting
+    covariance of the per-state mean estimators —
+    which captures both within-series autocorrelation
+    (via the bin size) and cross-series correlations
+    at matched block index.
 
     Parameters
     ----------
@@ -436,13 +460,12 @@ correlated-sample-averaged VMC energy.
     Returns
     -------
     enr : float
-        Correlated-sample-averaged VMC total energy in
-        Hartree.  When no PGCS combos are present the
-        reference (un-displaced) estimate is returned.
+        BLUE-combined VMC total energy in Hartree.
+        When no PGCS combos are present the reference
+        (un-displaced) estimate is returned.
     enr_err : float
         Statistical error (standard error of the mean)
-        in Hartree, corrected for cross-block
-        autocorrelation.
+        in Hartree.
     """
     suffixes_checked = [".chk.h5", ".grd.h5"]
     for s in suffixes_checked:
@@ -482,17 +505,16 @@ correlated-sample-averaged VMC energy.
 
         # Per-state per-block scalar energies.
         E_b_per_state = {s: [] for s in states}
-        E_cs_b = []
 
         for block_cnt in block_nums:
             # Reference: flat mean over (S, W) samples.
             le_ref = np.asarray(
                 f['local_energies'][f'{block_cnt}']
             )
-            E_ref = float(le_ref.mean(dtype=np.float64))
-            E_b_per_state[None].append(E_ref)
+            E_b_per_state[None].append(
+                float(le_ref.mean(dtype=np.float64))
+            )
 
-            block_E_list = [E_ref]
             for label in combo_labels:
                 # Combo: importance-reweighted global mean
                 # — sum(w * E_trans) / sum(w) — over the
@@ -508,23 +530,21 @@ correlated-sample-averaged VMC energy.
                     [label][f'{block_cnt}'],
                     dtype=np.float64,
                 )
-                E_combo = float((w * c_E).sum() / w.sum())
-                E_b_per_state[label].append(E_combo)
-                block_E_list.append(E_combo)
+                E_b_per_state[label].append(
+                    float((w * c_E).sum() / w.sum())
+                )
 
-            E_cs_b.append(
-                sum(block_E_list) / len(block_E_list)
-            )
-
-        # do_binning_analysis on each block sequence —
-        # captures across-block MC-trajectory
-        # autocorrelation through kappa.
+        # Per-state: bin-FFT autocorrelation analysis
+        # gives kappa, which both sets the BLUE bin
+        # size and lets us report per-state N_eff.
         all_state_results = {}
+        kappa_per_state = {}
         for state in states:
             E_blocks = jnp.asarray(E_b_per_state[state])
             xbar, serr, _, kappa = do_binning_analysis(
                 E_blocks,
             )
+            kappa_per_state[state] = float(kappa)
             neff = E_blocks.shape[0] / float(kappa)
             all_state_results[state] = (
                 float(xbar), float(serr), neff,
@@ -543,23 +563,34 @@ correlated-sample-averaged VMC energy.
         ref_enr, ref_err, _ = all_state_results[None]
 
         if combo_labels:
-            E_cs_blocks = jnp.asarray(E_cs_b)
-            ecs_mean, ecs_serr, _, ecs_kappa = (
-                do_binning_analysis(E_cs_blocks)
-            )
-            ecs_neff = (
-                E_cs_blocks.shape[0] / float(ecs_kappa)
+            blue_mean, blue_err, blue_neff, blue_w, bin_size = (
+                blue_combine_states(
+                    E_b_per_state, states,
+                    kappa_per_label=kappa_per_state,
+                )
             )
             print(
-                "\nCorrelated-sample-averaged E"
-                f" = {float(ecs_mean):.8f}"
-                f" ± {float(ecs_serr):.8f}"
-                f"  (N_eff = {ecs_neff:.1f},"
+                "\nBLUE-combined E"
+                f" = {blue_mean:.8f}"
+                f" ± {blue_err:.8f}"
+                f"  (N_eff = {blue_neff:.1f},"
+                f" bin size = {bin_size} blocks,"
                 f" over {len(states)} states)",
                 file=fout,
             )
-            ref_enr = float(ecs_mean)
-            ref_err = float(ecs_serr)
+            print("  BLUE weights:", file=fout)
+            for state, wk in zip(states, blue_w):
+                label_txt = (
+                    "reference"
+                    if state is None else state
+                )
+                print(
+                    f"    {label_txt:<24s}"
+                    f" = {float(wk):+.6f}",
+                    file=fout,
+                )
+            ref_enr = blue_mean
+            ref_err = blue_err
 
         if ofname_log is not None:
             fout.close()
