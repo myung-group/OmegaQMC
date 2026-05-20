@@ -1,13 +1,25 @@
 """
 Local energy estimators for AFQMC.
 
-All functions are pure (no side effects) and suitable for use
-inside ``@jax.jit`` boundaries defined in the driver modules.
+The estimator helpers (``local_energy*`` family) are pure and
+suitable for use inside ``@jax.jit`` boundaries defined in the
+driver modules.
+
+:func:`postproc_h5_pgcs` is a separate post-processing entry
+point that reads a VMC gradient HDF5 file and reports the
+correlated-sample-averaged VMC energy.  It is the energy
+analogue of :func:`OmegaQMC.observables.force.postproc_h5_pgcs`.
 """
 
+import sys
+
 import jax
+import h5py
+import numpy as np
 import jax.numpy as jnp
 from functools import partial
+
+from ..utils import do_binning_analysis
 
 
 def local_energy_1body(h1e, Ga, Gb, enuc):
@@ -375,3 +387,181 @@ def local_energy_multidet_streamed(
 
     e_tot = e_1b + e_2b
     return e_tot, e_1b, e_2b
+
+
+def postproc_h5_pgcs(
+        prefix: str = "vmc",
+        logfile: bool | str = False,
+        ) -> tuple[float, float]:
+    """Post-process VMC sample data to obtain \
+correlated-sample-averaged VMC energy.
+
+    Reads the local-energy samples written by
+    :func:`save_gto_gradients` /
+    :func:`save_nn_gradients` to ``<prefix>.grd.h5``
+    and applies Point Group Correlated Sampling (PGCS)
+    to obtain the symmetry-averaged total energy and
+    its statistical error.  The energy analogue of
+    :func:`OmegaQMC.observables.force.postproc_h5_pgcs`.
+
+    The recipe mirrors the in-driver computation
+    (``vmc_gto.py``'s ``CS-averaged VMC energy``):
+    each block contributes one scalar per state — the
+    flat mean of reference local energies, or the
+    fragment-weighted global mean of combo local
+    energies (``sum(w·E_trans)/sum(w)``).  The
+    correlated-sample estimate per block is the
+    *unweighted* mean over {reference, combo₁, …};
+    ``do_binning_analysis`` on the block sequence then
+    yields the mean, the autocorrelation-corrected
+    standard error, and the effective sample count
+    ``N_eff = N_blocks / kappa``.
+
+    Parameters
+    ----------
+    prefix : str, optional
+        File-name stem used when the VMC run was set up
+        (the ``prefix`` argument of
+        :func:`get_vmc_gto_func`).  The function looks
+        for ``<prefix>.grd.h5``; trailing ``.chk.h5``
+        or ``.grd.h5`` suffixes are stripped
+        automatically.  Default is ``"vmc"``.
+    logfile : bool or str, optional
+        Controls logging output.  ``False`` (default)
+        suppresses logging.  ``True`` writes to
+        ``<prefix>.log``.  A string is used as the log
+        file path directly (a ``.log`` extension is
+        appended if absent).
+
+    Returns
+    -------
+    enr : float
+        Correlated-sample-averaged VMC total energy in
+        Hartree.  When no PGCS combos are present the
+        reference (un-displaced) estimate is returned.
+    enr_err : float
+        Statistical error (standard error of the mean)
+        in Hartree, corrected for cross-block
+        autocorrelation.
+    """
+    suffixes_checked = [".chk.h5", ".grd.h5"]
+    for s in suffixes_checked:
+        if prefix.endswith(s):
+            prefix = prefix[:-len(s)]
+    ofname_grd = prefix + ".grd.h5"
+    if not logfile or (
+        isinstance(logfile, str) and logfile == ""
+    ):
+        ofname_log = None
+    else:
+        ofname_log = logfile.strip() \
+            if logfile.endswith(".log") \
+            else logfile.strip() + ".log"
+
+    with h5py.File(ofname_grd, 'r') as f:
+        block_nums = sorted(
+            int(k) for k in f['local_energies']
+            if k.isdigit()
+        )
+
+        # Combo labels: sub-groups under fragment_weights.
+        combo_labels = []
+        if 'fragment_weights' in f:
+            combo_labels = sorted(
+                k for k in f['fragment_weights']
+                if isinstance(
+                    f['fragment_weights'][k], h5py.Group,
+                )
+            )
+        states = [None] + combo_labels
+
+        if ofname_log is None:
+            fout = sys.stdout
+        else:
+            fout = open(ofname_log, 'w', 1)
+
+        # Per-state per-block scalar energies.
+        E_b_per_state = {s: [] for s in states}
+        E_cs_b = []
+
+        for block_cnt in block_nums:
+            # Reference: flat mean over (S, W) samples.
+            le_ref = np.asarray(
+                f['local_energies'][f'{block_cnt}']
+            )
+            E_ref = float(le_ref.mean(dtype=np.float64))
+            E_b_per_state[None].append(E_ref)
+
+            block_E_list = [E_ref]
+            for label in combo_labels:
+                # Combo: importance-reweighted global mean
+                # — sum(w * E_trans) / sum(w) — over the
+                # flat (S*W,) sample axis.  Matches the
+                # in-driver ``combo_block_E`` recipe.
+                c_E = np.asarray(
+                    f['local_energies']
+                    [label][f'{block_cnt}'],
+                    dtype=np.float64,
+                )
+                w = np.asarray(
+                    f['fragment_weights']
+                    [label][f'{block_cnt}'],
+                    dtype=np.float64,
+                )
+                E_combo = float((w * c_E).sum() / w.sum())
+                E_b_per_state[label].append(E_combo)
+                block_E_list.append(E_combo)
+
+            E_cs_b.append(
+                sum(block_E_list) / len(block_E_list)
+            )
+
+        # do_binning_analysis on each block sequence —
+        # captures across-block MC-trajectory
+        # autocorrelation through kappa.
+        all_state_results = {}
+        for state in states:
+            E_blocks = jnp.asarray(E_b_per_state[state])
+            xbar, serr, _, kappa = do_binning_analysis(
+                E_blocks,
+            )
+            neff = E_blocks.shape[0] / float(kappa)
+            all_state_results[state] = (
+                float(xbar), float(serr), neff,
+            )
+            label_txt = (
+                "reference" if state is None else state
+            )
+            print(
+                f"E[{label_txt}]"
+                f" = {float(xbar):.8f}"
+                f" ± {float(serr):.8f}"
+                f"  (N_eff = {neff:.1f})",
+                file=fout,
+            )
+
+        ref_enr, ref_err, _ = all_state_results[None]
+
+        if combo_labels:
+            E_cs_blocks = jnp.asarray(E_cs_b)
+            ecs_mean, ecs_serr, _, ecs_kappa = (
+                do_binning_analysis(E_cs_blocks)
+            )
+            ecs_neff = (
+                E_cs_blocks.shape[0] / float(ecs_kappa)
+            )
+            print(
+                "\nCorrelated-sample-averaged E"
+                f" = {float(ecs_mean):.8f}"
+                f" ± {float(ecs_serr):.8f}"
+                f"  (N_eff = {ecs_neff:.1f},"
+                f" over {len(states)} states)",
+                file=fout,
+            )
+            ref_enr = float(ecs_mean)
+            ref_err = float(ecs_serr)
+
+        if ofname_log is not None:
+            fout.close()
+
+    return ref_enr, ref_err
