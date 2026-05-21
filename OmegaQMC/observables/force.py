@@ -1184,7 +1184,7 @@ def save_gto_gradients(
 
 
 def _solve_param_response(
-    dict_grd_samples, block_nums, enr_mean,
+    f, block_nums, enr_mean,
 ):
     """Estimate Jastrow parameter response dp/dR.
 
@@ -1207,10 +1207,14 @@ def _solve_param_response(
             + 2\\,\\mathrm{Cov}(E_L^{(i)},
             \\partial\\log|\\psi|/\\partial R_{A,k})
 
+    Per-block walker-axis covariance moments are
+    stream-accumulated so peak host RAM stays
+    O(per-block) instead of O(total-walkers).
+
     Parameters
     ----------
-    dict_grd_samples : dict
-        Nested dict of per-block HDF5 data.
+    f : h5py.File
+        Open HDF5 file handle for the gradient data.
     block_nums : list of int
         Sorted list of block indices.
     enr_mean : float
@@ -1222,73 +1226,102 @@ def _solve_param_response(
         Parameter response vector, or ``None`` if
         the Hessian is singular.
     """
-    # Collect all per-walker data across blocks
-    all_O = []
-    all_dEL_dp = []
-    all_dEL_dR = []
-    all_dlogpsi_dR = []
+    # Stream over blocks: accumulate per-walker sums
+    # and sums of products (the moments that determine
+    # the covariances).  Each block array sees only
+    # this loop iteration.
+    s_O = None
+    s_dEL_dp = None
+    s_dEL_dR = None
+    s_dlp_dR = None
+    # Outer-product accumulators:
+    s_dEL_dp_O = None       # (n_p, n_p)
+    s_dEL_dR_O = None       # (n_nuc, 3, n_p)
+    s_dEL_dp_dlp_dR = None  # (n_p, n_nuc, 3)
+    n_w_total = 0
 
     for bc in block_nums:
         bcs = f'{bc}'
-        all_O.append(
-            dict_grd_samples['O_params'][bcs]
+        O = np.asarray(
+            f['O_params'][bcs][()], dtype=np.float64,
         )
-        all_dEL_dp.append(
-            dict_grd_samples['dEL_dparams'][bcs]
+        dEL_dp = np.asarray(
+            f['dEL_dparams'][bcs][()], dtype=np.float64,
         )
-        all_dEL_dR.append(
-            dict_grd_samples['dEL_dR_nuc'][bcs]
+        dEL_dR = np.asarray(
+            f['dEL_dR_nuc'][bcs][()], dtype=np.float64,
         )
-        all_dlogpsi_dR.append(
-            dict_grd_samples[
-                'dlogpsi_dR_nuc'
-            ][bcs]
+        dlp_dR = np.asarray(
+            f['dlogpsi_dR_nuc'][bcs][()], dtype=np.float64,
         )
+        n_w_total += O.shape[0]
 
-    # (total_walkers, n_params) etc.
-    O = jnp.concatenate(all_O, axis=0)
-    dEL_dp = jnp.concatenate(all_dEL_dp, axis=0)
-    dEL_dR = jnp.concatenate(all_dEL_dR, axis=0)
-    dlp_dR = jnp.concatenate(
-        all_dlogpsi_dR, axis=0,
+        b_s_O = O.sum(axis=0)
+        b_s_dEL_dp = dEL_dp.sum(axis=0)
+        b_s_dEL_dR = dEL_dR.sum(axis=0)
+        b_s_dlp_dR = dlp_dR.sum(axis=0)
+
+        b_s_dEL_dp_O = dEL_dp.T @ O                # (n_p, n_p)
+        b_s_dEL_dR_O = np.einsum(
+            'wAk,wj->Akj', dEL_dR, O,
+        )                                          # (n_nuc, 3, n_p)
+        b_s_dEL_dp_dlp_dR = np.einsum(
+            'wi,wAk->iAk', dEL_dp, dlp_dR,
+        )                                          # (n_p, n_nuc, 3)
+
+        if s_O is None:
+            s_O = b_s_O
+            s_dEL_dp = b_s_dEL_dp
+            s_dEL_dR = b_s_dEL_dR
+            s_dlp_dR = b_s_dlp_dR
+            s_dEL_dp_O = b_s_dEL_dp_O
+            s_dEL_dR_O = b_s_dEL_dR_O
+            s_dEL_dp_dlp_dR = b_s_dEL_dp_dlp_dR
+        else:
+            s_O += b_s_O
+            s_dEL_dp += b_s_dEL_dp
+            s_dEL_dR += b_s_dEL_dR
+            s_dlp_dR += b_s_dlp_dR
+            s_dEL_dp_O += b_s_dEL_dp_O
+            s_dEL_dR_O += b_s_dEL_dR_O
+            s_dEL_dp_dlp_dR += b_s_dEL_dp_dlp_dR
+
+    n_w = float(n_w_total)
+    O_mean = s_O / n_w
+    dEL_dp_mean = s_dEL_dp / n_w
+    dEL_dR_mean = s_dEL_dR / n_w
+    dlp_dR_mean = s_dlp_dR / n_w
+
+    n_p = O_mean.shape[0]
+    n_nuc = dEL_dR_mean.shape[0]
+
+    # Cov(X, Y) = E[XY] - E[X]E[Y]
+    cov_dEL_dp_O = (
+        s_dEL_dp_O / n_w
+        - np.outer(dEL_dp_mean, O_mean)
+    )                                              # (n_p, n_p)
+    cov_dEL_dR_O = (
+        s_dEL_dR_O / n_w
+        - np.einsum('Ak,j->Akj', dEL_dR_mean, O_mean)
+    )                                              # (n_nuc, 3, n_p)
+    cov_dEL_dp_dlp_dR = (
+        s_dEL_dp_dlp_dR / n_w
+        - np.einsum('i,Ak->iAk', dEL_dp_mean, dlp_dR_mean)
+    )                                              # (n_p, n_nuc, 3)
+
+    # H_pp = 2*(Cov(dEL_dp, O) + Cov(dEL_dp, O).T)
+    H_pp = jnp.asarray(
+        2.0 * (cov_dEL_dp_O + cov_dEL_dp_O.T)
     )
 
-    n_w = O.shape[0]
-    n_p = O.shape[1]
-    n_nuc = dEL_dR.shape[1]
-
-    # Center quantities
-    O_mean = O.mean(axis=0)
-    dEL_dp_mean = dEL_dp.mean(axis=0)
-    dEL_dR_mean = dEL_dR.mean(axis=0)
-    dlp_dR_mean = dlp_dR.mean(axis=0)
-
-    dO = O - O_mean[None, :]
-    ddEL_dp = dEL_dp - dEL_dp_mean[None, :]
-    ddEL_dR = dEL_dR - dEL_dR_mean[None, :, :]
-    ddlp_dR = dlp_dR - dlp_dR_mean[None, :, :]
-
-    # H_pp (n_p × n_p): leading-order Hessian
-    # H_pp[i,j] = 2*Cov(dEL/dp_i, O_j)
-    #           + 2*Cov(dEL/dp_j, O_i)
-    cov_ij = (ddEL_dp.T @ dO) / n_w
-    H_pp = 2.0 * (cov_ij + cov_ij.T)
-
-    # H_pR (n_p × n_nuc × 3)
-    # H_pR[i,A,k] = 2*Cov(dEL/dR_{A,k}, O_i)
-    #             + 2*Cov(dEL/dp_i, dlogpsi/dR_{A,k})
-    H_pR = jnp.zeros((n_p, n_nuc, 3))
-    for A in range(n_nuc):
-        for k in range(3):
-            cov_RO = (
-                ddEL_dR[:, A, k] @ dO
-            ) / n_w
-            cov_pR = (
-                ddEL_dp.T @ ddlp_dR[:, A, k]
-            ) / n_w
-            H_pR = H_pR.at[:, A, k].set(
-                2.0 * (cov_RO + cov_pR)
-            )
+    # H_pR[i,A,k] = 2*(Cov(dEL_dR[A,k], O[i])
+    #               + Cov(dEL_dp[i], dlp_dR[A,k]))
+    H_pR = jnp.asarray(
+        2.0 * (
+            cov_dEL_dR_O.transpose(2, 0, 1)
+            + cov_dEL_dp_dlp_dR
+        )
+    )                                              # (n_p, n_nuc, 3)
 
     # Solve dp/dR = -H_pp^{-1} H_pR
     cond_hpp = float(jnp.linalg.cond(H_pp))
@@ -1379,7 +1412,11 @@ nuclear forces using PGCS.
             if logfile.endswith(".log") \
             else logfile.strip() + ".log"
 
-    with h5py.File(ofname_grd, 'r') as f:
+    # 64 MiB chunk cache — coalesces multi-dataset
+    # per-block reads into fewer libhdf5 calls.
+    with h5py.File(
+        ofname_grd, 'r', rdcc_nbytes=64 * 1024 ** 2,
+    ) as f:
         atom_symbols = (
             f["system"]["atom_symbols"][()].split()
         )
@@ -1404,76 +1441,50 @@ nuclear forces using PGCS.
         else:
             atom_frag_map = None
 
-        # Keep per-block arrays on host (numpy); upload
-        # to the device per-block inside the force loop
-        # to bound peak device memory.
-        dict_grd_samples = {}
-        for key, val in f.items():
-            if isinstance(val, h5py.Group):
-                dict_grd_samples[key] = {}
-                for key2, val2 in val.items():
-                    if isinstance(val2, h5py.Group):
-                        dict_grd_samples[key][key2] = {}
-                        for key3, val3 in val2.items():
-                            if not val3.shape:
-                                dict_grd_samples[key][key2][key3] \
-                                    = val3[()].decode()
-                            else:
-                                dict_grd_samples[key][key2][key3] \
-                                    = np.asarray(val3)
-                    elif not val2.shape:
-                        dict_grd_samples[key][key2] \
-                            = val2[()].decode()
-                    else:
-                        dict_grd_samples[key][key2] \
-                            = np.asarray(val2)
-            elif val.ndim == 0:
-                dict_grd_samples[key] = val[()]
-            else:
-                dict_grd_samples[key] = np.asarray(val[:])
+        # Per-block arrays are read lazily from ``f``
+        # inside the streaming block loop below — peak
+        # host RAM stays O(per-block) instead of
+        # O(total file size).
 
-        block_nums = [
-            int(k) for k in
-            dict_grd_samples["local_energies"]
-            .keys()
+        block_nums = sorted(
+            int(k) for k in f['local_energies'].keys()
             if k.isdigit()
-        ]
-        block_nums.sort()
+        )
 
-        # Streaming mean over blocks — avoids stacking
-        # every block's local energies on device just to
-        # compute one scalar.
+        # Streaming mean over blocks — read only one
+        # block of ``local_energies`` at a time.
         _sum = 0.0
         _cnt = 0
         for block_cnt in block_nums:
-            local_energies = dict_grd_samples["local_energies"][f'{block_cnt}']
-            _sum += float(np.asarray(local_energies).sum(dtype=np.float64))
-            _cnt += local_energies.size
+            le_block = f['local_energies'][f'{block_cnt}']
+            _sum += float(
+                np.asarray(le_block[()]).sum(
+                    dtype=np.float64,
+                )
+            )
+            _cnt += le_block.size
         enr_mean = _sum / _cnt
 
-        grd_nn = jnp.asarray(
-            dict_grd_samples['grd_nn']
-        )
+        grd_nn = jnp.asarray(f['grd_nn'][()])
 
         # Identify combo labels from fragment_weights
         combo_labels = []
-        if 'fragment_weights' in dict_grd_samples:
+        if 'fragment_weights' in f:
             combo_labels = sorted(
-                k for k in dict_grd_samples['fragment_weights']
+                k for k in f['fragment_weights']
                 if isinstance(
-                    dict_grd_samples['fragment_weights'][k],
-                    dict,
+                    f['fragment_weights'][k], h5py.Group,
                 )
             )
         states = [None] + combo_labels
 
-        # Detect parameter-response data (ZVZB2)
-        has_pr = ('O_params' in dict_grd_samples)
+        # Detect parameter-response data (ZVZB2).
+        # ``_solve_param_response`` streams per-block.
+        has_pr = ('O_params' in f)
         dp_dR = None
         if has_pr and states[0] is None:
             dp_dR = _solve_param_response(
-                dict_grd_samples, block_nums,
-                enr_mean,
+                f, block_nums, enr_mean,
             )
 
         if ofname_log is None:
@@ -1485,56 +1496,83 @@ nuclear forces using PGCS.
         ref_grd_err = None
         all_state_results = {}
 
-        for state_label in states:
-            valid_samples_count = 0
-            grd_ke_sum = 0.0
-            grd_ee_en_sum = 0.0
-            grd_pulay_sum = 0.0
+        # Per-state accumulators, indexed by state_label.
+        # Loop order is inverted vs the eager-preload
+        # version so each block is read from disk once
+        # and all states are processed before moving on
+        # to the next block.
+        valid_samples_count = {s: 0 for s in states}
+        grd_ee_en_sum = {s: 0.0 for s in states}
+        grd_ke_sum = {s: 0.0 for s in states}
+        grd_pulay_sum = {s: 0.0 for s in states}
+        grd_tot_list = {s: [] for s in states}
+        grd_err_list = {s: [] for s in states}
 
-            grd_tot_list = []
-            grd_err_list = []
+        for block_cnt in block_nums:
+            bcs = f'{block_cnt}'
 
-            for block_cnt in block_nums:
-                # Per-block GPU upload: arrays sit on
-                # host as numpy; we transfer one block
-                # at a time to cap peak device memory.
-                if state_label is None:
-                    grd_ee_en = jnp.asarray(
-                        dict_grd_samples['grd_ee_en'][f'{block_cnt}']
-                    )
-                    grd_ke = jnp.asarray(
-                        dict_grd_samples['grd_ke'][f'{block_cnt}']
-                    )
-                    grd_logpsi = jnp.asarray(
-                        dict_grd_samples['grd_logpsi'][f'{block_cnt}']
-                    )
-                else:
-                    grd_ee_en = jnp.asarray(
-                        dict_grd_samples[
-                            'grd_ee_en'
-                        ][state_label][f'{block_cnt}']
-                    )
-                    grd_ke = jnp.asarray(
-                        dict_grd_samples[
-                            'grd_ke'
-                        ][state_label][f'{block_cnt}']
-                    )
-                    grd_logpsi = jnp.asarray(
-                        dict_grd_samples[
-                            'grd_logpsi'
-                        ][state_label][f'{block_cnt}']
-                    )
-                local_energies = jnp.asarray(
-                    dict_grd_samples['local_energies'][f'{block_cnt}']
+            # Reference local energies feed the Pulay
+            # term for every state in this block.
+            local_energies = jnp.asarray(
+                f['local_energies'][bcs][()]
+            )
+            d_enr = local_energies - enr_mean
+            num_steps_per_block, num_walkers = (
+                local_energies.shape
+            )
+
+            # Param-response per-block tensors (loaded
+            # once per block, reused only on the
+            # reference state).
+            if dp_dR is not None:
+                O_p_block = jnp.asarray(
+                    f['O_params'][bcs][()]
+                )
+                dEL_p_block = jnp.asarray(
+                    f['dEL_dparams'][bcs][()]
                 )
 
-                # Pulay force contribution
-                d_enr = local_energies - enr_mean
+            # Hoist all per-state HDF5 dataset reads
+            # for this block up front: one indexed
+            # lookup per dataset instead of repeating
+            # ``f['grd_ee_en'][...][bcs][()]`` style
+            # chains inside the state loop.  Caches
+            # group handles too.
+            block_data = {}
+            ee_en_grp = f['grd_ee_en']
+            ke_grp = f['grd_ke']
+            lp_grp = f['grd_logpsi']
+            block_data[None] = (
+                jnp.asarray(ee_en_grp[bcs][()]),
+                jnp.asarray(ke_grp[bcs][()]),
+                jnp.asarray(lp_grp[bcs][()]),
+                None,
+            )
+            if combo_labels:
+                fw_grp = f['fragment_weights']
+                for label in combo_labels:
+                    block_data[label] = (
+                        jnp.asarray(
+                            ee_en_grp[label][bcs][()]
+                        ),
+                        jnp.asarray(
+                            ke_grp[label][bcs][()]
+                        ),
+                        jnp.asarray(
+                            lp_grp[label][bcs][()]
+                        ),
+                        jnp.asarray(
+                            fw_grp[label][bcs][()]
+                        ),
+                    )
+
+            for state_label in states:
+                grd_ee_en, grd_ke, grd_logpsi, frag_w = (
+                    block_data[state_label]
+                )
 
                 _, num_nuc, _ = grd_ee_en.shape
-                num_steps_per_block, num_walkers = local_energies.shape
 
-                # Regroup
                 grd_ee_en = grd_ee_en.reshape(
                     num_steps_per_block,
                     num_walkers, num_nuc, 3,
@@ -1554,58 +1592,49 @@ nuclear forces using PGCS.
 
                 grd_nn_sw = jnp.broadcast_to(
                     grd_nn[jnp.newaxis, jnp.newaxis, :, :],
-                    (num_steps_per_block, num_walkers, num_nuc, 3),
+                    (num_steps_per_block, num_walkers,
+                     num_nuc, 3),
                 )
                 grd_arrays = [
                     grd_nn_sw,
                     grd_ee_en, grd_ke,
                     grd_pulay,
                 ]
-                grd_tot_sw = jnp.stack(grd_arrays, axis=0).sum(axis=0)
+                grd_tot_sw = jnp.stack(
+                    grd_arrays, axis=0,
+                ).sum(axis=0)
 
                 # Parameter-response correction
-                if dp_dR is not None and state_label is None:
-                    O_p = jnp.asarray(
-                        dict_grd_samples['O_params'][f'{block_cnt}']
-                    )
-                    dEL_p = jnp.asarray(
-                        dict_grd_samples['dEL_dparams'][f'{block_cnt}']
-                    )
-                    # n_s = num_steps_per_block * num_walkers
-                    n_jp = O_p.shape[-1]
-                    O_p = O_p.reshape(
+                if (
+                    dp_dR is not None
+                    and state_label is None
+                ):
+                    n_jp = O_p_block.shape[-1]
+                    O_p = O_p_block.reshape(
                         num_steps_per_block,
                         num_walkers, n_jp,
                     )
-                    dEL_p = dEL_p.reshape(
+                    dEL_p = dEL_p_block.reshape(
                         num_steps_per_block,
                         num_walkers, n_jp,
                     )
-                    # correction per walker:
-                    # dEL_p + 2*(E_L-<E>)*O_p
-                    cv = dEL_p + 2.0 * (d_enr[..., None] * O_p)
-                    # dp_dR: (n_jp, natom, 3)
+                    cv = (
+                        dEL_p
+                        + 2.0 * (d_enr[..., None] * O_p)
+                    )
                     delta_f = jnp.einsum(
                         'swi,inK->swnK', cv, dp_dR,
                     )
                     grd_tot_sw = grd_tot_sw + delta_f
 
-                # Load fragment weights for
-                # secondary states
-                if state_label is not None:
-                    frag_w = jnp.asarray(
-                        dict_grd_samples[
-                            'fragment_weights'
-                        ][state_label][f'{block_cnt}']
-                    )
+                # ``frag_w`` for combo states was already
+                # read into ``block_data`` above.
+                if frag_w is not None:
                     frag_w = frag_w.reshape(
                         num_steps_per_block,
                         num_walkers,
                     )
-                else:
-                    frag_w = None
 
-                # Compute forces and error
                 xbar, serr, sdev, kappa = (
                     batched_binning_analysis_grds(
                         grd_tot_sw,
@@ -1613,26 +1642,51 @@ nuclear forces using PGCS.
                         weights=frag_w,
                     )
                 )
-                grd_tot_list.append(xbar[None, :, :, :])
-                grd_err_list.append(serr[None, :, :, :])
+                grd_tot_list[state_label].append(
+                    xbar[None, :, :, :]
+                )
+                grd_err_list[state_label].append(
+                    serr[None, :, :, :]
+                )
 
-                grd_ee_en_sum += grd_ee_en.sum(axis=0)
-                grd_ke_sum += grd_ke.sum(axis=0)
-                grd_pulay_sum += grd_pulay.sum(axis=0)
+                grd_ee_en_sum[state_label] = (
+                    grd_ee_en_sum[state_label]
+                    + grd_ee_en.sum(axis=0)
+                )
+                grd_ke_sum[state_label] = (
+                    grd_ke_sum[state_label]
+                    + grd_ke.sum(axis=0)
+                )
+                grd_pulay_sum[state_label] = (
+                    grd_pulay_sum[state_label]
+                    + grd_pulay.sum(axis=0)
+                )
+                valid_samples_count[state_label] += (
+                    local_energies.shape[0]
+                )
 
-                valid_samples_count += local_energies.shape[0]
+        # --- Per-state post-loop averaging + report ---
+        # ``num_nuc`` is reused below and is constant
+        # across states / blocks; pull it from the
+        # reference NN gradient tensor.
+        num_nuc = int(grd_nn.shape[0])
 
-            # Compute averages
-            if valid_samples_count > 0:
-                grd_ee_en = grd_ee_en_sum / valid_samples_count
-                grd_ke = grd_ke_sum / valid_samples_count
-                grd_pulay = grd_pulay_sum / valid_samples_count
+        for state_label in states:
+            vsc = valid_samples_count[state_label]
+            if vsc > 0:
+                grd_ee_en = (
+                    grd_ee_en_sum[state_label] / vsc
+                )
+                grd_ke = grd_ke_sum[state_label] / vsc
+                grd_pulay = (
+                    grd_pulay_sum[state_label] / vsc
+                )
 
                 grd_tot_bw = jnp.concatenate(
-                    grd_tot_list, axis=0,
+                    grd_tot_list[state_label], axis=0,
                 )
                 grd_err_bw = jnp.concatenate(
-                    grd_err_list, axis=0,
+                    grd_err_list[state_label], axis=0,
                 )
 
                 # mean over blocks, then walkers
@@ -1646,86 +1700,62 @@ nuclear forces using PGCS.
                     / grd_err_bw.shape[0]
                 )
                 grd_err = (
-                    jnp.linalg.norm(
-                        grd_err, axis=0,
-                    )
+                    jnp.linalg.norm(grd_err, axis=0)
                     / grd_err.shape[0]
                 )
 
-                # Compute torques and error
                 torque, dtau = (
                     compute_torque_with_error(
                         myMol, grd_tot, grd_err,
                     )
                 )
 
-                grd_ee_en = jnp.mean(
-                    grd_ee_en, axis=0,
-                )
-                grd_ke = jnp.mean(
-                    grd_ke, axis=0,
-                )
-                grd_pulay = jnp.mean(
-                    grd_pulay, axis=0,
+                grd_ee_en = jnp.mean(grd_ee_en, axis=0)
+                grd_ke = jnp.mean(grd_ke, axis=0)
+                grd_pulay = jnp.mean(grd_pulay, axis=0)
+
+                grd_block_series = np.asarray(
+                    grd_tot_bw.mean(axis=1)
                 )
             else:
                 grd_ee_en = jnp.zeros_like(grd_nn)
                 grd_ke = jnp.zeros_like(grd_nn)
                 grd_pulay = jnp.zeros_like(grd_nn)
+                grd_tot = jnp.zeros_like(grd_nn)
+                grd_err = jnp.zeros_like(grd_nn)
+                torque = jnp.zeros(3)
+                dtau = jnp.zeros(3)
+                grd_block_series = None
 
-            # Save reference results for return
             if state_label is None:
                 ref_grd_tot = grd_tot
                 ref_grd_err = grd_err
-
-            # Per-block walker-averaged force vector
-            # (the per-block scalar time series feeding
-            # BLUE in the fragment-wise loop below).
-            if valid_samples_count > 0:
-                grd_block_series = np.asarray(
-                    grd_tot_bw.mean(axis=1)
-                )  # (num_blocks, num_nuc, 3)
-            else:
-                grd_block_series = None
 
             all_state_results[state_label] = (
                 grd_tot, grd_err, grd_block_series,
             )
 
-            # Write results
             with jnp.printoptions(
                 precision=12, suppress=True,
             ):
                 if state_label is not None:
                     print("\n--- Secondary state:"
-                          f" {state_label} ---", file=fout)
+                          f" {state_label} ---",
+                          file=fout)
                 else:
-                    print("\n--- Reference state ---", file=fout)
+                    print("\n--- Reference state ---",
+                          file=fout)
 
-                print(
-                    'NN gradients\n',
-                    grd_nn, file=fout,
-                )
-                print(
-                    'ee+eN gradients\n',
-                    grd_ee_en, file=fout,
-                )
-                print(
-                    'KE gradients\n',
-                    grd_ke, file=fout,
-                )
-                print(
-                    'Pulay gradients\n',
-                    grd_pulay, file=fout,
-                )
-                print(
-                    'Total gradients\n',
-                    grd_tot, file=fout,
-                )
+                print('NN gradients\n', grd_nn, file=fout)
+                print('ee+eN gradients\n', grd_ee_en,
+                      file=fout)
+                print('KE gradients\n', grd_ke, file=fout)
+                print('Pulay gradients\n', grd_pulay,
+                      file=fout)
+                print('Total gradients\n', grd_tot,
+                      file=fout)
 
-                fout.write(
-                    "Total forces (-gradients)\n"
-                )
+                fout.write("Total forces (-gradients)\n")
                 for i in range(num_nuc):
                     fout.write(
                         "{:4s}"
