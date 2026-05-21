@@ -276,7 +276,7 @@ def _autotune_deriv_batch(
 class _VMCOptDriverGTO_Linear:
     """Linear method VMC optimizer (OneShiftOnly)."""
 
-    def __init__(self, mf, params_cusp,
+    def __init__(self, mf, params_cusp, trial=None,
                  jastrow_config=None):
         nuc_crds = jnp.array(
             mf.mol.atom_coords(unit='Bohr')
@@ -295,6 +295,7 @@ class _VMCOptDriverGTO_Linear:
         (log_trial_wavefunction, local_energy, _, _) = \
             get_psi_fun(
                 mf, params_cusp=params_cusp,
+                trial=trial,
                 jastrow_config=jastrow_config,
             )
         (local_energy_ee, local_energy_nn,
@@ -1174,6 +1175,7 @@ class _VMCOptDriverGTO_Linear:
 
 def get_vmcopt_gto_func(
     mf, cusp_scheme="Quady2025",
+    trial=None,
     jastrow_config=None,
 ):
     """Create a linear-method VMC optimizer.
@@ -1185,6 +1187,12 @@ def get_vmcopt_gto_func(
     cusp_scheme : str or None
         Cusp-correction scheme. ``"Quady2025"``
         (default) or ``None``.
+    trial : dict or None, optional
+        Multi-Slater-determinant trial wave function,
+        as produced by
+        :func:`OmegaQMC.psi.gto.extract_casscf_trial`.
+        When ``None`` (default), the HF single-Slater
+        determinant in ``mf`` is used.
     jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::
@@ -1218,6 +1226,6 @@ def get_vmcopt_gto_func(
     else:
         params_cusp = None
     return _VMCOptDriverGTO_Linear(
-        mf, params_cusp,
+        mf, params_cusp, trial=trial,
         jastrow_config=jastrow_config,
     )

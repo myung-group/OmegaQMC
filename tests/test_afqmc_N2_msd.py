@@ -4,7 +4,7 @@ import jax
 from pyscf import gto, scf, mcscf
 
 from OmegaQMC import get_afqmc_func
-from OmegaQMC.afqmc_gto import extract_casscf_trial
+from OmegaQMC.psi.gto import extract_casscf_trial
 
 
 def test_n2_multidet():

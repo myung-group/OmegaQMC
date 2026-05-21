@@ -12,11 +12,9 @@ paths to exercise the streamed multi-det block-end energy.
 import jax
 from pyscf import gto, scf, mcscf
 
-from OmegaQMC.afqmc_gto import (
-    _AFQMCDriverGTO,
-    extract_casscf_trial,
-)
+from OmegaQMC.afqmc_gto import _AFQMCDriverGTO
 from OmegaQMC.afqmc_gto_estream import _AFQMCDriverGTO_EStream
+from OmegaQMC.psi.gto import extract_casscf_trial
 
 
 def _build_mf():

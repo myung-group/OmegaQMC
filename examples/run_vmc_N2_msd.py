@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from pyscf import mcscf
 
 from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
-from OmegaQMC.afqmc_gto import extract_casscf_trial
+from OmegaQMC.psi.gto import extract_casscf_trial
 from OmegaQMC.utils import format_basis_name
 
 rng_key = jax.random.key(888)

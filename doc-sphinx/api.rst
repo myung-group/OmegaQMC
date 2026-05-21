@@ -244,8 +244,6 @@ Cholesky decomposition
 
 .. autofunction:: OmegaQMC.integrals.cholesky.half_rotate_cholesky_multidet
 
-.. autofunction:: OmegaQMC.integrals.cholesky.extract_casscf_trial
-
 QED integrals
 ~~~~~~~~~~~~~
 
@@ -265,6 +263,8 @@ GTO trial
 ~~~~~~~~~
 
 .. autofunction:: OmegaQMC.psi.gto.get_psi_fun
+
+.. autofunction:: OmegaQMC.psi.gto.extract_casscf_trial
 
 Cusp corrections
 ~~~~~~~~~~~~~~~~

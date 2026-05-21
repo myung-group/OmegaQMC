@@ -8,7 +8,6 @@ qed      : QED-specific integral preparation.
 """
 
 from OmegaQMC.integrals.cholesky import (
-    extract_casscf_trial,
     chunked_cholesky,
     prepare_afqmc_integrals,
     half_rotate_cholesky,

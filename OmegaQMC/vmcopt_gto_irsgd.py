@@ -192,7 +192,7 @@ class _VMCOptDriverGTO_IRSGD:
     reached.
     """
 
-    def __init__(self, mf, params_cusp,
+    def __init__(self, mf, params_cusp, trial=None,
                  jastrow_config=None):
         nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
         eps = jnp.finfo(nuc_crds.dtype).eps
@@ -208,6 +208,7 @@ class _VMCOptDriverGTO_IRSGD:
 
         log_trial_wavefunction, local_energy, _, _ \
             = get_psi_fun(mf, params_cusp=params_cusp,
+                          trial=trial,
                           jastrow_config=jastrow_config)
         local_energy_ee, local_energy_nn, local_energy_en, local_energy_ke \
             = local_energy
@@ -683,6 +684,7 @@ class _VMCOptDriverGTO_IRSGD:
 def get_vmcopt_gto_func(
     mf,
     cusp_scheme="Quady2025",
+    trial=None,
     jastrow_config=None,
 ):
     """Create an iteratively-resampled SGD/Adam
@@ -704,6 +706,12 @@ def get_vmcopt_gto_func(
         (default) applies the scheme from Quady
         *et al.* (2025).  Pass ``None`` to skip
         cusp corrections.
+    trial : dict or None, optional
+        Multi-Slater-determinant trial wave function,
+        as produced by
+        :func:`OmegaQMC.psi.gto.extract_casscf_trial`.
+        When ``None`` (default), the HF single-Slater
+        determinant in ``mf`` is used.
     jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::
@@ -745,6 +753,6 @@ def get_vmcopt_gto_func(
     else:
         params_cusp = None
     return _VMCOptDriverGTO_IRSGD(
-        mf, params_cusp,
+        mf, params_cusp, trial=trial,
         jastrow_config=jastrow_config,
     )

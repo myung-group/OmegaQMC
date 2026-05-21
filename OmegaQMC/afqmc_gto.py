@@ -37,12 +37,6 @@ WEIGHT_CLIP_FRACTION = 0.10
 FBBOUND_DEFAULT = 1.0
 
 
-# --- Integrals re-exported from OmegaQMC.integrals ---
-from OmegaQMC.integrals.cholesky import (        # noqa: E402
-    extract_casscf_trial,
-)
-
-
 def _make_afqmc_sharding(num_walkers):
     """Return (phi_sharding, scalar_sharding) or (None, None).
 

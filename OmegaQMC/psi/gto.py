@@ -2401,6 +2401,73 @@ class _PsiGTO:
         self.local_energy_ke = local_energy_ke
 
 
+def extract_casscf_trial(mc, coeff_threshold=1e-4):
+    """Extract multi-det trial from PySCF CASSCF/CASCI.
+
+    Args:
+        mc: PySCF CASSCF or CASCI object
+            (must have run kernel()).
+        coeff_threshold: Threshold on ``|c_I|`` for
+            truncating the CI expansion.
+
+    Returns:
+        dict with keys:
+            'ci_coeffs': jnp.array, shape (ndet,).
+            'occ_up': jnp.array int, shape (ndet, nup).
+            'occ_dn': jnp.array int, shape (ndet, ndown).
+            'ndet': Number of determinants retained.
+            'mo_coeff': MO coefficients, shape (nao, nmo).
+    """
+    from pyscf.fci import cistring
+
+    ncore = mc.ncore
+    ncas = mc.ncas
+    nelecas = mc.nelecas  # (nalpha_cas, nbeta_cas)
+
+    # Generate occupation string lists
+    occslst_a = cistring.gen_occslst(
+        range(ncas), nelecas[0],
+    )
+    occslst_b = cistring.gen_occslst(
+        range(ncas), nelecas[1],
+    )
+
+    ci = np.asarray(mc.ci)
+    core_indices = list(range(ncore))
+
+    coeffs = []
+    occ_up_list = []
+    occ_dn_list = []
+
+    for ia in range(len(occslst_a)):
+        for ib in range(len(occslst_b)):
+            c = ci[ia, ib]
+            if abs(c) > coeff_threshold:
+                coeffs.append(c)
+                occ_a = core_indices + [
+                    ncore + j for j in occslst_a[ia]
+                ]
+                occ_b = core_indices + [
+                    ncore + j for j in occslst_b[ib]
+                ]
+                occ_up_list.append(occ_a)
+                occ_dn_list.append(occ_b)
+
+    ndet = len(coeffs)
+
+    return {
+        'ci_coeffs': jnp.array(np.array(coeffs)),
+        'occ_up': jnp.array(
+            np.array(occ_up_list, dtype=np.int32),
+        ),
+        'occ_dn': jnp.array(
+            np.array(occ_dn_list, dtype=np.int32),
+        ),
+        'ndet': ndet,
+        'mo_coeff': np.asarray(mc.mo_coeff),
+    }
+
+
 def get_psi_fun(mf, params_cusp=None, trial=None,
                 jastrow_config=None):
     """
