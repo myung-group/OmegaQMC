@@ -1,0 +1,77 @@
+# L8 V2 (Tang) production run — Weber Fig 1b γ=0.5
+#
+# Settings match V11 ON exactly (walkers, mcmc, iters, eval) except:
+#   - L8 V2 Tang architecture instead of L7 (Q₀, P₀) heads
+#   - N_max=2 (Fock truncation; ⟨n⟩ expected ~1-2 at γ=0.5)
+#   - offset_floor=-5 (was -50; easier training start)
+#
+# Per-iter estimate (fused JIT): 0.365 × (2048/1024) = ~0.73 s at mcmc=5.
+# With mcmc=15, expect ~1.0-1.5 s/iter.  30k iters ≈ 8-12 h.  --time=18h.
+project: l8v2_on
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  N_max: 2
+  phase_mlp_hidden: [64, 64]
+  offset_floor: -5.0
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  lr: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 30000
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  equil_steps: 50
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 30000
+  spring_mu: 0.0
+  spring_norm_clip: 1.0e10
+  save_every: 1000
+  use_fused_step: true
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

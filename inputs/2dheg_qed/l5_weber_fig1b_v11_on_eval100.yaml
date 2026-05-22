@@ -1,0 +1,86 @@
+# V11 ON eval-only — 100 blocks on the latest training chkpt (snapshot
+# taken at iter 10000, E/N = +0.13712 Ha).  Training continues in
+# parallel on the login node; this job reads from eval_snapshot.chk.npz
+# so the two do not race.
+#
+# Same physical setup + ansatz as l5_weber_fig1b_v11_on.yaml; only the
+# load_chkpt + skip_training + eval.blocks fields differ.
+project: l5_weber_fig1b_v11_on_eval100
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 6
+  phase_mlp_hidden: [64, 64]
+  mag_mlp_hidden: [64, 64]
+  activation: tanh
+  use_matter_photon_shift: true
+  use_matter_photon_width: false
+  use_matter_photon_pshift: true
+  q0_mlp_hidden: [32, 32]
+  s_mlp_hidden: [32, 32]
+  p0_mlp_hidden: [32, 32]
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 0
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 30000
+  spring_mu: 0.0
+  spring_norm_clip: 1.0e10
+  save_every: 1000
+  load_chkpt: runs/l5_weber_fig1b_v11_on/eval_snapshot.chk.npz
+  skip_training: true
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 100             # main change vs training YAML (was 50)
+  equil_blocks: 10        # extra warmup since walkers are reused from chkpt
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

@@ -1,0 +1,82 @@
+# L8 pilot — first real Fock-basis training run, Weber Fig 1b ON (γ=0.5).
+# Smaller than V11 ON so we can see if the architecture descends to
+# anywhere near +137.1 mHa/e in reasonable wall time:
+#   - 1024 walkers (vs V11 2048)
+#   - N_max=4 (vs spec N_max=6; ⟨n⟩ at γ=0.5 expected ~3, 4 should cover)
+#   - 2000 iters (vs V11 30000); enough to see clear trend
+#   - 50 eval blocks
+#
+# Cost estimate on GH200: smoke gave ~2.7s/iter at 128 walkers and N_max=4.
+# Scaling: 1024/128 × 4/5 (N_max factor minimal) ≈ 8 × 2.7s = 22s/iter.
+# 2000 iters × 22s = ~12 hours.  Probably too slow.
+# Quick path: 500 iters × 22s = ~3 hours, sees enough trend.
+project: l8_weber_fig1b_pilot_on
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  N_max: 4                       # Fock truncation
+  K_max: 6
+  mag_mlp_hidden: [64, 64]
+  phase_mlp_hidden: [64, 64]
+  activation: tanh
+  offset_floor: -50.0            # ψ_{n>0} starts at exp(-50) ≈ 1.9e-22 of ψ_0
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  lr: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 500                    # PILOT — bump to 2000+ if descending well
+  walkers: 1024
+  mcmc_decorr_steps: 10
+  mc_timestep_R: 0.1
+  equil_steps: 50
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 500
+  spring_mu: 0.0
+  spring_norm_clip: 1.0e10
+  save_every: 100
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

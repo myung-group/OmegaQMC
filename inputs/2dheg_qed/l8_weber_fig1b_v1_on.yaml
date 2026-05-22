@@ -1,0 +1,92 @@
+# L8 V1 ON — Fock-basis (Tang-style) cavity-QED HEG at Weber Fig 1b (γ=0.5).
+#
+# Settings matched to V11 ON for direct cross-check of the L7 result
+# (E_corr,el-ph = −0.225 ± 0.007 mHa/e).  L8 is a "no priors" architecture:
+# parametrize ψ_n(R) for n=0..N_max with per-n heads on a shared FermiNet
+# trunk, no coherent-state / Lang-Firsov inductive bias.
+#
+# What differs from V11 ON:
+#   • Photon basis: discrete Fock {|0⟩..|N_max⟩} instead of continuous q_c.
+#   • No q_c MCMC (just R).
+#   • Local energy: exact n-sum (no n sampling), bilinear couples n ↔ n±1.
+#   • No L6/L7 channels (Q₀, P₀, S) — fully learned by the per-n heads.
+#
+# Compute budget:  ~1.0–1.5 s/iter at 2048 walkers + mcmc=15 (estimated
+# from a fused-JIT benchmark at 1024 walkers, 0.50 s/iter, mcmc=5).
+# 30000 iters → 8–13 hours on a single GH200.  --time=18:00:00 for safety.
+#
+# Expected outcome:  if L8 reaches E/N ≈ +137.10 ± 0.02 mHa/e (matching
+# V11 ON) it confirms the L7 result is architecture-independent.  A
+# different value would indicate L7's LF prior was either incomplete
+# (lower L8 E) or biased (higher L8 E).
+project: l8_weber_fig1b_v1_on
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357               # gamma = N λ² / (Ω² + N λ²) = 0.5
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  N_max: 4                      # Fock truncation; ⟨n⟩ ~ 3 at γ=0.5
+  K_max: 6                      # matter Fourier feature cutoff
+  mag_mlp_hidden: [64, 64]
+  phase_mlp_hidden: [64, 64]
+  activation: tanh
+  offset_floor: -50.0           # ψ_{n>0}/ψ_0 = exp(-50) ≈ 1.9e-22 at init
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true  # matches V11 (with driver bug fixed)
+  envelope_type: plane_wave
+
+optimize:
+  lr: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20                   # unused (SMW path)
+  iters: 30000
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  equil_steps: 50
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 30000
+  spring_mu: 0.0                # pure SR (no momentum)
+  spring_norm_clip: 1.0e10      # no F-norm clip
+  save_every: 1000
+  use_fused_step: true          # use the optimized single-JIT train step
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

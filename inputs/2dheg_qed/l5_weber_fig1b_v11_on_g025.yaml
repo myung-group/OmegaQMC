@@ -1,0 +1,95 @@
+# V11 ON — L7 architecture with Smith deep Jastrow + Q0 + P0
+# Real first test of the LF-correlation channels at gamma=0.5.  Two
+# real changes vs V10:
+#   1. use_smith_deep_jastrow now actually flows into HEGPsiFormerConfig
+#      (driver bug discovered during V10 Q0 inspection — the flag was
+#      read but never passed to the ansatz constructor; all v8-v10
+#      runs trained without it).  Gives the matter side capacity to
+#      absorb the photon-mediated effective ee interaction.
+#   2. L7 photon ansatz adds an explicit i*P0(R)*q_c phase term.  For
+#      coupling_op="P" this is the Lang-Firsov mean-field channel
+#      that Q0 (a real position shift) cannot reach.  Bakes in the
+#      bilinear so the optimizer does not have to discover it inside
+#      phase_mlp.
+#
+# Expected:
+#   - ZPE_shift = (Omega_eff - Omega) / (2 N) = +1.15 mHa/e at gamma=0.5
+#   - PT correlation = -0.185 mHa/e
+#   - Target Delta E_cavity ~ +1.15 - 0.185 = +0.97 mHa/e relative to OFF
+project: l5_weber_fig1b_v11_on_g025
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.01361         # gamma = 0.25
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 6
+  phase_mlp_hidden: [64, 64]
+  mag_mlp_hidden: [64, 64]
+  activation: tanh
+  use_matter_photon_shift: true     # L6 Q0(R)
+  use_matter_photon_width: false
+  use_matter_photon_pshift: true    # L7 P0(R)*q_c — the LF channel for coupling_op=P
+  q0_mlp_hidden: [32, 32]
+  s_mlp_hidden: [32, 32]
+  p0_mlp_hidden: [32, 32]
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true   # now actually applied (driver bug fixed)
+  envelope_type: plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 30000
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 30000
+  spring_mu: 0.0
+  spring_norm_clip: 1.0e10
+  save_every: 1000
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

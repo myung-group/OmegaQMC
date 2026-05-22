@@ -138,6 +138,13 @@ def build_l5_log_psi(
     phase_mlp_hidden=(64, 64),
     mag_mlp_hidden=(64, 64),
     activation: str = "tanh",
+    use_matter_photon_shift: bool = False,
+    use_matter_photon_width: bool = False,
+    use_matter_photon_pshift: bool = False,
+    q0_mlp_hidden=(32, 32),
+    s_mlp_hidden=(32, 32),
+    p0_mlp_hidden=(32, 32),
+    eps_arr=None,
 ):
     """Construct the Level 5 complex log Ψ + initial flat params.
 
@@ -191,8 +198,9 @@ def build_l5_log_psi(
     else:
         raise ValueError(f"Unknown activation: {activation}")
 
-    # Param-init keys: split into electronic + mag MLP + phase MLP
-    key_e, key_mag, key_phase = jax.random.split(init_key, 3)
+    # Param-init keys: electronic + mag MLP + phase MLP + Q₀, S, P₀ MLPs
+    (key_e, key_mag, key_phase,
+     key_q0, key_s, key_p0) = jax.random.split(init_key, 6)
 
     # Electronic FermiNet (existing infrastructure)
     log_psi_e_pytree, e_init_params, graphdef = make_heg_log_psi(
@@ -209,12 +217,56 @@ def build_l5_log_psi(
         key_phase, phase_layer_sizes, zero_init_last=True,
     )
 
+    # L6: optional matter-dependent photon Q0 (coherent shift) and S (width).
+    # Q0_NN(R) and S_NN(R) take collective matter features + ε̂·CoM and output
+    # a scalar each. With zero_init_last=True both start at 0 → at iter 0,
+    # Q0(R) = 0 and S(R) = s (bare trial width). So L6 reduces to L5 at init.
+    n_q0_features = 2 * n_K + 2   # F_K_sin, F_K_cos, CoM_x, CoM_y (matter-only)
+    if use_matter_photon_shift:
+        q0_layer_sizes = (n_q0_features,) + tuple(q0_mlp_hidden) + (1,)
+        q0_init = init_mlp_params(
+            key_q0, q0_layer_sizes, zero_init_last=True,
+        )
+    else:
+        q0_init = None
+    if use_matter_photon_width:
+        s_layer_sizes = (n_q0_features,) + tuple(s_mlp_hidden) + (1,)
+        s_init = init_mlp_params(
+            key_s, s_layer_sizes, zero_init_last=True,
+        )
+    else:
+        s_init = None
+    # L7: optional matter-dependent photon P₀ (momentum / imaginary shift).
+    # Adds explicit i·P₀(R)·q_c to the phase — bakes in the Lang-Firsov
+    # bilinear so the optimizer does not have to discover it inside
+    # phase_mlp.  Zero-init last layer → P₀(R)=0 at init, L7→L6 then.
+    if use_matter_photon_pshift:
+        p0_layer_sizes = (n_q0_features,) + tuple(p0_mlp_hidden) + (1,)
+        p0_init = init_mlp_params(
+            key_p0, p0_layer_sizes, zero_init_last=True,
+        )
+    else:
+        p0_init = None
+
     init_params_pytree = {
         "e": e_init_params,
         "s": jnp.asarray(omega_init, dtype=jnp.float64),
         "mag_mlp": mag_init,
         "phase_mlp": phase_init,
     }
+    if use_matter_photon_shift:
+        init_params_pytree["q0_mlp"] = q0_init
+    if use_matter_photon_width:
+        init_params_pytree["s_mlp"] = s_init
+    if use_matter_photon_pshift:
+        init_params_pytree["p0_mlp"] = p0_init
+
+    # Polarization vector for CoM features (defaults to (1,0,...) along x).
+    if eps_arr is None:
+        eps_for_features = jnp.array([1.0] + [0.0] * (dim - 1),
+                                     dtype=jnp.float64)
+    else:
+        eps_for_features = jnp.asarray(eps_arr, dtype=jnp.float64)
     init_params_flat, unravel = ravel_pytree(init_params_pytree)
     n_params = int(init_params_flat.shape[0])
 
@@ -232,15 +284,67 @@ def build_l5_log_psi(
             [sin_feat, cos_feat, jnp.atleast_1d(q_c)]
         )
 
+    def compute_matter_features(R):
+        """Matter-only features for Q₀(R), S(R): includes CoM along each
+        axis (so the NN can directly express displacement-style coupling).
+        Returns (2·n_K + dim,).
+        """
+        K_dot_r = jnp.einsum("id,kd->ki", R, K_grid_const)
+        sin_feat = jnp.sum(jnp.sin(K_dot_r), axis=-1)
+        cos_feat = jnp.sum(jnp.cos(K_dot_r), axis=-1)
+        # CoM per dim (1/N · Σ rᵢ).  This is the key feature for
+        # capturing the Lang-Firsov-style q_c · ε̂·CoM coupling.
+        com = jnp.mean(R, axis=0)                          # (dim,)
+        return jnp.concatenate([sin_feat, cos_feat, com])
+
     def log_psi_l5(R, q_c, p_pytree):
         """log Ψ(R, q_c) = u + i·v, returned as two real scalars."""
         s = p_pytree["s"]
         log_psi_e_val = log_psi_e_pytree(R, p_pytree["e"])
+
+        # L6/L7: matter-dependent shift Q₀(R), width S(R), momentum P₀(R).
+        # All default to 0 → χ(q_c)·exp(i·P₀·q_c) reduces to bare HO of
+        # width s at iter 0.
+        need_mat_feats = (use_matter_photon_shift
+                          or use_matter_photon_width
+                          or use_matter_photon_pshift)
+        if need_mat_feats:
+            mat_feats = compute_matter_features(R)
+            if use_matter_photon_shift:
+                Q0 = mlp_apply(
+                    p_pytree["q0_mlp"], mat_feats, activation=act_fn,
+                )[0]
+            else:
+                Q0 = jnp.float64(0.0)
+            if use_matter_photon_width:
+                s_log_ratio = mlp_apply(
+                    p_pytree["s_mlp"], mat_feats, activation=act_fn,
+                )[0]
+                # Parameterise S(R) = s · exp(s_log_ratio) so S > 0
+                # and S = s when s_log_ratio = 0 (init).
+                S_eff = s * jnp.exp(s_log_ratio)
+            else:
+                S_eff = s
+            if use_matter_photon_pshift:
+                P0 = mlp_apply(
+                    p_pytree["p0_mlp"], mat_feats, activation=act_fn,
+                )[0]
+            else:
+                P0 = jnp.float64(0.0)
+        else:
+            Q0 = jnp.float64(0.0)
+            S_eff = s
+            P0 = jnp.float64(0.0)
+
+        # Photon Gaussian: log χ = -S/2·(q-Q₀)² + ½ log|S| - ½ log π
+        # (NB: matches old form exactly when Q₀=0 and S=s.)
+        q_shifted = q_c - Q0
         log_chi = (
-            -0.5 * s * q_c * q_c
-            + 0.5 * jnp.log(jnp.abs(s))
+            -0.5 * S_eff * q_shifted * q_shifted
+            + 0.5 * jnp.log(jnp.abs(S_eff))
             + log_inv_pi
         )
+
         feats = compute_features(R, q_c)
         # Both MLPs output (1,); take scalar via [0].
         mag_coupling = mlp_apply(
@@ -249,6 +353,8 @@ def build_l5_log_psi(
         phase = mlp_apply(
             p_pytree["phase_mlp"], feats, activation=act_fn,
         )[0]
+        # L7: explicit Lang-Firsov bilinear i·P₀(R)·q_c added to phase.
+        phase = phase + P0 * q_c
         log_mag = log_psi_e_val + log_chi + mag_coupling
         return log_mag, phase
 
@@ -264,6 +370,18 @@ def build_l5_log_psi(
     n_mag_mlp = int(mag_flat.shape[0])
     phase_flat, _ = ravel_pytree(phase_init)
     n_phase_mlp = int(phase_flat.shape[0])
+    n_q0_mlp = 0
+    n_s_mlp = 0
+    n_p0_mlp = 0
+    if q0_init is not None:
+        q0_flat, _ = ravel_pytree(q0_init)
+        n_q0_mlp = int(q0_flat.shape[0])
+    if s_init is not None:
+        s_flat, _ = ravel_pytree(s_init)
+        n_s_mlp = int(s_flat.shape[0])
+    if p0_init is not None:
+        p0_flat, _ = ravel_pytree(p0_init)
+        n_p0_mlp = int(p0_flat.shape[0])
 
     return {
         "log_psi_l5": log_psi_l5,
@@ -275,6 +393,9 @@ def build_l5_log_psi(
         "n_electronic": n_electronic,
         "n_mag_mlp": n_mag_mlp,
         "n_phase_mlp": n_phase_mlp,
+        "n_q0_mlp": n_q0_mlp,
+        "n_s_mlp": n_s_mlp,
+        "n_p0_mlp": n_p0_mlp,
         "n_K": n_K,
         "n_features": n_features,
         "K_grid": K_grid_const,
@@ -523,6 +644,8 @@ def make_l5_eloc_no_vee(
     omega_eff: float,
     nelec: int,
     dim: int,
+    coupling_op: str = "P",
+    omega_bare: float = None,
 ):
     """Build (Re, Im) local-energy function for Level 5 trial.
 
@@ -531,12 +654,28 @@ def make_l5_eloc_no_vee(
 
     Args:
       log_psi_l5: callable (R, q_c, p_pytree) → (log_mag, phase)
-      eps: (dim,) polarisation unit vector
+      eps: (dim,) polarisation unit vector (used only for 'P' coupling)
       lam: coupling λ
-      omega_eff: renormalised photon frequency √(Ω² + N·λ²)
+      omega_eff: renormalised photon frequency.  For 'P': √(Ω²+N·λ²)
+        (the A² term gives a constant N-enhancement, absorbed here).
+        For 'Lz': should be set to bare Ω (caller's responsibility);
+        the proper diamagnetic depends on Σᵢ rᵢ² and is added per-walker.
       nelec, dim: system dims
+      coupling_op: 'P' (linear momentum, Pauli-Fierz with ε̂·P_total) or
+        'Lz' (angular-momentum L_z, chiral cavity, 2D only).
+      omega_bare: bare cavity frequency Ω (needed for 'Lz' to add the
+        proper per-walker diamagnetic (λ²/2)·q_c²·Σᵢrᵢ²).  Ignored for
+        'P'.
     """
     eps_arr = jnp.asarray(eps, dtype=jnp.float64)
+    if coupling_op not in ("P", "Lz"):
+        raise ValueError(
+            f"coupling_op must be 'P' or 'Lz', got {coupling_op!r}"
+        )
+    if coupling_op == "Lz" and dim != 2:
+        raise ValueError(
+            f"coupling_op='Lz' requires dim=2 (got dim={dim})"
+        )
 
     def u_fn(R, q_c, p):
         return log_psi_l5(R, q_c, p)[0]
@@ -572,11 +711,23 @@ def make_l5_eloc_no_vee(
         grad_v_r_sq = jnp.dot(grad_v_r, grad_v_r)
         grad_u_dot_v = jnp.dot(grad_u_r, grad_v_r)
 
-        # ε·Σᵢ ∇ᵢ u and v (per-electron gradient projected on ε, summed)
+        # Matter operator coupled to q_c:
+        #   'P':  ε̂·Σᵢ ∇ᵢ (linear momentum projected on polarisation)
+        #   'Lz': Σᵢ (xᵢ ∂_yᵢ − yᵢ ∂_xᵢ)  (orbital angular momentum, 2D)
         grad_u_per_elec = grad_u_r.reshape(nelec, dim)
         grad_v_per_elec = grad_v_r.reshape(nelec, dim)
-        eps_dot_grad_u = jnp.einsum("id,d->", grad_u_per_elec, eps_arr)
-        eps_dot_grad_v = jnp.einsum("id,d->", grad_v_per_elec, eps_arr)
+        if coupling_op == "P":
+            coup_u = jnp.einsum("id,d->", grad_u_per_elec, eps_arr)
+            coup_v = jnp.einsum("id,d->", grad_v_per_elec, eps_arr)
+        else:   # 'Lz'
+            coup_u = jnp.sum(
+                R[:, 0] * grad_u_per_elec[:, 1]
+                - R[:, 1] * grad_u_per_elec[:, 0]
+            )
+            coup_v = jnp.sum(
+                R[:, 0] * grad_v_per_elec[:, 1]
+                - R[:, 1] * grad_v_per_elec[:, 0]
+            )
 
         # Photon (q_c) derivatives via 1D grad
         du_dq = jax.grad(u_q)(q_c)
@@ -585,16 +736,30 @@ def make_l5_eloc_no_vee(
         d2v_dq2 = jax.grad(jax.grad(v_q))(q_c)
 
         # Assemble Re(E_loc) and Im(E_loc) per Phase 0 formula
+        # Photon potential ½ Ω_eff² q² (P coupling): the A² term is
+        # constant in r → N·λ² shift absorbed into omega_eff.
+        # For Lz coupling: Σᵢ A²(rᵢ) = (λ²/4) Σᵢ rᵢ² is r-dependent;
+        # use bare Ω in the harmonic term, then add per-walker diamagnetic
+        # (λ²/2) q² Σᵢ rᵢ².
+        if coupling_op == "P":
+            phot_pot = 0.5 * omega_eff ** 2 * q_c ** 2
+        else:   # 'Lz'
+            sum_r_sq = jnp.sum(R * R)
+            phot_pot = (
+                0.5 * (omega_bare ** 2) * q_c ** 2
+                + 0.5 * (lam ** 2) * (q_c ** 2) * sum_r_sq
+            )
+
         re = (
             -0.5 * (lap_u_r + grad_u_r_sq - grad_v_r_sq)
             - 0.5 * (d2u_dq2 + du_dq ** 2 - dv_dq ** 2)
-            + 0.5 * omega_eff ** 2 * q_c ** 2
-            - lam * q_c * eps_dot_grad_v
+            + phot_pot
+            - lam * q_c * coup_v
         )
         im = (
             -0.5 * (lap_v_r + 2.0 * grad_u_dot_v)
             - 0.5 * (d2v_dq2 + 2.0 * du_dq * dv_dq)
-            + lam * q_c * eps_dot_grad_u
+            + lam * q_c * coup_u
         )
         return re, im
 
@@ -658,14 +823,43 @@ class _QEDL5Optimizer:
         omega: float = 0.1,
         coupling_lambda: float = 0.0,
         coupling_polarization=None,
+        coupling_op: str = "P",
+        # External one-body potential (Weber-style cosine for TI breaking).
+        # v_ext(r) = -v_ext_amp * Σ_d cos(2π·r_d / v_ext_a) (sum over dims).
+        # Adds Σᵢ v_ext(rᵢ) to V_ee in the local energy.  Set v_ext_amp=0
+        # to disable (default).
+        v_ext_amp: float = 0.0,
+        v_ext_a=None,    # lattice constant (defaults to L_x)
+        # Toggle V_ee (Coulomb) on/off.  When False, the Ewald sum is
+        # skipped in the local energy — useful for direct comparison with
+        # Weber et al.'s non-interacting setup.
+        include_vee: bool = True,
         # Level-5 architecture knobs
         K_max: int = 5,
         phase_mlp_hidden=(64, 64),
         mag_mlp_hidden=(64, 64),
         activation: str = "tanh",
+        # L6: matter-dependent photon shift and width.  Defaults False
+        # → L5 behaviour preserved exactly.
+        use_matter_photon_shift: bool = False,
+        use_matter_photon_width: bool = False,
+        use_matter_photon_pshift: bool = False,
+        q0_mlp_hidden=(32, 32),
+        s_mlp_hidden=(32, 32),
+        p0_mlp_hidden=(32, 32),
     ):
         self.config = config
-        self.L = float(config.L)
+        # L: scalar (square) or (L_x, L_y) (rectangular). When
+        # config.L_y is set, build a rectangular cell with L_x=config.L,
+        # L_y=config.L_y; otherwise square with side config.L.
+        L_y_attr = getattr(config, "L_y", None)
+        if L_y_attr is not None:
+            self.L_x = float(config.L)
+            self.L_y = float(L_y_attr)
+            self.L = (self.L_x, self.L_y)
+        else:
+            self.L_x = self.L_y = float(config.L)
+            self.L = float(config.L)
         self.n_up = int(config.n_up)
         self.n_down = int(config.n_down)
         self.nelec = self.n_up + self.n_down
@@ -683,11 +877,31 @@ class _QEDL5Optimizer:
         # Cavity parameters
         self.omega = float(omega)
         self.coupling_lambda = float(coupling_lambda)
-        self.omega_eff = float(
-            jnp.sqrt(
-                self.omega ** 2 + self.nelec * self.coupling_lambda ** 2
+        self.coupling_op = str(coupling_op)
+        # Diamagnetic-renormalised photon frequency.
+        #   'P':  Pauli-Fierz A² gives Ω_eff² = Ω² + N·λ² (constant in r),
+        #         absorbed into the harmonic term.
+        #   'Lz': proper magnetic diamagnetic is (λ²/2)·q_c²·Σᵢrᵢ²,
+        #         which is per-walker (depends on R) and is added directly
+        #         in the local-energy estimator.  For the trial-wavefunction
+        #         photon initialisation, estimate Ω_eff² ≈ Ω² + λ²·N·⟨r²⟩
+        #         where ⟨r²⟩ is taken as (L_x² + L_y²)/12 (uniform-in-cell
+        #         second moment).  Used only as a starting point for the
+        #         photon HO width; the trial s parameter is variational.
+        if self.coupling_op == "P":
+            self.omega_eff = float(
+                jnp.sqrt(
+                    self.omega ** 2 + self.nelec * self.coupling_lambda ** 2
+                )
             )
-        )
+        else:   # 'Lz'
+            avg_r_sq = (self.L_x ** 2 + self.L_y ** 2) / 12.0
+            self.omega_eff = float(
+                jnp.sqrt(
+                    self.omega ** 2
+                    + self.coupling_lambda ** 2 * self.nelec * avg_r_sq
+                )
+            )
         if coupling_polarization is None:
             eps_list = [1.0] + [0.0] * (self.dim - 1)
         else:
@@ -696,14 +910,21 @@ class _QEDL5Optimizer:
         eps_arr = eps_arr / jnp.linalg.norm(eps_arr)
         self.eps = eps_arr
 
-        # Build Level 5 trial machinery
+        # Build Level 5/6 trial machinery
         self.l5 = build_l5_log_psi(
             config, init_key,
-            omega_init=self.omega,        # init HO width = bare Ω
+            omega_init=self.omega_eff,    # init photon trial s = Ω_eff
             K_max=K_max,
             phase_mlp_hidden=phase_mlp_hidden,
             mag_mlp_hidden=mag_mlp_hidden,
             activation=activation,
+            use_matter_photon_shift=use_matter_photon_shift,
+            use_matter_photon_width=use_matter_photon_width,
+            use_matter_photon_pshift=use_matter_photon_pshift,
+            q0_mlp_hidden=q0_mlp_hidden,
+            s_mlp_hidden=s_mlp_hidden,
+            p0_mlp_hidden=p0_mlp_hidden,
+            eps_arr=self.eps,
         )
         self.params_flat = self.l5["init_params_flat"]
         self.unravel = self.l5["unravel"]
@@ -722,15 +943,25 @@ class _QEDL5Optimizer:
             lam=self.coupling_lambda,
             omega_eff=self.omega_eff,
             nelec=self.nelec, dim=self.dim,
+            coupling_op=self.coupling_op,
+            omega_bare=self.omega,
         )
 
-        # Lattice + Ewald
+        # Lattice + Ewald.  For 2D rectangular cells (L_x != L_y) use
+        # make_rectangular_lattice; otherwise square.
         if self.dim == 2:
-            self.lattice = make_square_lattice(self.L)
+            if abs(self.L_x - self.L_y) > 1e-9:
+                from .psi.nn.periodic import make_rectangular_lattice
+                self.lattice = make_rectangular_lattice(self.L_x, self.L_y)
+                ewald_L = (self.L_x, self.L_y)
+            else:
+                self.lattice = make_square_lattice(self.L_x)
+                ewald_L = self.L_x
         else:
             self.lattice = make_cubic_lattice(self.L)
+            ewald_L = self.L
         self.ewald = build_ewald_tables_dim(
-            self.L, dim=self.dim, eta=ewald_eta,
+            ewald_L, dim=self.dim, eta=ewald_eta,
             n_real=ewald_n_real, n_recip=ewald_n_recip,
         )
 
@@ -741,6 +972,29 @@ class _QEDL5Optimizer:
             from .observables.ewald import ewald_pair_energy
             _ewald_one = lambda r: ewald_pair_energy(r[None], self.ewald)[0]
         self._ewald_per_walker = jax.jit(jax.vmap(_ewald_one))
+
+        # V_ee toggle (Weber-style comparison).
+        self.include_vee = bool(include_vee)
+
+        # External cosine potential (Weber TI-breaking).
+        self.v_ext_amp = float(v_ext_amp)
+        if v_ext_a is None:
+            self.v_ext_a = float(self.L_x)
+        else:
+            self.v_ext_a = float(v_ext_a)
+        # 2π/a for the cosine wavevector
+        k_ext = 2.0 * jnp.pi / self.v_ext_a
+        amp = self.v_ext_amp
+
+        def _vext_one(R):
+            """V_ext per walker: −v·Σᵢ Σ_d cos(k·r_iᵈ).
+
+            Sums over electrons AND spatial dims.  Returns scalar.
+            Set v_ext_amp=0 → returns 0 (cheap, no branch).
+            """
+            return -amp * jnp.sum(jnp.cos(k_ext * R))
+
+        self._vext_per_walker = jax.jit(jax.vmap(_vext_one))
 
         # LR schedule
         self.lr_schedule = lr_schedule
@@ -799,15 +1053,59 @@ class _QEDL5Optimizer:
     def initialize_walkers(self, rng_key, num_walkers):
         """Joint (R, q_c) walker init.
 
-        R uniform in [0, L]^(N×dim);
-        q_c sampled from N(0, 1/√(2Ω)) — HO ground state.
+        R: uniform in [0, L]^(N×dim) for plane_wave envelope;
+           crystal_perturbed (near triangular sites with small noise)
+           for crystal_gaussian envelope — otherwise uniform-init
+           walkers sit far from the localized Gaussians and the
+           Slater det becomes numerically singular.
+        q_c: sampled from N(0, 1/√(2Ω)) — HO ground state.
         """
         k_R, k_q = jax.random.split(rng_key)
-        R = self.L * jax.random.uniform(
-            k_R, (num_walkers, self.nelec, self.dim),
-            dtype=jnp.float64,
-        )
-        sigma_q = 1.0 / jnp.sqrt(2.0 * self.omega)
+
+        envelope_type = str(getattr(
+            self.config, "envelope_type", "plane_wave",
+        ))
+        if envelope_type == "crystal_gaussian" and self.dim == 2:
+            from .psi.nn.env_localized_2d import crystal_init_walkers_2d
+            sigma_init = float(getattr(
+                self.config, "crystal_sigma_init", 0.25,
+            ))
+            spin_pattern = str(getattr(
+                self.config, "crystal_spin_pattern", "neel",
+            ))
+            lattice_type = str(getattr(
+                self.config, "crystal_lattice_type", "triangular",
+            ))
+            site_offset = float(getattr(
+                self.config, "crystal_site_offset", 0.5,
+            ))
+            R = crystal_init_walkers_2d(
+                k_R, num_walkers,
+                n_up=self.n_up, n_down=self.n_down,
+                L=self.L,
+                sigma_init=sigma_init,
+                spin_pattern=spin_pattern,
+                lattice_type=lattice_type,
+                site_offset=site_offset,
+            )
+        else:
+            # Rectangular cell: scale each axis independently.
+            L_arr = jnp.asarray(
+                [self.L_x, self.L_y], dtype=jnp.float64,
+            )
+            u = jax.random.uniform(
+                k_R, (num_walkers, self.nelec, self.dim),
+                dtype=jnp.float64,
+            )
+            R = u * L_arr        # broadcasts over last axis
+
+        # Initialise q_c at the proper photon HO width, sigma = 1/√(2·Ω_eff).
+        # For 'P' coupling, Ω_eff = √(Ω²+Nλ²) is the diamagnetic-shifted
+        # frequency; for 'Lz', Ω_eff includes the estimated
+        # λ²·N·⟨r²⟩ shift.  Using Ω_eff (not bare Ω) keeps the iter-0
+        # local energy O(1) instead of exploding from the per-walker
+        # diamagnetic ½ λ² q_c² Σrᵢ².
+        sigma_q = 1.0 / jnp.sqrt(2.0 * self.omega_eff)
         q_c = sigma_q * jax.random.normal(
             k_q, (num_walkers,), dtype=jnp.float64,
         )
@@ -879,14 +1177,17 @@ class _QEDL5Optimizer:
         return R_step, qc_step
 
     def _batched_eloc(self, R, q_c, p_pytree):
-        """Per-walker (re, im) including V_ee."""
+        """Per-walker (re, im) including V_ee and V_ext."""
         eloc_v = jax.vmap(
             lambda Ri, qi: self.eloc_fn(Ri, qi, p_pytree),
             in_axes=(0, 0),
         )
         re_no_vee, im = eloc_v(R, q_c)
-        V_ee = self._ewald_per_walker(R)
-        return re_no_vee + V_ee, im
+        V_ee = self._ewald_per_walker(R) if self.include_vee else 0.0
+        V_ext = (
+            self._vext_per_walker(R) if self.v_ext_amp != 0.0 else 0.0
+        )
+        return re_no_vee + V_ee + V_ext, im
 
     def _build_fused_train_step(self, num_walkers, mcmc_decorr_steps):
         """Plan C: one jitted train_step that runs the entire iter.
@@ -917,6 +1218,10 @@ class _QEDL5Optimizer:
         mu_c = jnp.float64(self.spring_mu)
         c_clip_c = jnp.float64(self.spring_norm_clip)
         freeze_mask_flat = self._freeze_mask_flat   # None or (n_params,)
+        # V_ee toggle + V_ext params (captured in closure)
+        include_vee = self.include_vee
+        v_ext_amp = self.v_ext_amp
+        k_ext = 2.0 * jnp.pi / self.v_ext_a
 
         def log_mag_one(r_flat, q_c, p_flat):
             return log_psi_l5_flat(r_flat, q_c, p_flat)[0]
@@ -966,6 +1271,12 @@ class _QEDL5Optimizer:
             _one = lambda r: ewald_2d_pair_energy(r[None], ewald)[0]
             return jax.vmap(_one)(R)
 
+        def vext_batched(R):
+            """−v·Σᵢ Σ_d cos(k·r_iᵈ) per walker (0 if amp=0)."""
+            if v_ext_amp == 0.0:
+                return jnp.zeros(R.shape[0], dtype=R.dtype)
+            return -v_ext_amp * jnp.sum(jnp.cos(k_ext * R), axis=(1, 2))
+
         # ---- MCMC inner scan body ----
         def mcmc_one_step(carry, _):
             rng, R, q_c, step_R, step_q, p_flat = carry
@@ -1006,11 +1317,12 @@ class _QEDL5Optimizer:
             ar_R = ar_R_sum / mcmc_decorr_steps
             ar_q = ar_q_sum / mcmc_decorr_steps
 
-            # 2) E_loc + Ewald
+            # 2) E_loc + Ewald + V_ext
             p_pytree = unravel(params_flat)
             re_no_vee, e_im = eloc_batched(R, q_c, p_pytree)
-            V_ee = ewald_batched(R)
-            e_re = re_no_vee + V_ee
+            V_ee = ewald_batched(R) if include_vee else jnp.zeros(num_walkers)
+            V_ext = vext_batched(R)
+            e_re = re_no_vee + V_ee + V_ext
 
             # 3) Jacobian per walker
             r_flat = R.reshape(num_walkers, -1)
@@ -1084,6 +1396,7 @@ class _QEDL5Optimizer:
         mc_timestep_qc: float = 0.5,
         fname_log=None,
         verbose: int = 1,
+        save_every: int = 0,
     ):
         """SR-VMC optimisation run.
 
@@ -1247,8 +1560,70 @@ class _QEDL5Optimizer:
                     file=fout,
                 )
 
+            # Periodic checkpoint save during training
+            if (
+                save_every > 0
+                and self.ofname_chkpt is not None
+                and it % save_every == 0
+            ):
+                if self.use_fused_step:
+                    _, R_chk, q_c_chk, R_step_chk, qc_step_chk, _, _ = carry
+                else:
+                    R_chk, q_c_chk = R, q_c
+                    R_step_chk, qc_step_chk = R_step_size, qc_step_size
+                chkpt_path = str(self.ofname_chkpt)
+                if chkpt_path.endswith(".h5"):
+                    chkpt_path = chkpt_path[:-3] + ".npz"
+                import numpy as _np
+                _np.savez(
+                    chkpt_path,
+                    params_flat=_np.asarray(self.params_flat),
+                    R=_np.asarray(R_chk),
+                    q_c=_np.asarray(q_c_chk),
+                    R_step_size=_np.asarray(R_step_chk),
+                    qc_step_size=_np.asarray(qc_step_chk),
+                    E_final_ha=_np.asarray(e_per),
+                    n_iters_trained=_np.asarray(it),
+                )
+                if verbose >= 1:
+                    print(
+                        f"# [chkpt] saved at iter {it}, "
+                        f"E/N={e_per:+.6f} Ha → {chkpt_path}",
+                        file=fout,
+                    )
+
         if fname_log is not None and fname_log != "":
             fout.close()
+
+        # Stash final walker state so ``evaluate()`` can warm-start
+        # from already-equilibrated walkers at the trained ansatz
+        # (avoids the long re-equil from scratch that hurts at high rs).
+        if self.use_fused_step:
+            _, R_out, q_c_out, R_step_out, qc_step_out, _, _ = carry
+        else:
+            R_out, q_c_out = R, q_c
+            R_step_out, qc_step_out = R_step_size, qc_step_size
+
+        # Save checkpoint (params + final walker state) as an npz file
+        # so a follow-up run can resume eval / observables without
+        # rerunning training.
+        if self.ofname_chkpt is not None:
+            import numpy as _np
+            chkpt_path = str(self.ofname_chkpt)
+            if chkpt_path.endswith(".h5"):
+                chkpt_path = chkpt_path[:-3] + ".npz"
+            _np.savez(
+                chkpt_path,
+                params_flat=_np.asarray(self.params_flat),
+                R=_np.asarray(R_out),
+                q_c=_np.asarray(q_c_out),
+                R_step_size=_np.asarray(R_step_out),
+                qc_step_size=_np.asarray(qc_step_out),
+                E_final_ha=_np.asarray(
+                    e_history[-1] if e_history else 0.0,
+                ),
+                n_iters_trained=_np.asarray(num_iters),
+            )
 
         return {
             "params_flat": self.params_flat,
@@ -1257,6 +1632,12 @@ class _QEDL5Optimizer:
             "Var_history": var_history,
             "Im_per_elec_history": im_history,
             "E_final_ha": e_history[-1] if e_history else None,
+            "final_walkers": {
+                "R": R_out,
+                "q_c": q_c_out,
+                "R_step_size": R_step_out,
+                "qc_step_size": qc_step_out,
+            },
         }
 
     def _build_fused_eval_step(self, num_walkers):
@@ -1274,9 +1655,17 @@ class _QEDL5Optimizer:
         unravel = self.unravel
         eloc_fn = self.eloc_fn
         ewald = self.ewald
+        nelec = self.nelec
+        dim = self.dim
+        include_vee = self.include_vee
+        v_ext_amp = self.v_ext_amp
+        k_ext = 2.0 * jnp.pi / self.v_ext_a
 
         def log_mag_one(r_flat, q_c, p_flat):
             return log_psi_l5_flat(r_flat, q_c, p_flat)[0]
+
+        def phase_one(r_flat, q_c, p_flat):
+            return log_psi_l5_flat(r_flat, q_c, p_flat)[1]
 
         def R_move_one(key, R, q_c, step, p_flat):
             kp, ka = jax.random.split(key)
@@ -1315,6 +1704,25 @@ class _QEDL5Optimizer:
             _one = lambda r: ewald_2d_pair_energy(r[None], ewald)[0]
             return jax.vmap(_one)(R)
 
+        def vext_batched(R):
+            if v_ext_amp == 0.0:
+                return jnp.zeros(R.shape[0], dtype=R.dtype)
+            return -v_ext_amp * jnp.sum(jnp.cos(k_ext * R), axis=(1, 2))
+
+        # L_z observable: for each walker, compute the local angular momentum
+        # of the trial wave function,  L_z_local = Σᵢ (xᵢ ∂_yᵢ v − yᵢ ∂_xᵢ v).
+        # This is the per-walker "chirality" used as the order parameter for
+        # cavity-induced T-breaking.  Only needs ∇v at one extra grad call.
+        def lz_one(R, q_c, p_flat):
+            r_flat = R.reshape(-1)
+            grad_v = jax.grad(
+                lambda rf: phase_one(rf, q_c, p_flat),
+            )(r_flat)
+            gv = grad_v.reshape(nelec, dim)
+            return jnp.sum(R[:, 0] * gv[:, 1] - R[:, 1] * gv[:, 0])
+
+        lz_batch = jax.vmap(lz_one, in_axes=(0, 0, None))
+
         @jax.jit
         def eval_step(carry, _):
             rng, R, q_c, step_R, step_q, params_flat = carry
@@ -1330,18 +1738,91 @@ class _QEDL5Optimizer:
             q_c, acc_q = qc_move_batch(keys, R, q_c, step_q, params_flat)
             ar_q = jnp.mean(acc_q).astype(jnp.float64)
             step_q = _adapt_step_size(step_q, ar_q)
-            # E_loc + Ewald + reductions
+            # E_loc + Ewald + V_ext + reductions
             p_pytree = unravel(params_flat)
             re_no_vee, e_im = eloc_batched(R, q_c, p_pytree)
-            V_ee = ewald_batched(R)
-            e_re = re_no_vee + V_ee
+            V_ee = ewald_batched(R) if include_vee else jnp.zeros(num_walkers)
+            V_ext = vext_batched(R)
+            e_re = re_no_vee + V_ee + V_ext
             e_re_mean = jnp.mean(e_re)
             e_im_mean = jnp.mean(e_im)
             qc_sq_mean = jnp.mean(q_c * q_c)
+            # Chirality order parameter
+            lz_walker = lz_batch(R, q_c, params_flat)
+            lz_mean = jnp.mean(lz_walker)
+            lz_sq_mean = jnp.mean(lz_walker * lz_walker)
             new_carry = (rng, R, q_c, step_R, step_q, params_flat)
-            return new_carry, (e_re_mean, e_im_mean, qc_sq_mean)
+            return new_carry, (
+                e_re_mean, e_im_mean, qc_sq_mean, lz_mean, lz_sq_mean,
+            )
 
         return eval_step
+
+    def _build_mcmc_only_step(self, num_walkers):
+        """Jit-fused 1-step MCMC (no E_loc / Ewald).
+
+        carry  := (rng, R, q_c, step_R, step_q, params_flat)
+        output := None
+
+        Same as ``_build_fused_eval_step`` minus the eloc + Ewald
+        computation.  Used by S(k) accumulation (and any other
+        observable that needs samples but not energy).  Halves the
+        per-step cost vs eval_step.
+        """
+        log_psi_l5_flat = self.l5["log_psi_l5_flat"]
+        lattice = self.lattice
+
+        def log_mag_one(r_flat, q_c, p_flat):
+            return log_psi_l5_flat(r_flat, q_c, p_flat)[0]
+
+        def R_move_one(key, R, q_c, step, p_flat):
+            kp, ka = jax.random.split(key)
+            R_prop = R + step * jax.random.normal(
+                kp, R.shape, dtype=jnp.float64,
+            )
+            R_prop = wrap_to_cell(R_prop, lattice)
+            lp_old = log_mag_one(R.reshape(-1), q_c, p_flat)
+            lp_new = log_mag_one(R_prop.reshape(-1), q_c, p_flat)
+            accept = jax.random.uniform(ka) < jnp.exp(
+                2.0 * (lp_new - lp_old)
+            )
+            return jnp.where(accept, R_prop, R), accept
+
+        def qc_move_one(key, R, q_c, step, p_flat):
+            kp, ka = jax.random.split(key)
+            q_prop = q_c + step * jax.random.normal(
+                kp, (), dtype=jnp.float64,
+            )
+            r_flat = R.reshape(-1)
+            lp_old = log_mag_one(r_flat, q_c, p_flat)
+            lp_new = log_mag_one(r_flat, q_prop, p_flat)
+            accept = jax.random.uniform(ka) < jnp.exp(
+                2.0 * (lp_new - lp_old)
+            )
+            return jnp.where(accept, q_prop, q_c), accept
+
+        R_move_batch = jax.vmap(R_move_one, in_axes=(0, 0, 0, None, None))
+        qc_move_batch = jax.vmap(qc_move_one, in_axes=(0, 0, 0, None, None))
+
+        @jax.jit
+        def mcmc_only_step(carry, _):
+            rng, R, q_c, step_R, step_q, params_flat = carry
+            # R move
+            rng, sub = jax.random.split(rng)
+            keys = jax.random.split(sub, num_walkers)
+            R, acc_R = R_move_batch(keys, R, q_c, step_R, params_flat)
+            ar_R = jnp.mean(acc_R).astype(jnp.float64)
+            step_R = _adapt_step_size(step_R, ar_R)
+            # qc move
+            rng, sub = jax.random.split(rng)
+            keys = jax.random.split(sub, num_walkers)
+            q_c, acc_q = qc_move_batch(keys, R, q_c, step_q, params_flat)
+            ar_q = jnp.mean(acc_q).astype(jnp.float64)
+            step_q = _adapt_step_size(step_q, ar_q)
+            new_carry = (rng, R, q_c, step_R, step_q, params_flat)
+            return new_carry, None
+
+        return mcmc_only_step
 
     def evaluate(
         self,
@@ -1355,11 +1836,20 @@ class _QEDL5Optimizer:
         mc_timestep_qc: float = 0.5,
         fname_log=None,
         verbose: int = 1,
+        init_walkers=None,
     ):
         """Non-gradient block-averaged evaluation.
 
         ``fname_log`` is opened in APPEND mode so the runner can pass
         the same file as training to keep both sections in one log.
+
+        ``init_walkers``: optional dict with keys
+        ``R, q_c, R_step_size, qc_step_size`` — if provided, use these
+        as the starting walker state instead of cold initialization.
+        Lets eval inherit already-equilibrated walkers from training,
+        which is critical at high rs where re-equilibration from
+        uniform is very slow.  Walker count must match num_walkers; if
+        the saved batch differs, we tile/truncate.
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
@@ -1372,9 +1862,32 @@ class _QEDL5Optimizer:
             params_flat = self.params_flat
 
         rng_key, init_key = jax.random.split(rng_key)
-        R, q_c = self.initialize_walkers(init_key, num_walkers)
-        R_step_size = jnp.asarray((3 * mc_timestep_R) ** 0.5, dtype=jnp.float64)
-        qc_step_size = jnp.asarray(mc_timestep_qc, dtype=jnp.float64)
+        if init_walkers is not None:
+            R = init_walkers["R"]
+            q_c = init_walkers["q_c"]
+            R_step_size = jnp.asarray(
+                init_walkers["R_step_size"], dtype=jnp.float64,
+            )
+            qc_step_size = jnp.asarray(
+                init_walkers["qc_step_size"], dtype=jnp.float64,
+            )
+            # If walker count mismatches, tile/truncate the first axis.
+            if R.shape[0] != num_walkers:
+                if R.shape[0] < num_walkers:
+                    reps = (num_walkers + R.shape[0] - 1) // R.shape[0]
+                    R = jnp.tile(R, (reps,) + (1,) * (R.ndim - 1))[:num_walkers]
+                    q_c = jnp.tile(q_c, (reps,))[:num_walkers]
+                else:
+                    R = R[:num_walkers]
+                    q_c = q_c[:num_walkers]
+            warm_start = True
+        else:
+            R, q_c = self.initialize_walkers(init_key, num_walkers)
+            R_step_size = jnp.asarray(
+                (3 * mc_timestep_R) ** 0.5, dtype=jnp.float64,
+            )
+            qc_step_size = jnp.asarray(mc_timestep_qc, dtype=jnp.float64)
+            warm_start = False
 
         # Jit-fused 1-step MCMC + eloc, used inside lax.scan for both
         # equilibration and per-block sampling.  Eliminates Python loop
@@ -1382,31 +1895,48 @@ class _QEDL5Optimizer:
         eval_step = self._build_fused_eval_step(num_walkers)
         carry = (rng_key, R, q_c, R_step_size, qc_step_size, params_flat)
 
-        # Equilibration (no metric collection)
+        # Equilibration (no metric collection).  Warm-started eval can
+        # skip most equilibration since walkers come pre-equilibrated;
+        # we still do a short pass to break correlations with training.
         n_equil = num_blocks_equil * num_steps_per_block
+        if warm_start:
+            n_equil = min(n_equil, num_steps_per_block)   # ~1 block max
+            if verbose >= 1:
+                print(
+                    f"# Eval warm-started from training walkers "
+                    f"(R.shape={R.shape}, step_R={float(R_step_size):.3f}, "
+                    f"step_q={float(qc_step_size):.3f}); "
+                    f"short equil {n_equil} steps",
+                    file=fout,
+                )
         if n_equil > 0:
             carry, _ = jax.lax.scan(eval_step, carry, None, length=n_equil)
 
         E_blocks = []
         Im_blocks = []
         qc_sq_blocks = []
+        Lz_blocks = []
+        Lz_sq_blocks = []
         timestamp_init = datetime.now()
 
         for blk in range(num_blocks):
             # Each block: scan over num_steps_per_block MCMC+eloc steps
-            carry, (re_arr, im_arr, qc_sq_arr) = jax.lax.scan(
+            carry, (re_arr, im_arr, qc_sq_arr, lz_arr, lz_sq_arr) = jax.lax.scan(
                 eval_step, carry, None, length=num_steps_per_block,
             )
             E_blocks.append(float(jnp.mean(re_arr)))
             Im_blocks.append(float(jnp.mean(im_arr)))
             qc_sq_blocks.append(float(jnp.mean(qc_sq_arr)))
+            Lz_blocks.append(float(jnp.mean(lz_arr)))
+            Lz_sq_blocks.append(float(jnp.mean(lz_sq_arr)))
 
             if verbose >= 1 and (blk + 1) % 10 == 0:
                 print(
                     f"#  block {blk + 1}/{num_blocks}  "
                     f"E/N = {E_blocks[-1] / self.nelec:+.6e}  "
                     f"Im/N = {Im_blocks[-1] / self.nelec:+.3e}  "
-                    f"<q²>={qc_sq_blocks[-1]:.4f}",
+                    f"<q²>={qc_sq_blocks[-1]:.4f}  "
+                    f"<Lz>/N={Lz_blocks[-1] / self.nelec:+.3e}",
                     file=fout,
                 )
 
@@ -1418,6 +1948,14 @@ class _QEDL5Optimizer:
         im_mean = float(jnp.mean(jnp.array(Im_blocks))) / N
         im_serr = float(jnp.std(jnp.array(Im_blocks)) / jnp.sqrt(num_blocks)) / N
         qc_sq_mean = float(jnp.mean(jnp.array(qc_sq_blocks)))
+        lz_per = float(jnp.mean(jnp.array(Lz_blocks))) / N
+        lz_per_serr = float(
+            jnp.std(jnp.array(Lz_blocks)) / jnp.sqrt(num_blocks)
+        ) / N
+        lz_sq_per = float(jnp.mean(jnp.array(Lz_sq_blocks))) / N
+        lz_sq_per_serr = float(
+            jnp.std(jnp.array(Lz_sq_blocks)) / jnp.sqrt(num_blocks)
+        ) / N
 
         elapsed = (datetime.now() - timestamp_init).total_seconds()
         if verbose >= 1:
@@ -1443,10 +1981,25 @@ class _QEDL5Optimizer:
                 f"   [Ω_eff=√(Ω²+N·λ²)={self.omega_eff:.4f}])",
                 file=fout,
             )
+            print(
+                f"<L_z>/N      = {lz_per:+.4e} ± {lz_per_serr:.2e}   "
+                f"(chirality order parameter; "
+                f"= 0 by T-symmetry at λ=0 or coupling_op='P')",
+                file=fout,
+            )
+            print(
+                f"<L_z²>/N     = {lz_sq_per:+.4e} ± {lz_sq_per_serr:.2e}   "
+                f"(per-electron angular momentum variance)",
+                file=fout,
+            )
             print(f"Total eval time: {elapsed:.2f} s", file=fout)
 
         if fname_log is not None and fname_log != "":
             fout.close()
+
+        # Final walker state — used for downstream S(k) accumulation
+        # warm-started from already-equilibrated eval walkers.
+        rng_key_out, R_out, q_c_out, R_step_out, qc_step_out, _ = carry
 
         return {
             "E_per_elec_ha": e_per,
@@ -1454,7 +2007,19 @@ class _QEDL5Optimizer:
             "Im_per_e_ha": im_mean,
             "Im_serr_per_e_ha": im_serr,
             "qc_sq_mean": qc_sq_mean,
+            "Lz_per_e": lz_per,
+            "Lz_per_e_serr": lz_per_serr,
+            "Lz_sq_per_e": lz_sq_per,
+            "Lz_sq_per_e_serr": lz_sq_per_serr,
             "E_blocks": E_blocks,
             "Im_blocks": Im_blocks,
             "qc_sq_blocks": qc_sq_blocks,
+            "Lz_blocks": Lz_blocks,
+            "Lz_sq_blocks": Lz_sq_blocks,
+            "final_walkers": {
+                "R": R_out,
+                "q_c": q_c_out,
+                "R_step_size": R_step_out,
+                "qc_step_size": qc_step_out,
+            },
         }

@@ -1,0 +1,89 @@
+# L8 V2 (Tang) cheap production run — Weber Fig 1b γ=0.5
+#
+# Settings: matches V11 ON physically (same rs, v_ext, Ω, λ, ansatz) but
+# at smaller walker count to keep wall time short:
+#   walkers: 128 (vs V11 2048)         → ~16× faster per-iter
+#   N_max: 2 (vs N_max=4 in earlier L8) → 1.67× faster
+#   iters: 30000                        → same as V11
+#   mcmc_decorr_steps: 15               → same as V11
+#   offset_floor: -5                    → easier training start
+#
+# Per-iter bench (fused JIT): 0.05 s at mcmc=5 → ~0.10 s at mcmc=15.
+# 30k iters wall: ~50 min + ~5 min eval.
+#
+# Expected:
+#   - SEM at 128 walkers ≈ 4× V11's (which was 0.007 mHa/e) → ~0.03 mHa/e
+#   - Target E_corr,el-ph ≈ -0.225 mHa/e (V11 reference)
+#   - 1σ band ~[-0.255, -0.195]; should clearly distinguish "matches V11"
+#     vs "different answer"
+#
+# Caveat: 128 walkers may stress SR (n_w << n_p ≈ 100k).  If unstable,
+# bump walkers to 256-512.
+project: l8v2_cheap_on
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  N_max: 2
+  phase_mlp_hidden: [64, 64]
+  offset_floor: -5.0
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  lr: 0.005
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 30000
+  walkers: 128
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  equil_steps: 50
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 30000
+  spring_mu: 0.0
+  spring_norm_clip: 1.0e10
+  save_every: 1000
+  use_fused_step: true
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 128
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

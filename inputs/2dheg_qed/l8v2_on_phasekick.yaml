@@ -1,0 +1,92 @@
+# L8 V2 Tang — phase-kick warmstart from vacuum chkpt.
+#
+# Architectural fix (option A from the diagnosis):
+#   The Tang trial's phase_mlp last-layer kernel used to be zero-init.
+#   That killed phase(R, n) = 0 at iter 0, which in turn killed the
+#   gradient signal for n_cond_proj — both pathways were near-zero
+#   and the only descent direction lived in the cross-derivative
+#   (invisible to SR).  Vacuum local-min.
+#
+# Fix:
+#   1. (in tang module) phase_mlp last-layer kernel is now Xavier-init,
+#      not zero.  Nonzero phase at iter 0 ⇒ bilinear coupling has a
+#      first-order gradient w.r.t. n_cond_proj from step 1.
+#   2. (in driver) optimize.kick_phase_on_warmstart=True overrides the
+#      chkpt's near-zero phase_mlp_last with the fresh Xavier values
+#      while keeping all other chkpt params (matter trunk + n_cond_proj).
+#
+# Hypothesis: with phase ≠ 0 at iter 0 and the matter trunk already
+# well-trained, SR + standard hyperparams should now find the LF basin.
+# Compare to V11's E_corr,el-ph = −0.225 mHa/e.
+#
+# Settings: vanilla SR (no SPRING), V11-matching otherwise. ~3.5h.
+project: l8v2_on_phasekick
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  N_max: 2
+  phase_mlp_hidden: [64, 64]
+  offset_floor: -5.0          # match chkpt
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  load_chkpt: runs/l8v2_on/l8v2_on.chk.npz   # warmstart
+  kick_phase_on_warmstart: true              # NEW: override phase_mlp last layer
+  lr: 0.005                   # vanilla SR (matches V11)
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 15000                # ~3.5h
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  equil_steps: 50
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 15000
+  spring_mu: 0.0              # vanilla SR (no momentum)
+  spring_norm_clip: 1.0e10    # no clip
+  save_every: 1000
+  use_fused_step: true
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

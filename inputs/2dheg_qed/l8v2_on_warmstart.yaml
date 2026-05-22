@@ -1,0 +1,88 @@
+# L8 V2 Tang — warmstart from vacuum-stuck chkpt with aggressive optimizer.
+#
+# Resume strategy:
+#   • Start from runs/l8v2_on/l8v2_on.chk.npz (vacuum local-min after 30k iters)
+#   • Apply MORE aggressive optimizer than the in-flight l8v2_on_aggressive:
+#       lr=0.05 (10× original V11; 2.5× the in-flight aggressive)
+#       mu=0.9, clip=0.1   (same SPRING recipe)
+#   • Keep offset_floor=-5 to match chkpt (chkpt params were optimized under -5)
+#   • Shorter run (iters=10000) since matter is already trained — only need
+#     photon channel to develop
+#
+# What the optimizer must do:
+#   • Grow n_cond_proj kernel from |W|_max=0.10 → ~1.0
+#   • Grow phase_mlp final-layer kernel from |W|_max=1.1e-5 → meaningful values
+#   • These two pathways together produce the LF coherent shift
+#
+# Success: ⟨n⟩ becomes nonzero mid-training; eval E_corr near V11's −0.225.
+# Failure: still stuck in vacuum → confirms the local-min is too deep for
+#          SR-with-momentum to escape without explicit LF priors.
+project: l8v2_on_warmstart
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  N_max: 2
+  phase_mlp_hidden: [64, 64]
+  offset_floor: -5.0          # match chkpt
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false
+  use_smith_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  load_chkpt: runs/l8v2_on/l8v2_on.chk.npz   # NEW — warmstart
+  lr: 0.05                    # 10× V11; 2.5× in-flight aggressive
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 10000                # shorter — matter already trained
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  equil_steps: 50
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 10000
+  spring_mu: 0.9              # SPRING momentum
+  spring_norm_clip: 0.1       # F-norm clip
+  save_every: 500
+  use_fused_step: true
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42
