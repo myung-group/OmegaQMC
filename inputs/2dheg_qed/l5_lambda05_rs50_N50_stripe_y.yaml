@@ -1,0 +1,86 @@
+# Phase 5c finite-λ run: L5 at rs=50 N=50 λ=0.5.
+# Same settings as l5_lambda0_rs50_N50 (the λ=0 control), only λ changes.
+# Strong coupling — much larger than λ=0.05.  We expect:
+#   • ⟨Im E_loc⟩/N → 0 (Hermiticity)
+#   • ⟨q_c²⟩ tightens to 1/(2·Ω_eff), Ω_eff = √(0.01 + 50·0.25) = √12.51 ≈ 3.537
+#     → expected ⟨q²⟩ ≈ 1/(2·3.537) ≈ 0.141
+#   • Energy shift dominated by dressed photon ZPE:
+#     ΔE/N = (Ω_eff − Ω)/(2·N_e) = (3.537 − 0.1)/100 ≈ 34.4 mHa per electron
+#     → predicted E_L5/N ≈ E_bare + 34.4 mHa ≈ −19.46 + 34.4 ≈ +14.9 mHa
+#   • S(k) and density should show whether the cavity destabilises the WC
+
+project: l5_lambda05_rs50_N50_stripe_y
+
+system:
+  n_up: 25
+  n_down: 25
+  rs: 50.0
+  dim: 2
+
+cavity:
+  omega: 0.1
+  lambda: 0.5                  # strong coupling
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.10
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.10
+  crystal_lattice_type: stripe_y
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 2000
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 500
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 1024
+  sample_steps: 200
+  decorr_steps: 5
+  density_2d: true
+  density_n_bins: 64
+
+seed: 42

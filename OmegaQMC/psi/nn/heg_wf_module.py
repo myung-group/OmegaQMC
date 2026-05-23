@@ -328,6 +328,73 @@ class SmithDeepJastrow(nnx.Module):
         return z.squeeze(-1).sum()
 
 
+class KappaCoeffDelta(nnx.Module):
+    """Small κ-conditioning MLP that outputs a Δcoeff complex tensor.
+
+    For κ-aware TABC training: ``coeff_eff(κ) = coeff_base + Δ(κ)``.
+    Final layer is zero-initialised so the κ=0 behaviour collapses to
+    the un-conditioned baseline (and warm-starting from a Γ-trained
+    chkpt with this module inserted is non-disruptive at iter 0).
+
+    Args:
+        dim_kappa: 2 for 2D HEG, 3 for 3D.
+        n_det, n_orb_spin, n_pw: shape of the per-spin coeff tensor.
+        hidden: tuple of hidden widths; default a single 32-unit hidden.
+        init_scale_last: stddev for non-final layers (Xavier-like);
+            final layer is zero-init.
+    """
+
+    def __init__(
+        self,
+        *,
+        dim_kappa: int,
+        n_det: int,
+        n_orb_spin: int,
+        n_pw: int,
+        hidden=(32,),
+        rngs: nnx.Rngs,
+    ):
+        self.dim_kappa = int(dim_kappa)
+        self.n_det = int(n_det)
+        self.n_orb_spin = int(n_orb_spin)
+        self.n_pw = int(n_pw)
+        out_size = 2 * self.n_det * self.n_orb_spin * self.n_pw
+        sizes = (self.dim_kappa,) + tuple(int(h) for h in hidden) + (out_size,)
+        # Manual Linear chain (Xavier non-final, zero-init last).
+        keys = jax.random.split(rngs.params(), len(sizes) - 1)
+        Ws, bs = [], []
+        for i, (n_in, n_out) in enumerate(zip(sizes[:-1], sizes[1:])):
+            is_last = (i == len(sizes) - 2)
+            if is_last:
+                W = jnp.zeros((n_in, n_out), dtype=jnp.float64)
+            else:
+                stddev = jnp.sqrt(2.0 / (n_in + n_out))
+                W = stddev * jax.random.normal(
+                    keys[i], (n_in, n_out), dtype=jnp.float64,
+                )
+            b = jnp.zeros((n_out,), dtype=jnp.float64)
+            Ws.append(nnx.Param(W))
+            bs.append(nnx.Param(b))
+        # Store as attributes so nnx flattens them (must be unique names).
+        for i, (W, b) in enumerate(zip(Ws, bs)):
+            setattr(self, f"W{i}", W)
+            setattr(self, f"b{i}", b)
+        self._n_layers = len(Ws)
+
+    def __call__(self, kappa):
+        """kappa: (dim_kappa,) real -> (n_det, n_orb_spin, n_pw) complex."""
+        x = jnp.asarray(kappa, dtype=jnp.float64)
+        for i in range(self._n_layers):
+            W = param_value(getattr(self, f"W{i}"))
+            b = param_value(getattr(self, f"b{i}"))
+            x = x @ W + b
+            if i < self._n_layers - 1:
+                x = jnp.tanh(x)
+        # (out_size,) → (n_det, n_orb_spin, n_pw, 2) → complex
+        x = x.reshape((self.n_det, self.n_orb_spin, self.n_pw, 2))
+        return x[..., 0] + 1j * x[..., 1]
+
+
 def apply_heg_backflow_mult(orb, fs):
     """Multiplicative backflow without the molecular nuclear cutoff.
 
@@ -788,6 +855,16 @@ def build_heg_psiformer_wf(
     n_down = config.n_down
     n_det = config.n_det
     L = float(config.L)
+    # For rectangular cells, config.L_y is set and L_pass is a tuple
+    # passed downstream; rs is derived from the full cell area.
+    L_y_attr = getattr(config, 'L_y', None)
+    if L_y_attr is not None:
+        L_y_val = float(L_y_attr)
+        L_pass = (L, L_y_val)
+        cell_area = L * L_y_val
+    else:
+        L_pass = L
+        cell_area = L * L
     n_elec = n_up + n_down
     emb_dim = config.embedding_dim
     tp_dim = config.two_particle_stream_dim
@@ -821,7 +898,7 @@ def build_heg_psiformer_wf(
         else:
             pw_basis_size = max(n_up, n_down, 1) + int(config.n_virt_pw)
         envelope = PlaneWaveEnvelope(
-            n_up=n_up, n_down=n_down, n_det=n_det, L=L,
+            n_up=n_up, n_down=n_down, n_det=n_det, L=L_pass,
             init_pw_count=pw_basis_size,
             det_jitter=config.det_jitter,
             dim=dim,
@@ -835,11 +912,12 @@ def build_heg_psiformer_wf(
                 "implemented in 2D.",
             )
         from .env_localized_2d import GaussianLocalizedEnvelope2D
-        # Recover r_s from the cell geometry: pi * rs^2 = A/N -> rs.
-        rs = L / np.sqrt(np.pi * (n_up + n_down))
+        # Recover r_s from the cell AREA (handles rectangular cells too):
+        # pi * rs^2 = A/N -> rs.
+        rs = np.sqrt(cell_area / (np.pi * (n_up + n_down)))
         envelope = GaussianLocalizedEnvelope2D(
             n_up=n_up, n_down=n_down, n_det=n_det,
-            rs=float(rs), L=L,
+            rs=float(rs), L=L_pass,
             sigma_init=float(getattr(
                 config, 'crystal_sigma_init', 0.25,
             )),
@@ -848,6 +926,15 @@ def build_heg_psiformer_wf(
             )),
             det_jitter=float(getattr(
                 config, 'crystal_det_jitter', 0.0,
+            )),
+            lattice_type=str(getattr(
+                config, 'crystal_lattice_type', 'triangular',
+            )),
+            anisotropic_sigma=bool(getattr(
+                config, 'crystal_anisotropic_sigma', False,
+            )),
+            site_offset=float(getattr(
+                config, 'crystal_site_offset', 0.5,
             )),
         )
     else:
@@ -1197,6 +1284,8 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         coord_backflow=None,
         smith_deep_jastrow=None,
         full_determinant: bool = False,
+        kappa_coeff_delta_up=None,
+        kappa_coeff_delta_dn=None,
     ):
         self.n_up = n_up
         self.n_down = n_down
@@ -1210,6 +1299,10 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
         self.coord_backflow = coord_backflow
         self.smith_deep_jastrow = smith_deep_jastrow
         self.full_determinant = bool(full_determinant)
+        # κ-aware: optional MLPs that output Δcoeff(κ) for up/down.  When
+        # None, behaves identically to the non-κ-aware path.
+        self.kappa_coeff_delta_up = kappa_coeff_delta_up
+        self.kappa_coeff_delta_dn = kappa_coeff_delta_dn
 
     @property
     def _spin_slices(self):
@@ -1218,7 +1311,15 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
             slice(self.n_up, None),
         )
 
-    def __call__(self, r: jax.Array) -> jax.Array:
+    def __call__(self, r: jax.Array, kappa=None) -> jax.Array:
+        """Evaluate complex log ψ.
+
+        If ``kappa`` (shape ``(dim,)``) is given, the envelope is
+        evaluated with that runtime κ overriding the construct-time
+        value; if the κ-coeff-delta MLPs are attached, they also
+        apply a Δcoeff(κ) correction on top of the stored base
+        coefficients.  This is the κ-aware TABC mode.
+        """
         pc = _make_heg_phys_conf(r)
 
         # GNN + backflow (and optional deep jastrow) — real-valued.
@@ -1231,10 +1332,31 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
             r_bf = r + self.coord_backflow(emb)
             pc_bf = _make_heg_phys_conf(r_bf)
         else:
+            r_bf = r
             pc_bf = pc
 
+        # κ-aware coefficient correction (if MLPs attached).
+        coeff_up_ovr = None
+        coeff_dn_ovr = None
+        if kappa is not None and self.kappa_coeff_delta_up is not None:
+            delta_up = self.kappa_coeff_delta_up(kappa)
+            coeff_up_ovr = (
+                param_value(self.envelope.coeff_up) + delta_up
+            )
+        if (kappa is not None and self.kappa_coeff_delta_dn is not None
+                and self.n_down > 0):
+            delta_dn = self.kappa_coeff_delta_dn(kappa)
+            coeff_dn_ovr = (
+                param_value(self.envelope.coeff_dn) + delta_dn
+            )
+
         # Envelope orbitals — complex.
-        orb = self.envelope(pc_bf)  # complex (n_det, n_elec, n_orb_total)
+        orb = self.envelope(
+            pc_bf,
+            kappa_runtime=kappa,
+            coeff_up_override=coeff_up_ovr,
+            coeff_dn_override=coeff_dn_ovr,
+        )  # complex (n_det, n_elec, n_orb_total)
 
         if self.full_determinant:
             orb_up = orb[:, :self.n_up]
@@ -1288,6 +1410,13 @@ class HEGPsiFormerWaveFunctionComplex(nnx.Module):
             )
         if jastrow is not None:
             log_psi_complex = log_psi_complex + jastrow
+
+        # Smith 2024 deep Jastrow — same as real Γ-point variant.
+        # Missing this was the 48 mHa κ=0-vs-Γ gap on V11 chkpts.
+        if (getattr(self, 'smith_deep_jastrow', None) is not None
+                and emb is not None):
+            log_psi_complex = log_psi_complex + self.smith_deep_jastrow(emb, r_bf)
+
         if self.pair_jastrow is not None:
             log_psi_complex = log_psi_complex + self.pair_jastrow(
                 r, self.lattice,
@@ -1301,6 +1430,8 @@ def build_heg_psiformer_wf_complex(
     rngs: nnx.Rngs,
     *,
     kappa=None,
+    kappa_aware: bool = False,
+    kappa_mlp_hidden=(32,),
 ):
     """Assemble a complex (twist-aware) PsiFormer HEG wavefunction.
 
@@ -1335,11 +1466,58 @@ def build_heg_psiformer_wf_complex(
     # ``transfer_trained_params`` can copy everything except the
     # envelope block.
     base = build_heg_psiformer_wf(config, rngs)
+    # Match the real envelope's PW basis size so the κ→0 limit recovers
+    # the trained Γ wavefunction.  For full_determinant=True this is
+    # n_up + n_down + n_virt_pw; otherwise max(n_up, n_down) + n_virt_pw.
+    if getattr(config, 'full_determinant', False):
+        pw_basis_size = (config.n_up + config.n_down) + int(
+            getattr(config, 'n_virt_pw', 0)
+        )
+    else:
+        pw_basis_size = max(config.n_up, config.n_down, 1) + int(
+            getattr(config, 'n_virt_pw', 0)
+        )
+    # For TABC: bump complex init to cover the antipodal closure of the
+    # real basis so cos/sin coefficients can be transferred losslessly at
+    # κ=0.  Real basis stores +k representatives; complex basis needs both
+    # +k and -k.  Round to the next complete shell so partial-shell
+    # boundary asymmetries cancel.
+    from .env_periodic import enumerate_real_pw_basis_2d
+    _real_for_size = enumerate_real_pw_basis_2d(pw_basis_size, float(config.L)) if dim == 2 else None
+    if _real_for_size is not None:
+        import numpy as _np
+        _kv = _np.asarray(_real_for_size.kvecs)
+        _n_zero = int(_np.sum(_np.linalg.norm(_kv, axis=1) < 1e-9))
+        _antipodal_closure = _n_zero + 2 * (_kv.shape[0] - _n_zero)
+        _CLOSED_2D = [1, 5, 9, 13, 21, 25, 29, 37, 45, 57, 61, 81, 89,
+                      97, 109, 113, 121, 129, 137, 145, 149, 161, 169]
+        _shell = next((c for c in _CLOSED_2D if c >= _antipodal_closure),
+                      max(_CLOSED_2D))
+        complex_init_pw = max(pw_basis_size, _shell)
+    else:
+        complex_init_pw = pw_basis_size
     complex_envelope = ComplexPlaneWaveEnvelope(
         n_up=config.n_up, n_down=config.n_down,
         n_det=config.n_det, L=float(config.L),
         kappa=kappa, dim=dim,
+        init_pw_count=complex_init_pw,
+        full_determinant=bool(getattr(config, 'full_determinant', False)),
     )
+    # κ-aware coefficient delta MLPs (zero-init last layer → no behavior
+    # change at iter 0 vs the non-κ-aware path).
+    kappa_delta_up = None
+    kappa_delta_dn = None
+    if kappa_aware:
+        kappa_delta_up = KappaCoeffDelta(
+            dim_kappa=dim, n_det=config.n_det, n_orb_spin=config.n_up,
+            n_pw=complex_init_pw, hidden=tuple(kappa_mlp_hidden), rngs=rngs,
+        )
+        if config.n_down > 0:
+            kappa_delta_dn = KappaCoeffDelta(
+                dim_kappa=dim, n_det=config.n_det,
+                n_orb_spin=config.n_down, n_pw=complex_init_pw,
+                hidden=tuple(kappa_mlp_hidden), rngs=rngs,
+            )
     return HEGPsiFormerWaveFunctionComplex(
         n_up=config.n_up, n_down=config.n_down,
         n_det=config.n_det, L=float(config.L),
@@ -1348,5 +1526,14 @@ def build_heg_psiformer_wf_complex(
         lattice=lattice,
         cusp_electrons=base.cusp_electrons,
         pair_jastrow=base.pair_jastrow,
+        # Forward Smith deep Jastrow + coord backflow from base so
+        # TABC eval includes ALL the trained NN corrections, not just
+        # the GNN/envelope.  Without these, V11 chkpts (which use
+        # Smith DJ) silently lose ~6k params during transfer and the
+        # κ=0 eval gives a much worse energy than Γ.
+        smith_deep_jastrow=getattr(base, 'smith_deep_jastrow', None),
+        coord_backflow=getattr(base, 'coord_backflow', None),
         full_determinant=config.full_determinant,
+        kappa_coeff_delta_up=kappa_delta_up,
+        kappa_coeff_delta_dn=kappa_delta_dn,
     )

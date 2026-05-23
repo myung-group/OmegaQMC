@@ -690,6 +690,13 @@ def _run(cfg, project, run_dir, prefix):
     if trained_params is not None:
         driver.params = trained_params
 
+    # Warm-start eval from training's final walker state — critical at
+    # high rs where re-equilibration from uniform is very slow.
+    eval_init_walkers = (
+        opt_result.get('final_walkers')
+        if 'opt_result' in dir() and opt_result is not None
+        else None
+    )
     result = driver(
         eval_key,
         num_walkers=eval_walkers,
@@ -698,6 +705,7 @@ def _run(cfg, project, run_dir, prefix):
         num_blocks_equil=eval_equil_blocks,
         mc_timestep=mc_timestep,
         verbose=1,
+        init_walkers=eval_init_walkers,
     )
     e_vmc_ha = result['E_per_elec_ha']
     e_serr_ha = result['E_serr'] / N
@@ -767,13 +775,44 @@ def _run(cfg, project, run_dir, prefix):
             decorr_obs = int(obs_cfg.get('decorr_steps', 5))
 
             rng_obs = jax.random.fold_in(eval_key, 999)
-            walkers_obs = driver.initialize_walkers(
-                rng_obs, n_walkers_obs,
+            # Warm-start S(k) MCMC from training's final walker state
+            # — at high rs (e.g. WC at rs=50), uniform-init walkers
+            # take many thousands of MCMC steps to settle on the
+            # crystal manifold.  If unavailable, fall back to cold init.
+            warm_obs = (
+                opt_result.get('final_walkers')
+                if 'opt_result' in dir() and opt_result is not None
+                else None
             )
-            step_size_obs = (3 * mc_timestep) ** 0.5
+            if warm_obs is not None:
+                walkers_obs = jnp.asarray(warm_obs['R'])
+                if walkers_obs.shape[0] != n_walkers_obs:
+                    if walkers_obs.shape[0] < n_walkers_obs:
+                        reps = (
+                            (n_walkers_obs + walkers_obs.shape[0] - 1)
+                            // walkers_obs.shape[0]
+                        )
+                        walkers_obs = jnp.tile(
+                            walkers_obs,
+                            (reps,) + (1,) * (walkers_obs.ndim - 1),
+                        )[:n_walkers_obs]
+                    else:
+                        walkers_obs = walkers_obs[:n_walkers_obs]
+                step_size_obs = float(warm_obs.get(
+                    'step_size', (3 * mc_timestep) ** 0.5,
+                ))
+                n_equil_obs_actual = min(n_equil_obs, 50)  # short decorr
+                print(f"  [obs] warm-started from training walkers "
+                      f"(short decorr {n_equil_obs_actual} steps)")
+            else:
+                walkers_obs = driver.initialize_walkers(
+                    rng_obs, n_walkers_obs,
+                )
+                step_size_obs = (3 * mc_timestep) ** 0.5
+                n_equil_obs_actual = n_equil_obs
 
             # Equilibrate on |psi|^2 with trained params.
-            for _ in range(n_equil_obs):
+            for _ in range(n_equil_obs_actual):
                 rng_obs, sk_key = jax.random.split(rng_obs)
                 keys = jax.random.split(sk_key, n_walkers_obs)
                 walkers_obs, _ = driver._metropolis_move_allw(
@@ -788,6 +827,11 @@ def _run(cfg, project, run_dir, prefix):
                 ))
                 for name, kg in k_grids.items()
             }
+            # 2D density-map accumulation (parallel to S(k) loop)
+            do_density = bool(obs_cfg.get('density_2d', True))
+            n_bins = int(obs_cfg.get('density_n_bins', 64))
+            if do_density and dim == 2:
+                density_hist = np.zeros((n_bins, n_bins), dtype=np.float64)
             for _ in range(n_sample_obs):
                 for _ in range(decorr_obs):
                     rng_obs, sk_key = jax.random.split(rng_obs)
@@ -800,6 +844,30 @@ def _run(cfg, project, run_dir, prefix):
                     sk_blocks[name].append(
                         np.asarray(jnp.mean(sk_per_walker, axis=0)),
                     )
+                if do_density and dim == 2:
+                    pts = np.asarray(walkers_obs).reshape(-1, 2)
+                    pts = np.mod(pts, L)
+                    h2d, _, _ = np.histogram2d(
+                        pts[:, 0], pts[:, 1],
+                        bins=n_bins, range=[[0.0, L], [0.0, L]],
+                    )
+                    density_hist += h2d
+
+            # Save 2D density as npz for later rendering
+            if do_density and dim == 2:
+                bin_area = (L / n_bins) ** 2
+                n_configs = n_sample_obs * n_walkers_obs
+                rho = density_hist / n_configs / bin_area
+                rho_avg = float(N) / (L * L)
+                np.savez(
+                    Path(run_dir) / 'density_2d.npz',
+                    rho_over_rho_avg=rho / rho_avg,
+                    n_bins=n_bins, L=L, n_samples=n_sample_obs,
+                )
+                print(
+                    f"  [density] saved {run_dir}/density_2d.npz  "
+                    f"(max ρ/ρ_avg = {(rho/rho_avg).max():.2f})"
+                )
 
             summary['observables'] = {}
             for name, blocks in sk_blocks.items():

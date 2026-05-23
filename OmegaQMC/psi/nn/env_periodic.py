@@ -780,6 +780,8 @@ class ComplexPlaneWaveEnvelope(nnx.Module):
         *,
         kappa=None,
         dim: int = 3,
+        init_pw_count: Optional[int] = None,
+        full_determinant: bool = False,
     ):
         if kappa is None:
             kappa = (0.0,) * dim
@@ -788,8 +790,14 @@ class ComplexPlaneWaveEnvelope(nnx.Module):
         self.n_det = n_det
         self.L = float(L)
         self.dim = dim
+        self.full_determinant = bool(full_determinant)
 
-        n_pw = max(n_up, n_down, 1)
+        # init_pw_count: defaults to closed-shell size.  TABC driver
+        # passes the full_determinant-equivalent size (n_up+n_down)
+        # to match the real Γ envelope's basis exactly.
+        if init_pw_count is None:
+            init_pw_count = max(n_up, n_down, 1)
+        n_pw = int(init_pw_count)
         if dim == 3:
             basis = enumerate_complex_pw_basis(n_pw, L, kappa=kappa)
         elif dim == 2:
@@ -800,6 +808,9 @@ class ComplexPlaneWaveEnvelope(nnx.Module):
         self.kvecs = nnx.data(basis.kvecs)
         self.k_sq = nnx.data(basis.k_sq)
         self.kappa_vec = nnx.data(basis.kappa)
+        # Store integer n-vectors so we can rebuild kvecs at runtime under
+        # κ-aware mode: kvecs_runtime = (n_ints + kappa_runtime) * (2π/L)
+        self.n_ints = nnx.data(basis.n_ints)
         self._has_down = n_down > 0
 
         # Identity-init complex coefficients.
@@ -818,32 +829,78 @@ class ComplexPlaneWaveEnvelope(nnx.Module):
                 coeff_dn_init[:, i, i] = 1.0 + 0.0j
             self.coeff_dn = nnx.Param(jnp.asarray(coeff_dn_init))
 
-    def __call__(self, phys_conf, nuc_params=None):
+    def __call__(self, phys_conf, nuc_params=None,
+                 kappa_runtime=None,
+                 coeff_up_override=None,
+                 coeff_dn_override=None):
         """Evaluate the complex envelope at ``phys_conf.r``.
 
         Returns a complex ``(n_det, n_elec, n_up + n_down)`` tensor;
         the first ``n_up`` columns are the up-spin orbital basis and
         the remaining columns are the down-spin basis.
+
+        Args:
+            kappa_runtime: Optional (dim,) JAX array.  If given,
+                replaces the construct-time κ via
+                ``kvecs = (n_ints + κ_rt) · 2π/L`` — enables κ-aware
+                ansätze where κ is sampled per training step.
+            coeff_up_override / coeff_dn_override: Optional
+                ``(n_det, n_orb_spin, n_pw)`` complex tensors.  If
+                given, replace the stored coefficients — used by the
+                κ-aware wf to inject a ΔMLP(κ) correction.
         """
         del nuc_params
-        r = phys_conf.r  # (n_elec, 3), real
+        r = phys_conf.r  # (n_elec, dim), real
+
+        if kappa_runtime is None:
+            kvecs_eff = self.kvecs
+        else:
+            kvecs_eff = (
+                jnp.asarray(self.n_ints, dtype=jnp.float64)
+                + jnp.asarray(kappa_runtime)[None, :]
+            ) * (2.0 * jnp.pi / self.L)
 
         # k·r for every walker electron and every k-vector.
-        kr = r @ self.kvecs.T  # (n_elec, n_pw) real
-        exp_ikr = jnp.exp(1j * kr)  # (n_elec, n_pw) complex
+        kr = r @ kvecs_eff.T            # (n_elec, n_pw) real
+        exp_ikr = jnp.exp(1j * kr)      # (n_elec, n_pw) complex
 
-        # Up-spin orbitals: only evaluate on the up electrons.
+        c_up = (coeff_up_override if coeff_up_override is not None
+                else param_value(self.coeff_up))
+        if self._has_down:
+            c_dn = (coeff_dn_override if coeff_dn_override is not None
+                    else param_value(self.coeff_dn))
+
+        if self.full_determinant:
+            # Full-det: ALL electrons evaluated on ALL orbital functions
+            # (no block-diagonal pattern).  Matches the real envelope's
+            # full_determinant=True semantics where the Slater matrix is
+            # (n_elec, n_up+n_down) with up- and down-channel orbitals
+            # at disjoint k-shells but every electron sees both.
+            orb_up_all = jnp.einsum(
+                'dim,em->dei', c_up, exp_ikr,
+            )  # (n_det, n_elec, n_up)
+            if self._has_down:
+                orb_dn_all = jnp.einsum(
+                    'dim,em->dei', c_dn, exp_ikr,
+                )  # (n_det, n_elec, n_dn)
+            else:
+                orb_dn_all = jnp.zeros(
+                    (self.n_det, exp_ikr.shape[0], 0),
+                    dtype=orb_up_all.dtype,
+                )
+            return jnp.concatenate([orb_up_all, orb_dn_all], axis=-1)
+
+        # Block-diagonal (full_determinant=False): up orbitals only on
+        # up electrons, down orbitals only on down electrons.
         exp_up = exp_ikr[:self.n_up]  # (n_up, n_pw)
         orb_up = jnp.einsum(
-            'dim,em->dei',
-            param_value(self.coeff_up), exp_up,
+            'dim,em->dei', c_up, exp_up,
         )  # (n_det, n_up, n_up)
 
         if self._has_down:
             exp_dn = exp_ikr[self.n_up:]  # (n_dn, n_pw)
             orb_dn = jnp.einsum(
-                'dim,em->dei',
-                param_value(self.coeff_dn), exp_dn,
+                'dim,em->dei', c_dn, exp_dn,
             )  # (n_det, n_dn, n_dn)
         else:
             orb_dn = jnp.zeros(

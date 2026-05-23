@@ -1,0 +1,81 @@
+# Resume bare HEG plane_wave deep training from saved chkpt;
+# skip training; only re-run eval + S(k) + density_2d.
+
+project: bare_rs50_N50_planewave_deep_eval
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 64
+  layers: 2
+  two_particle_dim: 16
+  n_det: 4
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  use_backflow: true
+  use_coord_backflow: false
+  pair_jastrow: false
+  deep_jastrow: true
+  use_smith_deep_jastrow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 5
+  det_jitter: 0.04
+  walker_init: gas
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  skip: true                  # skip training
+  load_chkpt: runs/bare_rs50_N50_planewave_deep/bare_rs50_N50_planewave_deep.chk.h5
+  iters: 0
+  walkers: 1024
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 1
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 15
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 0
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 1024
+  equil_steps: 200
+  sample_steps: 200
+  decorr_steps: 5
+  density_2d: true
+  density_n_bins: 64
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+seed: 3366247121

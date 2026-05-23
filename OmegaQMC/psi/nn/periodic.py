@@ -71,6 +71,19 @@ def make_square_lattice(L: float) -> PeriodicLattice:
     return PeriodicLattice(A=A, A_inv=A_inv, metric=metric, volume=volume)
 
 
+def make_rectangular_lattice(L_x: float, L_y: float) -> PeriodicLattice:
+    """Build a rectangular 2D :class:`PeriodicLattice` with sides
+    ``L_x`` along x̂ and ``L_y`` along ŷ.
+
+    Reduces to :func:`make_square_lattice` when ``L_x == L_y``.
+    """
+    A = jnp.diag(jnp.asarray([L_x, L_y], dtype=jnp.float64))
+    A_inv = jnp.diag(jnp.asarray([1.0 / L_x, 1.0 / L_y], dtype=jnp.float64))
+    metric = jnp.diag(jnp.asarray([L_x * L_x, L_y * L_y], dtype=jnp.float64))
+    volume = jnp.asarray(L_x * L_y)
+    return PeriodicLattice(A=A, A_inv=A_inv, metric=metric, volume=volume)
+
+
 def make_lattice(A: jax.Array) -> PeriodicLattice:
     """Build a :class:`PeriodicLattice` from a primitive-vector matrix.
 

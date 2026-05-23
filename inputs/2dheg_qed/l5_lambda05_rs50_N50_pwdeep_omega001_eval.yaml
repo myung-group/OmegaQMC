@@ -1,0 +1,76 @@
+# Resume from L5 Ω=0.001 λ=0.5 deep PW chkpt; skip training; only do
+# eval + S(k) + density.  Uses 256 walkers throughout to avoid OOM.
+
+project: l5_lambda05_rs50_N50_pwdeep_omega001_eval
+
+system:
+  n_up: 25
+  n_down: 25
+  rs: 50.0
+  dim: 2
+
+cavity:
+  omega: 0.001
+  lambda: 0.5
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 2
+  two_particle_stream_dim: 16
+  n_det: 4
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 5
+  use_ghost_atom: false
+  use_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  load_chkpt: runs/l5_lambda05_rs50_N50_pwdeep_omega001/l5_lambda05_rs50_N50_pwdeep_omega001.chk.npz
+  skip_training: true
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 0
+  walkers: 256
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.1
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 1
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 0
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 256                  # reduced from 1024 (OOM)
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 256
+  sample_steps: 200
+  decorr_steps: 5
+  density_2d: true
+  density_n_bins: 64
+
+seed: 42

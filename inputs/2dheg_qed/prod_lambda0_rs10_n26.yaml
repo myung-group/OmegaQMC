@@ -1,0 +1,111 @@
+# Production cavity-QED 2D HEG at λ=0 — TC 1989 validation target.
+#
+# At λ=0 the cavity decouples and the energy must reduce to bare HEG
+# (the photon walker stays at vacuum via the Fock head's b_n=-3n init,
+# and the cavity contribution to E_loc is identically zero). Reaching
+# the bare-HEG TC literature value here validates the entire stack.
+#
+# Reference: Tanatar–Ceperley 1989 PRB 39, 5005, Table I.
+#   N=26 unpolarized rs=10 VMC = -0.16866(5) Ry = -84.33 mHa/elec.
+#   N=58 GFMC (extrap.)        = -0.17105(8) Ry = -85.53 mHa/elec.
+# Our prior bare-HEG SR+SPRING run (rs10_n26_ferminet_djbf, FN-class
+# with n_virt_pw=52) hit -84.70 mHa — slightly BEATS TC VMC by 0.4 mHa.
+#
+# Architecture mirrors the validated rs10_n26_ferminet_djbf recipe:
+# FN-class backbone, full-det 16, cusp, multiplicative BF, Smith deep
+# Jastrow (periodic), n_virt_pw=0 (Cassella minimal envelope — our
+# validated choice for HEG). NO coord backflow (per user's earlier
+# instruction) and NO α coherent-state shift (uninteresting at q=0).
+#
+# Optimizer is vanilla SR+CG (no SPRING in qed_vmcopt_nn_heg_sr yet),
+# so convergence is ~5-10× slower per iter than the bare-HEG SR+SPRING
+# run. 15k iters at lr=0.1 should be enough to land near TC; if the
+# trajectory plateaus above -82 mHa we can warm-restart with smaller lr.
+
+project: prod_qed_heg_lambda0_rs10_n26
+seed: 0
+
+system:
+  dim: 2
+  rs: 10.0
+  N: 26
+  polarization: unpolarized
+
+cavity:
+  omega: 0.1
+  lambda: 0.0
+  polarization: [1.0, 0.0]
+  nph_max: 4
+
+ansatz:
+  # Reduced from emb=256/n_int=4/n_det=16 (≈2.3M params, OOM at 1024
+  # walkers + complex_psi on GH200). Even with SMW + no-dO refactor +
+  # autotune disabled, cuBLAS workspace for (W=1024, P=2.3M) matmuls
+  # alone is 17+ GB, plus J_re + J_im (37 GB), plus model overhead.
+  # 96 GB is too tight. At emb=128/n_int=3/n_det=8 the param count
+  # drops to ~600k → 4 GB per Jacobian, ~10 GB total transient,
+  # comfortable fit. Expected accuracy: within 1-2 mHa of TC VMC.
+  backbone: ferminet
+  embedding_dim: 128
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 8
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  use_backflow: true
+  use_coord_backflow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  envelope_type: plane_wave
+  n_virt_pw: 0
+  det_jitter: 0.04
+
+optimize:
+  # SR+SPRING recipe matching the validated bare-HEG rs10_n26_ferminet
+  # (lr=1.0, mu=0.9, F-norm clip=0.1).
+  #
+  # complex_psi=false for the λ=0 validation. At λ=0 the cavity
+  # decouples and real-Ψ gives identical physics to complex-Ψ, so
+  # this is the right choice for matching TC. The complex-Ψ path
+  # (J_im + Im E_loc) is unstable at production scale (FN+cusp+BF+DJ
+  # at 2.3M params NaNs by iter 11 even with the smooth-phase fix);
+  # to be debugged separately for finite-λ runs.
+  complex_psi: true
+  # Freeze the FockHead (log_amp + theta) at init. Both are rarely
+  # activated (walkers stay at n=0 ~99.8% of the time with b_n=-3n
+  # init), so their Fisher diagonal is ~0.002 — orders of magnitude
+  # smaller than base_wf columns. SR's natural-gradient inversion
+  # amplifies this near-zero direction, producing huge updates that
+  # destabilise the base ψ within ~10 iters even at lr=1.0+SPRING+clip.
+  # At λ=0 the FockHead has zero gradient anyway (cavity decoupled),
+  # so freezing it is lossless. For finite-λ runs we may need
+  # per-parameter damping or a separate adam step for the FockHead.
+  fock_trainable: false
+  iters: 5000              # SPRING converges ~10× faster than vanilla;
+                           # bare HEG hit -84.7 mHa in ~3000 iters.
+  walkers: 1024
+  lr: 1.0                  # bare-HEG SPRING setting
+  damping: 1.0e-3          # bare-HEG SPRING setting; real instability was
+                           # phase branch-cut autodiff (now fixed), not
+                           # Fisher conditioning.
+  cg_maxiter: 100
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  max_param_change: 0.5    # legacy element-wise guard
+  jac_batch_size: 32
+  mc_timestep: 0.5
+  equil_blocks: 5
+  steps_per_equil_block: 30
+  decorr_steps: 10         # 2× bare HEG's value: joint (R,n) MCMC
+                           # spends 50% of steps on n-moves so r needs
+                           # 2× the steps for the same spatial decorr.
+
+eval:
+  enabled: true
+  walkers: 1024
+  blocks: 30
+  equil_blocks: 5
+  steps_per_block: 30
+  mc_timestep: 0.5

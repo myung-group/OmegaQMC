@@ -90,6 +90,170 @@ def triangular_lattice_sites(
     return np.array(sites)
 
 
+def triangular_lattice_sites_rect_cell(rs: float, n_sites: int):
+    """Generate triangular WC sites in their NATURAL centered-rectangular cell.
+
+    Unlike :func:`triangular_lattice_sites` (which packs sites into an
+    oblique M×M grid that does not perfectly tile a square cell), this
+    function returns sites that EXACTLY tile a rectangular cell of
+    dimensions ``L_x × L_y = M·a × M·a·√3`` with ``2·M²`` sites — the
+    natural commensurate geometry for the 2D triangular Wigner crystal.
+
+    Args:
+        rs: Wigner-Seitz radius (Bohr).
+        n_sites: Must be of the form ``2·M²`` (i.e. 2, 8, 18, 32, 50,
+            72, 98, 128, 162, 200, ...).
+
+    Returns:
+        Tuple ``(sites, L_x, L_y)``:
+          * ``sites`` shape ``(n_sites, 2)`` — Cartesian positions.
+          * ``L_x``, ``L_y`` — rectangular cell dimensions.
+    """
+    M = int(round(np.sqrt(n_sites / 2)))
+    if 2 * M * M != n_sites:
+        raise ValueError(
+            f"triangular_lattice_sites_rect_cell requires n_sites in "
+            f"the sequence 2·M² = 2, 8, 18, 32, 50, 72, 98, ...; "
+            f"got n_sites={n_sites}",
+        )
+    n_density = 1.0 / (np.pi * rs ** 2)
+    a = np.sqrt(2.0 / (np.sqrt(3.0) * n_density))
+    L_x = M * a
+    L_y = M * a * np.sqrt(3.0)
+    sites = []
+    for j in range(M):
+        for i in range(M):
+            sites.append([i * a, j * a * np.sqrt(3.0)])
+            sites.append([(i + 0.5) * a, (j + 0.5) * a * np.sqrt(3.0)])
+    return np.array(sites), L_x, L_y
+
+
+def stripe_lattice_sites(
+    rs: float, n_sites: int,
+    orientation: str = 'x', n_rows: int = 0,
+) -> np.ndarray:
+    """``n_sites`` electrons in horizontal (``orientation='x'``) or
+    vertical (``orientation='y'``) stripes inside a square cell.
+
+    The square cell has side ``L = rs * sqrt(pi * n_sites)``.  Sites are
+    laid out on a rectangular grid: ``n_rows`` rows × ``n_per_row``
+    columns (where ``n_per_row = n_sites // n_rows``).  Setting
+    ``n_rows`` small (e.g. 2 or 5) gives elongated stripes; setting
+    ``n_rows = ceil(sqrt(n_sites))`` gives a near-square rectangular
+    arrangement.
+
+    If ``n_rows = 0`` (default), picks ``ceil(sqrt(n_sites/2))`` for a
+    moderate stripe shape (rows roughly half as many as columns).
+
+    Args:
+        rs: Wigner-Seitz radius (Bohr).
+        n_sites: Number of electrons.
+        orientation: ``'x'`` (rows along x) or ``'y'`` (rows along y).
+        n_rows: Number of rows.  0 → auto.
+
+    Returns:
+        ``(n_sites, 2)`` site positions in Bohr.
+    """
+    if orientation not in ('x', 'y'):
+        raise ValueError(
+            f"orientation must be 'x' or 'y', got {orientation!r}",
+        )
+    n_density = 1.0 / (np.pi * rs ** 2)
+    L = np.sqrt(n_sites / n_density)
+    if n_rows <= 0:
+        n_rows = max(1, int(np.ceil(np.sqrt(n_sites / 2.0))))
+    n_per_row = int(np.ceil(n_sites / n_rows))
+    if orientation == 'x':
+        a_par = L / n_per_row   # spacing along x within a row
+        a_perp = L / n_rows     # row separation along y
+        sites = []
+        for j in range(n_rows):
+            for i in range(n_per_row):
+                sites.append([(i + 0.5) * a_par, (j + 0.5) * a_perp])
+                if len(sites) >= n_sites:
+                    return np.array(sites)
+    else:  # 'y' — same as 'x' but transposed
+        a_par = L / n_per_row
+        a_perp = L / n_rows
+        sites = []
+        for j in range(n_rows):
+            for i in range(n_per_row):
+                sites.append([(j + 0.5) * a_perp, (i + 0.5) * a_par])
+                if len(sites) >= n_sites:
+                    return np.array(sites)
+    return np.array(sites)
+
+
+def square_lattice_sites(
+    rs: float, n_sites: int,
+    site_offset: float = 0.5,
+) -> np.ndarray:
+    """``n_sites`` electrons on a near-square Bravais lattice.
+
+    Picks ``M = ceil(sqrt(n_sites))``, builds an ``M x M`` grid with
+    spacing ``L/M``, returns the first ``n_sites`` sites in row-major
+    order.  Exactly square for ``n_sites = M²`` (e.g. 4, 9, 16, 25, 49);
+    slightly imperfect otherwise.
+
+    Args:
+      site_offset: Fractional shift within a unit cell.  Default 0.5
+        places sites at cell CENTERS (good for bare WC).  Use 0.0 to
+        place sites at cell CORNERS (good for cosine-modulated systems
+        where v_ext = -v·Σ cos(2πr/a) has minima at r = n·a).
+    """
+    n_density = 1.0 / (np.pi * rs ** 2)
+    L = np.sqrt(n_sites / n_density)
+    M = int(np.ceil(np.sqrt(n_sites)))
+    a = L / M
+    off = float(site_offset)
+    sites = []
+    for i in range(M):
+        for j in range(M):
+            sites.append([(i + off) * a, (j + off) * a])
+            if len(sites) >= n_sites:
+                return np.array(sites)
+    return np.array(sites)
+
+
+def make_lattice_sites(
+    rs: float, n_sites: int,
+    lattice_type: str = 'triangular',
+    **kwargs,
+) -> np.ndarray:
+    """Dispatch to the correct lattice-sites generator.
+
+    Args:
+        rs: Wigner-Seitz radius (Bohr).
+        n_sites: Number of electrons.
+        lattice_type: One of ``'triangular'`` (default), ``'square'``,
+            ``'stripe_x'``, ``'stripe_y'``.
+        **kwargs: Passed through to the specific generator (e.g.
+            ``n_rows`` for stripe).
+
+    Returns:
+        ``(n_sites, 2)`` site positions in Bohr.
+    """
+    lt = lattice_type.lower()
+    if lt == 'triangular':
+        return triangular_lattice_sites(rs, n_sites)
+    elif lt == 'square':
+        return square_lattice_sites(rs, n_sites, **kwargs)
+    elif lt in ('stripe_x', 'stripe'):
+        return stripe_lattice_sites(
+            rs, n_sites, orientation='x', **kwargs,
+        )
+    elif lt == 'stripe_y':
+        return stripe_lattice_sites(
+            rs, n_sites, orientation='y', **kwargs,
+        )
+    else:
+        raise ValueError(
+            f"lattice_type must be one of "
+            f"('triangular', 'square', 'stripe_x', 'stripe_y'); "
+            f"got {lattice_type!r}",
+        )
+
+
 def commensurate_triangular_supercell(
     rs: float, n_sites: int,
 ):
@@ -120,11 +284,13 @@ def crystal_init_walkers_2d(
     num_walkers: int,
     n_up: int,
     n_down: int,
-    L: float,
+    L,
     *,
     sigma_init: float = 0.25,
     spin_pattern: str = 'neel',
     noise_scale_factor: float = 0.5,
+    lattice_type: str = 'triangular',
+    site_offset: float = 0.5,
 ):
     """Initialise walkers near triangular Bravais lattice sites.
 
@@ -163,10 +329,28 @@ def crystal_init_walkers_2d(
             f"got {spin_pattern!r}",
         )
     n_elec = n_up + n_down
-    rs = L / np.sqrt(np.pi * n_elec)
+    # Accept either scalar L (square cell) or 2-tuple (rectangular)
+    if isinstance(L, (tuple, list, np.ndarray, jnp.ndarray)):
+        L_x, L_y = float(L[0]), float(L[1])
+    else:
+        L_x = L_y = float(L)
+    area = L_x * L_y
+    rs = np.sqrt(area / (np.pi * n_elec))
     a_nn = np.sqrt(2.0 * np.pi / np.sqrt(3.0)) * rs   # ~ 1.905 * rs
+    L_arr = np.asarray([L_x, L_y])
 
-    all_sites = triangular_lattice_sites(rs, n_elec)
+    # For rectangular cells with native triangular aspect, use the
+    # 2·M²-commensurate generator (sites exactly tile the cell).
+    is_rect = abs(L_x - L_y) > 1e-6
+    if is_rect and lattice_type == 'triangular':
+        all_sites, _, _ = triangular_lattice_sites_rect_cell(rs, n_elec)
+    else:
+        extra = {}
+        if lattice_type == 'square':
+            extra['site_offset'] = float(site_offset)
+        all_sites = make_lattice_sites(
+            rs, n_elec, lattice_type=lattice_type, **extra,
+        )
     if spin_pattern == 'neel':
         up_sites = all_sites[0::2][:n_up]
         dn_sites = (
@@ -179,9 +363,9 @@ def crystal_init_walkers_2d(
         )
 
     # Wrap to cell to match envelope's site convention.
-    up_sites = np.mod(up_sites, L)
+    up_sites = np.mod(up_sites, L_arr)
     if dn_sites is not None:
-        dn_sites = np.mod(dn_sites, L)
+        dn_sites = np.mod(dn_sites, L_arr)
         sites = np.concatenate([up_sites, dn_sites], axis=0)
     else:
         sites = up_sites
@@ -193,10 +377,8 @@ def crystal_init_walkers_2d(
     )
     walkers = sites[None, :, :] + noise
 
-    # Wrap into [0, L)^2 in case noise pushed walkers outside
-    # (Metropolis sampler also wraps, but this keeps the very first
-    # log_psi evaluation inside the cell for sanity).
-    walkers = jnp.mod(walkers, L)
+    # Wrap into [0, L_x)x[0, L_y) (scalar L_arr broadcasts to last axis).
+    walkers = jnp.mod(walkers, jnp.asarray(L_arr, dtype=jnp.float64))
     return walkers
 
 
@@ -258,22 +440,45 @@ class GaussianLocalizedEnvelope2D(nnx.Module):
         n_down: int,
         n_det: int,
         rs: float,
-        L: float,
+        L,
         *,
         sigma_init: float = 0.25,
         spin_pattern: str = 'neel',
         det_jitter: float = 0.0,
+        lattice_type: str = 'triangular',
+        anisotropic_sigma: bool = False,
+        site_offset: float = 0.5,
     ):
         if spin_pattern not in ('neel', 'all_up'):
             raise ValueError(
                 f"spin_pattern must be 'neel' or 'all_up', "
                 f"got {spin_pattern!r}",
             )
+        # Accept scalar L (square cell) or 2-tuple (rectangular).
+        if isinstance(L, (tuple, list, np.ndarray, jnp.ndarray)):
+            L_x, L_y = float(L[0]), float(L[1])
+        else:
+            L_x = L_y = float(L)
         n_total = n_up + n_down
-        all_sites = triangular_lattice_sites(rs, n_total)
-        # Wrap sites to be inside [0, L)^2 (paranoia: with the
+        is_rect = abs(L_x - L_y) > 1e-6
+        if is_rect and lattice_type == 'triangular':
+            all_sites, _, _ = triangular_lattice_sites_rect_cell(
+                rs, n_total,
+            )
+        else:
+            # site_offset is forwarded to lattice generators that support
+            # it (currently 'square').  Default 0.5 = cell-centered (bare
+            # WC); 0.0 = corner-aligned (matches cosine v_ext minima).
+            extra = {}
+            if lattice_type == 'square':
+                extra['site_offset'] = float(site_offset)
+            all_sites = make_lattice_sites(
+                rs, n_total, lattice_type=lattice_type, **extra,
+            )
+        # Wrap sites to be inside [0, L_x) x [0, L_y) (paranoia: with the
         # commensurate cell they should all already lie in the cell).
-        all_sites = np.mod(all_sites, L)
+        L_arr_np = np.asarray([L_x, L_y])
+        all_sites = np.mod(all_sites, L_arr_np)
 
         if spin_pattern == 'neel':
             # Alternating assignment: site[::2] is up, site[1::2] down.
@@ -310,30 +515,54 @@ class GaussianLocalizedEnvelope2D(nnx.Module):
         else:
             self.sites_dn = None
 
-        self.sigma_up = nnx.Param(jnp.asarray(sigma0))
-        self.sigma_dn = (
-            nnx.Param(jnp.asarray(sigma0)) if n_down > 0 else None
-        )
+        # Sigma: scalar (isotropic) or (sigma_x, sigma_y) when
+        # anisotropic_sigma=True.  Init both components to the same
+        # sigma0 → at λ=0 they should stay equal; at finite-λ they
+        # can diverge (nematic order parameter).
+        self.anisotropic_sigma = bool(anisotropic_sigma)
+        if self.anisotropic_sigma:
+            self.sigma_up = nnx.Param(jnp.asarray([sigma0, sigma0]))
+            self.sigma_dn = (
+                nnx.Param(jnp.asarray([sigma0, sigma0]))
+                if n_down > 0 else None
+            )
+        else:
+            self.sigma_up = nnx.Param(jnp.asarray(sigma0))
+            self.sigma_dn = (
+                nnx.Param(jnp.asarray(sigma0)) if n_down > 0 else None
+            )
 
         self.n_up = n_up
         self.n_down = n_down
         self.n_det = n_det
-        self.L = float(L)
+        # Store as 2-array so _orb_one_spin's min-image broadcasts
+        # naturally for both square and rectangular cells.
+        self.L = jnp.asarray([L_x, L_y], dtype=jnp.float64)
         self.dim = 2
 
     def _orb_one_spin(
         self, r_spin: jax.Array, sites: jax.Array, sigma: jax.Array,
     ) -> jax.Array:
-        """Evaluate (n_det, n_spin, n_orb_spin) Gaussian orbitals."""
+        """Evaluate (n_det, n_spin, n_orb_spin) Gaussian orbitals.
+
+        ``sigma`` may be a scalar (isotropic Gaussian) or a length-2
+        array ``[sigma_x, sigma_y]`` (anisotropic — nematic distortion).
+        """
         # r_spin: (n_spin, 2), sites: (n_det, n_orb, 2)
-        # diff: (n_det, n_spin, n_orb, 2) via broadcasting
         diff = r_spin[None, :, None, :] - sites[:, None, :, :]
-        # Minimum-image via wrapping fractional coords to [-0.5, 0.5).
         s = diff / self.L
         s = s - jnp.round(s)
-        diff_mi = s * self.L
-        d2 = jnp.sum(diff_mi ** 2, axis=-1)
-        return jnp.exp(-d2 / (2.0 * sigma ** 2))
+        diff_mi = s * self.L                  # (n_det, n_spin, n_orb, 2)
+        if sigma.ndim == 0:
+            d2 = jnp.sum(diff_mi ** 2, axis=-1)
+            return jnp.exp(-d2 / (2.0 * sigma ** 2))
+        else:
+            # sigma shape (2,) — anisotropic
+            inv_2s2 = 1.0 / (2.0 * sigma ** 2)         # (2,)
+            exponent = jnp.sum(
+                (diff_mi ** 2) * inv_2s2, axis=-1,
+            )
+            return jnp.exp(-exponent)
 
     def __call__(self, phys_conf, nuc_params=None):
         """Return ``(n_det, n_elec, n_up + n_down)`` orbital matrix.

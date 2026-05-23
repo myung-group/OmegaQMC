@@ -1,0 +1,83 @@
+# Eval-only validation of rs20_n26_ferminet_djbf_spring chkpt.
+# Loads snapshot, runs 0 training iters, then a LARGE eval phase
+# (200 blocks x 100 steps x 4096 walkers) for a precise E ± SE.
+# Tests if -46.84 mHa is a real variational energy or a training-time
+# bias artifact.
+
+project: djbf_validation_eval
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: true
+  smith_jastrow_hidden: 32
+  smith_jastrow_n_layers: 4
+  use_backflow: true
+  use_coord_backflow: true
+  coord_bf_zero_init: true
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52
+  det_jitter: 0.04
+  walker_init: crystal_perturbed
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 0                         # NO TRAINING — eval only
+  walkers: 1024                    # placeholder (training won't run)
+  load_chkpt: runs/djbf_validation/source.chk.h5
+  lr: 0.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 1
+  lr_n_restarts: 0
+  spring_mu: 0.0
+  spring_norm_clip: 0
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 10000
+
+eval:
+  walkers: 2048                    # 2x training walkers — quick
+  blocks: 30                       # ≈3-5 min total
+  equil_blocks: 10
+  steps_per_block: 30
+
+observables:
+  enabled: true
+  triangular_shells: 4
+  cartesian_n_max: 6
+  n_walkers: 1024
+  equil_steps: 600
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

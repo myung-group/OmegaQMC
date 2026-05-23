@@ -1,0 +1,87 @@
+# Bare 2D HEG at rs=50 N=50 — test whether DEEP plane_wave ansatz
+# can spontaneously discover the WC (without any crystal prior).
+# Starts from gas (uniform-random) walker init; no triangular bias.
+#
+# Compare against bare_rs50_N50_match_l5 (crystal_gaussian: E=-19.46,
+# S(k)=8.4).  If plane_wave + deeper ansatz reaches similar S(k) and
+# energy, we know unbiased VMC can find the crystal.
+#
+# Settings are intermediate (not full Cassella scale to limit cost):
+#   - emb=64, layers=2, two_particle_dim=16, n_det=4
+#   - deep_jastrow + backflow + cusp
+#   - 2000 SR iters with SPRING
+
+project: bare_rs50_N50_planewave_deep
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 50
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 64           # 2× the small ansatz
+  layers: 2                   # 2× the small ansatz
+  two_particle_dim: 16        # 2× the small ansatz
+  n_det: 4                    # 2× the small ansatz
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  use_backflow: true
+  use_coord_backflow: false
+  pair_jastrow: false
+  deep_jastrow: true          # GNN-side scalar Jastrow head
+  use_smith_deep_jastrow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave   # NO crystal prior
+  n_virt_pw: 5                # extra virtual plane-waves (Cassella style)
+  det_jitter: 0.04
+  walker_init: gas            # UNIFORM random — NO crystal bias
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 1024
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 15
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 500
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 1024
+  equil_steps: 200
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+seed: 3366247121

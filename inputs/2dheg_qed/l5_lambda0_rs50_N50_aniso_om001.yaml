@@ -1,0 +1,81 @@
+# Control: λ=0, Ω=0.001, anisotropic σ envelope.
+# Expected: σ_x ≈ σ_y at convergence (rotational symmetry preserved).
+# Tests whether the anisotropic envelope correctly converges to
+# isotropic when no symmetry-breaking field is present.
+
+project: l5_lambda0_rs50_N50_aniso_om001
+
+system:
+  n_up: 25
+  n_down: 25
+  rs: 50.0
+  dim: 2
+
+cavity:
+  omega: 0.001
+  lambda: 0.0                  # control — no cavity coupling
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 0.10
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.10
+  crystal_lattice_type: triangular
+  crystal_anisotropic_sigma: true     # NEW: per-site (σ_x, σ_y) variational
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 2000
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 5.0          # wide HO for Ω=0.001 (⟨q²⟩=500)
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 500
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 1024
+  sample_steps: 200
+  decorr_steps: 5
+  density_2d: true
+  density_n_bins: 64
+
+seed: 42

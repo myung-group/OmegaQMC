@@ -216,6 +216,7 @@ class _VMCDriverHEG:
         mc_timestep: float = 0.1,
         fname_log: Optional[str] = None,
         verbose: int = 1,
+        init_walkers=None,
     ):
         """Run the VMC simulation.
 
@@ -251,13 +252,30 @@ class _VMCDriverHEG:
         timestamp_init = datetime.now()
 
         rng_key, init_key = jax.random.split(rng_key)
-        walkers = self.initialize_walkers(init_key, num_walkers)
+        if init_walkers is not None:
+            walkers = jnp.asarray(init_walkers["R"])
+            # tile/truncate to num_walkers if needed
+            if walkers.shape[0] != num_walkers:
+                if walkers.shape[0] < num_walkers:
+                    reps = (num_walkers + walkers.shape[0] - 1) // walkers.shape[0]
+                    walkers = jnp.tile(
+                        walkers, (reps,) + (1,) * (walkers.ndim - 1),
+                    )[:num_walkers]
+                else:
+                    walkers = walkers[:num_walkers]
+            mc_stepsize = float(init_walkers.get(
+                "step_size", (3 * mc_timestep) ** 0.5,
+            ))
+            warm_start = True
+        else:
+            walkers = self.initialize_walkers(init_key, num_walkers)
+            mc_stepsize = (3 * mc_timestep) ** 0.5
+            warm_start = False
         walkers_sharding, walker_keys_sharding = _make_sharding(
             num_walkers,
         )
         if walkers_sharding is not None:
             walkers = jax.device_put(walkers, walkers_sharding)
-        mc_stepsize = (3 * mc_timestep) ** 0.5
 
         # Compiling a full ``lax.scan`` over ``num_steps_per_block`` with
         # a vmapped-Laplacian body fuses tens of thousands of ops into a
@@ -308,7 +326,12 @@ class _VMCDriverHEG:
 
         _kin_batch = jax.vmap(energy_kinetic, in_axes=(0, None))
 
-        for _ in range(num_blocks_equil):
+        # Warm-started runs skip most equilibration since walkers come
+        # pre-equilibrated from training; we still run ONE block to
+        # decorrelate from training trajectory.  Cold start runs the
+        # full requested equilibration.
+        n_equil_blocks = 1 if warm_start else num_blocks_equil
+        for _ in range(n_equil_blocks):
             ar = 0.0
             for _s in range(num_steps_per_block):
                 rng_key, walkers, ar = _mcmc_one_step(
@@ -594,6 +617,7 @@ class _VMCDriverHEGTwist:
         mc_timestep: float = 0.1,
         fname_log: Optional[str] = None,
         verbose: int = 1,
+        init_walkers=None,
     ):
         """Run VMC at the fixed twist ``κ`` stored on this driver.
 
@@ -614,8 +638,24 @@ class _VMCDriverHEGTwist:
 
         timestamp_init = datetime.now()
         rng_key, init_key = jax.random.split(rng_key)
-        walkers = self.initialize_walkers(init_key, num_walkers)
-        mc_stepsize = (3 * mc_timestep) ** 0.5
+        if init_walkers is not None:
+            walkers = jnp.asarray(init_walkers["R"])
+            if walkers.shape[0] != num_walkers:
+                if walkers.shape[0] < num_walkers:
+                    reps = (num_walkers + walkers.shape[0] - 1) // walkers.shape[0]
+                    walkers = jnp.tile(
+                        walkers, (reps,) + (1,) * (walkers.ndim - 1),
+                    )[:num_walkers]
+                else:
+                    walkers = walkers[:num_walkers]
+            mc_stepsize = float(init_walkers.get(
+                "step_size", (3 * mc_timestep) ** 0.5,
+            ))
+            warm_start = True
+        else:
+            walkers = self.initialize_walkers(init_key, num_walkers)
+            mc_stepsize = (3 * mc_timestep) ** 0.5
+            warm_start = False
 
         @jax.jit
         def _mcmc_one_step(rk, w, s, params):

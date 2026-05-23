@@ -1,0 +1,86 @@
+# V9 OFF — cavity OFF baseline with EXPANDED architecture
+# Same physical setup as V8 OFF (N=18 closed shell, plane_wave envelope, Weber Fig 1b
+# parameters v=0.3, Ω=0.1, λ=0.02357), but with:
+#   - K_max:           3 → 5    (covers cosine wavelength k=2π/3≈2.09; previously max k=1.57)
+#   - phase/mag MLPs:  32×32 → 64×64
+#   - walkers:         1024 → 2048
+#   - iters:           50000 → 30000
+#   - SPRING + lr=1.0 (per user request, original optimizer settings)
+#
+# Goal: test whether enlarging the cavity-coupling architecture lets the wavefunction
+# capture the small PT-predicted E_corr,el-ph (≈ -0.185 mHa/e) at γ=0.5.
+project: l5_weber_fig1b_v10_off
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958              # = L/sqrt(N pi) for L=12 N=18 (closed shell)
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.0             # cavity OFF baseline (= HF for non-interacting matter)
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 6                # WAS 3 — extend Fourier basis past cosine wavelength
+  phase_mlp_hidden: [64, 64]    # WAS [32, 32] — modest width increase
+  mag_mlp_hidden: [64, 64]      # WAS [32, 32]
+  activation: tanh
+  use_matter_photon_shift: true     # L6: Q₀(R) — captures Lang-Firsov-style cavity correlation
+  use_matter_photon_width: false    # L6: S(R) off for now (Q₀ alone captures LF to leading order)
+  q0_mlp_hidden: [32, 32]
+  s_mlp_hidden: [32, 32]
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 3
+  two_particle_stream_dim: 16
+  n_det: 1                       # single determinant (lighter than n_det=16)
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: false        # disable old deep Jastrow ...
+  use_smith_deep_jastrow: true   # ... use Smith-style deep Jastrow instead
+  envelope_type: plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 0.005                     # pure SR fine-tune lr
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 30000
+  walkers: 2048
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 30000
+  spring_mu: 0.0                # SPRING momentum off (pure SR)
+  spring_norm_clip: 1.0e10      # gradient clipping off (pure SR)
+  save_every: 1000
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 2048
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

@@ -992,12 +992,26 @@ class _HEGSROptimizer:
             note='final',
         )
 
+        # Reshape pmap-distributed (n_dev, n_w_local, ...) walkers and
+        # step_size back to a single batch for downstream handoff.
+        final_walkers = walkers.reshape(
+            (-1,) + walkers.shape[2:]
+        ) if walkers.ndim > 3 else walkers
+        final_step_size = (
+            float(step_size[0]) if hasattr(step_size, 'shape')
+            and step_size.ndim > 0 else float(step_size)
+        )
+
         return {
             'params': params_pytree,
             'params_flat': params_flat,
             'E_per_elec_history': e_history,
             'Var_history': var_history,
             'E_final_ha': e_history[-1] if e_history else None,
+            'final_walkers': {
+                'R': final_walkers,
+                'step_size': final_step_size,
+            },
         }
 
 

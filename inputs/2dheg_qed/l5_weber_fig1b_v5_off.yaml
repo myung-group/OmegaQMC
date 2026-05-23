@@ -1,0 +1,83 @@
+# V4 — Weber Fig 1(b) reproduction with Weber-style trial setup.
+# N=16, 4x4 supercell, a=3 Bohr (exact commensurate, rs=3/sqrt(pi)=1.6926).
+# envelope_type: crystal_gaussian on SQUARE lattice — matches cosine minima.
+# This mirrors Weber's HF-like initialization where electrons are pre-placed
+# at cosine minima sites, rather than learning the modulation from a uniform
+# plane-wave start.
+# Cavity OFF baseline.
+project: l5_weber_fig1b_v5_off
+
+system:
+  n_up: 8
+  n_down: 8
+  rs: 1.6926              # = 3/sqrt(pi) → ν=1 per cosine cell exactly
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.0
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 5
+  phase_mlp_hidden: [128, 128]
+  mag_mlp_hidden: [128, 128]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: true
+  envelope_type: crystal_gaussian
+  crystal_sigma_init: 1.5           # ~a/2, moderate localization (HF-like, not WC)
+  crystal_spin_pattern: neel
+  crystal_det_jitter: 0.10
+  crystal_lattice_type: square      # KEY CHANGE — square matches cosine
+  crystal_anisotropic_sigma: false
+
+optimize:
+  load_chkpt: runs/l5_weber_fig1b_v4_off/l5_weber_fig1b_v4_off.chk.npz
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 0.01
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 10000           # V5 fine-tune from V4 chkpt
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 10000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 2000
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 30
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

@@ -1,0 +1,77 @@
+# V7 — OFF only, plane_wave envelope.
+# N=16, a=3 Bohr (rs=1.6926), v=0.3 Ha, Ω=0.1 Ha, λ=0, V_ee OFF.
+# Goal: see if FermiNet + Jastrow + backflow on plane_wave envelope can
+# develop the cosine modulation by itself — without forcing localization
+# from crystal_gaussian (which over-localized in V6).
+project: l5_weber_fig1b_v8_on_eval50
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958              # = L/sqrt(N pi) for L=12 N=18 (closed shell)
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3
+  a: 3.0
+
+cavity:
+  omega: 0.1
+  lambda: 0.02357
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: true
+  envelope_type: plane_wave            # KEY: back to plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 0.05
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 0
+  skip_training: true
+  load_chkpt: runs/l5_weber_fig1b_v8_on/l5_weber_fig1b_v8_on.chk.npz
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 50000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 1000
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 50
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

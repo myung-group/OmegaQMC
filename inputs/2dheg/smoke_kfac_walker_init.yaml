@@ -1,0 +1,77 @@
+# Smoke test for the KFAC walker_init fix.
+# 30 iters, 256 walkers (small to fit on shared GPU).
+# Loads Cassella chkpt at iter 3899, energy=-0.046085 Ha/elec.
+# Walker init must respect ansatz.walker_init = crystal_perturbed.
+#
+# Verify: iter 1 energy is near -46 mHa (NOT -32 mHa as it was when
+# walker_init was always uniform).
+
+project: smoke_kfac_walker_init
+
+system:
+  dim: 2
+  rs: 20.0
+  N: 26
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 256
+  layers: 4
+  two_particle_dim: 32
+  n_det: 16
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false
+  use_backflow: true
+  use_coord_backflow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 52
+  det_jitter: 0.04
+  walker_init: crystal_perturbed   # ← the field we're testing
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: kfac
+  iters: 30
+  walkers: 256                     # small for shared mango GPU
+  load_chkpt: runs/rs20_n26_ferminet_cassella/rs20_n26_ferminet_cassella.chk.h5
+  lr: 0.001                        # very small to preserve loaded params
+  lr_decay: 1.0e3
+  kfac_damping: 0.1
+  kfac_damping_adapt: false        # static damping, simpler smoke
+  kfac_damping_decay: 0.9
+  kfac_damping_lookback: 5
+  kfac_damping_min: 1.0e-5
+  kfac_damping_max: 1.0e3
+  kfac_norm_constraint: 1.0e-4
+  kfac_capture_activations: false
+  kfac_fixed_scale: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 30
+  mc_timestep: 0.1
+  save_every: 100
+
+eval:
+  walkers: 256
+  blocks: 5
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 3
+  n_recip: 6

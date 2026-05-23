@@ -41,6 +41,65 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 
+
+def flatten_to_real(pytree):
+    """Flatten pytree to a REAL flat vector, splitting complex leaves
+    into (re, im) pairs.
+
+    Returns ``(flat_real, unravel_real)`` where ``unravel_real(flat_real)``
+    reconstructs the original pytree (including the original complex
+    dtype for any leaves that were complex).
+
+    Purpose: SR-VMC math assumes real parameters.  When the matter
+    trunk uses a complex envelope (TABC / κ-aware), the envelope's
+    ``coeff_up`` / ``coeff_dn`` are complex, so ``ravel_pytree`` of the
+    full params returns a complex flat — and ``jax.grad`` then returns
+    Wirtinger-complex gradients that break the real SR primitives.
+    Splitting complex → (re, im) reals lets ``jax.grad`` return purely
+    real gradients of the proper 2n-dim doubled real space.
+
+    For pytrees with no complex leaves, this is identical to
+    ``ravel_pytree`` (returns the same flat + unravel).
+    """
+    leaves, treedef = jax.tree_util.tree_flatten(pytree)
+    has_any_complex = any(jnp.iscomplexobj(l) for l in leaves)
+    if not has_any_complex:
+        return ravel_pytree(pytree)
+
+    real_segments = []
+    leaf_info = []   # list of (shape, is_complex, n_elements_in_flat, dtype)
+    for leaf in leaves:
+        shape = leaf.shape
+        if jnp.iscomplexobj(leaf):
+            re_flat = jnp.asarray(leaf.real).ravel()
+            im_flat = jnp.asarray(leaf.imag).ravel()
+            real_segments.append(re_flat)
+            real_segments.append(im_flat)
+            leaf_info.append((shape, True, re_flat.shape[0] * 2, leaf.dtype))
+        else:
+            flat = jnp.asarray(leaf).ravel()
+            real_segments.append(flat)
+            leaf_info.append((shape, False, flat.shape[0], leaf.dtype))
+    flat_real = jnp.concatenate(real_segments)
+
+    def unravel_real(real_flat):
+        leaves_out = []
+        offset = 0
+        for shape, is_complex, n_elem, dtype in leaf_info:
+            if is_complex:
+                half = n_elem // 2
+                re_part = real_flat[offset:offset + half].reshape(shape)
+                im_part = real_flat[offset + half:offset + n_elem].reshape(shape)
+                leaves_out.append((re_part + 1j * im_part).astype(dtype))
+            else:
+                leaves_out.append(
+                    real_flat[offset:offset + n_elem].reshape(shape).astype(dtype)
+                )
+            offset += n_elem
+        return jax.tree_util.tree_unflatten(treedef, leaves_out)
+
+    return flat_real, unravel_real
+
 import sys
 from datetime import datetime
 
@@ -145,6 +204,9 @@ def build_l5_log_psi(
     s_mlp_hidden=(32, 32),
     p0_mlp_hidden=(32, 32),
     eps_arr=None,
+    twist=None,   # if set, matter trunk is built with complex envelope at
+                  # the given twist κ (for TABC eval).  None → real Γ-point
+                  # build (existing behavior; backward-compatible).
 ):
     """Construct the Level 5 complex log Ψ + initial flat params.
 
@@ -202,10 +264,19 @@ def build_l5_log_psi(
     (key_e, key_mag, key_phase,
      key_q0, key_s, key_p0) = jax.random.split(init_key, 6)
 
-    # Electronic FermiNet (existing infrastructure)
-    log_psi_e_pytree, e_init_params, graphdef = make_heg_log_psi(
-        config, key_e,
-    )
+    # Electronic FermiNet (existing infrastructure).
+    # For TABC: when twist is set, build the complex-valued variant so
+    # the orbital basis uses shifted plane waves k_n + κ.  log_psi_e_val
+    # is then complex; we split Re/Im appropriately in log_psi_l5 below.
+    if twist is None:
+        log_psi_e_pytree, e_init_params, graphdef = make_heg_log_psi(
+            config, key_e,
+        )
+    else:
+        from .psi.nn.heg_wf import make_heg_log_psi_complex
+        log_psi_e_pytree, e_init_params, graphdef = make_heg_log_psi_complex(
+            config, key_e, kappa=tuple(twist),
+        )
 
     # MLPs.  Final output dim is 1 (scalar).
     mag_layer_sizes = (n_features,) + tuple(mag_mlp_hidden) + (1,)
@@ -267,7 +338,11 @@ def build_l5_log_psi(
                                      dtype=jnp.float64)
     else:
         eps_for_features = jnp.asarray(eps_arr, dtype=jnp.float64)
-    init_params_flat, unravel = ravel_pytree(init_params_pytree)
+    # Use real-aware flatten so complex envelope coefficients (κ-aware
+    # / TABC) get split into (re, im) real pairs.  SR math downstream
+    # is then purely real even when coeff_up/dn are complex.  For the
+    # standard real-only Γ ansatz, this collapses to ravel_pytree.
+    init_params_flat, unravel = flatten_to_real(init_params_pytree)
     n_params = int(init_params_flat.shape[0])
 
     K_grid_const = K_grid
@@ -355,7 +430,12 @@ def build_l5_log_psi(
         )[0]
         # L7: explicit Lang-Firsov bilinear i·P₀(R)·q_c added to phase.
         phase = phase + P0 * q_c
-        log_mag = log_psi_e_val + log_chi + mag_coupling
+        # For TABC: matter trunk at twist κ ≠ 0 returns complex
+        # log_ψ_e = log|ψ_e| + i·arg(ψ_e).  Split into real (→log_mag)
+        # and imag (→phase).  jnp.imag returns 0 cleanly for real input,
+        # so this is backward-compatible with the κ=0 / Γ-point path.
+        log_mag = jnp.real(log_psi_e_val) + log_chi + mag_coupling
+        phase = phase + jnp.imag(log_psi_e_val)
         return log_mag, phase
 
     def log_psi_l5_flat(r_flat, q_c, p_flat):
@@ -363,24 +443,27 @@ def build_l5_log_psi(
         p_pytree = unravel(p_flat)
         return log_psi_l5(R, q_c, p_pytree)
 
-    # Diagnostics on parameter splits
-    e_flat, _ = ravel_pytree(e_init_params)
+    # Diagnostics on parameter splits.  Use the same real-aware
+    # flatten so counts match the unified params_flat layout (relevant
+    # when e_init_params has complex envelope coeffs under TABC /
+    # κ-aware).
+    e_flat, _ = flatten_to_real(e_init_params)
     n_electronic = int(e_flat.shape[0])
-    mag_flat, _ = ravel_pytree(mag_init)
+    mag_flat, _ = flatten_to_real(mag_init)
     n_mag_mlp = int(mag_flat.shape[0])
-    phase_flat, _ = ravel_pytree(phase_init)
+    phase_flat, _ = flatten_to_real(phase_init)
     n_phase_mlp = int(phase_flat.shape[0])
     n_q0_mlp = 0
     n_s_mlp = 0
     n_p0_mlp = 0
     if q0_init is not None:
-        q0_flat, _ = ravel_pytree(q0_init)
+        q0_flat, _ = flatten_to_real(q0_init)
         n_q0_mlp = int(q0_flat.shape[0])
     if s_init is not None:
-        s_flat, _ = ravel_pytree(s_init)
+        s_flat, _ = flatten_to_real(s_init)
         n_s_mlp = int(s_flat.shape[0])
     if p0_init is not None:
-        p0_flat, _ = ravel_pytree(p0_init)
+        p0_flat, _ = flatten_to_real(p0_init)
         n_p0_mlp = int(p0_flat.shape[0])
 
     return {
@@ -847,6 +930,9 @@ class _QEDL5Optimizer:
         q0_mlp_hidden=(32, 32),
         s_mlp_hidden=(32, 32),
         p0_mlp_hidden=(32, 32),
+        # TABC: if set, matter trunk is built with complex envelope at
+        # the given twist κ.  None → real Γ-point build.
+        twist=None,
     ):
         self.config = config
         # L: scalar (square) or (L_x, L_y) (rectangular). When
@@ -925,9 +1011,18 @@ class _QEDL5Optimizer:
             s_mlp_hidden=s_mlp_hidden,
             p0_mlp_hidden=p0_mlp_hidden,
             eps_arr=self.eps,
+            twist=twist,
         )
+        self.twist = twist
         self.params_flat = self.l5["init_params_flat"]
         self.unravel = self.l5["unravel"]
+        # Real-aware flatten that matches self.unravel.  Downstream
+        # scripts (TABC driver, smoke tests) should call this instead
+        # of jax.flatten_util.ravel_pytree when packing a manually-
+        # constructed pytree back to flat — otherwise complex envelope
+        # leaves are emitted as complex flat, but unravel() expects
+        # the real-doubled layout.
+        self.flatten = flatten_to_real
         self.n_params = self.l5["n_params"]
 
         # SR primitives
@@ -1032,9 +1127,9 @@ class _QEDL5Optimizer:
             mask_pytree["phase_mlp"] = jax.tree.map(
                 lambda x: jnp.zeros_like(x), mask_pytree["phase_mlp"],
             )
-            self._freeze_mask_flat, _ = jax.flatten_util.ravel_pytree(
-                mask_pytree
-            )
+            # Must use the same real-aware flatten as init_params_flat
+            # so the mask shape matches in the complex-coeff case.
+            self._freeze_mask_flat, _ = flatten_to_real(mask_pytree)
         else:
             self._freeze_mask_flat = None
 

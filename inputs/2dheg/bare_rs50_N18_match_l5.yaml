@@ -1,0 +1,78 @@
+# Bare 2D HEG control at rs=50 N=18 — magic number for triangular WC
+# in this codebase (commensurate sequence 2·M² → N=18 = 2·3²).
+# Should produce sharper Bragg peaks than N=10 (non-commensurate).
+
+project: bare_rs50_N18_match_l5
+
+system:
+  dim: 2
+  rs: 50.0
+  N: 18                       # closed shell + WC magic number
+  polarization: unpolarized
+
+ansatz:
+  type: nn_heg
+  backbone: ferminet
+  embedding_dim: 32
+  layers: 1
+  two_particle_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_cusp: true
+  cusp_trainable_alpha: false
+  use_backflow: true
+  use_coord_backflow: false
+  pair_jastrow: false
+  deep_jastrow: false
+  use_smith_deep_jastrow: false
+  use_ghost_atom: false
+  envelope_type: plane_wave
+  n_virt_pw: 1
+  det_jitter: 0.04
+  walker_init: crystal_perturbed   # important at WC regime
+
+pretrain:
+  iters: 0
+
+optimize:
+  type: sr
+  iters: 2000
+  walkers: 1024
+  lr: 1.0
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.2
+  damping_adapt: false
+  sampler: metropolis
+  var_weight: 0.0
+  mcmc_decorr_steps: 15
+  mc_timestep: 0.1
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  save_every: 2000
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 1024
+  equil_steps: 200            # cold-start fallback
+  sample_steps: 200
+  decorr_steps: 5
+
+twist:
+  n_twists: 0
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+seed: 3366247121

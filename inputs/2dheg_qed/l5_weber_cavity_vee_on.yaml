@@ -1,0 +1,74 @@
+# Weber 2x2 pilot — baseline: cavity OFF, V_ee OFF.
+# Free fluid + cosine V_ext only. Reproduces Weber's setup at λ=0.
+# N=18 closed-shell, square cell, plane-wave envelope (fluid regime).
+project: l5_weber_cavity_vee_on
+
+system:
+  # square cell (default), N=18 closed-shell for unpolarized fluid
+  n_up: 9
+  n_down: 9
+  rs: 10.0
+  dim: 2
+  include_vee: true
+
+v_ext:
+  amp: 1.0                       # cosine modulation strength (Hartree)
+  # a defaults to L_x (fundamental cell wavelength), Weber's choice
+
+cavity:
+  omega: 0.1
+  lambda: 0.1
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: true
+  envelope_type: plane_wave      # FLUID regime — not crystal!
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 1000
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 1000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 500
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

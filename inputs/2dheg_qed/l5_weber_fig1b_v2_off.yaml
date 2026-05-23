@@ -1,0 +1,75 @@
+# Reproduce Weber Fig 1(b): cavity OFF baseline (Option A — closed-shell N=18).
+# N=18, n_up=n_down=9, square cell L=12 Bohr (4 cosine periods at a=3).
+# rs = sqrt(8/pi) = 1.5958 Bohr (slight density mismatch vs Weber's rs=1.692
+# at ν=1.125 instead of exactly 1, but ratios v/ρ and Ω/ρ match Weber Fig 1b).
+# At λ=0.02357 (cavity_on partner): γ = Nλ²/Ω_eff² = 0.5, moderate coupling.
+project: l5_weber_fig1b_v2_off
+
+system:
+  n_up: 9
+  n_down: 9
+  rs: 1.5958              # = sqrt(8/pi) → cell L=12 Bohr at N=18, commensurate with a=3
+  dim: 2
+  include_vee: false
+
+v_ext:
+  amp: 0.3                # Weber Fig 1(b) v/ρ = 2.7 with ρ=1/9
+  a: 3.0
+
+cavity:
+  omega: 0.1              # Weber Fig 1(b) Ω/ρ = 0.9 with ρ=1/9
+  lambda: 0.0             # cavity OFF
+  polarization: [1.0, 0.0]
+  coupling_op: P
+  K_max: 5
+  phase_mlp_hidden: [128, 128]
+  mag_mlp_hidden: [128, 128]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 32
+  n_interactions: 1
+  two_particle_stream_dim: 8
+  n_det: 2
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 0
+  use_ghost_atom: true
+  use_deep_jastrow: true
+  envelope_type: plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 3000            # 2x longer for MLPs to develop
+  walkers: 1024
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.5
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 3000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 500
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 30
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: false
+
+seed: 42

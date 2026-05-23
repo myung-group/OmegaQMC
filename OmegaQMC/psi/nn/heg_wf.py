@@ -306,6 +306,7 @@ class HEGPsiFormerConfig(NamedTuple):
     n_up: int
     n_down: int
     L: float
+    L_y: Optional[float] = None     # if set, cell is rectangular with (L_x=L, L_y); else square
     n_det: int = 4
     full_determinant: bool = False
     embedding_dim: int = 64
@@ -456,6 +457,9 @@ class HEGPsiFormerConfig(NamedTuple):
     crystal_sigma_init: float = 0.25       # fraction of NN spacing
     crystal_spin_pattern: str = 'neel'     # 'neel' (AFM) or 'all_up' (FM)
     crystal_det_jitter: float = 0.0        # site-position jitter for det>=1
+    crystal_lattice_type: str = 'triangular'  # 'triangular' | 'square' | 'stripe_x' | 'stripe_y'
+    crystal_anisotropic_sigma: bool = False   # if True, per-site (σ_x, σ_y) variational — tests nematic distortion
+    crystal_site_offset: float = 0.5          # fractional shift within unit cell (square lattice only); 0.5 = cell centers (bare WC), 0.0 = corners (matches cosine v_ext minima)
     # Walker initialisation strategy (consumed by the SR/eval drivers).
     # 'auto' (default) → crystal_perturbed when envelope is
     # crystal_gaussian, uniform otherwise.  'crystal_perturbed' forces

@@ -102,35 +102,55 @@ def _square_lattice_vectors(L: float, nmax: int, include_origin: bool):
     return (L * n).astype(np.float64)
 
 
+def _rectangular_lattice_vectors(
+    L_x: float, L_y: float, nmax: int, include_origin: bool,
+):
+    """Same as _square_lattice_vectors but with per-axis scaling."""
+    rng = np.arange(-nmax, nmax + 1)
+    nx, ny = np.meshgrid(rng, rng, indexing='ij')
+    n = np.stack([nx.ravel(), ny.ravel()], axis=1)
+    if not include_origin:
+        mask = np.any(n != 0, axis=1)
+        n = n[mask]
+    scaled = n.astype(np.float64) * np.asarray([L_x, L_y])
+    return scaled
+
+
 def build_ewald_2d_tables(
-    L: float,
+    L,
     *,
     eta: float = None,
     n_real: int = 4,
     n_recip: int = 8,
 ) -> EwaldTables2D:
-    """Precompute 2D Ewald real/reciprocal tables for a square cell.
+    """Precompute 2D Ewald real/reciprocal tables.
 
     Args:
-        L: Square simulation-cell side length.
-        eta: Ewald splitting parameter.  Default ``2.8/L`` — the 2D
-            analog of the CASINO/FermiNet 3D recommendation
-            ``eta = 2.8/V^{1/3}`` (Cassella 2022).  Pass an explicit
-            value to override.
-        n_real: Real-space cutoff in lattice-vector units (shells with
-            ``|n_i| <= n_real`` are summed).
+        L: Cell dimensions.  Scalar → square cell of side ``L``.
+            2-tuple/sequence ``(L_x, L_y)`` → rectangular cell.
+        eta: Ewald splitting parameter.  Default ``2.8/sqrt(area)`` —
+            the 2D analog of the CASINO/FermiNet 3D recommendation
+            ``eta = 2.8/V^{1/3}`` (Cassella 2022).
+        n_real: Real-space cutoff in lattice-vector units.
         n_recip: Reciprocal-space cutoff in integer-G units.
 
     Returns:
         :class:`EwaldTables2D`.
     """
+    if isinstance(L, (tuple, list, np.ndarray, jnp.ndarray)):
+        L_x, L_y = float(L[0]), float(L[1])
+    else:
+        L_x = L_y = float(L)
+    area = L_x * L_y
+    L_eff = float(np.sqrt(area))    # for label + default eta
     if eta is None:
-        eta = 2.8 / L
-    area = L ** 2
+        eta = 2.8 / L_eff
 
-    R_vecs = _square_lattice_vectors(L, n_real, include_origin=False)
+    R_vecs = _rectangular_lattice_vectors(
+        L_x, L_y, n_real, include_origin=False,
+    )
     G_ints = _square_lattice_vectors(1.0, n_recip, include_origin=False)
-    G_vecs = 2.0 * np.pi * G_ints / L
+    G_vecs = 2.0 * np.pi * G_ints / np.asarray([L_x, L_y])
     G_norm = np.sqrt(np.sum(G_vecs ** 2, axis=-1))
 
     from scipy.special import erfc as _erfc_np
@@ -153,7 +173,7 @@ def build_ewald_2d_tables(
     madelung = 0.5 * (e_real + e_recip + e_self + e_bg)
 
     return EwaldTables2D(
-        L=float(L),
+        L=L_eff,
         eta=float(eta),
         R_vecs=jnp.asarray(R_vecs),
         G_vecs=jnp.asarray(G_vecs),

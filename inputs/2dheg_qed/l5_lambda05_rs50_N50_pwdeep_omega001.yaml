@@ -1,0 +1,89 @@
+# L5 at rs=50 N=50, Ω=0.001 (RESONANT with WC phonon ~1 mHa), λ=0.5.
+# Same ansatz as bare_rs50_N50_planewave_deep (deep plane_wave envelope,
+# no crystal prior, gas walker init).
+#
+# Goal: test cavity-induced phase transitions in resonant deep-strong
+# coupling regime.  Plane-wave envelope means no inductive bias toward
+# any specific WC lattice — let the cavity + matter optimization
+# discover whatever ground-state structure they prefer.
+#
+# Predictions:
+#   ⟨q_c²⟩ ≈ 1/(2·Ω_eff) where Ω_eff = √(Ω² + N·λ²)
+#              = √(10⁻⁶ + 12.5) ≈ 3.535 → ⟨q²⟩ ≈ 0.141
+#   Naive Weber ZPE shift / N_e = (Ω_eff − Ω)/(2·N_e) ≈ +35.3 mHa
+#   So if no phase change: E_L5 ≈ E_bare(plane_wave) + 35.3 mHa
+#   If cavity induces structure: density map should show ordering
+#                                even though plane_wave alone gives fluid
+
+project: l5_lambda05_rs50_N50_pwdeep_omega001
+
+system:
+  n_up: 25
+  n_down: 25
+  rs: 50.0
+  dim: 2
+
+cavity:
+  omega: 0.001                 # 1 mHa — resonant with WC Einstein phonon
+  lambda: 0.5                  # deep strong coupling at this Ω
+  polarization: [1.0, 0.0]
+  K_max: 3
+  phase_mlp_hidden: [32, 32]
+  mag_mlp_hidden: [32, 32]
+  activation: tanh
+
+ansatz:
+  backbone: ferminet
+  embedding_dim: 64
+  n_interactions: 2
+  two_particle_stream_dim: 16
+  n_det: 4
+  full_determinant: true
+  use_backflow: true
+  use_cusp: true
+  n_virt_pw: 5
+  use_ghost_atom: false
+  use_deep_jastrow: true
+  envelope_type: plane_wave    # NO crystal prior — unbiased
+  # crystal_* fields ignored when envelope_type=plane_wave
+
+optimize:
+  use_smw_sr: true
+  use_fused_step: true
+  freeze_mlps: false
+  lr: 1.0
+  sr_damping: 1.0e-3
+  sr_n_cg: 20
+  iters: 2000
+  walkers: 256                  # reduced from 1024 (OOM at 1024 with deep ansatz)
+  mcmc_decorr_steps: 15
+  mc_timestep_R: 0.1
+  mc_timestep_qc: 0.1          # tighter for the dressed photon
+  lr_schedule: cosine
+  lr_min: 1.0e-5
+  lr_T_max: 2000
+  spring_mu: 0.9
+  spring_norm_clip: 0.1
+  save_every: 500
+
+ewald:
+  n_real: 2
+  n_recip: 4
+
+eval:
+  walkers: 1024
+  blocks: 20
+  equil_blocks: 5
+  steps_per_block: 10
+
+observables:
+  enabled: true
+  triangular_shells: 2
+  cartesian_n_max: 4
+  n_walkers: 1024
+  sample_steps: 200
+  decorr_steps: 5
+  density_2d: true
+  density_n_bins: 64
+
+seed: 42
