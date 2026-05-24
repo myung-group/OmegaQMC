@@ -160,6 +160,7 @@ def build_casci_from_chat(
     mf = scf.RHF(mol).run(verbose=0)
     no_coeff = np.asarray(fci_ref["no_coeff_ao"])
 
+    n_total = sum(fci_ref["nelec"])
     if ncore is None or ncas is None or nelecas is None:
         from OmegaQMC.cs.properties import compute_1rdm, natural_occupations_from_rdm
         gamma = compute_1rdm(c_hat, fci_ref["candidate_set"],
@@ -168,15 +169,25 @@ def build_casci_from_chat(
         ncore_auto, ncas_auto = select_active_space(
             no_occ, occ_threshold=occ_threshold, max_ncas=max_ncas,
         )
-        if ncore is None:
+        if ncore is None and nelecas is None:
             ncore = ncore_auto
         if ncas is None:
             ncas = ncas_auto
         if nelecas is None:
-            n_total = sum(fci_ref["nelec"])
             n_active_e = n_total - 2 * ncore
             nelecas = (n_active_e // 2 + n_active_e % 2,
                        n_active_e // 2)
+        if ncore is None:
+            # nelecas given but ncore not: derive ncore from the constraint
+            # 2*ncore + sum(nelecas) == n_total
+            ncore = (n_total - sum(nelecas)) // 2
+    # Final sanity check
+    if 2 * ncore + sum(nelecas) != n_total:
+        raise ValueError(
+            f"electron-count mismatch: 2*ncore({ncore}) + sum(nelecas)"
+            f"({sum(nelecas)}) = {2*ncore + sum(nelecas)} != "
+            f"n_total({n_total})"
+        )
 
     mc = mcscf.CASCI(mf, ncas, nelecas)
     mc.ncore = ncore

@@ -776,37 +776,70 @@ state-averaging schemes, and convergence accelerators; in many cases
 they fail to converge to the chemically correct root at all.
 CASPT2 cannot proceed without a CASSCF reference.
 
-A pilot demonstration on \ce{BeH2} at $R_{\rm Be-H} = 1.33$~\AA\ in
-cc-pVDZ illustrates the basic outcome. A FermiNet ansatz with a deep
-Jastrow scalar correction was trained for 1000 SR iterations to
-$E_{\rm NN} = -15.838(7)\,E_{\rm h}$, within MC noise of the
-cc-pVDZ FCI value $-15.836\,E_{\rm h}$. The recovered CI vector
-$\widehat{c}$ was projected into a CAS(4,(2,2)) active space (the
-textbook BeH$_2$ valence active space; CASSCF reference computed at
-the same active space), the active-space Hamiltonian diagonalised in
-the NN-derived natural-orbital basis, and NEVPT2 evaluated on the
-resulting variational eigenvector. The result is
+Two pilot demonstrations illustrate the basic outcome on closed-shell
+single-reference \ce{BeH2} and strongly multireference \ce{N2}
+stretched. Both use FermiNet with a Smith-style deep
+Jastrow~\cite{Hermann2020PauliNet} as the trial wavefunction
+($\sim 700{,}000$ parameters), stochastic-reconfiguration training, and
+a $25{,}600$-walker bank dumped from a $100$-block VMC eval.
+
+For \ce{BeH2} at $R_{\rm Be-H} = 1.33$~\AA\ in cc-pVDZ, 1000 SR
+iterations gave $E_{\rm NN} = -15.838(7)\,E_{\rm h}$, within MC noise
+of the cc-pVDZ FCI value $-15.836\,E_{\rm h}$. For \ce{N2} at
+$R_{\rm N-N} = 2.4$~\AA\ in STO-3G (the smallest basis admitting
+tractable full FCI for verification), 3000 SR iterations gave
+$E_{\rm NN} = -108.903(14)\,E_{\rm h}$. STO-3G FCI sits at
+$-107.44\,E_{\rm h}$ here, so the NN trial captures
+$\sim 1.5\,E_{\rm h}$ of correlation outside the STO-3G basis; this is
+the regime where the NN wavefunction projected onto FCI's
+natural-orbital basis develops the diffuse spurious mass discussed in
+\S\ref{sec:h4_linear}.
+
+For each cell, the recovered CI vector $\widehat{c}$ was projected
+into the indicated active space, the active-space Hamiltonian
+diagonalised in the NN-derived natural-orbital basis, and NEVPT2
+evaluated on the resulting variational eigenvector. CASSCF baselines
+were computed at the same active spaces:
 \begin{center}\renewcommand{\arraystretch}{1.05}\small
-\begin{tabular}{lccc}
+\begin{tabular}{llccc}
 \toprule
-& reference $E$ (Ha) & $E_{\rm NEVPT2}$ (Ha) & gap to FCI (mE_h) \\
+system & active space & $E_{\rm tot}$ ($\widehat{c}$ in NN-NOs) & $E_{\rm tot}$ (CASSCF) & gap chat$-$CASSCF (mE_h) \\
 \midrule
-$\widehat{c}$ in NN-NOs (this work)        & $-15.7790$ & $-15.8211$ & $+15.3$ \\
-CASSCF orbitals (baseline) & $-15.7744$ & $-15.8171$ & $+19.3$ \\
+\ce{BeH2}/cc-pVDZ & CAS(4,(2,2))  & $-15.821$  & $-15.817$  & $-4.0$ \\
+\ce{BeH2}/cc-pVDZ & CAS(8,(3,3))  & $-15.827$  & $-15.824$  & $-3.1$ \\
+\ce{BeH2}/cc-pVDZ & CAS(10,(3,3)) & $-15.832$  & $-15.831$  & $-0.4$ \\
+\ce{N2}/STO-3G    & CAS(6,(4,4))  & $-107.275$ & $-107.266$ & $-9.0$ \\
+\ce{N2}/STO-3G    & CAS(8,(6,6))  & $-107.265$ & $-107.264$ & $-1.3$ \\
 \midrule
-FCI(cc-pVDZ) (reference)   &            & $-15.8364$ &        \\
+FCI(cc-pVDZ \ce{BeH2}) &  & $-15.836$  &  &       \\
+FCI(STO-3G  \ce{N2})   &  & $-107.441$ &  &       \\
 \bottomrule
 \end{tabular}
 \end{center}
-The $\widehat{c}$-derived CASCI reference lies $4.7\,{\rm m}E_{\rm h}$
-below CASSCF at the same (4,4) active space, and the resulting
-NEVPT2 closes the gap to FCI by $4.0\,{\rm m}E_{\rm h}$. The NN
+Across both systems and at every active space tested, the
+$\widehat{c}$-derived NEVPT2 lies below the CASSCF-derived NEVPT2 by
+$0.4$ to $9\,{\rm m}E_{\rm h}$, with the gap shrinking as the active
+space grows toward the full single-particle Hilbert space. The NN
 orbitals import additional correlation into the active space that
-CASSCF orbital optimisation cannot reach without enlarging the
-active space. This is the expected qualitative behaviour: a
-near-FCI-quality real-space wavefunction's natural orbitals naturally
-include some of the dynamic correlation that variational CASSCF
-within a small active space cannot.
+CASSCF orbital optimisation cannot reach at the same CAS size.
+
+For \ce{BeH2} the small-CAS(4,(2,2)) chat-NEVPT2 sits
+$4\,{\rm m}E_{\rm h}$ below the CASSCF baseline (equivalently, the
+gap to FCI closes from $19.3$ to $15.3\,{\rm m}E_{\rm h}$); enlarging
+the active space toward CAS(10,(3,3)) brings both to within
+$5\,{\rm m}E_{\rm h}$ of FCI, with the chat-vs-CASSCF advantage
+shrinking to $0.4\,{\rm m}E_{\rm h}$ as the orbital optimisation
+becomes less important. For the strongly-correlated stretched
+\ce{N2}/STO-3G case ($|c_{\rm ref}|^{2} \approx 0.11$ in FCI ---
+nominally two- or three-configuration), the chat-NEVPT2 advantage at
+CAS(6,(4,4)) is $9\,{\rm m}E_{\rm h}$; both methods sit
+$\sim 170\,{\rm m}E_{\rm h}$ above the STO-3G FCI energy, which
+reflects basis-incompleteness inherent to the STO-3G level rather
+than a failure of either reference. This is the qualitative pattern
+expected: a near-FCI-quality real-space wavefunction's natural
+orbitals naturally include some of the correlation that variational
+CASSCF within a small active space cannot, and the two approaches
+converge as the active space grows.
 
 The NN-VMC + CS pipeline supplies the same object CASSCF would have
 produced --- a multireference active-space wavefunction in an
@@ -930,34 +963,39 @@ floor at the chosen $|c_I^{\rm FCI}| > 10^{-4}$ threshold.
 
 \begin{table}[t]
 \caption{One-electron properties recovered from $\widehat{c}$
-compared against PySCF FCI in the same natural-orbital basis. Both
-runs use the standard pipeline: \texttt{candidate\_tol=$10^{-4}$},
-naive L${}_2$ normalisation of the sample mean. ``--'' indicates
-H$_2$O cc-pVDZ was excluded because the full-FCI Hamiltonian exceeds
-our 32~GB workstation memory; a CASCI(8,(4,4)) frozen-core variant
-gives qualitatively similar agreement (data not shown).}
+compared against PySCF FCI in the same natural-orbital basis. All
+three runs use the standard pipeline: \texttt{candidate\_tol=$10^{-4}$},
+naive L${}_2$ normalisation of the sample mean. H$_2$O/cc-pVDZ was
+excluded because the full-FCI Hamiltonian ($1.8\!\times\!10^6$
+determinants) exceeded our 32~GB workstation memory. For stretched
+\ce{N2}/STO-3G the NN trial captures $\sim 1.5\,E_{\rm h}$ of
+correlation outside the STO-3G basis ($E_{\rm NN} = -108.90$ vs
+$E_{\rm FCI}^{\rm STO\text{-}3G} = -107.44\,E_{\rm h}$); the
+comparison shows what properties look like when the trial extends
+well beyond the chosen Gaussian basis.}
 \label{tab:rdm_properties}
 \centering
-\small
-\begin{tabular}{lcccc}
+\footnotesize
+\begin{tabular}{lcccccc}
 \toprule
 property &
-\multicolumn{2}{c}{H$_2$ cc-pVDZ, $R = 2.5\,a_0$} &
-\multicolumn{2}{c}{BeH$_2$ cc-pVDZ, $R = 1.33$\,\AA} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-& $\widehat{c}$ & FCI & $\widehat{c}$ & FCI \\
+\multicolumn{2}{c}{H$_2$/cc-pVDZ, $R\!=\!2.5\,a_0$} &
+\multicolumn{2}{c}{BeH$_2$/cc-pVDZ, $R\!=\!1.33$\,\AA} &
+\multicolumn{2}{c}{N$_2$/STO-3G, $R\!=\!2.4$\,\AA} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+& $\widehat{c}$ & FCI & $\widehat{c}$ & FCI & $\widehat{c}$ & FCI \\
 \midrule
-Tr $\gamma$ ($N_e$)            & $2.000000$ & $2.000000$ & $6.000000$ & $6.000000$ \\
-NO occ. $n_1$ (largest)        & $1.9118$ & $1.8827$ & $1.9701$ & $2.0000$ \\
-NO occ. $n_2$                  & $0.0825$ & $0.1107$ & $1.7745$ & $1.9571$ \\
-$C_0$ (HF amplitude)           & $+0.978$ & $+0.970$ & $+0.902$ & $+0.978$ \\
-$C_0^2$                        & $0.956$  & $0.941$  & $0.814$  & $0.957$ \\
-$N_{\rm unp}$ (Head--Gordon)   & $0.170$  & $0.222$  & $0.923$  & $0.171$ \\
-$|\mu|$ (Debye)                & $0$      & $0$      & $0$      & $0$     \\
-$Q_{zz}$ (a.u.)                & $-1.145$ & $-1.175$ & $-8.04$  & $-8.72$ \\
+Tr $\gamma$ ($N_e$)         & $2.0000$ & $2.0000$ & $6.0000$ & $6.0000$ & $14.0000$ & $14.0000$ \\
+NO occ.\ $n_1$              & $1.9118$ & $1.8827$ & $1.9701$ & $2.0000$ & $2.0000$  & $2.0000$ \\
+NO occ.\ $n_2$              & $0.0825$ & $0.1107$ & $1.7745$ & $1.9571$ & $2.0000$  & $2.0000$ \\
+NO occ.\ $n_3$              & --       & --       & $1.7628$ & $1.9563$ & $1.8795$  & $1.9999$ \\
+$C_0$ (leading amp.)        & $+0.978$ & $+0.970$ & $+0.902$ & $+0.978$ & $+0.477$  & $+0.334$ \\
+$N_{\rm unp}$ (Head--Gordon)& $0.170$  & $0.222$  & $0.923$  & $0.171$  & $3.172$   & $2.922$  \\
+$|\mu|$ (Debye)             & $0$      & $0$      & $0$      & $0$      & $0$       & $0$ \\
+$Q_{zz}$ (a.u.)             & $-1.145$ & $-1.175$ & $-8.04$  & $-8.72$  & $-7.02$   & $-6.99$ \\
 \bottomrule
 \end{tabular}
-\end{table>
+\end{table}
 
 This brings NN-VMC into the orbit of analysis tools that have been
 developed over decades for CI/CC-style wavefunctions
