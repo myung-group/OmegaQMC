@@ -14,6 +14,7 @@ estimators : f_I(R_k) computation and Lasso/soft-threshold recovery (JAX).
 scaling    : Sweep orchestrator emitting cells/aux for one (R, basis).
 walkers    : Streaming HDF5 dumper/loader for the VMC walker bank.
 properties : 1-RDM, dipole, quadrupole, MR diagnostics from a recovered c_hat.
+mrpt       : c_hat → CASCI → NEVPT2 (post-HF multireference PT bridge).
 plots      : Headline scaling plots (matplotlib, imported lazily).
 """
 
@@ -72,4 +73,13 @@ from OmegaQMC.cs.properties import (
     effective_unpaired_electrons,
     report_properties,
     compare_to_fci,
+)
+
+from OmegaQMC.cs.mrpt import (
+    select_active_space,
+    chat_to_casci_matrix,
+    build_casci_from_chat,
+    run_nevpt2,
+    casscf_nevpt2_reference,
+    compare_nevpt2,
 )

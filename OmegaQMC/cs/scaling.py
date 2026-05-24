@@ -65,6 +65,7 @@ def precompute_means(
     det_chunk_size: int = 200,
     seed_base: int = 0,
     walker_convention: str = "grouped",
+    return_second_moments: bool = False,
 ) -> dict:
     """Stream f_I in determinant chunks, accumulate per-(K_s, seed) means.
 
@@ -73,7 +74,15 @@ def precompute_means(
     and PySCF). NN-VMC walker banks dumped by ``OmegaQMC.vmc_nn`` are in
     ``"interleaved"`` convention and require that string.
 
-    Returns ``{(K_s, seed_idx): means_vector_of_length_n_det}``.
+    With ``return_second_moments=False`` (default) returns
+    ``{(K_s, seed_idx): means_vector_of_length_n_det}``.
+
+    With ``return_second_moments=True`` returns
+    ``(means, second_moments)`` where ``second_moments[key]`` holds the
+    per-coefficient sample mean of ``f_I^2``. Needed for the
+    bias-corrected proj_mass estimator
+    (see :func:`OmegaQMC.cs.estimators.bias_corrected_proj_mass`) when
+    the candidate set is large relative to the walker count.
     """
     candidate = fci_ref["candidate_set"]
     n_det = len(candidate)
@@ -99,12 +108,20 @@ def precompute_means(
         )
 
     means = {key: np.zeros(n_det, dtype=float) for key in subsamples}
+    m2s = ({key: np.zeros(n_det, dtype=float) for key in subsamples}
+           if return_second_moments else None)
     for start in range(0, n_det, det_chunk_size):
         end = min(start + det_chunk_size, n_det)
         chunk = candidate[start:end]
         f_I_chunk = f_I_matrix(orb_vals, chunk, psi_vals_bank, n_alpha, n_beta)
+        if return_second_moments:
+            f_I_sq_chunk = f_I_chunk ** 2
         for key, idx in subsamples.items():
             means[key][start:end] = f_I_chunk[:, idx].mean(axis=1)
+            if return_second_moments:
+                m2s[key][start:end] = f_I_sq_chunk[:, idx].mean(axis=1)
+    if return_second_moments:
+        return means, m2s
     return means
 
 

@@ -157,6 +157,58 @@ def soft_threshold(x: np.ndarray, lam: float) -> np.ndarray:
     return np.sign(x) * np.maximum(np.abs(x) - lam, 0.0)
 
 
+def bias_corrected_proj_mass(
+    c_raw: np.ndarray,
+    m2: np.ndarray,
+    K_s: int,
+) -> float:
+    """Unbiased estimator of basis_frac/Z = E[Sum c_I^2 / Z].
+
+    The naive Sum c_raw^2 is biased high by Sum Var(c_raw_I) = (1/K_s)
+    Sum Var(f_I). Subtracting the empirical Sum (m2 - c_raw^2)/K_s
+    removes that bias. Use when n_det >> K_s and the noise floor
+    dominates the signal in the naive projection mass.
+
+    Args:
+        c_raw: per-coefficient sample mean of f_I, shape (n_det,)
+        m2: per-coefficient sample mean of f_I^2, shape (n_det,)
+        K_s: number of samples per coefficient
+
+    Returns:
+        Bias-corrected proj_mass scalar. Can be negative if signal is
+        swamped by noise; the caller is expected to handle that case.
+    """
+    c_raw = np.asarray(c_raw)
+    m2 = np.asarray(m2)
+    sample_var = m2 - c_raw ** 2
+    bias = float(np.sum(sample_var) / K_s)
+    naive = float(np.sum(c_raw ** 2))
+    return naive - bias
+
+
+def normalize_and_align_bias_corrected(
+    c_raw: np.ndarray,
+    m2: np.ndarray,
+    K_s: int,
+    reference_sign: float,
+    floor: float = 1e-30,
+) -> tuple:
+    """Like :func:`normalize_and_align` but uses bias-corrected proj_mass.
+
+    Returns ``(c_norm, proj_mass_corrected, proj_mass_naive)`` so the
+    caller can see how much bias was subtracted.
+    """
+    proj_mass_naive = float(np.sum(np.asarray(c_raw) ** 2))
+    proj_mass = bias_corrected_proj_mass(c_raw, m2, K_s)
+    if proj_mass < floor:
+        # Signal swamped by noise: fall back to the naive proj_mass with a warning.
+        proj_mass = proj_mass_naive
+    c_norm = np.asarray(c_raw) / np.sqrt(proj_mass)
+    if reference_sign != 0.0 and c_norm[0] * reference_sign < 0:
+        c_norm = -c_norm
+    return c_norm, proj_mass, proj_mass_naive
+
+
 def normalize_and_align(
     c_raw: np.ndarray,
     reference_sign: float,

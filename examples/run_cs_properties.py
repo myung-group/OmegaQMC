@@ -34,8 +34,10 @@ from OmegaQMC.utils import Mole_custom
 from OmegaQMC.cs.reference import compute_fci_reference
 from OmegaQMC.cs.walkers import load_walker_bank
 from OmegaQMC.cs.estimators import (
-    evaluate_orbitals_on_walkers, f_I_matrix, normalize_and_align,
+    evaluate_orbitals_on_walkers, f_I_matrix,
+    normalize_and_align, normalize_and_align_bias_corrected,
 )
+from OmegaQMC.cs.scaling import precompute_means
 from OmegaQMC.cs.properties import report_properties, compare_to_fci
 from OmegaQMC.psi.nn.adapter import make_nn_log_psi
 from OmegaQMC.vmc_nn import get_vmc_nn_func
@@ -91,6 +93,12 @@ def main():
     p.add_argument("--n-alpha", type=int, required=True)
     p.add_argument("--n-beta", type=int, required=True)
     p.add_argument("--psi-batch", type=int, default=2048)
+    p.add_argument("--det-chunk", type=int, default=200,
+                   help="determinant-chunk size for streaming f_I (memory bound)")
+    p.add_argument("--candidate-tol", type=float, default=1e-4,
+                   help="drop FCI determinants with |c_FCI| <= this "
+                        "from the candidate set; default 1e-4 filters out "
+                        "noise-dominated coefficients in large bases")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-json", default=None,
                    help="Optional path for a JSON dump of all numbers")
@@ -110,7 +118,10 @@ def main():
 
     fci_ref = compute_fci_reference(
         mol, n_alpha=args.n_alpha, n_beta=args.n_beta,
+        candidate_tol=args.candidate_tol,
     )
+    print(f"  candidate_tol = {args.candidate_tol:.0e}  "
+          f"|candidate set| = {len(fci_ref['candidate_set'])}")
     print(f"  E_HF  = {fci_ref['E_HF']: .6f} Ha")
     print(f"  E_FCI = {fci_ref['E_FCI']: .6f} Ha")
 
@@ -123,24 +134,35 @@ def main():
         walkers, np.asarray(mol.atom_coords()),
         driver.params, log_psi, batch_size=args.psi_batch,
     )
-    orb = evaluate_orbitals_on_walkers(
-        mol, walkers, fci_ref["no_coeff_ao"],
-        convention="interleaved", n_alpha=args.n_alpha, n_beta=args.n_beta,
+    # Stream f_I in determinant chunks to bound memory at L * K_s_max
+    # instead of n_det * K_s_max. Also accumulate second moments so we
+    # can subtract the per-coefficient variance bias from proj_mass.
+    # The bias scales as n_det/(Z K_s) and dominates the signal at
+    # large basis (e.g. cc-pVDZ for atoms with valence shells).
+    K_s_max = walkers.shape[0]
+    means, m2s = precompute_means(
+        mol, fci_ref, walkers, psi_vals,
+        K_s_sweep=[K_s_max], n_seeds=1,
+        det_chunk_size=args.det_chunk,
+        walker_convention="interleaved",
+        return_second_moments=True,
     )
-    f_I = f_I_matrix(orb, fci_ref["candidate_set"], psi_vals,
-                     n_alpha=args.n_alpha, n_beta=args.n_beta)
-    c_raw = f_I.mean(axis=1)
+    c_raw = means[(K_s_max, 0)]
+    m2 = m2s[(K_s_max, 0)]
     c_true = np.array([fci_ref["ci_dict"][k]
                        for k in fci_ref["candidate_set"]])
-    c_hat, proj_mass = normalize_and_align(
-        c_raw, float(np.sign(c_true[0])),
-    )
+    from OmegaQMC.cs.estimators import bias_corrected_proj_mass
+    c_hat, proj_mass = normalize_and_align(c_raw, float(np.sign(c_true[0])))
+    proj_mass_corrected = bias_corrected_proj_mass(c_raw, m2, K_s_max)
 
     chat_rep = report_properties(c_hat, fci_ref, mol)
     cmp = compare_to_fci(chat_rep, fci_ref, mol)
     ch, fc, dl = cmp["chat"], cmp["fci"], cmp["delta"]
 
-    print(f"\n  K_s = {f_I.shape[1]},  proj_mass = {proj_mass:.3e}")
+    print(f"\n  K_s = {K_s_max}")
+    print(f"  proj_mass (naive, used)    = {proj_mass:.4e}")
+    print(f"  proj_mass (bias-corrected) = {proj_mass_corrected:.4e}  "
+          f"(bias = {proj_mass - proj_mass_corrected:+.4e})")
     print(f"\n{'property':<38} {'c_hat':>14} {'c_FCI':>14} {'diff':>14}")
     print("-" * 82)
     n_show = min(5, len(ch["occupations"]))
@@ -182,7 +204,9 @@ def main():
             R=args.R, basis=args.basis,
             n_alpha=args.n_alpha, n_beta=args.n_beta,
             E_HF=fci_ref["E_HF"], E_FCI=fci_ref["E_FCI"],
-            K_s=int(f_I.shape[1]), proj_mass=float(proj_mass),
+            K_s=int(K_s_max),
+            proj_mass=float(proj_mass),
+            proj_mass_bias_corrected=float(proj_mass_corrected),
             chat=dict(
                 occupations=ch["occupations"].tolist(),
                 trace_gamma=ch["trace_gamma"],
