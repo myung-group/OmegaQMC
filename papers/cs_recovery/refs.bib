@@ -1,0 +1,489 @@
+% -- Direct precedents: compressed sensing / L1 for CI vectors -------------
+
+@article{McClean2015MAGIC,
+  author = {McClean, Jarrod R. and Aspuru-Guzik, Al{\'a}n},
+  title  = {Compact wavefunctions from compressed imaginary time evolution},
+  journal = {RSC Adv.},
+  volume = {5},
+  pages  = {102277--102283},
+  year   = {2015},
+  doi    = {10.1039/C5RA22198F},
+  note   = {arXiv:1409.7358}
+}
+
+@article{Knowles2015compressive,
+  author = {Knowles, Peter J.},
+  title  = {Compressive sampling in configuration interaction wavefunctions},
+  journal = {Mol. Phys.},
+  volume = {113},
+  number = {13-14},
+  pages  = {1655--1660},
+  year   = {2015},
+  doi    = {10.1080/00268976.2014.1003621}
+}
+
+@article{Sanders2015CSlowrank,
+  author = {Sanders, Jacob N. and Andrade, Xavier and Aspuru-Guzik, Al{\'a}n},
+  title  = {Compressed Sensing for the Fast Computation of Matrices: Application to Molecular Vibrations},
+  journal = {ACS Cent. Sci.},
+  volume = {1},
+  number = {1},
+  pages  = {24--32},
+  year   = {2015},
+  doi    = {10.1021/acscentsci.5b00078}
+}
+
+% -- Closest competitor: NN + natural-orbital CI ---------------------------
+
+@misc{Thirion2025NONNCI,
+  author = {Thirion, Pauline and Schmerwitz, Yorick L. A. and Kroesbergen, Marijn and Levi, Gianluca and J{\'o}nsson, Hannes and Bilous, Pavlo and J{\'o}nsson, Elvar O. and Hansmann, Pierre},
+  title  = {Natural-Orbital-Based Neural Network Configuration Interaction},
+  year   = {2025},
+  eprint = {2510.27665},
+  archivePrefix = {arXiv}
+}
+
+% -- NN-as-CI-importance-classifier (related selected-CI work) -------------
+
+@article{Coe2018MLCI,
+  author = {Coe, Jeremy P.},
+  title  = {Machine learning configuration interaction},
+  journal = {J. Chem. Theory Comput.},
+  volume = {14},
+  number = {11},
+  pages  = {5739--5749},
+  year   = {2018},
+  doi    = {10.1021/acs.jctc.8b00849}
+}
+
+@article{Coe2019MLCIPEC,
+  author = {Coe, Jeremy P.},
+  title  = {Machine learning configuration interaction for ab initio potential energy curves},
+  journal = {J. Chem. Theory Comput.},
+  volume = {15},
+  pages  = {6179--6189},
+  year   = {2019},
+  doi    = {10.1021/acs.jctc.9b00828}
+}
+
+@misc{RBMCI2024,
+  author = {[multiple authors]},
+  title  = {Configuration Interaction Guided Sampling with Interpretable Restricted {Boltzmann} Machine},
+  year   = {2024},
+  eprint = {2409.06146},
+  archivePrefix = {arXiv}
+}
+
+@misc{Thompson2026ARNN,
+  author = {Thompson, Daniel and Gunlycke, Daniel},
+  title  = {Auto-regressive Neural Quantum State Sampling for Selected Configuration Interaction},
+  year   = {2026},
+  eprint = {2603.24728},
+  archivePrefix = {arXiv}
+}
+
+% -- NN-VMC real-space architectures (method baselines) --------------------
+
+@article{Pfau2020FermiNet,
+  author = {Pfau, David and Spencer, James S. and Matthews, Alexander G. de G. and Foulkes, W. M. C.},
+  title  = {Ab initio solution of the many-electron {S}chr{\"o}dinger equation with deep neural networks},
+  journal = {Phys. Rev. Research},
+  volume = {2},
+  pages  = {033429},
+  year   = {2020},
+  doi    = {10.1103/PhysRevResearch.2.033429}
+}
+
+@article{Hermann2020PauliNet,
+  author = {Hermann, Jan and Sch{\"a}tzle, Zeno and No{\'e}, Frank},
+  title  = {Deep-neural-network solution of the electronic {S}chr{\"o}dinger equation},
+  journal = {Nat. Chem.},
+  volume = {12},
+  pages  = {891--897},
+  year   = {2020},
+  doi    = {10.1038/s41557-020-0544-y}
+}
+
+@inproceedings{vonGlehn2023PsiFormer,
+  author = {von Glehn, Ingrid and Spencer, James S. and Pfau, David},
+  title  = {A self-attention Ansatz for ab-initio quantum chemistry},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year   = {2023},
+  note   = {arXiv:2211.13672}
+}
+
+@article{Pfau2024ExcitedStates,
+  author = {Pfau, David and Axelrod, Simon and Sutterud, Halvard and von Glehn, Ingrid and Spencer, James S.},
+  title  = {Accurate computation of quantum excited states with neural networks},
+  journal = {Science},
+  volume = {385},
+  number = {6711},
+  pages  = {eadn0137},
+  year   = {2024},
+  doi    = {10.1126/science.adn0137}
+}
+
+@misc{Foster2025Orbformer,
+  author = {Foster, William and [...]},
+  title  = {Orbformer: A scalable transformer-based ansatz for neural-network variational {M}onte {C}arlo},
+  year   = {2025},
+  eprint = {2506.19960},
+  archivePrefix = {arXiv}
+}
+
+@article{Gao2023Globe,
+  author = {Gao, Nicholas and G{\"u}nnemann, Stephan},
+  title  = {Generalizing neural wave functions},
+  journal = {Nat. Commun.},
+  year   = {2023}
+}
+
+% -- NN parameterizing CI amplitudes (adjacent paradigm) -------------------
+
+@article{Liu2024NNBackflow,
+  author = {Liu, An-Jun and Clark, Bryan K.},
+  title  = {Neural network backflow for ab initio quantum chemistry},
+  journal = {Phys. Rev. B},
+  volume = {110},
+  pages  = {115137},
+  year   = {2024},
+  doi    = {10.1103/PhysRevB.110.115137}
+}
+
+@misc{Liu2025NNBackflowOpt,
+  author = {Liu, An-Jun and Clark, Bryan K.},
+  title  = {Improving optimization of neural network backflow wavefunctions},
+  year   = {2025},
+  eprint = {2502.18843},
+  archivePrefix = {arXiv}
+}
+
+% -- Methodological precedent for the MC overlap estimator -----------------
+
+@misc{Szoldra2023NQSoverlap,
+  author = {Szo{\l}dra, Tomasz},
+  title  = {Fidelity and Overlap of Neural Quantum States: Error Bounds on the {M}onte {C}arlo Estimator},
+  year   = {2023},
+  eprint = {2311.14820},
+  archivePrefix = {arXiv}
+}
+
+% -- Natural orbitals from QMC (background) --------------------------------
+
+@article{Per2008NOVMC,
+  author = {Per, Manolo C. and Walker, Kevin A. and Russo, Salvy P.},
+  title  = {How important is orbital choice in single-determinant diffusion {M}onte {C}arlo calculations?},
+  journal = {J. Chem. Theory Comput.},
+  volume = {4},
+  pages  = {2188--2193},
+  year   = {2008},
+  doi    = {10.1021/ct800188e}
+}
+
+@article{Filippi2000NO,
+  author = {Filippi, Claudia and Fahy, Stephen},
+  title  = {Optimal orbitals from energy fluctuations in correlated wave functions},
+  journal = {J. Chem. Phys.},
+  volume = {112},
+  pages  = {3523--3531},
+  year   = {2000},
+  doi    = {10.1063/1.480507}
+}
+
+@article{Bytautas2013NOs,
+  author = {Bytautas, Laimutis and Ruedenberg, Klaus},
+  title  = {Are natural orbitals useful for generating an efficient expansion of the wave function?},
+  journal = {Chem. Phys. Lett.},
+  volume = {580},
+  pages  = {7--12},
+  year   = {2013},
+  doi    = {10.1016/j.cplett.2013.06.023}
+}
+
+@article{Lowdin1955natural,
+  author = {L{\"o}wdin, Per-Olov},
+  title  = {Quantum theory of many-particle systems. {I}. {P}hysical interpretations by means of density matrices, natural spin-orbitals, and convergence problems in the method of configurational interaction},
+  journal = {Phys. Rev.},
+  volume = {97},
+  pages  = {1474--1489},
+  year   = {1955},
+  doi    = {10.1103/PhysRev.97.1474}
+}
+
+% -- FCIQMC / selected CI (comparison paradigm) ----------------------------
+
+@article{Booth2009FCIQMC,
+  author = {Booth, George H. and Thom, Alex J. W. and Alavi, Ali},
+  title  = {Fermion {M}onte {C}arlo without fixed nodes: A game of life, death, and annihilation in {S}later determinant space},
+  journal = {J. Chem. Phys.},
+  volume = {131},
+  pages  = {054106},
+  year   = {2009},
+  doi    = {10.1063/1.3193710}
+}
+
+@article{Holmes2016HCI,
+  author = {Holmes, Adam A. and Tubman, Norm M. and Umrigar, C. J.},
+  title  = {Heat-bath configuration interaction: An efficient selected configuration interaction algorithm inspired by heat-bath sampling},
+  journal = {J. Chem. Theory Comput.},
+  volume = {12},
+  pages  = {3674--3680},
+  year   = {2016},
+  doi    = {10.1021/acs.jctc.6b00407}
+}
+
+@article{Tubman2020ASCI,
+  author = {Tubman, Norm M. and Freeman, C. Daniel and Levine, Daniel S. and Hait, Diptarka and Head-Gordon, Martin and Whaley, K. Birgitta},
+  title  = {Modern approaches to exact diagonalization and selected configuration interaction with the adaptive sampling {CI} method},
+  journal = {J. Chem. Theory Comput.},
+  volume = {16},
+  pages  = {2139--2159},
+  year   = {2020},
+  doi    = {10.1021/acs.jctc.8b00536}
+}
+
+@article{Garniron2019CIPSI,
+  author = {Garniron, Yann and Applencourt, Thomas and Gasperich, Kevin and Benali, Anouar and Fert{\'e}, Anthony and Paquier, Julien and Pradines, Barth{\'e}l{\'e}my and Assaraf, Roland and Reinhardt, Peter and Toulouse, Julien and Barbaresco, Pierre and Renon, Nicolas and David, Gr{\'e}goire and Malrieu, Jean-Paul and V{\'e}ril, Micka{\"e}l and Caffarel, Michel and Loos, Pierre-Fran{\c c}ois and Giner, Emmanuel and Scemama, Anthony},
+  title  = {Quantum Package 2.0: An Open-Source Determinant-Driven Suite of Programs},
+  journal = {J. Chem. Theory Comput.},
+  volume = {15},
+  pages  = {3591--3609},
+  year   = {2019},
+  doi    = {10.1021/acs.jctc.9b00176}
+}
+
+@article{Eriksen2017MBE,
+  author = {Eriksen, Janus J. and Lipparini, Filippo and Gauss, J{\"u}rgen},
+  title  = {Virtual orbital many-body expansions: a possible route towards the full configuration interaction limit},
+  journal = {J. Phys. Chem. Lett.},
+  volume = {8},
+  pages  = {4633--4639},
+  year   = {2017},
+  doi    = {10.1021/acs.jpclett.7b02075}
+}
+
+% -- Foundational compressed sensing theory --------------------------------
+
+@article{Candes2006CS,
+  author = {Cand{\`e}s, Emmanuel J. and Romberg, Justin and Tao, Terence},
+  title  = {Robust uncertainty principles: exact signal reconstruction from highly incomplete frequency information},
+  journal = {IEEE Trans. Inf. Theory},
+  volume = {52},
+  pages  = {489--509},
+  year   = {2006},
+  doi    = {10.1109/TIT.2005.862083}
+}
+
+@article{Donoho2006CS,
+  author = {Donoho, David L.},
+  title  = {Compressed sensing},
+  journal = {IEEE Trans. Inf. Theory},
+  volume = {52},
+  pages  = {1289--1306},
+  year   = {2006},
+  doi    = {10.1109/TIT.2006.871582}
+}
+
+@article{Candes2005RIP,
+  author = {Cand{\`e}s, Emmanuel J. and Tao, Terence},
+  title  = {Decoding by linear programming},
+  journal = {IEEE Trans. Inf. Theory},
+  volume = {51},
+  pages  = {4203--4215},
+  year   = {2005},
+  doi    = {10.1109/TIT.2005.858979}
+}
+
+@article{Tropp2004coherence,
+  author = {Tropp, Joel A.},
+  title  = {Greed is good: algorithmic results for sparse approximation},
+  journal = {IEEE Trans. Inf. Theory},
+  volume = {50},
+  pages  = {2231--2242},
+  year   = {2004},
+  doi    = {10.1109/TIT.2004.834793}
+}
+
+@article{Tibshirani1996lasso,
+  author = {Tibshirani, Robert},
+  title  = {Regression shrinkage and selection via the lasso},
+  journal = {J. R. Stat. Soc. B},
+  volume = {58},
+  pages  = {267--288},
+  year   = {1996}
+}
+
+% -- Quantum-state compressed sensing (different setting, useful contrast) -
+
+@article{Gross2010QSCS,
+  author = {Gross, David and Liu, Yi-Kai and Flammia, Steven T. and Becker, Stephen and Eisert, Jens},
+  title  = {Quantum state tomography via compressed sensing},
+  journal = {Phys. Rev. Lett.},
+  volume = {105},
+  pages  = {150401},
+  year   = {2010},
+  doi    = {10.1103/PhysRevLett.105.150401}
+}
+
+@article{Torlai2018NQStomography,
+  author = {Torlai, Giacomo and Mazzola, Guglielmo and Carrasquilla, Juan and Troyer, Matthias and Melko, Roger and Carleo, Giuseppe},
+  title  = {Neural-network quantum state tomography},
+  journal = {Nat. Phys.},
+  volume = {14},
+  pages  = {447--450},
+  year   = {2018},
+  doi    = {10.1038/s41567-018-0048-5}
+}
+
+% -- AFQMC and trial wavefunctions (downstream use case) -------------------
+
+@article{Mahajan2025NNQSAFQMC,
+  author = {Mahajan, Ankit and Sharma, Sandeep},
+  title  = {Neural-network quantum state trial wave functions for {AFQMC}},
+  year   = {2025},
+  note   = {arXiv:2507.07540}
+}
+
+@article{Carleo2017NQS,
+  author = {Carleo, Giuseppe and Troyer, Matthias},
+  title  = {Solving the quantum many-body problem with artificial neural networks},
+  journal = {Science},
+  volume = {355},
+  pages  = {602--606},
+  year   = {2017},
+  doi    = {10.1126/science.aag2302}
+}
+
+@misc{PySCF2020,
+  author = {Sun, Qiming and others},
+  title  = {Recent developments in the {PySCF} program package},
+  year   = {2020},
+  journal = {J. Chem. Phys.},
+  volume = {153},
+  pages  = {024109},
+  doi    = {10.1063/5.0006074}
+}
+
+@misc{Heek2024Flax,
+  author = {Heek, Jonathan and Levskaya, Anselm and Oliver, Avital and Ritter, Marvin and Rondepierre, Bertrand and Steiner, Andreas and van Zee, Marc},
+  title  = {Flax: A neural network library and ecosystem for {JAX}},
+  year   = {2024},
+  howpublished = {\url{http://github.com/google/flax}}
+}
+
+% -- Multireference perturbation theory and SA-CASSCF --------------------
+
+@article{Andersson1992CASPT2,
+  author = {Andersson, Kerstin and Malmqvist, Per-{\AA}ke and Roos, Bj{\"o}rn O.},
+  title  = {Second-order perturbation theory with a complete active space self-consistent field reference function},
+  journal = {J. Chem. Phys.},
+  volume = {96},
+  pages  = {1218--1226},
+  year   = {1992},
+  doi    = {10.1063/1.462209}
+}
+
+@article{Angeli2001NEVPT2,
+  author = {Angeli, Celestino and Cimiraglia, Renzo and Evangelisti, Stefano and Leininger, Thierry and Malrieu, Jean-Paul},
+  title  = {Introduction of n-electron valence states for multireference perturbation theory},
+  journal = {J. Chem. Phys.},
+  volume = {114},
+  pages  = {10252--10264},
+  year   = {2001},
+  doi    = {10.1063/1.1361246}
+}
+
+@article{Roos1980SACASSCF,
+  author = {Roos, Bj{\"o}rn O. and Taylor, Peter R. and Siegbahn, Per E. M.},
+  title  = {A complete active space {SCF} method ({CASSCF}) using a density matrix formulated super-{CI} approach},
+  journal = {Chem. Phys.},
+  volume = {48},
+  pages  = {157--173},
+  year   = {1980},
+  doi    = {10.1016/0301-0104(80)80045-0}
+}
+
+@article{Sayfutyarova2017AVAS,
+  author = {Sayfutyarova, Elvira R. and Sun, Qiming and Chan, Garnet Kin-Lic and Knizia, Gerald},
+  title  = {Automated construction of molecular active spaces from atomic valence orbitals},
+  journal = {J. Chem. Theory Comput.},
+  volume = {13},
+  pages  = {4063--4078},
+  year   = {2017},
+  doi    = {10.1021/acs.jctc.7b00128}
+}
+
+% -- Multireference diagnostics -------------------------------------------
+
+@article{Lee1989T1diag,
+  author = {Lee, Timothy J. and Taylor, Peter R.},
+  title  = {A diagnostic for determining the quality of single-reference electron correlation methods},
+  journal = {Int. J. Quantum Chem.},
+  volume = {36},
+  pages  = {199--207},
+  year   = {1989},
+  doi    = {10.1002/qua.560360824}
+}
+
+@article{Janssen1998D1diag,
+  author = {Janssen, Curtis L. and Nielsen, Ida M. B.},
+  title  = {New diagnostics for coupled-cluster and {M}{\o}ller--{P}lesset perturbation theory},
+  journal = {Chem. Phys. Lett.},
+  volume = {290},
+  pages  = {423--430},
+  year   = {1998},
+  doi    = {10.1016/S0009-2614(98)00504-1}
+}
+
+% -- Wavefunction analysis tools (consumers of CI/RDM data) ---------------
+
+@article{Lu2012Multiwfn,
+  author = {Lu, Tian and Chen, Feiwu},
+  title  = {{M}ultiwfn: A multifunctional wavefunction analyzer},
+  journal = {J. Comput. Chem.},
+  volume = {33},
+  pages  = {580--592},
+  year   = {2012},
+  doi    = {10.1002/jcc.22885}
+}
+
+@article{Glendening2013NBO,
+  author = {Glendening, Eric D. and Landis, Clark R. and Weinhold, Frank},
+  title  = {{NBO} 6.0: Natural bond orbital analysis program},
+  journal = {J. Comput. Chem.},
+  volume = {34},
+  pages  = {1429--1437},
+  year   = {2013},
+  doi    = {10.1002/jcc.23266}
+}
+
+@book{Bader1990AIM,
+  author = {Bader, Richard F. W.},
+  title  = {Atoms in Molecules: A Quantum Theory},
+  publisher = {Oxford University Press},
+  year   = {1990}
+}
+
+@book{Helgaker2000MEST,
+  author = {Helgaker, Trygve and J{\o}rgensen, Poul and Olsen, Jeppe},
+  title  = {Molecular Electronic-Structure Theory},
+  publisher = {Wiley},
+  year   = {2000}
+}
+
+@article{Enkovaara2010GPAW,
+  author = {Enkovaara, Jens and Rostgaard, Carsten and Mortensen, Jens J{\o}rgen and others},
+  title = {Electronic structure calculations with {GPAW}: a real-space implementation of the projector augmented-wave method},
+  journal = {J. Phys.: Condens. Matter},
+  volume = {22},
+  pages = {253202},
+  year = {2010},
+  doi = {10.1088/0953-8984/22/25/253202}
+}
+
+@misc{JAX2018,
+  author = {Bradbury, James and Frostig, Roy and Hawkins, Peter and Johnson, Matthew James and Leary, Chris and Maclaurin, Dougal and Necula, George and Paszke, Adam and VanderPlas, Jake and Wanderman-Milne, Skye and Zhang, Qiao},
+  title  = {{JAX}: composable transformations of {P}ython+{N}um{P}y programs},
+  year   = {2018},
+  howpublished = {\url{http://github.com/jax-ml/jax}}
+}

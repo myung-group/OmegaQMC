@@ -102,5 +102,14 @@ ehthumbs.db
 Desktop.ini
 
 
-# Paper drafts kept locally, not in repo
-papers/
+# Paper drafts kept locally by default; tracked drafts are explicit allowlist
+papers/*
+!papers/cs_recovery/
+# LaTeX build artefacts (track .tex/.bib/.md only)
+papers/cs_recovery/*.aux
+papers/cs_recovery/*.bbl
+papers/cs_recovery/*.blg
+papers/cs_recovery/*.out
+papers/cs_recovery/*.toc
+papers/cs_recovery/*.synctex.gz
+papers/cs_recovery/main.pdf
