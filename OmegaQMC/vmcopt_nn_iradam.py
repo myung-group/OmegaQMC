@@ -129,6 +129,10 @@ class _VMCOptDriverNN_IRAdam:
         )
         self.init_params = init_params
         self.lap_grad = lap_grad
+        # Expose log_psi (with .signed attribute) so subclasses such
+        # as the NES-VMC driver can compute signed Psi for overlap
+        # estimators without re-instantiating the model.
+        self.log_psi = log_psi
 
         # Precompute nuclear repulsion
         n_nuc = len(charges)

@@ -890,15 +890,51 @@ represents. Neural-network excited-state VMC
 trial wavefunctions $\{\Psi_{\mathrm{NN}}^{(k)}\}_{k=0}^{K}$ at the
 same NN-VMC accuracy as the ground state. Independent application of
 the recovery pipeline to each member of the family --- one walker
-bank per state --- would yield CI vectors $\{\widehat{c}^{(k)}\}$ for
-the ground state and every excited state, in the \emph{same}
-natural-orbital basis. Implementing the penalty-method NES-VMC
-optimisation inside the current \textsc{OmegaQMC} framework
-constitutes a substantial extension to the existing
-single-state SR driver and is left to a follow-up
-work; the recovery pipeline itself requires no modification, since
-$f_I$ has no explicit dependence on which state $\Psi_{\rm NN}^{(k)}$
-represents.
+bank per state --- yields CI vectors $\{\widehat{c}^{(k)}\}$ for the
+ground state and every excited state, in the \emph{same}
+natural-orbital basis. We implemented this as a penalty-method
+NES-VMC driver (\texttt{OmegaQMC.vmcopt\_nn\_nes}) on top of the
+existing Adam optimiser, with loss
+\begin{equation}
+L(\theta_1) = 0.2\,\langle E \rangle + 0.8\,\sigma_E
++ \lambda\,\bigl( \mathbb{E}_{R \sim |\Psi_1|^{2}}[
+\Psi_{0}(R)/\Psi_{1}(R)]\bigr)^{2},
+\label{eq:nes_loss}
+\end{equation}
+where $\Psi_{0}$ is the frozen pre-trained ground-state trial and
+the penalty $\lambda$ controls the orthogonalisation strength.
+
+A pilot run on stretched H$_2$/cc-pVDZ ($R = 2.5\,a_0$, the system
+of \S\ref{sec:h2}) with $\lambda = 1$ and 200 Adam iterations
+reduced the real-space overlap estimator from $\sim 1$ to
+$\mathbb{E}_{R \sim |\Psi_1|^2}[\Psi_0/\Psi_1] = 0.031$,
+demonstrating that the penalty actively orthogonalises the two
+neural-network trials in real space. However, the CS recovery
+applied to both trials revealed an unexpected methodological
+caveat: the recovered CI vectors satisfy
+$\langle \widehat{c}^{(0)} | \widehat{c}^{(1)} \rangle = 0.99925$
+with $\|\widehat{c}^{(0)} - \widehat{c}^{(1)}\|_{2} = 0.04$ over
+the 10 dominant determinants. The two trained NN states are nearly
+indistinguishable in the FCI basis even though they are
+approximately orthogonal in real space. The penalty drove
+$\Psi_{1}$ into directions of the full real-space Hilbert space that
+are \emph{orthogonal to the FCI basis}, leaving the basis-resolved
+CI vector essentially unchanged.
+
+This finding is intrinsic to projection-based CS recovery from a
+real-space NN: $\Psi_{\rm NN}^{(k)}$ extends beyond any chosen
+Gaussian basis (as documented in
+\S\ref{sec:h4_linear},\S\ref{sec:h2}), and the penalty-method
+orthogonalisation can be satisfied by changes in those
+basis-incomplete components alone. To obtain CI-resolved excited
+states, either (i) the NN must be constrained or biased toward the
+chosen Gaussian basis, or (ii) the penalty must specifically
+target basis-resolved orthogonality, e.g. via
+$|\mathbb{E}[c_{I}^{(1)\star} c_{I}^{(0)}]|^{2}$ summed over the
+candidate set rather than a real-space ratio. Both are interesting
+directions for follow-up; the
+\texttt{OmegaQMC.vmcopt\_nn\_nes} infrastructure provides the
+foundation in either case.
 
 The downstream applications this unlocks are: transition density
 matrices
