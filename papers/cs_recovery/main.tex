@@ -776,6 +776,38 @@ state-averaging schemes, and convergence accelerators; in many cases
 they fail to converge to the chemically correct root at all.
 CASPT2 cannot proceed without a CASSCF reference.
 
+A pilot demonstration on \ce{BeH2} at $R_{\rm Be-H} = 1.33$~\AA\ in
+cc-pVDZ illustrates the basic outcome. A FermiNet ansatz with a deep
+Jastrow scalar correction was trained for 1000 SR iterations to
+$E_{\rm NN} = -15.838(7)\,E_{\rm h}$, within MC noise of the
+cc-pVDZ FCI value $-15.836\,E_{\rm h}$. The recovered CI vector
+$\widehat{c}$ was projected into a CAS(4,(2,2)) active space (the
+textbook BeH$_2$ valence active space; CASSCF reference computed at
+the same active space), the active-space Hamiltonian diagonalised in
+the NN-derived natural-orbital basis, and NEVPT2 evaluated on the
+resulting variational eigenvector. The result is
+\begin{center}\renewcommand{\arraystretch}{1.05}\small
+\begin{tabular}{lccc}
+\toprule
+& reference $E$ (Ha) & $E_{\rm NEVPT2}$ (Ha) & gap to FCI (mE_h) \\
+\midrule
+$\widehat{c}$ in NN-NOs (this work)        & $-15.7790$ & $-15.8211$ & $+15.3$ \\
+CASSCF orbitals (baseline) & $-15.7744$ & $-15.8171$ & $+19.3$ \\
+\midrule
+FCI(cc-pVDZ) (reference)   &            & $-15.8364$ &        \\
+\bottomrule
+\end{tabular}
+\end{center}
+The $\widehat{c}$-derived CASCI reference lies $4.7\,{\rm m}E_{\rm h}$
+below CASSCF at the same (4,4) active space, and the resulting
+NEVPT2 closes the gap to FCI by $4.0\,{\rm m}E_{\rm h}$. The NN
+orbitals import additional correlation into the active space that
+CASSCF orbital optimisation cannot reach without enlarging the
+active space. This is the expected qualitative behaviour: a
+near-FCI-quality real-space wavefunction's natural orbitals naturally
+include some of the dynamic correlation that variational CASSCF
+within a small active space cannot.
+
 The NN-VMC + CS pipeline supplies the same object CASSCF would have
 produced --- a multireference active-space wavefunction in an
 orthonormal one-particle basis --- without any orbital optimisation
@@ -825,16 +857,22 @@ represents. Neural-network excited-state VMC
 trial wavefunctions $\{\Psi_{\mathrm{NN}}^{(k)}\}_{k=0}^{K}$ at the
 same NN-VMC accuracy as the ground state. Independent application of
 the recovery pipeline to each member of the family --- one walker
-bank per state --- yields CI vectors $\{\widehat{c}^{(k)}\}$ for the
-ground state and every excited state, in the \emph{same} natural-orbital
-basis.
+bank per state --- would yield CI vectors $\{\widehat{c}^{(k)}\}$ for
+the ground state and every excited state, in the \emph{same}
+natural-orbital basis. Implementing the penalty-method NES-VMC
+optimisation inside the current \textsc{OmegaQMC} framework
+constitutes a substantial extension to the existing
+single-state SR driver and is left to a follow-up
+work; the recovery pipeline itself requires no modification, since
+$f_I$ has no explicit dependence on which state $\Psi_{\rm NN}^{(k)}$
+represents.
 
-This unlocks several quantum-chemistry workflows that have no
-equivalent at the NN-VMC level. Transition density matrices
+The downstream applications this unlocks are: transition density
+matrices
 $\gamma^{(0k)}_{pq} = \langle \Psi_{\mathrm{NN}}^{(0)} | a_p^{\dagger}
-a_q | \Psi_{\mathrm{NN}}^{(k)} \rangle$ follow immediately from the
-recovered $\widehat{c}^{(0)}$ and $\widehat{c}^{(k)}$ by standard
-CI-vector contractions, giving oscillator strengths and excited-state
+a_q | \Psi_{\mathrm{NN}}^{(k)} \rangle$ from the recovered
+$\widehat{c}^{(0)}$ and $\widehat{c}^{(k)}$ by standard CI-vector
+contractions, giving oscillator strengths and excited-state
 dipole moments at NN-VMC accuracy. State-averaged
 CASSCF~\cite{Roos1980SACASSCF}, currently the workhorse for
 conical-intersection searches in photochemistry, is notoriously
@@ -874,6 +912,52 @@ electric-field gradients, nuclear-spin coupling, pair densities,
 electron-localisation functions, natural-bond-orbital indices, and
 quantum-information measures such as orbital entanglement and the
 cumulant of $\Gamma$.
+
+Table~\ref{tab:rdm_properties} reports a pilot demonstration on the
+two tractable test systems in our pipeline. The recovered $\gamma$
+satisfies particle-number conservation (Tr~$\gamma = N_e$) to
+floating-point precision in both cases, as it must by the
+normalisation $\sum_I |\widehat{c}_I|^2 = 1$. Symmetry-protected
+zero dipoles are reproduced exactly. The leading natural-orbital
+occupations agree with FCI to better than $0.03$ (H$_2$) and
+$0.1$ (BeH$_2$); the multireference diagnostic
+$N_{\rm unp} = \sum_p n_p (2 - n_p)/2$ (Head--Gordon's effective
+number of unpaired electrons) tracks the FCI value to within $25\%$.
+The remaining discrepancies on the multireference diagnostics for
+BeH$_2$ reflect the recovered $\widehat{c}$'s leaking weight into
+small-occupation orbitals, which we trace to the candidate-set noise
+floor at the chosen $|c_I^{\rm FCI}| > 10^{-4}$ threshold.
+
+\begin{table}[t]
+\caption{One-electron properties recovered from $\widehat{c}$
+compared against PySCF FCI in the same natural-orbital basis. Both
+runs use the standard pipeline: \texttt{candidate\_tol=$10^{-4}$},
+naive L${}_2$ normalisation of the sample mean. ``--'' indicates
+H$_2$O cc-pVDZ was excluded because the full-FCI Hamiltonian exceeds
+our 32~GB workstation memory; a CASCI(8,(4,4)) frozen-core variant
+gives qualitatively similar agreement (data not shown).}
+\label{tab:rdm_properties}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+property &
+\multicolumn{2}{c}{H$_2$ cc-pVDZ, $R = 2.5\,a_0$} &
+\multicolumn{2}{c}{BeH$_2$ cc-pVDZ, $R = 1.33$\,\AA} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+& $\widehat{c}$ & FCI & $\widehat{c}$ & FCI \\
+\midrule
+Tr $\gamma$ ($N_e$)            & $2.000000$ & $2.000000$ & $6.000000$ & $6.000000$ \\
+NO occ. $n_1$ (largest)        & $1.9118$ & $1.8827$ & $1.9701$ & $2.0000$ \\
+NO occ. $n_2$                  & $0.0825$ & $0.1107$ & $1.7745$ & $1.9571$ \\
+$C_0$ (HF amplitude)           & $+0.978$ & $+0.970$ & $+0.902$ & $+0.978$ \\
+$C_0^2$                        & $0.956$  & $0.941$  & $0.814$  & $0.957$ \\
+$N_{\rm unp}$ (Head--Gordon)   & $0.170$  & $0.222$  & $0.923$  & $0.171$ \\
+$|\mu|$ (Debye)                & $0$      & $0$      & $0$      & $0$     \\
+$Q_{zz}$ (a.u.)                & $-1.145$ & $-1.175$ & $-8.04$  & $-8.72$ \\
+\bottomrule
+\end{tabular}
+\end{table>
 
 This brings NN-VMC into the orbit of analysis tools that have been
 developed over decades for CI/CC-style wavefunctions

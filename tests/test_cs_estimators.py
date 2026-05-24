@@ -16,12 +16,14 @@ from pyscf import gto
 from OmegaQMC.cs.estimators import (
     _interleaved_to_grouped_indices,
     _normalization,
+    bias_corrected_proj_mass,
     estimate_ci,
     evaluate_ci_wavefunction,
     evaluate_orbitals_on_walkers,
     f_I_matrix,
     lambda_cv,
     normalize_and_align,
+    normalize_and_align_bias_corrected,
     recovery_metrics,
     soft_threshold,
 )
@@ -90,6 +92,42 @@ def test_normalize_and_align_handles_zero_input():
     c_norm, proj_mass = normalize_and_align(x, reference_sign=+1.0)
     assert proj_mass == 0.0
     np.testing.assert_array_equal(c_norm, x)
+
+
+def test_bias_correction_zero_when_no_noise():
+    """If sample mean is perfect (m2 == c_raw^2 → zero variance), the
+    bias correction subtracts zero."""
+    c_raw = np.array([0.9, -0.3, 0.05])
+    m2 = c_raw ** 2  # zero variance per coefficient
+    K_s = 100
+    corrected = bias_corrected_proj_mass(c_raw, m2, K_s)
+    naive = float(np.sum(c_raw ** 2))
+    assert abs(corrected - naive) < 1e-12
+
+
+def test_bias_correction_positive_for_noisy_means():
+    """With per-coefficient variance > 0, the bias correction returns
+    a value smaller than the naive Σ c_raw^2."""
+    c_raw = np.array([1.0, 0.5, 0.01])
+    m2 = np.array([1.5, 1.0, 0.5])  # variance: 0.5, 0.75, 0.4999
+    K_s = 10
+    corrected = bias_corrected_proj_mass(c_raw, m2, K_s)
+    naive = float(np.sum(c_raw ** 2))
+    expected_bias = (0.5 + 0.75 + 0.4999) / 10
+    assert abs(corrected - (naive - expected_bias)) < 1e-10
+    assert corrected < naive
+
+
+def test_bias_corrected_normalize_returns_three_values():
+    c_raw = np.array([0.9, -0.3, 0.05])
+    m2 = c_raw ** 2 + 0.01  # small noise
+    c_norm, pm, pm_naive = normalize_and_align_bias_corrected(
+        c_raw, m2, K_s=100, reference_sign=+1.0,
+    )
+    assert c_norm.shape == c_raw.shape
+    assert pm < pm_naive  # bias subtracted
+    # Sign aligned: c_norm[0] > 0 since reference_sign=+1 and c_raw[0]>0
+    assert c_norm[0] > 0
 
 
 def test_normalize_and_align_handles_zero_reference_sign():
