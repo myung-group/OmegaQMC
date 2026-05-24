@@ -13,6 +13,7 @@ reference  : FCI ground truth + natural orbitals + candidate set (PySCF).
 estimators : f_I(R_k) computation and Lasso/soft-threshold recovery (JAX).
 scaling    : Sweep orchestrator emitting cells/aux for one (R, basis).
 walkers    : Streaming HDF5 dumper/loader for the VMC walker bank.
+properties : 1-RDM, dipole, quadrupole, MR diagnostics from a recovered c_hat.
 plots      : Headline scaling plots (matplotlib, imported lazily).
 """
 
@@ -59,4 +60,16 @@ from OmegaQMC.cs.scaling import (
 from OmegaQMC.cs.walkers import (
     WalkerDumper,
     load_walker_bank,
+)
+
+from OmegaQMC.cs.properties import (
+    reshape_chat_to_pyscf_matrix,
+    compute_1rdm,
+    natural_occupations_from_rdm,
+    electric_dipole,
+    electric_quadrupole,
+    multireference_diagnostics,
+    effective_unpaired_electrons,
+    report_properties,
+    compare_to_fci,
 )
