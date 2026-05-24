@@ -300,6 +300,7 @@ class _VMCDriverNN:
         compute_gradients=False,
         fname_log=None,
         verbose=1,
+        dump_walkers_path=None,
     ):
         """Execute a VMC run with fixed NN parameters.
 
@@ -323,6 +324,11 @@ class _VMCDriverNN:
                 to stdout; any other string opens that
                 file in line-buffered mode.
             verbose: Verbosity (0 = silent).
+            dump_walkers_path: Optional HDF5 path. When set, each
+                production block streams the post-block walker
+                configurations and ``log|Psi|`` values to that file via
+                :class:`OmegaQMC.cs.walkers.WalkerDumper`. Used by the
+                compressed-sensing CI extraction pipeline.
 
         Returns:
             Dict with keys ``'E_mean'``,
@@ -551,6 +557,18 @@ class _VMCDriverNN:
         E_cs_b = []
         timestamp_prev = datetime.now()
 
+        walker_dumper = None
+        if dump_walkers_path is not None:
+            from .cs.walkers import WalkerDumper
+            walker_dumper = WalkerDumper(
+                dump_walkers_path,
+                num_blocks=num_blocks,
+                num_walkers=num_walkers,
+                nelec=nelec,
+                mc_timestep=mc_timestep,
+                num_steps_decorr=num_steps_decorr,
+            )
+
         for blk in range(1, num_blocks + 1):
             state = (rng_key, walkers, mc_stepsize)
             state, result = jax.lax.scan(
@@ -584,6 +602,12 @@ class _VMCDriverNN:
                 file=fout,
             )
             timestamp_prev = now
+
+            if walker_dumper is not None:
+                walker_dumper.write_block(
+                    jax.device_get(walkers),
+                    jax.device_get(self._log_psi_batch(walkers)),
+                )
 
             if compute_gradients:
                 # sampled_w: (steps, walkers, nel, 3)
@@ -627,6 +651,9 @@ class _VMCDriverNN:
                     E_cs_b.append(
                         sum(all_E) / len(all_E),
                     )
+
+        if walker_dumper is not None:
+            walker_dumper.close()
 
         if not (fname_log is None
                 or (isinstance(fname_log, str)

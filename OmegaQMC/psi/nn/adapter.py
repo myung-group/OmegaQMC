@@ -351,7 +351,12 @@ def make_nn_log_psi(config, mol_info, rng_key):
     Returns:
         Tuple ``(log_psi, init_params, graphdef, lap_grad)``.
         *log_psi* is a callable
-        ``(elec_crds, nuc_crds, params) -> float``.
+        ``(elec_crds, nuc_crds, params) -> float`` returning
+        ``log|psi|``. It carries a ``.signed`` attribute
+        ``log_psi.signed(elec_crds, nuc_crds, params) ->
+        (sign, log_amp)`` for callers that need the wavefunction
+        sign (e.g. the compressed-sensing f_I estimator). Both
+        callables share the same params and graphdef.
         *init_params* is the initial parameter pytree.
         *graphdef* is the NNX ``GraphDef`` needed to
         reconstruct the model via ``nnx.merge``.
@@ -415,6 +420,29 @@ def make_nn_log_psi(config, mol_info, rng_key):
         )
         mdl = nnx.merge(graphdef, params, other)
         return mdl(phys_conf).log
+
+    def log_psi_signed(elec_crds, nuc_crds, params):
+        """Evaluate ``(sign(psi), log|psi|)`` for a single walker.
+
+        Parallel to :func:`log_psi`; the sign component is
+        needed for estimators like ``f_I = D_I / psi`` that
+        cannot be reconstructed from ``log|psi|`` alone.
+        """
+        r_up = elec_crds[::2]
+        r_dn = elec_crds[1::2]
+        r_grouped = jnp.concatenate(
+            [r_up, r_dn], axis=0,
+        )
+        phys_conf = PhysicalConfiguration(
+            R=nuc_crds,
+            r=r_grouped,
+            mol_idx=jnp.array(0),
+        )
+        mdl = nnx.merge(graphdef, params, other)
+        out = mdl(phys_conf)
+        return out.sign, out.log
+
+    log_psi.signed = log_psi_signed
 
     def _lap_grad_linearize(elec_crds, nuc_crds, params):
         def f_flat(r_flat):

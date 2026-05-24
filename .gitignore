@@ -77,6 +77,10 @@ references/
 runs/
 runs_auto/
 
+# CS pilot output directories (checkpoints, walker banks, cells, summaries)
+cs_*_results/
+cs_*_validation/
+
 # Research notes / drafts / refs and internal design docs — local only
 research/
 docs/

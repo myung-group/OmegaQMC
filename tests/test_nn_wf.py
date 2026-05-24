@@ -170,5 +170,50 @@ class TestConfig:
         assert cfg.update_rule == 'concatenate'
 
 
+class TestSignedLogPsi:
+    """log_psi exposes a .signed callable returning (sign, log_amp)."""
+
+    def test_signed_attribute_exists(self, psiformer_trial):
+        log_psi, _params, _mol = psiformer_trial
+        assert callable(log_psi.signed)
+
+    def test_signed_shapes_and_finite(self, psiformer_trial):
+        log_psi, params, mol = psiformer_trial
+        nuc = mol.coords
+        elec = jnp.array([
+            [0.1, 0.0, -0.7],
+            [0.0, 0.1, 0.7],
+        ])
+        sign, log_amp = log_psi.signed(elec, nuc, params)
+        assert sign.shape == ()
+        assert log_amp.shape == ()
+        assert jnp.isfinite(log_amp)
+        assert jnp.isfinite(sign)
+
+    def test_signed_log_amp_matches_log_psi(self, psiformer_trial):
+        log_psi, params, mol = psiformer_trial
+        nuc = mol.coords
+        elec = jnp.array([
+            [0.2, 0.1, -0.6],
+            [-0.1, 0.3, 0.8],
+        ])
+        log_check = log_psi(elec, nuc, params)
+        _sign, log_amp = log_psi.signed(elec, nuc, params)
+        jnp.allclose(log_amp, log_check)
+        assert abs(float(log_amp) - float(log_check)) < 1e-6
+
+    def test_signed_sign_is_unit_magnitude(self, psiformer_trial):
+        """For real-valued wavefunctions ``|sign| == 1`` everywhere except
+        on the nodal surface (probability-zero set)."""
+        log_psi, params, mol = psiformer_trial
+        nuc = mol.coords
+        elec = jnp.array([
+            [0.4, 0.0, -0.5],
+            [-0.2, 0.1, 0.9],
+        ])
+        sign, _ = log_psi.signed(elec, nuc, params)
+        assert abs(abs(float(sign)) - 1.0) < 1e-6
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
