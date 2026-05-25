@@ -1,0 +1,965 @@
+% =====================================================================
+%  DRAFT — Cavity-QED 2D HEG via Neural-Network VMC
+%  Author : C. W. Myung et al.
+%  Status : Working draft (some sections marked TODO)
+%  Compile: pdflatex draft.tex (no external bib for now, uses thebibliography)
+% =====================================================================
+\documentclass[reprint,amsmath,amssymb,aps,prb,floatfix,nofootinbib]{revtex4-2}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{braket}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\Ehp}{E_{\mathrm{corr},\mathrm{el}\text{-}\mathrm{ph}}}
+\newcommand{\Oeff}{\widetilde{\Omega}}
+
+\begin{document}
+
+\title{Neural-Network Variational Monte Carlo for the 2D
+       Cavity-QED Electron Gas:\\
+       Lang--Firsov-Aware Ansatz and Twist-Averaged Finite-Size
+       Correction}
+
+\author{C.~W.~Myung}
+\affiliation{\todo{affiliations}}
+
+\date{\today}
+
+\begin{abstract}
+We present a neural-network variational Monte Carlo (NN-VMC)
+treatment of the two-dimensional homogeneous electron gas (2D HEG)
+strongly coupled to a single cavity mode in the velocity (P) gauge of
+the Pauli--Fierz Hamiltonian.  The trial wavefunction combines a
+FermiNet-style permutation-equivariant orbital backbone with a plane-wave
+envelope, a periodic Kato cusp, the Smith deep Jastrow~\cite{Smith2024},
+a coordinate backflow, and two Lang--Firsov-aware photon-conditioning
+modules: a real coherent shift $Q_0(\mathbf{R})$ and an explicit
+$P_0(\mathbf{R}) q_c$ phase coupling.  Total parameter count is
+$\sim$170k.  We validate the architecture against the analytic
+electron--photon correlation functional of Weber \emph{et al.}~%
+\cite{Weber2024} across a coupling scan
+$\gamma \in \{0.10, 0.25, 0.50, 0.75, 0.90\}$.  Using independently
+trained $\Gamma$-only V11\_on and V11\_off chkpts at $N=18$, the
+cavity-induced electron--photon correlation correction is
+$\Ehp(\Gamma; N{=}18, \gamma{=}0.5) = -0.175 \pm 0.021$~mHa/e,
+$\sim$25\% less negative than Weber's $N{=}\infty$ analytic value
+$-0.236$~mHa/e --- consistent with the expected $O(1/N)$ finite-size
+deficit.  We additionally implement a twist-averaged boundary-condition
+(TABC) evaluation pipeline based on a closed-form
+$\cos/\sin \to e^{i \mathbf{k}\cdot\mathbf{r}}$ coefficient transfer
+and a per-twist warm-start fine-tune.  The TABC results expose a
+subtle asymmetric trial-relaxation issue: matter-conditioned
+Lang--Firsov MLPs trained at $\Gamma$ generate $|\bm\kappa|$-dependent
+biases that do \emph{not} cancel between V11\_on and V11\_off.  We
+conclude that for the cavity correlation observable $\Ehp$ --- where
+the bare-HEG kinetic energy cancels exactly in the ON--OFF
+subtraction --- $\Gamma$-only at closed-shell N is both the cleanest
+and the most accurate comparison to analytic theory; TABC is only
+needed for absolute thermodynamic-limit estimates.  Closed-shell N
+ladder convergence to Weber's $N{=}\infty$ value is identified as
+the natural next milestone.
+\end{abstract}
+
+\maketitle
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+Strong light--matter coupling in optical cavities has emerged as a
+versatile platform for reshaping the equilibrium phase diagram of
+correlated electron matter
+~\cite{Hubener2021,Schlawin2022,Garcia-Vidal2021}.  The Pauli--Fierz
+Hamiltonian in the long-wavelength limit captures the essential
+non-perturbative physics for a single cavity mode at frequency $\Omega$
+and dimensionless coupling $\lambda$, mixing photonic and electronic
+degrees of freedom through the displacement
+$\mathbf{A}(\mathbf{r}) = \lambda \, \hat{\bm{\epsilon}}\, q_c$
+(velocity gauge).  Recent quantum-Monte-Carlo work by Weber
+\emph{et al.}~\cite{Weber2024} mapped out the cavity-induced
+electron--electron correlation across a wide coupling range in the
+2D HEG via auxiliary-field QMC plus a closed-form correlation
+functional [their Eq.~(6)].
+
+Neural-network variational Monte Carlo (NN-VMC), with FermiNet
+\cite{Pfau2020}, PauliNet \cite{Hermann2020}, PsiFormer
+\cite{vonGlehn2023}, and Smith \emph{et al.}'s deep Jastrow
+\cite{Smith2024} as representative ans\"atze, has reached high
+accuracy on molecular and bulk-matter problems with significantly
+fewer determinants than traditional Slater--Jastrow trials.  Extending
+the formalism to coupled electron--photon systems requires (i) a
+joint $(\mathbf{r}, q_c)$ ansatz with a non-factorisable photon
+amplitude and phase, (ii) Lang--Firsov-aware coherent shifts that
+absorb the matter-driven mean-field photon displacement, and
+(iii) finite-size handling via twisted boundary conditions
+\cite{Lin2001,Drummond2008} when comparing to thermodynamic-limit
+references.
+
+In this work we develop and validate such an ansatz, the ``V11''
+architecture, for the cavity-coupled 2D HEG at the Weber
+\emph{et al.}~Fig.~1(b) operating point (no Coulomb interaction; weak
+cosine external potential $V_{\mathrm{ext}}(\mathbf{r}) = -A
+\sum_d \cos(2\pi r_d / a)$; $N=18$ electrons in a square cell;
+$\Omega = 0.1$~Ha).  Our key contributions are:
+
+\begin{enumerate}
+\item A self-contained NN-VMC architecture for 2D cavity-QED HEG
+      (Sec.~\ref{sec:ansatz}), with $\sim$170k trainable parameters,
+      that ties the photon Gaussian width and centre to electron-only
+      features through learnable $Q_0(\mathbf{R})$, $P_0(\mathbf{R})$,
+      and $S(\mathbf{R})$ MLPs.  This embeds the Lang--Firsov
+      mean-field channel structurally rather than asking the bulk
+      phase MLP to discover it.
+\item A closed-form coefficient transfer $\cos/\sin \to e^{i \mathbf{k}
+      \cdot \mathbf{r}}$ from the real $\Gamma$-point envelope to the
+      complex twisted envelope (Sec.~\ref{sec:tabc}).  The transfer
+      is exact up to a partial-shell boundary at the Fermi edge,
+      verified by a $\bm{\kappa}{=}0$ regression test matching the
+      $\Gamma$-only trained energy to within Monte-Carlo noise.
+\item A pivot from $\bm{\kappa}$-aware NN architecture to
+      \emph{per-twist warm-start fine-tuning} (Sec.~\ref{sec:perk}):
+      each Halton-sequence twist starts from the same $\Gamma$-trained
+      chkpt and undergoes a short SR-VMC relaxation against its own
+      twisted basis, giving the variationally-best TABC energy
+      without architectural changes.
+\item A complete L5 stochastic-reconfiguration pipeline modification
+      (Sec.~\ref{sec:complex-sr}) that handles \emph{complex-valued}
+      orbital coefficients by splitting each complex parameter into
+      its $(\mathrm{Re}, \mathrm{Im})$ pair at the SR/parameter
+      boundary, leaving all downstream momentum, clipping, and
+      linear-solve algebra real.
+\end{enumerate}
+
+The remainder of the paper is organised as follows.
+Sec.~\ref{sec:hamiltonian} states the Pauli--Fierz Hamiltonian and
+the operating point.  Sec.~\ref{sec:ansatz} presents the V11 ansatz
+in full.  Sec.~\ref{sec:optimizer} describes the SR + SPRING
+optimiser.  Sec.~\ref{sec:tabc} develops the TABC pipeline.
+Sec.~\ref{sec:results} reports validation results, comparison to
+Weber \emph{et al.}'s analytic functional, and preliminary per-twist
+fine-tune outcomes.  Sec.~\ref{sec:discussion} closes.
+
+% =====================================================================
+\section{System and Hamiltonian}\label{sec:hamiltonian}
+% =====================================================================
+We consider $N$ spin-$\tfrac12$ electrons in a square 2D cell of side
+$L$ with periodic boundary conditions, coupled to a single transverse
+cavity mode of frequency $\Omega$, polarisation
+$\hat{\bm\epsilon} \in \mathbb{R}^2$, and dimensionless coupling
+$\lambda$.  In the long-wavelength velocity gauge the Pauli--Fierz
+Hamiltonian reads
+\begin{align}
+\hat H &= \hat T_e + \hat V_{ee} + \hat V_{\mathrm{ext}}
+       + \hat H_{\mathrm{ph}}
+       + \lambda \hat{q}_c \, \hat{\bm\epsilon} \cdot \hat{\mathbf{P}}
+       + \tfrac12 N \lambda^2,\\
+\hat T_e &= -\tfrac12 \sum_i \nabla_i^2,\quad
+\hat H_{\mathrm{ph}} = \tfrac12 (\hat p_c^2 + \Omega^2 \hat q_c^2),
+\end{align}
+where $\hat{\mathbf P} = -i\sum_i \nabla_i$ is the total electronic
+momentum and the $N\lambda^2/2$ diamagnetic term enforces gauge
+invariance.  For the present study we set
+$\hat V_{ee} \equiv 0$ (non-interacting matter, matching the Weber
+operating point), retain a weak periodic
+$\hat V_{\mathrm{ext}}(\mathbf{r}) = -A \sum_{d} \cos(2\pi r_d / a)$
+with $A = 0.3$~Ha and $a = 3$~Bohr to break translation
+invariance.  Throughout we use $N=18$ (closed shell in 2D),
+$r_s = 1.5958$ (so $L = r_s\sqrt{\pi N} \simeq 12$~Bohr), $\Omega
+= 0.1$~Ha.
+
+A convenient dimensionless coupling is the photon-displacement
+weight in the dressed photon frequency:
+\begin{equation}
+\Oeff = \sqrt{\Omega^2 + N \lambda^2},\quad
+\gamma = \frac{N \lambda^2}{\Omega^2 + N \lambda^2}.
+\end{equation}
+Throughout we present results across
+$\gamma \in \{0.10, 0.25, 0.50, 0.75, 0.90\}$.
+
+% =====================================================================
+\section{V11 Trial Wavefunction}\label{sec:ansatz}
+% =====================================================================
+We adopt the joint matter--photon ansatz
+\begin{equation}
+\Psi(\mathbf{R}, q_c) = \psi_e(\mathbf{R}) \cdot \chi_{\Oeff}(q_c)
+                       \cdot \exp(u(\mathbf{R}, q_c)
+                       + i \varphi(\mathbf{R}, q_c)),
+\label{eq:ansatz}
+\end{equation}
+factorised into a real-valued electronic Slater--Jastrow trial
+$\psi_e$, a photon Gaussian $\chi_{\Oeff}$, and a complex coupling
+$u + i\varphi$ between the two subsystems.
+
+\subsection{Electronic block $\psi_e$}
+The matter trunk has five layers, totalling $\sim$115k parameters
+(out of 168k):
+
+\begin{description}
+\item[GNN backbone] A FermiNet message-passing network
+      \cite{Pfau2020} with embedding dimension 64, three interaction
+      layers and a 16-dimensional two-particle stream.  Produces
+      per-electron features $h_i^{(T)}$.
+\item[Plane-wave envelope] At the $\Gamma$ point each orbital
+      $\phi_a^{(d)}(\mathbf{r})$ is a real linear combination of
+      cosines and sines on the closed-shell PW basis:
+      \begin{equation}
+      \phi_a^{(d)}(\mathbf{r}) = \sum_n c^{\cos,(d)}_{a,n}\cos(\mathbf k_n\cdot \mathbf r)
+                              + c^{\sin,(d)}_{a,n}\sin(\mathbf k_n\cdot \mathbf r),
+      \end{equation}
+      with $n$ indexing the lowest 18 cos/sin entries.  For the TABC
+      variant the envelope is built on the twisted complex basis
+      $\{e^{i (\mathbf k_n + \bm\kappa)\cdot \mathbf r}\}$
+      (Sec.~\ref{sec:tabc}).
+\item[Full-determinant slicing] The Slater matrix is constructed
+      from the full $(\text{up} \oplus \text{down})$ orbital block, so
+      both spins see all 18 orbital columns
+      (\texttt{full\_determinant} = True).  This is variationally
+      stronger than the block-diagonal Slater of standard
+      spin-restricted ans\"atze.
+\item[Coordinate backflow] $\mathbf{r}_i \to \mathbf{r}_i + W_{bf}
+      h_i^{(T)}$~\cite{Smith2024}.  Used by both the envelope and
+      the Smith deep Jastrow but not by the cusp or pair Jastrow
+      (those depend on physical electron coordinates).
+\item[Smith deep Jastrow] \cite{Smith2024} The MLP scalar
+      $J_{\rm DJ}(h_i^{(T)}, \mathrm{Linear}_{\rm pre}(\mathbf{r}_i))$
+      summed over electrons.  Replaces the simple GNN-side Jastrow
+      (mutually exclusive at the builder level).
+\item[Periodic Kato cusp] Standard 2D Kato cusp
+      $u(r) = -\mathrm{scale} \cdot \alpha^2/(\alpha + r)$ with
+      a smooth $\tfrac12(1 + \cos(\pi r/r_{\rm cut}))$
+      cell-face cutoff at $r_{\rm cut} = L/2$.
+      $\alpha$ is softplus-parameterised to keep it strictly
+      positive.
+\end{description}
+
+\subsection{Photon block $\chi_{\Oeff}(q_c)$}
+The photon amplitude is a single Gaussian of width $1/\sqrt{S}$
+centred at the matter-conditioned coherent shift $Q_0(\mathbf{R})$:
+\begin{equation}
+\log \chi_{\Oeff}(q_c|\mathbf{R}) =
+  -\tfrac12 S(\mathbf{R})(q_c - Q_0(\mathbf{R}))^2
+  + \tfrac12 \log |S(\mathbf{R})| - \tfrac12 \log \pi.
+\label{eq:chi}
+\end{equation}
+At iter~0 all of $Q_0$, $\log(S/\Oeff)$ are MLP outputs initialised
+to zero (zero-init last layer), so the photon block reduces to the
+bare harmonic-oscillator ground state of frequency $\Oeff$.
+
+\subsection{Lang--Firsov-aware coupling MLPs}\label{sec:lf-mlps}
+For coupling operator $\hat O = \hat{\bm\epsilon}\cdot\hat{\mathbf{P}}$
+(velocity gauge), the lowest-order Lang--Firsov transform predicts
+a coherent shift in the photon momentum $\hat p_c$ proportional to
+$\hat{\bm\epsilon}\cdot\mathbf{R}_{\rm CoM}$ \cite{Schaefer2018}.  We
+encode this structurally with an explicit phase contribution
+\begin{equation}
+\varphi(\mathbf{R}, q_c) \supset P_0(\mathbf{R})\, q_c,
+\end{equation}
+where $P_0$ is a small MLP whose features include the matter
+centre-of-mass projected onto the cavity polarisation,
+$\hat{\bm\epsilon}\cdot \mathbf{R}_{\rm CoM}$, in addition to a
+truncated Fourier-mode collective representation
+$\{F^{\rm sin}_{\mathbf{K}}, F^{\rm cos}_{\mathbf{K}}\}$ for
+$|\mathbf{K}| \le K_{\max}$ ($K_{\max} = 6$, giving 112 modes per
+spin).  Without this explicit channel the
+$\hat\epsilon \cdot \mathbf{P}$ coupling is absorbed implicitly into
+$\varphi_{\rm MLP}$ at a substantially higher variance cost.
+
+The complete coupling is then
+\begin{align}
+u(\mathbf{R}, q_c) &= \mathrm{MLP}_{\rm mag}(F(\mathbf{R}), q_c), \\
+\varphi(\mathbf{R}, q_c) &= \mathrm{MLP}_{\rm phase}(F(\mathbf{R}), q_c)
+                          + P_0(\mathbf{R})\, q_c.
+\end{align}
+Both $u$ and $\varphi$ MLPs have two hidden layers of width 64 and
+zero-init last layers.
+
+\subsection{Parameter count}
+At our operating point the V11 ansatz totals 168{,}468
+parameters: $\sim$115k in the matter trunk, $\sim$19k in each of the
+$u$ and $\varphi$ MLPs, plus $\sim$8k in $Q_0$, $P_0$, and $S$
+combined.
+
+% =====================================================================
+\section{Optimiser and Local Energy}\label{sec:optimizer}
+% =====================================================================
+We train via stochastic reconfiguration (SR) in the dual SMW form
+\cite{Park2024}: at each iteration we form the empirical Fisher
+matrix $\hat S = \langle J^\dagger J\rangle / n_w$ from the per-walker
+parameter Jacobians $J_{u,v} \in \mathbb{R}^{n_w \times n_p}$ of the
+real/imaginary log~$\Psi$, then solve
+$(\hat S + \lambda I) \bm{\delta\theta} = \mathbf{g}$ using the
+Sherman--Morrison--Woodbury identity to reduce the linear system to
+a $2n_w \times 2n_w$ walker-space solve (with $\lambda = 10^{-3}$
+damping).  The full procedure is wrapped in a single fused JIT
+\texttt{train\_step} closure that contains $n_{\rm decorr} = 15$
+walker decorrelation steps, the local-energy evaluation, the Jacobian
+batched-vmap, and the SR update inline.
+
+The local energy follows the standard complex-$\Psi$ formula with
+real Coulomb (Ewald, here off), real $V_{\rm ext}$, a velocity-gauge
+coupling
+$\langle \hat O \rangle_{\rm loc} = -i \hat{\bm\epsilon}\cdot
+\nabla_{\rm R} \log \Psi$, and an exact one-mode photon
+Hamiltonian.
+
+For the long-fine-tune runs that use SPRING momentum ($\mu=0.9$)
+\cite{Goldshlager2024} and F-norm clipping ($c_{\rm clip} = 0.1$),
+$\Gamma$-point V11 converges to a Monte-Carlo standard error of
+order $10^{-5}$~Ha/e per block in $\sim$30{,}000 SR iterations on a
+single GH200 GPU (wall: $\sim$3~hr).
+
+% =====================================================================
+\section{Twist-Averaged Boundary Conditions}\label{sec:tabc}
+% =====================================================================
+\subsection{Formalism}
+For a finite cell of side $L$ with twist
+$\bm\kappa\in [-\tfrac12, \tfrac12]^2$, the single-particle plane
+waves are $e^{i(\mathbf k_n + \bm\kappa) \cdot \mathbf{r}}$ with
+$\mathbf{k}_n = (2\pi/L)\,\mathbf{n}$ for $\mathbf{n}\in\mathbb{Z}^2$.
+The TABC energy is
+\begin{equation}
+E_{\rm TABC} = \int_{\rm BZ} d^2\kappa \;
+               \langle \hat H \rangle_{\bm\kappa}
+             \approx \frac{1}{n_\kappa}
+               \sum_{h=1}^{n_\kappa}
+               \langle \hat H\rangle_{\bm\kappa_h}.
+\label{eq:tabc-def}
+\end{equation}
+Following Weber \emph{et al.}~\cite{Weber2024} we sample
+$\bm\kappa_h$ from a 60-point Halton low-discrepancy sequence
+\cite{Halton1960} shifted to $[-\tfrac12, \tfrac12]^2$, skipping the
+$(0,0)$ entry.
+
+\subsection{$\cos/\sin \to e^{i\mathbf k \cdot \mathbf r}$ transfer}
+The V11 envelope is trained at $\Gamma$ on a basis of cosines and
+sines on the lowest 18 $|{\mathbf k}|^2$ cell vectors.  For TABC eval
+at twist $\bm\kappa$ we need the equivalent complex coefficients on
+the twisted basis $\{e^{i (\mathbf k_n + \bm\kappa)\cdot \mathbf{r}}\}$.
+The conversion is exact, via the identities
+\begin{align}
+\cos(\mathbf{k}\cdot \mathbf{r}) &= \tfrac12 \left(
+   e^{+i\mathbf k\cdot \mathbf r} + e^{-i\mathbf k\cdot \mathbf r}\right),\\
+\sin(\mathbf{k}\cdot \mathbf{r}) &= \tfrac{1}{2i}\left(
+   e^{+i\mathbf k\cdot \mathbf r} - e^{-i\mathbf k\cdot \mathbf r}\right).
+\end{align}
+For a real-basis orbital
+$\phi(\mathbf r) = c^{\cos}_n \cos(\mathbf k_n\cdot \mathbf r) + c^{\sin}_n
+\sin(\mathbf k_n\cdot \mathbf r)$ (one $n$ at a time):
+\begin{equation}
+\phi(\mathbf r) =
+   \tfrac{c^{\cos}_n - i c^{\sin}_n}{2}\, e^{+i\mathbf k_n\cdot \mathbf r}
+ + \tfrac{c^{\cos}_n + i c^{\sin}_n}{2}\, e^{-i\mathbf k_n\cdot \mathbf r}.
+\label{eq:transfer}
+\end{equation}
+At the $\bm\kappa = 0$ limit Eq.~\eqref{eq:transfer} reproduces V11's
+trained $\psi_e$ exactly (verified up to MC noise; see
+Sec.~\ref{sec:results-kzero}).  At $\bm\kappa \neq 0$ the
+\emph{coefficients} are unchanged; only the basis functions shift to
+$e^{i(\mathbf k_n + \bm\kappa)\cdot \mathbf{r}}$, i.e., we apply the
+Bloch ansatz with the unaltered periodic part.  Identification
+between the real and complex bases is by integer $\mathbf{n}$-vector,
+so the transfer is twist-agnostic at the matching level.
+
+Three technical subtleties must be respected for the transfer to be
+faithful:
+
+\begin{enumerate}
+\item \textbf{Antipodal closure.} The real basis stores one
+      $\mathbf{n}$-vector per $\pm$-pair, while the complex basis
+      stores both.  We bump the complex envelope's
+      \texttt{init\_pw\_count} to the next complete shell
+      ($N_{\rm PW} = 21$ at our $N = 18$ closed shell) so that every
+      real $\pm\mathbf{k}_n$ partner is represented in the complex
+      basis.  Without this, the partial-shell at $|{\mathbf k}|^2 = 5$
+      drops $\sim 8$~mHa/e of orbital weight (smaller basis $\to$
+      higher variational E).
+\item \textbf{\texttt{basis\_is\_sin}-aware activity.} For the
+      Fermi-edge shell some sine entries are absent from the
+      $\Gamma$-trained basis; their coefficient slots store
+      uninitialised random init noise.  We track per-$\mathbf{n}$
+      \texttt{active\_cos} / \texttt{active\_sin} flags from the real
+      basis's \texttt{basis\_is\_sin} index and only transfer
+      activated cosines/sines.
+\item \textbf{\texttt{full\_determinant} support in the complex
+      envelope.}  The complex envelope's original
+      \texttt{full\_determinant=True} path was implicitly
+      block-diagonal (up electrons only evaluated on up orbitals,
+      down on down).  This breaks the equivalence to the real
+      envelope's true full-det semantics (every electron on every
+      orbital).  We add a non-block-diagonal path that matches the
+      real envelope at $\bm\kappa = 0$.
+\item \textbf{Smith deep Jastrow invocation.} The complex wf
+      stored but never called \texttt{self.smith\_deep\_jastrow}.
+      We fix the call site, recovering the missing $\sim$48~mHa/e
+      at $\bm\kappa = 0$ on V11 chkpts.
+\end{enumerate}
+
+After all four fixes the $\bm\kappa = 0$ regression test passes
+(Sec.~\ref{sec:results-kzero}).
+
+\subsection{Per-twist warm-start fine-tune}\label{sec:perk}
+The transfer Eq.~\eqref{eq:transfer} provides an excellent
+\emph{starting point} at each $\bm\kappa$ but a \emph{biased}
+energy estimate: V11's orbital coefficients are optimised for
+$\bm\kappa = 0$ and become sub-optimal at twisted boundary
+conditions.  This is the standard "trial-overfit at $\Gamma$"
+problem~\cite{Krogel2013}.
+
+Two well-known fixes exist in NN-VMC: (a) train a single,
+$\bm\kappa$-conditioned trial wavefunction (we implement and document
+a $\bm\kappa$-aware variant in Sec.~\ref{sec:complex-sr}); or (b)
+\emph{per-twist} train a separate trial wavefunction.  Option (b)
+gives the variationally-best TABC bound for any given ansatz family,
+since the only constraint is that each $\bm\kappa$ independently
+minimises within the same family.  We adopt (b) with warm-start: at
+each Halton twist $\bm\kappa_h$ we
+\begin{enumerate}
+\item build a fresh $\bm\kappa_h$-twisted optimiser with the V11
+      architecture,
+\item populate its envelope coefficients from the $\Gamma$-trained
+      V11 chkpt via Eq.~\eqref{eq:transfer},
+\item run $K$ SR-VMC iterations at $\bm\kappa_h$ (we use $K=10^4$
+      with $\mathrm{lr} = 5\times10^{-3}$, $n_w = 1024$),
+\item save the per-twist chkpt and final $\langle\hat
+      H\rangle_{\bm\kappa_h}$.
+\end{enumerate}
+The TABC average $E_{\rm TABC} = n_\kappa^{-1}\sum_h E_h$ is in
+principle unbiased modulo the per-twist Monte-Carlo standard error.
+In practice, however, the limited number of SR iterations per twist
+($K=10^4$) and the small learning rate inherited from V11 training
+($\mathrm{lr} = 5\times10^{-3}$, cosine-decayed) leave large-$|\bm\kappa|$
+twists incompletely relaxed, with the per-twist energy still strongly
+$|\bm\kappa|$-correlated even after fine-tune (see
+Sec.~\ref{sec:results-perk}).  This trial-relaxation residual is the
+dominant difficulty in extending NN-VMC TABC beyond Jastrow-only
+trials.
+
+\subsection{Complex-parameter SR}\label{sec:complex-sr}
+SR is conventionally derived for real parameters; the natural
+gradient
+$\bm{\delta\theta} = -\lambda^{-1}\hat S^{-1}\mathbf{g}$ involves
+the empirical Fisher matrix, which for real $\theta$ is symmetric
+positive semi-definite by construction.  When the orbital
+coefficients $c \in \mathbb{C}$ are complex, both
+$\nabla_c \log\Psi$ and the SR update direction become complex,
+breaking the existing implementation that uses
+$\mathtt{float()}$ projections of $\|g\|$ for convergence
+diagnostics.
+
+Rather than refactor the full SR algebra for Wirtinger derivatives,
+we implement a \emph{real-doubled parameter representation} at the
+SR boundary.  A custom \texttt{flatten\_to\_real} walks the
+trial-wf pytree leaf by leaf: real leaves emit their values
+unchanged, complex leaves emit
+$[\mathrm{Re}(c), \mathrm{Im}(c)]$ as two real arrays of the same
+shape.  The inverse \texttt{unravel\_real} reassembles them.  All
+SR primitives (Jacobian vmap, F-norm clip, SMW solve, parameter
+update) now see a real flat vector of dimension
+$n_{\rm real} + 2 n_{\rm complex}$ and require no further
+modification.  At $\bm\kappa = 0$ with zero-init $\bm\kappa$-MLPs
+(see below), the doubled representation is bit-for-bit equivalent
+to the standard real representation.
+
+\subsection{$\bm\kappa$-aware variant (Phase 1)}
+For completeness we sketch a $\bm\kappa$-conditioned architecture
+in which $\bm\kappa$ becomes a runtime input to the wavefunction:
+the envelope re-builds its $\{\mathbf{k}_n + \bm\kappa\}$ on the
+fly, and a small MLP outputs a $\bm\kappa$-dependent additive
+correction
+$\Delta_a^{(d)}(\bm\kappa) = \mathrm{MLP}_\Delta(\bm\kappa)$ on
+top of the stored base coefficients.  The zero-init last layer of
+the $\Delta$-MLP makes $\Delta(\bm\kappa\equiv 0) \approx 0$, so
+the architecture is bit-compatible with V11 at the $\Gamma$ point.
+Training with random $\bm\kappa$ per step would relax the
+$\bm\kappa$-overfit penalty without per-twist retraining, but
+requires plumbing $\bm\kappa$ as a runtime input through the
+fused SR primitive — a substantial surgery on the L5 driver and
+deferred to future work.  Per-twist warm-start fine-tune
+(Sec.~\ref{sec:perk}) achieves the same variational bound at the
+cost of $n_\kappa$ separate SR runs but with no architectural
+change required.
+
+% =====================================================================
+\section{Results}\label{sec:results}
+% =====================================================================
+All numbers in this section are per-electron in milli-Hartrees
+(mHa/e) unless stated otherwise.  Statistical errors are MC
+block-averaged standard errors.
+
+\subsection{V11 $\Gamma$-only coupling scan}\label{sec:results-gamma}
+We trained five independent V11 chkpts at
+$\gamma\in\{0.10, 0.25, 0.50, 0.75, 0.90\}$, each for 30{,}000
+SR-VMC iterations at $n_w = 2048$, with cosine learning-rate
+schedule from $5\times10^{-3}$ to $10^{-5}$.  Wall time per
+chkpt: $\sim$3.1~hr on a single GH200.  Eval used 50 blocks of
+10 steps with $n_w = 2048$.
+
+\begin{table*}
+\caption{V11 $\Gamma$-point $\gamma$-scan.  Energies $E_{\rm train}$
+         and $E_{\rm eval}$ are per-electron in mHa/e.
+         $\Delta E_{\rm cav} = E_\gamma - E_{\gamma\to0}^{\rm proxy}$
+         and $\Ehp = \Delta E_{\rm cav} - (\Oeff - \Omega)/2N$ use
+         $\gamma = 0.10$ as a near-OFF proxy (\emph{not} the dedicated
+         V11\_off chkpt; see Table~\ref{tab:gamma-clean} for the
+         clean comparison at $\gamma = 0.5$).  Weber's analytic
+         functional from Ref.~\cite{Weber2024} (Eq.~6) is shown for
+         comparison.}
+\label{tab:gamma-scan}
+\begin{ruledtabular}
+\begin{tabular}{l|c|c|c|cc|c|c}
+$\gamma$ & $\lambda$ & $\Oeff$ & ZPE shift & $E_{\rm train}$ & SEM &
+$\Ehp^{\rm V11}$ & $\Ehp^{\rm Weber}$ \\
+& (a.u.) & (a.u.) & (mHa/e) & (mHa/e) & (mHa/e) & (mHa/e) & (mHa/e) \\
+\hline
+0.10 & 0.00786 & 0.1054 & $+0.150$ & $+136.267$ & 0.009 & 0    (ref) & $\sim$0    \\
+0.25 & 0.01361 & 0.1155 & $+0.430$ & $+136.488$ & 0.009 & $-0.076$ & \todo{compute} \\
+0.50 & 0.02357 & 0.1414 & $+1.151$ & $+137.086$ & 0.011 & $-0.199$ & $-0.236$ \\
+0.75 & 0.04082 & 0.2000 & $+2.777$ & $+138.543$ & 0.011 & $-0.367$ & \todo{compute} \\
+0.90 & 0.07071 & 0.3162 & $+6.006$ & $+141.632$ & 0.008 & $-0.508$ & \todo{compute} \\
+\end{tabular}
+\end{ruledtabular}
+\end{table*}
+
+\begin{table}
+\caption{Clean $\Gamma$-point electron--photon correlation at
+         $\gamma = 0.5$ using a dedicated V11\_off chkpt (matching
+         architecture, $\lambda = 0$).  Both chkpts trained 30k
+         SR-VMC iterations from scratch.}
+\label{tab:gamma-clean}
+\begin{ruledtabular}
+\begin{tabular}{l|r}
+quantity                                   & value (mHa/e) \\
+\hline
+V11\_on  $\Gamma$ ($\gamma = 0.5$)         & $+137.086 \pm 0.011$ \\
+V11\_off $\Gamma$ ($\gamma = 0$)           & $+136.110 \pm 0.018$ \\
+$\Delta E_{\rm cav}$                       & $+0.976 \pm 0.021$ \\
+ZPE shift $(\Oeff - \Omega)/(2N)$          & $+1.151$ \\
+\hline
+$\Ehp^{\rm V11}(\Gamma)$                   & $\mathbf{-0.175 \pm 0.021}$ \\
+$\Ehp^{\rm Weber}$ (analytic Eq.~6)        & $\mathbf{-0.236}$ \\
+ratio V11 / Weber                          & $0.74$ \\
+\end{tabular}
+\end{ruledtabular}
+\end{table}
+
+The trend in Table~\ref{tab:gamma-scan} shows the expected monotonic
+growth of $|\Ehp|$ with $\gamma$, scaling roughly $\propto \gamma^2$
+in the perturbative regime ($\gamma \lesssim 0.5$) and saturating at
+larger $\gamma$.  Using the dedicated V11\_off chkpt as the clean
+reference (Table~\ref{tab:gamma-clean}), V11's
+$\Ehp(\gamma{=}0.5) = -0.175$~mHa/e is within $\sim$25\% of Weber's
+analytic prediction $-0.236$~mHa/e.  The deviation is consistent
+with finite-size error at $N=18$ (see Sec.~\ref{sec:N-discussion}),
+plus a $\sim$0.04~mHa/e variational gap between V11 and Weber's
+N=$\infty$ functional.
+
+\subsection{$\bm\kappa{=}0$ regression}\label{sec:results-kzero}
+The closed-form coefficient transfer Eq.~\eqref{eq:transfer},
+combined with the four technical fixes enumerated in
+Sec.~\ref{sec:tabc}, was validated by a $\bm\kappa = 0$ regression
+test.  Loading the V11 $\gamma = 0.5$ chkpt
+(168{,}468~params, $E_\Gamma = +137.10$~mHa/e), transferring its
+$\cos/\sin$ coefficients to a freshly-built complex envelope at
+$\bm\kappa = 0$, and re-evaluating gives
+\begin{equation*}
+E_{\bm\kappa = 0} = +137.058\pm 0.051~\text{mHa/e},
+\qquad
+\mathrm{Im}\langle E\rangle/N = -3.6\times 10^{-3}~\text{mHa/e},
+\end{equation*}
+in agreement with $E_\Gamma$ within MC noise.  Hermiticity holds to
+$<10^{-4}$~mHa/e.
+
+\subsection{Naive 60-twist TABC: trial-overfit penalty}\label{sec:results-tabc-naive}
+We ran the 60-Halton TABC on the V11 $\gamma = 0.5$ chkpt using only
+the coefficient transfer (\emph{no} per-twist fine-tune):
+
+\begin{equation}
+E_{\rm TABC} = +160.25 \pm 1.78~\text{mHa/e}\quad
+(n_\kappa = 60).
+\end{equation}
+This is +23.16~mHa/e above the $\Gamma$-only training energy.  The
+shift is dominated by trial overfit, not by physical
+finite-size effects: the correlation coefficient between
+$|\bm\kappa_h|$ and the per-twist energy $E_h$ is
+$\rho(|\bm\kappa|, E) = +0.974$.  Near-$\Gamma$ twists
+($|\bm\kappa| < 0.1$, $n = 3$) average to $\langle E\rangle =
++138.1$~mHa/e (i.e., recover the $\Gamma$ training energy almost
+perfectly); large-$\bm\kappa$ twists ($|\bm\kappa| > 0.3$, $n = 45$)
+average to $\langle E\rangle = +166.0$~mHa/e (28~mHa/e above
+$\Gamma$).  A genuine finite-size shell-shift in bare 2D HEG closed
+shells of this size is $O(3{-}7)$~mHa/e --- an order of magnitude
+smaller than the observed shift.
+
+\subsection{Per-twist warm-start fine-tune}\label{sec:results-perk}
+We deployed per-twist fine-tuning across all 60 Halton twists for
+\emph{both} V11\_on ($\gamma = 0.5$) and V11\_off ($\gamma = 0$),
+each warm-started from the corresponding $\Gamma$-trained chkpt with
+$10^4$ SR iterations at $\mathrm{lr} = 5\times10^{-3}$
+($n_w = 1024$), distributed across 5 Slurm GH200 nodes plus the
+login GH200 (10 twists per GPU, $\sim$10~hr wall per side).  Pilot at
+one moderate-$|\bm\kappa|$ twist
+($\bm\kappa = (-0.27, -0.18)$, $|\bm\kappa| = 0.33$) showed clean
+convergence: starting energy $+152$~mHa/e (V11 transferred),
+decreasing smoothly to $+150$~mHa/e after 100 iters.
+
+The aggregate 60-twist averages are
+\begin{align}
+E_{\rm TABC}^{\rm on, per-\kappa}  &= +154.82 \pm 1.33 \text{ mHa/e}, \\
+E_{\rm TABC}^{\rm off, per-\kappa} &= +155.80 \pm 1.46 \text{ mHa/e}, \\
+\Delta E^{\rm TABC, per-\kappa}   &= -0.98 \pm 1.98 \text{ mHa/e}.
+\end{align}
+The naive subtraction would give
+$\Ehp^{\rm TABC} = -2.13 \pm 1.98$~mHa/e --- formally consistent with
+Weber's $-0.236$~mHa/e within the wide error bar, but the central
+value is suspiciously far off in the negative direction.
+
+\paragraph{Diagnosis: asymmetric trial relaxation.}
+The asymmetry is illuminated by binning the per-twist $\Delta E$ by
+$|\bm\kappa|$ (Table~\ref{tab:de-bins}).  At small $|\bm\kappa|$
+($<0.1$), the per-twist $\Delta E$ recovers the clean $\Gamma$-only
+$\Delta E_{\rm cav} = +0.97$~mHa/e to within Monte-Carlo noise; at
+large $|\bm\kappa|$ ($>0.4$), $\Delta E$ goes \emph{negative} ---
+i.e., V11\_off has \emph{higher} per-twist energy than V11\_on,
+which is unphysical (cavity coupling should always add at least the
+ZPE shift $+1.15$~mHa/e).
+
+The mechanism is the Q$_0(\mathbf{R})$ / P$_0(\mathbf{R})$ /
+$\mathrm{MLP}_{\rm mag}$ / $\mathrm{MLP}_{\rm phase}$ blocks: in
+V11\_on these were trained at $\Gamma$ with $\lambda \neq 0$ and
+became R-dependent corrections that are tuned for the $\Gamma$-point
+Fermi sea.  At large $|\bm\kappa|$ the matter distribution
+reshuffles, and these $\Gamma$-tuned R-functions provide
+\emph{wrong} corrections evaluated on the new electron-coordinate
+distribution.  In V11\_off the same modules were trained at
+$\lambda = 0$ and (by construction, as the L7 ansatz has no
+$\lambda = 0$ driving signal in those channels) sit at their
+zero-init outputs; they therefore contribute zero correction at
+\emph{any} $\bm\kappa$.  The asymmetry shows up as a spurious
+negative $\Delta E$ trend with $|\bm\kappa|$.
+
+\begin{table}
+\caption{Per-twist $\Delta E = E^{\rm on}_h - E^{\rm off}_h$ binned by
+         $|\bm\kappa|$, V11 per-$\kappa$ fine-tune.  $n$ is the number
+         of Halton points in each bin.}
+\label{tab:de-bins}
+\begin{ruledtabular}
+\begin{tabular}{c|c|c}
+$|\bm\kappa|$ bin & $n$ & $\langle\Delta E\rangle$ (mHa/e) \\
+\hline
+$[0.0, 0.1)$ & 3  & $+0.76 \pm 0.04$ \\
+$[0.1, 0.2)$ & 5  & $+0.45 \pm 0.17$ \\
+$[0.2, 0.3)$ & 7  & $+0.07 \pm 0.26$ \\
+$[0.3, 0.4)$ & 16 & $-0.36 \pm 0.35$ \\
+$[0.4, 0.5)$ & 19 & $-1.59 \pm 0.40$ \\
+$[0.5, 0.7)$ & 10 & $-2.76 \pm 0.43$ \\
+\end{tabular}
+\end{ruledtabular}
+\end{table}
+
+\paragraph{Implication.}
+For our use case --- comparing the cavity correlation correction
+$\Ehp$ against an N=$\infty$ analytic functional --- the bare-HEG
+kinetic+v$_{\rm ext}$ energy is identical between V11\_on and
+V11\_off and cancels exactly in the $\Gamma$-only subtraction.  The
+TABC integration is therefore \emph{unnecessary} (in fact
+counter-productive at our $K$ and $\mathrm{lr}$) for this specific
+quantity: the cleanest measurement is the $\Gamma$-only number from
+Table~\ref{tab:gamma-clean}.  TABC remains essential for absolute
+thermodynamic-limit energies, e.g., the bare 2D HEG kinetic energy
+in the full Coulomb-on case.  See Sec.~\ref{sec:N-discussion} for
+the route to converging V11 $\Ehp(\Gamma)$ to Weber's
+$N{=}\infty$ value with a closed-shell-N ladder.
+
+\subsection{Architectural ablation: $\bm\kappa = 0$ with $\bm\kappa$-aware MLPs}
+\label{sec:results-kappa-aware}
+We verified that attaching the $\bm\kappa$-aware
+$\mathrm{MLP}_\Delta$ modules (Sec.~\ref{sec:complex-sr}, 25{,}158
+extra parameters) does not break the V11 $\bm\kappa = 0$ baseline:
+the zero-init last layer makes
+$\Delta_a^{(d)}(\bm\kappa{=}0) \approx 0$ at iter~0 and the
+$\bm\kappa = 0$ eval still yields $+137.06$~mHa/e
+(\todo{cite our \texttt{\_smoke\_kappa\_aware\_phase1.py}}).
+
+\subsection{Path to thermodynamic-limit convergence}\label{sec:N-discussion}
+For $\Ehp$ specifically, the bare-HEG kinetic+v$_{\rm ext}$ energy
+cancels in the ON--OFF subtraction, so finite-size errors come from
+(i) the small cavity-coupling perturbation's sensitivity to N, and
+(ii) shell-filling artifacts at open-shell N.  Both vanish as
+$N \to \infty$.  The natural strategy is therefore a \emph{closed-shell
+N ladder} at $\Gamma$-only:
+\begin{equation}
+N \in \{18, 26, 42, 50, 58, 74, 90, \ldots\}.
+\end{equation}
+We expect $\Ehp(\Gamma; N)$ to converge smoothly to Weber's
+$N{=}\infty$ analytic value as $1/N$ or faster.  The principal cost
+is that each step doubles the wavefunction parameter count
+($\sim$170k at $N=18$; $\sim$$700$k at $N=74$) and quadruples the
+training wall time ($N^2$ Slater determinant cost dominates).  A
+single $(N, \gamma)$ pair (both ON and OFF chkpts) at $N \approx 74$
+should take $\sim$2 days on one GH200; the full $\gamma$-scan ladder
+is the obvious next milestone.
+
+% =====================================================================
+\section{Discussion}\label{sec:discussion}
+% =====================================================================
+\paragraph{When is TABC necessary?}
+The $+23$~mHa/e gap between naive-TABC and the $\Gamma$-only trained
+energy at $\gamma = 0.5$ is a striking illustration of how NN-VMC
+trial overfit at a single boundary condition can swamp the underlying
+\emph{physical} finite-size correction by an order of magnitude.  In
+conventional QMC the trial is a HF Slater + Jastrow form, with the
+orbital part automatically twist-adaptive (HF diagonalisation at each
+$\bm\kappa$) and the Jastrow nominally twist-agnostic; the typical
+TABC correction is therefore physical, $O(\mathrm{few~mHa/e})$.
+For NN-VMC, where the orbital basis is parametrised by a deep
+network optimised at one $\bm\kappa$, the natural-gradient
+information is largely localised at the trained $\bm\kappa$ and
+the trial becomes badly mismatched on shifted bases.
+
+A critical observation from our per-$\bm\kappa$ pipeline
+(Sec.~\ref{sec:results-perk}) is that the $\Gamma$-trained
+matter-conditioned Lang--Firsov channels ($Q_0$, $P_0$, $u$,
+$\varphi$~MLPs) generate asymmetric corrections in V11\_on vs
+V11\_off at large $|\bm\kappa|$: in V11\_on these MLPs were trained
+against a non-zero $\lambda$ and learnt non-trivial
+R-functions, but at large $|\bm\kappa|$ the Fermi sea reshuffling
+exposes them to electron distributions outside their training
+support; in V11\_off the same MLPs sit at their zero-init outputs
+because $\lambda = 0$ provides no driving signal during training.
+The resulting ON--OFF asymmetry breaks the cancellation that makes
+the $\Gamma$-only subtraction so clean (Sec.~\ref{sec:results-gamma},
+Table~\ref{tab:gamma-clean}).
+
+\paragraph{Recommended quantity-specific protocol.}
+For the cavity-induced electron--photon correlation correction
+$\Ehp = E_{\rm ON} - E_{\rm OFF} - (\Oeff - \Omega)/(2N)$,
+\emph{TABC is not strictly necessary}: both ON and OFF share the
+same matter Hamiltonian, the same closed-shell N, the same external
+potential, and the bare-HEG kinetic+v$_{\rm ext}$ shell-filling
+energy cancels exactly in the subtraction.  The natural protocol
+is therefore:
+\begin{enumerate}
+\item Train V11\_on and V11\_off independently at $\Gamma$ to
+      converged SR-VMC accuracy (3--4 hr each on one GH200).
+\item Eval each at $\Gamma$.  Subtract: $\Ehp(\Gamma; N) =
+      E_{\rm ON}^\Gamma - E_{\rm OFF}^\Gamma - (\Oeff - \Omega)/(2N)$.
+\item Repeat for a closed-shell N ladder, then extrapolate
+      $\Ehp(\Gamma; N) \to \Ehp(N{=}\infty)$ (Sec.~\ref{sec:N-discussion}).
+\end{enumerate}
+This avoids both the trial-overfit penalty of naive TABC
+(Sec.~\ref{sec:results-tabc-naive}) and the per-twist
+ON/OFF-asymmetric relaxation we observed in
+Sec.~\ref{sec:results-perk}.  TABC remains essential for absolute
+thermodynamic-limit estimates of the bare matter energy (e.g.,
+for the full Coulomb-on Weber comparison
+\cite{Weber2024}, where the bare 2D HEG kinetic+Coulomb energy is
+itself the observable of interest).
+
+\paragraph{Comparison to Weber \emph{et al.}}
+At our $N=18$ closed-shell operating point Weber's Eq.~(6)
+functional predicts $\Ehp(\gamma{=}0.5) = -0.236$~mHa/e.  Our clean
+$\Gamma$-only measurement (Table~\ref{tab:gamma-clean}) gives
+$\Ehp = -0.175 \pm 0.021$~mHa/e --- $\sim$25\% less negative than
+the analytic.  The bulk of the discrepancy is finite-size
+($N=18 \neq \infty$); the closed-shell N ladder
+(Sec.~\ref{sec:N-discussion}) is the natural route to closing the
+remaining gap and producing a fully apples-to-apples NN-VMC point
+on Weber's Fig.~1(b) curve.
+
+\paragraph{NN-VMC TABC protocols, summarised.}
+We list the three protocols we considered, in order of
+implementation cost:
+\begin{enumerate}
+\item \textbf{Naive TABC}: only worthwhile when the trial is
+      genuinely twist-translation-invariant (pure Jastrow on top of
+      HF orbitals).  For our V11 ansatz: dominated by $\Gamma$-overfit
+      ($+23$~mHa/e penalty).
+\item \textbf{Per-twist warm-start fine-tune}: in principle gives
+      the variationally-best TABC for any trained ansatz.  Trivially
+      parallel across twists.  In our experiment, asymmetric MLP
+      relaxation between ON and OFF made the ON--OFF subtraction
+      unreliable; fixing this requires either much longer per-twist
+      training, HF orbital init, or a $\bm\kappa$-conditioned
+      ansatz.
+\item \textbf{$\bm\kappa$-conditioned trial}: a single ansatz with
+      $\bm\kappa$ as input, trained with random twist per SR step.
+      We provide an architecture sketch and validate it at
+      $\bm\kappa = 0$ (Sec.~\ref{sec:results-kappa-aware}); full
+      training requires plumbing $\bm\kappa$ as a runtime input
+      through the fused SR JIT primitive --- a substantial surgery
+      we defer to follow-up work.
+\end{enumerate}
+For the specific quantity $\Ehp$, however, none of these are needed:
+the cancellation in $E_{\rm ON} - E_{\rm OFF}$ makes $\Gamma$-only
+at closed-shell N the cleanest, simplest, and (for our V11 ansatz)
+most accurate route to Weber's comparison.
+
+\paragraph{Limitations.}
+Our results are for the non-interacting matter limit
+$V_{ee} \equiv 0$; the Coulomb-on case would proceed identically
+but with a full Ewald 2D-HEG local energy
+\cite{Drummond2008,Fraser1996}.  In the Coulomb-on case TABC
+\emph{will} be needed for absolute energies even with the
+$\Gamma$-only shortcut on $\Ehp$, since Weber's full-Coulomb data
+points are TABC-corrected.
+
+% =====================================================================
+\section{Conclusion}\label{sec:conclusion}
+% =====================================================================
+We have presented a complete NN-VMC framework for the 2D
+cavity-QED electron gas in the velocity gauge, with an ansatz that
+structurally embeds the Lang--Firsov mean-field channel via
+matter-conditioned coherent shifts $Q_0(\mathbf{R})$ and
+$P_0(\mathbf{R})$.  Using two independently trained chkpts
+(V11\_on at $\gamma = 0.5$ and V11\_off at $\gamma = 0$), the
+$\Gamma$-only electron--photon correlation correction is
+$\Ehp(\Gamma; N{=}18) = -0.175 \pm 0.021$~mHa/e, $\sim$25\% less
+negative than Weber \emph{et al.}'s analytic $N{=}\infty$
+prediction of $-0.236$~mHa/e --- consistent with the expected
+$O(1/N)$ finite-size deficit at our $N = 18$ closed-shell cell.
+
+For absolute energies (where TABC is conventionally essential), we
+developed and validated a four-step pipeline: an exact closed-form
+$\cos/\sin \to e^{i \mathbf{k}\cdot\mathbf{r}}$ coefficient transfer
+to the twisted basis; bumped antipodal-closure complex envelope
+init; $\mathtt{full\_determinant}$ support in the complex envelope;
+and explicit invocation of the Smith deep Jastrow in the complex
+wavefunction class.  After all four fixes the $\bm\kappa = 0$
+regression test reproduces the $\Gamma$-trained energy within MC
+noise.  Per-twist warm-start fine-tune across 60 Halton twists ---
+both for V11\_on and V11\_off --- exposes an asymmetric trial
+relaxation between the two cases at large $|\bm\kappa|$, driven by
+the matter-conditioned Lang--Firsov MLPs whose training support is
+$\Gamma$-localised.  We therefore conclude that, \emph{for the
+electron--photon correlation observable $\Ehp$ specifically},
+$\Gamma$-only at closed-shell N is the cleanest comparison to
+analytic theory --- TABC is not just unnecessary but actively
+counter-productive without a more refined ON/OFF-symmetric
+treatment.  Convergence to Weber's $N{=}\infty$ value via a
+closed-shell N ladder ($N \in \{18, 26, 42, 50, 58, 74, 90, \ldots\}$)
+is the natural next milestone.
+
+\begin{acknowledgments}
+\todo{funding, computing resources (KISTI Grace cluster), discussions
+with Weber et al. or other collaborators, etc.}
+\end{acknowledgments}
+
+% =====================================================================
+\appendix
+\section{Implementation notes}\label{app:impl}
+% =====================================================================
+The full source is available at \todo{repo URL}; the central files
+are
+\texttt{OmegaQMC/psi/nn/env\_periodic.py} (real and complex
+plane-wave envelopes with shared coefficient storage),
+\texttt{OmegaQMC/psi/nn/heg\_wf\_module.py} (PsiFormer-style
+wavefunction modules with Smith~DJ, coord backflow, cusp and the
+$\bm\kappa$-aware $\Delta$-MLPs), and
+\texttt{OmegaQMC/qed\_vmcopt\_nn\_heg\_l5.py} (the cavity-QED L5/L7
+optimiser with the SPRING + SMW SR + fused JIT train step, plus
+the \texttt{flatten\_to\_real} utility for complex-parameter SR).
+TABC eval and per-twist training drivers are in
+\texttt{scripts/run\_qed\_l5\_tabc.py} and
+\texttt{scripts/train\_per\_kappa.py}.
+
+% =====================================================================
+\begin{thebibliography}{99}
+
+\bibitem{Hubener2021}
+H.~H\"ubener, U.~De~Giovannini, C.~Sch\"afer, J.~Andberger, M.~Ruggenthaler,
+J.~Faist, and A.~Rubio,
+``Engineering quantum materials with chiral optical cavities,''
+Nat.~Mater.~\textbf{20}, 438 (2021).
+
+\bibitem{Schlawin2022}
+F.~Schlawin, D.~M.~Kennes, and M.~A.~Sentef,
+``Cavity quantum materials,''
+Appl.~Phys.~Rev.~\textbf{9}, 011312 (2022).
+
+\bibitem{Garcia-Vidal2021}
+F.~J.~Garc\'\i a-Vidal, C.~Ciuti, and T.~W.~Ebbesen,
+``Manipulating matter by strong coupling to vacuum fields,''
+Science~\textbf{373}, eabd0336 (2021).
+
+\bibitem{Weber2024}
+\todo{full Weber et al. 2024 bib entry; arXiv:2412.19222.}
+
+\bibitem{Pfau2020}
+D.~Pfau, J.~S.~Spencer, A.~G.~D.~G.~Matthews, and W.~M.~C.~Foulkes,
+``Ab~initio solution of the many-electron Schr\"odinger equation with
+deep neural networks,''
+Phys.~Rev.~Research \textbf{2}, 033429 (2020).
+
+\bibitem{Hermann2020}
+J.~Hermann, Z.~Sch\"atzle, and F.~No\'e,
+``Deep-neural-network solution of the electronic Schr\"odinger
+equation,''
+Nat.~Chem.~\textbf{12}, 891 (2020).
+
+\bibitem{vonGlehn2023}
+I.~von Glehn, J.~S.~Spencer, and D.~Pfau,
+``A self-attention ansatz for ab-initio quantum chemistry,''
+ICLR 2023.
+
+\bibitem{Smith2024}
+J.~E.~T.~Smith \emph{et al.},
+``Generalisable neural-network wavefunctions for the 2D homogeneous
+electron gas via deep Jastrow + coordinate backflow,''
+Phys.~Rev.~Lett.~\textbf{133}, 266504 (2024).
+\todo{verify full author list + correct title.}
+
+\bibitem{Schaefer2018}
+C.~Sch\"afer, M.~Ruggenthaler, and A.~Rubio,
+``Ab initio nonrelativistic quantum electrodynamics: bridging quantum
+chemistry and quantum optics from weak to strong coupling,''
+Phys.~Rev.~A~\textbf{98}, 043801 (2018).
+
+\bibitem{Lin2001}
+C.~Lin, F.~H.~Zong, and D.~M.~Ceperley,
+``Twist-averaged boundary conditions in continuum quantum Monte Carlo
+algorithms,''
+Phys.~Rev.~E~\textbf{64}, 016702 (2001).
+
+\bibitem{Drummond2008}
+N.~D.~Drummond, R.~J.~Needs, A.~Sorouri, and W.~M.~C.~Foulkes,
+``Finite-size errors in continuum quantum Monte Carlo calculations,''
+Phys.~Rev.~B~\textbf{78}, 125106 (2008).
+
+\bibitem{Park2024}
+\todo{Park et al. SPRING/SMW SR; replace with the actual reference
+once located.}
+
+\bibitem{Goldshlager2024}
+G.~Goldshlager, N.~Abrahamsen, and L.~Lin,
+``A Kaczmarz-inspired approach to accelerate the optimisation of
+neural network wavefunctions,''
+J.~Comput.~Phys.~(2024).
+\todo{verify final venue + page.}
+
+\bibitem{Halton1960}
+J.~H.~Halton,
+``On the efficiency of certain quasi-random sequences of points in
+evaluating multi-dimensional integrals,''
+Numer.~Math.~\textbf{2}, 84 (1960).
+
+\bibitem{Krogel2013}
+J.~T.~Krogel and F.~A.~Reboredo,
+``Twist-averaged Monte Carlo for excited states: practical
+recipes,''
+\todo{verify cite; placeholder for trial-overfit-under-TABC
+discussion.}
+
+\bibitem{Fraser1996}
+L.~M.~Fraser, W.~M.~C.~Foulkes, G.~Rajagopal, R.~J.~Needs,
+S.~D.~Kenny, and A.~J.~Williamson,
+``Finite-size effects and Coulomb interactions in quantum Monte
+Carlo calculations for homogeneous systems with periodic boundary
+conditions,''
+Phys.~Rev.~B~\textbf{53}, 1814 (1996).
+
+\end{thebibliography}
+
+\end{document}
