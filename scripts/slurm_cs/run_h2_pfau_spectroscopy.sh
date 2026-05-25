@@ -58,6 +58,11 @@ export PYTHONPATH="$PWD:$PYTHONPATH"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 
+# Force unbuffered stdout/stderr so SLURM .out captures iter progress
+# in real time instead of holding it in the block buffer for the whole
+# run (Python defaults to block-buffered when stdout is a regular file).
+export PYTHONUNBUFFERED=1
+
 R=${R:-2.5}
 BASIS=${BASIS:-cc-pvdz}
 ANSATZ=${ANSATZ:-examples/inputs/psiformer_small.yaml}
