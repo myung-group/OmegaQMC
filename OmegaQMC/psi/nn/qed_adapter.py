@@ -169,7 +169,7 @@ def make_qed_nn_log_psi(
           at leading order — a useful invariant for testing.
     """
     # Build the standard electronic NN log_psi.
-    elec_log_psi, elec_init_params, graphdef = make_nn_log_psi(
+    elec_log_psi, elec_init_params, graphdef, _ = make_nn_log_psi(
         config, mol_info, rng_key,
     )
 
@@ -333,7 +333,7 @@ def make_qed_nn_log_psi_n_aware(
             enough that exposing it isn't currently needed).
     """
     # 1. Build the standard electronic NN.
-    elec_log_psi, elec_init_params, elec_graphdef = make_nn_log_psi(
+    elec_log_psi, elec_init_params, elec_graphdef, _ = make_nn_log_psi(
         config, mol_info, rng_key,
     )
 
@@ -443,7 +443,7 @@ def make_qed_nn_log_psi_hybrid(
             in the closure).
     """
     # 1. Build the standard electronic NN.
-    elec_log_psi, elec_init_params, elec_graphdef = make_nn_log_psi(
+    elec_log_psi, elec_init_params, elec_graphdef, _ = make_nn_log_psi(
         config, mol_info, rng_key,
     )
 
