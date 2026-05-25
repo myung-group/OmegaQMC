@@ -19,6 +19,7 @@ from OmegaQMC.integrals.cholesky import (
 def prepare_qed_integrals(
     mf, omega, coupling_vec, chol_cut=1e-5,
     chol_h5_path=None, chol_chunk_g=128,
+    mo_coeff=None, proper_dse=True,
 ):
     """Prepare AFQMC integrals augmented with QED DSE.
 
@@ -34,6 +35,21 @@ def prepare_qed_integrals(
     The DSE adds one extra Cholesky vector (d_ij), so the augmented
     tensor has shape ``(naux + 1, nbasis, nbasis)``.
 
+    Note on the DSE in a finite basis (``proper_dse``):
+        The extra Cholesky vector implements the DSE in its
+        *operator-squared* form ``(1/2) D̂²`` with
+        ``D̂ = sum_pq d_pq Ê_pq``.  Its one-body part is the matrix
+        product ``d̃²_pq = sum_r d_pr d_rq``.  The true Pauli-Fierz DSE,
+        ``(1/2) λ² (ε·∑_i r̂_i)²``, instead carries the one-body
+        *quadrupole* matrix ``Q_pq = λ² <p|(ε·r̂)²|q>``.  The two agree
+        only in the complete-basis limit (resolution of identity).  With
+        ``proper_dse=True`` (default) we add the residual
+        ``(1/2)(λ² Q − d̃²)`` to ``h1e`` so the implemented Hamiltonian
+        matches the exact Pauli-Fierz form in any basis — and therefore
+        QED-AFQMC reproduces QED-FCI run with the same ``proper_dse=True``
+        convention.  Set ``proper_dse=False`` for the legacy
+        operator-squared behaviour.
+
     Args:
         mf: PySCF mean-field object
             (must have run kernel()).
@@ -47,6 +63,14 @@ def prepare_qed_integrals(
             accumulation are done in ``chol_chunk_g`` slabs so peak
             RAM is independent of naux.
         chol_chunk_g: Slab size along the auxiliary axis. Default 128.
+        mo_coeff: Optional (nao, nmo) orbital coefficients to build the
+            MO basis from.  Defaults to ``mf.mo_coeff``.  Pass the
+            QED-Hartree-Fock orbitals here to use the cavity-relaxed
+            reference instead of plain (RHF) orbitals.
+        proper_dse: If True (default), add the one-body quadrupole
+            correction ``(1/2)(λ² Q − d̃²)`` to ``h1e`` so the DSE is
+            exact in any basis.  If False, keep the legacy
+            operator-squared DSE.
 
     Returns:
         dict with keys:
@@ -62,7 +86,9 @@ def prepare_qed_integrals(
     """
     mol = mf.mol
     nbasis = mol.nao_nr()
-    mo_coeff = np.asarray(mf.mo_coeff)
+    if mo_coeff is None:
+        mo_coeff = mf.mo_coeff
+    mo_coeff = np.asarray(mo_coeff)
     nup, ndown = mol.nelec
     nmo = mo_coeff.shape[1]
 
@@ -81,6 +107,23 @@ def prepare_qed_integrals(
     dip_ao = mol.intor('int1e_r', comp=3)
     dip_ao_proj = lam * np.einsum('k,kpq->pq', epsilon, dip_ao)
     dip_mo = mo_coeff.T @ dip_ao_proj @ mo_coeff
+
+    # --- Proper-DSE one-body correction ---
+    # The augmented Cholesky vector below contributes the DSE through the
+    # *genuine* two-body operator (1/2)∑_{i≠j} d̂_i d̂_j (the one-body
+    # byproduct of D̂² is the normal-ordering shift v0, used only by the
+    # propagator, and is absent from the local-energy estimator).  The exact
+    # Pauli-Fierz DSE additionally carries the one-body self term
+    # (1/2)∑_i d̂_i² = (1/2) λ² <p|(ε·r̂)²|q>.  Add this quadrupole matrix to
+    # h1e so the implemented Hamiltonian is the exact Pauli-Fierz form in any
+    # basis (matching QED-FCI with proper_dse=True).  It is the same
+    # correction applied in OmegaQMC.addons.qed_fci.
+    if proper_dse and lam > 0.0:
+        quad_ao = mol.intor('int1e_rr', comp=9).reshape(3, 3, nbasis, nbasis)
+        quad_ao_proj = (lam ** 2) * np.einsum(
+            'a,b,abpq->pq', epsilon, epsilon, quad_ao)
+        quad_mo = mo_coeff.T @ quad_ao_proj @ mo_coeff
+        h1e = h1e + 0.5 * quad_mo
 
     # --- Cholesky in AO basis (chunked_cholesky picks dense/direct) ---
     chol_ao = chunked_cholesky(mol, chol_cut=chol_cut)

@@ -424,9 +424,23 @@ class _QEDAFQMCDriverGTO:
     """
 
     def __init__(self, mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
-                 s=1.0, q0=0.0, verbose=True,
-                 chol_h5_path=None, chol_chunk_g=128):
+                 s=1.0, q0='auto', verbose=True,
+                 chol_h5_path=None, chol_chunk_g=128,
+                 use_qed_hf=True, proper_dse=True):
         """Prepare QED integrals and build the propagator.
+
+        The trial wavefunction is a product ``|Φ_el⟩ ⊗ f(q)`` (Eq. 19 of
+        arXiv:2410.18838), where ``f(q) = (s/π)^{1/4} exp(-s(q-q₀)²/2)`` is
+        the photon Gaussian.  Two choices make QED-AFQMC reproduce QED-FCI:
+
+        * the electronic reference ``|Φ_el⟩`` is the cavity-relaxed
+          **QED-Hartree-Fock** determinant (``use_qed_hf=True``) rather than
+          plain RHF, and
+        * the photon trial is the dipole-gauge coherent state, i.e. centred
+          at ``q₀ = -⟨D⟩/√Ω`` (``q0='auto'``) instead of the origin.
+
+        Together with the proper-DSE integrals (see ``proper_dse``), these
+        reduce the phaseless bias to the sub-mHa level reported in the paper.
 
         Args:
             mf: PySCF mean-field object (must have run kernel()).
@@ -436,7 +450,9 @@ class _QEDAFQMCDriverGTO:
             dt: Imaginary time step.
             chol_cut: Cholesky decomposition threshold.
             s: Photon trial squeeze parameter (default 1.0 for dipole gauge).
-            q0: Photon trial displacement (default 0.0).
+            q0: Photon trial displacement.  ``'auto'`` (default) sets the
+                dipole-gauge coherent-state value ``q₀ = -⟨D⟩/√Ω`` from the
+                reference determinant's dipole; pass a float to override.
             verbose: Print progress.
             chol_h5_path: If set, the augmented MO‑basis Cholesky tensor
                 is stored in this HDF5 file (dataset ``chol_mo``) and
@@ -444,12 +460,18 @@ class _QEDAFQMCDriverGTO:
                 ``chol_qed`` in RAM.
             chol_chunk_g: Slab size along the auxiliary axis for disk
                 reads. Default 128.
+            use_qed_hf: If True (default), run QED-Hartree-Fock and use its
+                cavity-relaxed orbitals for the electronic trial and the
+                integral MO basis.  Falls back to ``mf.mo_coeff`` for
+                open-shell systems or zero coupling.
+            proper_dse: If True (default), use the exact (quadrupole) form of
+                the dipole self-energy so the Hamiltonian matches QED-FCI in
+                any basis.  See :func:`prepare_qed_integrals`.
         """
         self.mf = mf
         self.dt = dt
         self.omega = float(omega)
         self.s = float(s)
-        self.q0 = float(q0)
         self.verbose = verbose
         self.chol_chunk_g = chol_chunk_g
 
@@ -457,9 +479,31 @@ class _QEDAFQMCDriverGTO:
             print("Preparing QED-AFQMC integrals...")
             t0 = time.time()
 
+        # Cavity-relaxed (QED-HF) reference orbitals, when requested and
+        # applicable.  For open-shell systems or zero coupling we keep the
+        # supplied mean-field orbitals (QED-HF reduces to RHF at λ=0).
+        mol = mf.mol
+        lam = float(jnp.linalg.norm(jnp.asarray(coupling_vec, dtype=float)))
+        mo_coeff = None
+        self.e_qed_hf = None
+        self.use_qed_hf = bool(use_qed_hf)
+        if (use_qed_hf and lam > 0.0
+                and mol.nelec[0] == mol.nelec[1]):
+            from OmegaQMC.addons.qed_hf import run_qed_hf
+            qedhf = run_qed_hf(mol, omega, tuple(float(c) for c in coupling_vec))
+            mo_coeff = np.asarray(qedhf['C'])
+            self.e_qed_hf = float(qedhf['E_qed_hf'])
+            if verbose:
+                print(f"  Using QED-HF reference: E_QED-HF = "
+                      f"{self.e_qed_hf:.10f}")
+        elif use_qed_hf and lam > 0.0 and verbose:
+            print("  QED-HF reference unavailable (open shell); "
+                  "using mf.mo_coeff")
+
         integrals = prepare_qed_integrals(
             mf, omega, coupling_vec, chol_cut=chol_cut,
-            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g,
+            mo_coeff=mo_coeff, proper_dse=proper_dse)
         self.h1e = integrals['h1e']
         self.h1e_mod_0 = integrals['h1e_mod_0']
         self.chol_qed = integrals['chol_qed']
@@ -470,6 +514,19 @@ class _QEDAFQMCDriverGTO:
         self.ndown = integrals['ndown']
         self.mo_coeff = integrals['mo_coeff']
         self.naux = self.chol_qed.shape[0]  # naux_coulomb + 1 (DSE)
+
+        # Photon trial displacement.  In the dipole gauge the photon relaxes
+        # to the coherent state that minimises √Ω q ⟨D⟩ + (Ω/2) q², i.e.
+        # q₀ = -⟨D⟩/√Ω, where ⟨D⟩ = Tr[d (Ga+Gb)] is the reference dipole
+        # (sum of occupied diagonal dipole elements for the identity trial).
+        if isinstance(q0, str) and q0 == 'auto':
+            dip_diag = jnp.diag(self.dip_mo)
+            d_exp = float(jnp.sum(dip_diag[:self.nup])
+                          + jnp.sum(dip_diag[:self.ndown]))
+            self.q0 = -d_exp / np.sqrt(self.omega) if self.omega > 0 else 0.0
+        else:
+            self.q0 = float(q0)
+        q0 = self.q0
 
         if verbose:
             print(f"  nbasis={self.nbasis}, nup={self.nup}, "
@@ -668,12 +725,19 @@ class _QEDAFQMCDriverGTO:
         q_mean_prod = np.array(q_mean_blocks[num_blocks_equil:])
         e_ph_prod = np.array(e_ph_blocks[num_blocks_equil:])
 
+        # Reference energy for the correlation energy: the QED-HF energy
+        # when a cavity-relaxed reference was used, else plain HF.
+        e_ref = self.e_qed_hf if self.e_qed_hf is not None \
+            else float(self.mf.e_tot)
+
         if verbose:
             print("-" * 80)
             print(f"E_HF       = {float(self.mf.e_tot):.10f}")
+            if self.e_qed_hf is not None:
+                print(f"E_QED-HF   = {float(self.e_qed_hf):.10f}")
             print(f"E_QED-AFQMC = {float(e_mean):.10f} +/- "
                   f"{float(e_err):.10f}")
-            print(f"E_corr     = {float(e_mean) - float(self.mf.e_tot):.10f}")
+            print(f"E_corr     = {float(e_mean) - e_ref:.10f}")
             print(f"<q>        = {float(np.mean(q_mean_prod)):.6f}")
             print(f"E_photon   = {float(np.mean(e_ph_prod)):.6f}")
             print(f"kappa      = {float(kappa):.2f}")
@@ -685,6 +749,8 @@ class _QEDAFQMCDriverGTO:
             'energy_std': float(e_std),
             'kappa': float(kappa),
             'ehf': float(self.mf.e_tot),
+            'e_qed_hf': self.e_qed_hf,
+            'q0': float(self.q0),
             'q_mean': float(np.mean(q_mean_prod)),
             'e_photon_mean': float(np.mean(e_ph_prod)),
             'q_mean_blocks': np.array(q_mean_blocks),
@@ -704,9 +770,16 @@ class _QEDAFQMCDriverGTO:
 
 
 def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
-                       s=1.0, q0=0.0, verbose=True,
-                       chol_h5_path=None, chol_chunk_g=128):
+                       s=1.0, q0='auto', verbose=True,
+                       chol_h5_path=None, chol_chunk_g=128,
+                       use_qed_hf=True, proper_dse=True):
     """Create a reusable QED-AFQMC driver.
+
+    By default the driver uses the cavity-relaxed QED-Hartree-Fock
+    determinant as the electronic trial, the exact (quadrupole) dipole
+    self-energy, and the dipole-gauge coherent-state photon displacement
+    ``q₀ = -⟨D⟩/√Ω``.  With these defaults QED-AFQMC reproduces QED-FCI to
+    within the (sub-mHa) phaseless bias.
 
     Args:
         mf: PySCF mean-field object (must have run kernel()).
@@ -716,11 +789,16 @@ def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
         dt: Imaginary time step (default 0.005).
         chol_cut: Cholesky decomposition threshold.
         s: Photon trial squeeze parameter (1.0 for dipole gauge).
-        q0: Photon trial displacement (0.0 for no displacement).
+        q0: Photon trial displacement.  ``'auto'`` (default) uses the
+            coherent-state value ``-⟨D⟩/√Ω``; pass a float to override.
         verbose: Print progress.
         chol_h5_path: If set, augmented MO‑basis Cholesky lives in this
             HDF5 file and is streamed in g‑chunks during the run.
         chol_chunk_g: Slab size along the auxiliary axis for disk reads.
+        use_qed_hf: If True (default), use QED-HF cavity-relaxed orbitals
+            for the electronic trial / integral basis.
+        proper_dse: If True (default), use the exact (quadrupole) DSE so the
+            Hamiltonian matches QED-FCI in any basis.
 
     Returns:
         _QEDAFQMCDriverGTO instance (callable).
@@ -728,4 +806,5 @@ def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
     return _QEDAFQMCDriverGTO(mf, omega, coupling_vec, dt=dt,
                            chol_cut=chol_cut, s=s, q0=q0, verbose=verbose,
                            chol_h5_path=chol_h5_path,
-                           chol_chunk_g=chol_chunk_g)
+                           chol_chunk_g=chol_chunk_g,
+                           use_qed_hf=use_qed_hf, proper_dse=proper_dse)

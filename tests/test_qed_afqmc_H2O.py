@@ -52,7 +52,7 @@ def test_h2_qed_afqmc_vs_fci():
     )
     result_qed = driver_qed(
         rng_key=jax.random.key(42),
-        num_walkers=100,
+        num_walkers=200,
         num_blocks=200,
         num_steps_per_block=25,
         stabilize_freq=5,
@@ -79,6 +79,12 @@ def test_h2_qed_afqmc_vs_fci():
     nsigma = abs(diff) / result_qed['energy_err'] \
         if result_qed['energy_err'] > 0 else 0
     print(f"\nΔ(QED-AFQMC - QED-FCI) = {diff:.6f}  ({nsigma:.1f}σ)")
+
+    # With the proper-DSE Hamiltonian, the QED-HF reference and the
+    # coherent-state photon trial, phaseless QED-AFQMC reproduces QED-FCI
+    # to within the (sub-mHa) phaseless bias plus statistical error.
+    assert abs(diff) < 2.0e-3, \
+        f"QED-AFQMC deviates from QED-FCI by {diff*1e3:.2f} mHa"
 
 
 def test_h2o_qed_afqmc_vs_fci():
@@ -152,6 +158,12 @@ def test_h2o_qed_afqmc_vs_fci():
     nsigma = abs(diff) / result_qed['energy_err'] \
         if result_qed['energy_err'] > 0 else 0
     print(f"\nΔ(QED-AFQMC - QED-FCI) = {diff:.6f}  ({nsigma:.1f}σ)")
+
+    # See test_h2_qed_afqmc_vs_fci: QED-AFQMC reproduces QED-FCI to the
+    # sub-mHa phaseless bias once the proper-DSE Hamiltonian, QED-HF
+    # reference and coherent-state photon trial are used.
+    assert abs(diff) < 2.0e-3, \
+        f"QED-AFQMC deviates from QED-FCI by {diff*1e3:.2f} mHa"
 
 
 if __name__ == '__main__':
