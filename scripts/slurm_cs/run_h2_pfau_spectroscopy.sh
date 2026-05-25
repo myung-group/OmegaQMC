@@ -26,6 +26,11 @@
 
 set -eo pipefail
 
+# kisti-grace SLURM has a broken default MPI plugin ("mpi/mpi/pmix")
+# that causes any implicit srun to fail before user code runs. Skip
+# the plugin entirely; we don't use MPI for the single-GPU NN-VMC code.
+export SLURM_MPI_TYPE=none
+
 cd "$(dirname "$0")/../.."
 source ~/.bashrc
 conda activate omegaqmc
