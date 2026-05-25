@@ -457,3 +457,259 @@ def get_vmcopt_nn_nes_basis_func(
         )
         driver.init_params = ground_params
     return driver
+
+
+# ===========================================================================
+# CI-overlap NES-VMC variant (route 3)
+# ===========================================================================
+#
+# The cos^2 penalty of _VMCOptDriverNN_NES_Basis targets the *real-space*
+# cosine between Psi_synth and Psi_NN. This is not the same as the
+# *CI-vector* cosine between c_hat^(0) and c_hat^(1), because c_hat^(1)_I
+# = E[D_I/Psi_1] has its own (basis-incompleteness) bias relative to
+# E[Psi_synth/Psi_1] = sum_I c_hat^(0)_I × c_hat^(1)_I. When Psi_NN
+# extends beyond the basis, the in-basis c_hat vectors of the ground
+# and excited states can be highly aligned even when the real-space
+# overlap is small. To penalise the CI-vector cosine directly we need
+# both the numerator (sum c^(0)_I × c^(1)_I) and a CI-vector denominator
+# (sum (c^(1)_I)^2), each evaluated per-Adam-step on the same batch.
+#
+# This requires pre-computing the matrix M[k, I] = D_I^norm(R_k) at every
+# sampled walker for every candidate determinant I, rather than the
+# scalar Psi_synth(R_k) used by the previous variant. The per-Adam-step
+# loss then divides through by Psi_1(R_k) to get f_I^(1)[k, I],
+# takes column means to get c_raw_I, and forms the CI-cosine.
+
+
+class _VMCOptDriverNN_NES_CIOverlap(_VMCOptDriverNN_IRAdam):
+    """NES-VMC with a direct CI-vector cosine penalty.
+
+    Penalty: ``( sum_I c_hat^(0)_I × c_raw^(1)_I )^2 / sum_I (c_raw^(1)_I)^2``
+    where ``c_raw^(1)_I = (1/K) sum_k D_I^norm(R_k) / Psi_1(R_k)`` is the
+    per-coefficient sample mean over the current batch. This is the
+    squared cosine between the normalised CI vectors directly, and it
+    cannot be cheated by the real-space sign-cancellation pathway that
+    the cos^2 variant suffered from.
+
+    Memory cost per outer iter: ``(n_walkers_per_iter) × n_det × 8`` bytes
+    for the pre-computed D_I matrix. For H2/cc-pVDZ with n_det = 10 and
+    n_walkers = 2048, that is 160 KB. For H4 cc-pVDZ with
+    n_det = 10^4 it is 160 MB. For larger n_det this variant becomes
+    impractical and the user should fall back to either truncated
+    candidate sets or the real-space variant.
+    """
+
+    def __init__(
+        self,
+        mol_info,
+        config,
+        init_key,
+        c_hat_ground,
+        fci_ref,
+        lambda_penalty: float = 1.0,
+    ):
+        super().__init__(mol_info, config, init_key)
+        self.c_hat_ground = np.asarray(c_hat_ground, dtype=np.float64)
+        self.fci_ref = fci_ref
+        self.lambda_penalty = float(lambda_penalty)
+
+        from .cs.estimators import (
+            evaluate_orbitals_on_walkers,
+            _normalization,
+        )
+        from .cs.estimators import f_I_matrix  # noqa: F401
+
+        n_alpha, n_beta = fci_ref["nelec"]
+        candidate = fci_ref["candidate_set"]
+        no_coeff = fci_ref["no_coeff_ao"]
+        n_norm = _normalization(n_alpha, n_beta)
+        n_det = len(candidate)
+
+        def evaluate_D_matrix(walkers_np):
+            """Compute D_I^norm(R_k) for every (walker, candidate det).
+
+            Returns numpy array shape ``(K_s, n_det)``. Heavy numerical
+            work is done once per outer iteration (outside JIT).
+            """
+            orb = evaluate_orbitals_on_walkers(
+                mol_info, np.asarray(walkers_np), no_coeff,
+                convention="interleaved",
+                n_alpha=n_alpha, n_beta=n_beta,
+            )
+            orb_a = orb[:, :n_alpha, :]
+            orb_b = orb[:, n_alpha:, :]
+            K = orb.shape[0]
+            D = np.zeros((K, n_det), dtype=np.float64)
+            for i, (occ_a, occ_b) in enumerate(candidate):
+                M_a = orb_a[:, :, list(occ_a)]
+                M_b = orb_b[:, :, list(occ_b)]
+                D[:, i] = n_norm * np.linalg.det(M_a) * np.linalg.det(M_b)
+            return D
+        self.evaluate_D_matrix = evaluate_D_matrix
+
+        log_psi_signed = self.log_psi.signed
+        nuc_crds = self.nuc_crds
+        compute_batch_energy = self.compute_batch_energy
+        c_hat_g_j = jnp.asarray(self.c_hat_ground)
+
+        def signed_psi_one(walker, params):
+            sign, log_amp = log_psi_signed(walker, nuc_crds, params)
+            return sign * jnp.exp(log_amp)
+
+        @jax.jit
+        def loss_fn_ci(params, batch_walkers, batch_D):
+            energies = compute_batch_energy(batch_walkers, params)
+            e_loss = 0.2 * energies.mean() + 0.8 * energies.std()
+            psi_1 = jax.vmap(signed_psi_one, in_axes=(0, None))(
+                batch_walkers, params,
+            )
+            # f_I^(1) [k, I] = D_I^norm(R_k) / Psi_1(R_k)
+            f_I = batch_D / psi_1[:, None]
+            # Per-coefficient sample mean: c_raw^(1)_I = E[f_I]
+            c_raw = jnp.mean(f_I, axis=0)
+            # CI-vector cosine squared
+            numerator = jnp.sum(c_hat_g_j * c_raw) ** 2
+            denominator = jnp.sum(c_raw ** 2) + 1e-30
+            cos2_ci = numerator / denominator
+            return e_loss + lambda_penalty * cos2_ci
+        self.loss_fn_ci = loss_fn_ci
+
+    def __call__(
+        self,
+        rng_key,
+        num_iters: int = 200,
+        num_epochs: int = 1,
+        num_walkers: int = 512,
+        num_steps_per_block: int = 100,
+        num_steps_decorr: int = 1,
+        num_sample_blocks: int = 4,
+        num_blocks_equil: int = 5,
+        mc_timestep: float = 0.1,
+        lr: float = 1e-2,
+        train_split: float = 0.8,
+        batch_size: int = None,
+        verbose: int = 1,
+        prefix: str = "nesopt_ci",
+    ):
+        """Adam loop with the CI-overlap penalty.
+
+        ``batch_size = None`` (default) uses the entire training set in
+        each Adam step, which is necessary for low-variance estimation
+        of the per-coefficient sample means.
+        """
+        params = self.init_params
+        optimizer = optax.adam(learning_rate=lr)
+        opt_state = optimizer.init(params)
+        mc_stepsize = (3 * mc_timestep) ** 0.5
+
+        rng_key, init_walker_key = jax.random.split(rng_key)
+        walkers = self.initialize_walkers(init_walker_key, num_walkers)
+
+        if verbose >= 1:
+            print(f"CI-overlap NES-VMC: lambda={self.lambda_penalty}, "
+                  f"|candidate set|={len(self.fci_ref['candidate_set'])}")
+            print(f"  equilibrating {num_blocks_equil} blocks...")
+        (rng_key, walkers, mc_stepsize, _), _ = self.run_equilibration(
+            rng_key, walkers, mc_stepsize, params,
+            num_blocks_equil, num_steps_per_block,
+        )
+
+        chkpt_path = f"{prefix}.chk.h5"
+        for iteration in range(num_iters):
+            all_samples = []
+            for _ in range(num_sample_blocks):
+                (rng_key, walkers, mc_stepsize, _), _ = self.run_production(
+                    rng_key, walkers, mc_stepsize, params,
+                    num_steps_per_block, num_steps_decorr,
+                )
+                all_samples.append(walkers)
+            sampled = jnp.vstack(all_samples).reshape(-1, self.nelec, 3)
+            n_samples = sampled.shape[0]
+
+            D_all = self.evaluate_D_matrix(np.asarray(sampled))
+            D_all = jnp.asarray(D_all)
+
+            rng_key, perm_key = jax.random.split(rng_key)
+            idx = jax.random.permutation(perm_key, jnp.arange(n_samples))
+            n_train = int(train_split * n_samples)
+            train_w = sampled[idx[:n_train]]
+            train_D = D_all[idx[:n_train]]
+            valid_w = sampled[idx[n_train:]]
+
+            effective_batch = batch_size if batch_size is not None else n_train
+
+            epoch_losses = []
+            for _ in range(num_epochs):
+                for si in range(0, n_train, effective_batch):
+                    ei = min(si + effective_batch, n_train)
+                    loss, grads = jax.value_and_grad(
+                        self.loss_fn_ci,
+                    )(params, train_w[si:ei], train_D[si:ei])
+                    updates, opt_state = optimizer.update(
+                        grads, opt_state, params,
+                    )
+                    params = optax.apply_updates(params, updates)
+                    epoch_losses.append(loss)
+
+            # Diagnostic: CI overlap on validation (large batch, robust)
+            v_D = jnp.asarray(self.evaluate_D_matrix(np.asarray(valid_w)))
+            psi_1_v = jax.vmap(
+                lambda w: self.log_psi.signed(w, self.nuc_crds, params),
+            )(valid_w)
+            sgn_v, lam_v = psi_1_v
+            psi_1_arr = sgn_v * jnp.exp(lam_v)
+            f_I_v = v_D / psi_1_arr[:, None]
+            c_raw_v = jnp.mean(f_I_v, axis=0)
+            num_v = float(jnp.sum(jnp.asarray(self.c_hat_ground) * c_raw_v) ** 2)
+            den_v = float(jnp.sum(c_raw_v ** 2)) + 1e-30
+            ci_cos2 = num_v / den_v
+
+            v_energies = []
+            for si in range(0, valid_w.shape[0], 256):
+                ei = min(si + 256, valid_w.shape[0])
+                v_energies.append(
+                    self.compute_batch_energy(valid_w[si:ei], params),
+                )
+            all_e = jnp.concatenate(v_energies)
+            iter_e = float(all_e.mean())
+            iter_err = float(all_e.std()) / max(1, all_e.size) ** 0.5
+
+            if verbose >= 1:
+                iter_loss = float(jnp.array(epoch_losses).mean())
+                print(f"Iter {iteration:5d} | "
+                      f"E = {iter_e:.6f} +/- {iter_err:.5f} | "
+                      f"CI cos^2 = {ci_cos2:.5f} | "
+                      f"Loss: {iter_loss:.6f}")
+
+            if os.path.exists(chkpt_path):
+                os.rename(chkpt_path, f"{prefix}.{iteration}.h5")
+            save_nn_checkpoint(
+                chkpt_path, params, iteration,
+                self.config_name, self.mol_info, energy=iter_e,
+            )
+
+        return params, {"energy": {"mean": iter_e, "stderr": iter_err}}
+
+
+def get_vmcopt_nn_nes_ci_func(
+    mol_info,
+    config,
+    init_key,
+    c_hat_ground,
+    fci_ref,
+    lambda_penalty: float = 1.0,
+    init_from_ground_checkpoint: str = None,
+):
+    """Factory for the CI-overlap NES-VMC driver (route 3)."""
+    driver = _VMCOptDriverNN_NES_CIOverlap(
+        mol_info, config, init_key,
+        c_hat_ground=c_hat_ground,
+        fci_ref=fci_ref,
+        lambda_penalty=lambda_penalty,
+    )
+    if init_from_ground_checkpoint is not None:
+        ground_params, _meta = load_nn_checkpoint(
+            init_from_ground_checkpoint, driver.init_params,
+        )
+        driver.init_params = ground_params
+    return driver

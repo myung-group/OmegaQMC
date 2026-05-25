@@ -19,8 +19,10 @@ from OmegaQMC.utils import Mole_custom
 from OmegaQMC.vmcopt_nn_nes import (
     _VMCOptDriverNN_NES,
     _VMCOptDriverNN_NES_Basis,
+    _VMCOptDriverNN_NES_CIOverlap,
     get_vmcopt_nn_nes_func,
     get_vmcopt_nn_nes_basis_func,
+    get_vmcopt_nn_nes_ci_func,
 )
 from OmegaQMC.vmcopt_nn_iradam import _VMCOptDriverNN_IRAdam
 from OmegaQMC.psi.nn.checkpoint import save_nn_checkpoint
@@ -192,5 +194,60 @@ def test_loss_fn_basis_is_finite_and_differentiable(h2_setup, h2_fci_ref):
     loss = float(nes_b.loss_fn_basis(nes_b.init_params, walkers_jx, psi_synth))
     assert np.isfinite(loss)
     grads = jax.grad(nes_b.loss_fn_basis)(nes_b.init_params, walkers_jx, psi_synth)
+    leaves = jax.tree.leaves(grads)
+    assert all(np.all(np.isfinite(np.asarray(g))) for g in leaves)
+
+
+# ---------- CI-overlap NES (route 3) tests ----------------------------------
+
+
+@pytest.mark.slow
+def test_nes_ci_driver_instantiates(h2_setup, h2_fci_ref):
+    """get_vmcopt_nn_nes_ci_func runs and exposes the right hooks."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_ci = get_vmcopt_nn_nes_ci_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=1.0,
+    )
+    assert hasattr(nes_ci, "loss_fn_ci")
+    assert hasattr(nes_ci, "evaluate_D_matrix")
+    assert hasattr(nes_ci, "c_hat_ground")
+    assert nes_ci.lambda_penalty == 1.0
+
+
+@pytest.mark.slow
+def test_evaluate_D_matrix_shape_and_finite(h2_setup, h2_fci_ref):
+    """D-matrix evaluation returns a finite (K, n_det) array."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_ci = get_vmcopt_nn_nes_ci_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=1.0,
+    )
+    rng = np.random.default_rng(0)
+    walkers = rng.normal(size=(20, 2, 3))
+    n_det = len(ref["candidate_set"])
+    D = nes_ci.evaluate_D_matrix(walkers)
+    assert D.shape == (20, n_det)
+    assert np.all(np.isfinite(D))
+
+
+@pytest.mark.slow
+def test_loss_fn_ci_is_finite_and_differentiable(h2_setup, h2_fci_ref):
+    """The CI-overlap loss returns a finite scalar with finite grads."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_ci = get_vmcopt_nn_nes_ci_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=1.0,
+    )
+    rng = np.random.default_rng(7)
+    walkers = rng.normal(size=(8, 2, 3))
+    D = jnp.asarray(nes_ci.evaluate_D_matrix(walkers))
+    walkers_jx = jnp.asarray(walkers)
+    loss = float(nes_ci.loss_fn_ci(nes_ci.init_params, walkers_jx, D))
+    assert np.isfinite(loss)
+    grads = jax.grad(nes_ci.loss_fn_ci)(nes_ci.init_params, walkers_jx, D)
     leaves = jax.tree.leaves(grads)
     assert all(np.all(np.isfinite(np.asarray(g))) for g in leaves)

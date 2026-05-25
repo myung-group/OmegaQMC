@@ -973,9 +973,58 @@ direct penalisation of
 $|\sum_I \widehat{c}^{(0)}_I \mathbb{E}[f_I^{(1)}]|^{2}$ with the
 $\widehat{c}^{(1)}_I$ computed across the full bank each iteration.
 The third route is the most direct extension of the
-\texttt{OmegaQMC.cs.scaling} streaming-mean infrastructure
-and is the most promising direction for a future paper-grade NES
-demonstration.
+\texttt{OmegaQMC.cs.scaling} streaming-mean infrastructure.
+
+We implemented this third route as
+\texttt{\_VMCOptDriverNN\_NES\_CIOverlap} with the per-step
+estimator
+$F_{\rm CI-cos^{2}}(\theta_1) =
+(\sum_I \widehat{c}^{(0)}_I \, c^{(1)}_{{\rm raw},I})^{2} /
+\sum_I (c^{(1)}_{{\rm raw},I})^{2}$
+where $c^{(1)}_{{\rm raw},I} = (1/K) \sum_k
+D_I^{\rm norm}(R_k) / \Psi_1(R_k)$ is the per-coefficient sample
+mean over the (full-train) Adam batch. This penalty is scale-
+invariant in $\Psi_1$, requires only one
+$\mathcal{O}(K \times n_{\rm det})$
+matrix per outer iteration (160\,KB for H$_2$/cc-pVDZ), and
+targets the actual CI-vector cosine. On the H$_2$/cc-pVDZ test
+case, however, the optimisation failed: with random
+initialisation and $\lambda = 1$ the network converged to the
+ground state ($E = -1.08\,E_{\rm h}$,
+$\langle \widehat{c}^{(0)} | \widehat{c}^{(1)} \rangle = 0.999$);
+with ground-state initialisation and $\lambda = 10$ the penalty
+plateaued at $\sim 0.95$--$0.99$ without lowering. The cause is
+the denominator's scale invariance: $F_{\rm CI-cos^{2}}$ is
+constant under $c^{(1)}_{{\rm raw}} \to \alpha \, c^{(1)}_{{\rm raw}}$,
+so any direction in parameter space that scales the basis-
+projected mass of $\Psi_1$ leaves the penalty unchanged, and
+Adam finds those flat directions before it finds the rotation
+that orthogonalises against $\widehat{c}^{(0)}$. We therefore
+have three failure modes spanning the penalty design space:
+\begin{itemize}
+\item \emph{Real-space cos$^{2}$:} optimises easily but
+  satisfies orthogonality through out-of-basis components,
+  leaving the in-basis CI vector aligned (overlap $\sim 1$).
+\item \emph{Basis-resolved cos$^{2}$:} pushes the
+  energy to a genuine excited state but the in-batch estimator
+  is high-variance and the optimiser cheats it via sign
+  cancellation, plateauing at overlap $\sim 0.9$.
+\item \emph{Direct CI cos$^{2}$:} scale-invariant denominator
+  creates a flat manifold around the ground-state minimum that
+  Adam cannot escape (overlap $\sim 1$).
+\end{itemize}
+A clean solution likely requires either (a) an absolute-overlap
+penalty $|\sum_I \widehat{c}^{(0)}_I c^{(1)}_{{\rm raw},I}|^{2}$
+without the degenerate scale invariance, paired with a strong
+energy regulariser to constrain $\Psi_1$'s scale; (b) a
+constrained-optimisation approach that projects the gradient onto
+the orthogonality manifold rather than minimising a soft penalty;
+or (c) an architectural change so that $\Psi_{\rm NN}$ lies in (or
+is biased toward) the chosen Gaussian basis, eliminating the
+basis-incompleteness pathway entirely. These are interesting
+directions for follow-up work; the \texttt{OmegaQMC.vmcopt\_nn\_nes}
+module exposes three skeleton implementations along the relevant
+axes.
 
 The downstream applications this unlocks are: transition density
 matrices
