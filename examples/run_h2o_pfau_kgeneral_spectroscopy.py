@@ -240,9 +240,16 @@ def main():
     # NEVPT2 on (ground, target)
     print(f"\n[Step 7] NEVPT2 on (eigenstate 1, eigenstate {k_target + 1})")
     try:
+        # Pass ncore explicitly when the fci_ref is CASCI; otherwise
+        # run_multistate_nevpt2 calls compute_1rdm to auto-derive
+        # ncore, which OOMs in large bases (compute_1rdm uses the
+        # full-FCI reshape_chat_to_pyscf_matrix).
+        ncore_arg = (int(fci_ref["ncore"])
+                     if "ncore" in fci_ref else None)
         nevpt2 = run_multistate_nevpt2(
             mol, c_hats=[c_eig[0], c_eig[k_target]], fci_ref=fci_ref,
             state_labels=["ground", "excited"],
+            ncore=ncore_arg,
             ncas=args.cas_ncas, nelecas=nelecas,
             occ_threshold=args.nevpt2_occ_threshold,
             nroots_max=8,
