@@ -243,6 +243,214 @@ def run_nevpt2(mc) -> dict:
     )
 
 
+def build_casci_root_matched(
+    mol,
+    c_hat: np.ndarray,
+    fci_ref: Mapping,
+    ncore: int = None,
+    ncas: int = None,
+    nelecas: Tuple[int, int] = None,
+    occ_threshold: float = 0.1,
+    max_ncas: int = None,
+    nroots_max: int = 8,
+):
+    """Variational CASCI reference matched to an excited-state ``c_hat``.
+
+    Like :func:`build_casci_from_chat` with ``diagonalize=True``, but
+    instead of returning the lowest CASCI root (which would be the
+    ground state regardless of ``c_hat``), this routine
+
+      1. Diagonalises the active-space Hamiltonian for the lowest
+         ``nroots_max`` roots,
+      2. Computes the overlap of each root's CI vector with the
+         active-space projection of ``c_hat``,
+      3. Selects the root with the largest overlap (typically the
+         excited state that ``c_hat`` represents),
+      4. Sets ``mc.ci``, ``mc.e_tot``, and ``mc.fcisolver.nroots = 1``
+         to the matched root, so a subsequent NEVPT2 call uses the
+         correct reference.
+
+    This is the principled way to do NEVPT2 on top of a Pfau-NES (or
+    any other) excited-state CI vector: the post-NES PT2 correction
+    is computed at the *variational* CASCI eigenvector closest to the
+    NN-derived state, not at the lowest root by default.
+
+    Returns the matched ``mc`` (CASCI object) plus a small
+    ``_cs_meta_root`` attribute on it with the overlap and root index.
+    """
+    from pyscf import mcscf, scf
+    from pyscf import fci as pyscf_fci
+    from OmegaQMC.cs.properties import (
+        compute_1rdm, natural_occupations_from_rdm,
+    )
+
+    mf = scf.RHF(mol).run(verbose=0)
+    no_coeff = np.asarray(fci_ref["no_coeff_ao"])
+
+    n_total = sum(fci_ref["nelec"])
+    if ncore is None or ncas is None or nelecas is None:
+        gamma = compute_1rdm(c_hat, fci_ref["candidate_set"],
+                             fci_ref["n_orb"], fci_ref["nelec"])
+        no_occ = natural_occupations_from_rdm(gamma)
+        ncore_auto, ncas_auto = select_active_space(
+            no_occ, occ_threshold=occ_threshold, max_ncas=max_ncas,
+        )
+        if ncore is None and nelecas is None:
+            ncore = ncore_auto
+        if ncas is None:
+            ncas = ncas_auto
+        if nelecas is None:
+            n_active_e = n_total - 2 * ncore
+            nelecas = (n_active_e // 2 + n_active_e % 2,
+                       n_active_e // 2)
+        if ncore is None:
+            ncore = (n_total - sum(nelecas)) // 2
+    if 2 * ncore + sum(nelecas) != n_total:
+        raise ValueError(
+            f"electron-count mismatch: 2*ncore({ncore}) + "
+            f"sum(nelecas)({sum(nelecas)}) = {2*ncore + sum(nelecas)}"
+            f" != n_total({n_total})"
+        )
+
+    # Project c_hat onto the active space (for the overlap reference)
+    ci_matrix_ref, _ = chat_to_casci_matrix(
+        c_hat, fci_ref["candidate_set"], ncore, ncas, nelecas,
+    )
+    # Total CAS det count for this (ncas, nelecas) — required for nroots cap
+    from pyscf.fci import cistring
+    n_dets_alpha = cistring.num_strings(ncas, nelecas[0])
+    n_dets_beta = cistring.num_strings(ncas, nelecas[1])
+    n_dets_total = n_dets_alpha * n_dets_beta
+    nroots = min(nroots_max, n_dets_total)
+
+    mc = mcscf.CASCI(mf, ncas, nelecas)
+    mc.ncore = ncore
+    mc.mo_coeff = no_coeff
+    mc.fcisolver.nroots = nroots
+    mc.verbose = 0
+    mc.kernel(mo_coeff=no_coeff)
+
+    # mc.ci is now a list (or tuple) of nroots CI matrices; select by
+    # maximum overlap with c_hat's active-space projection
+    overlaps = []
+    for ci_k in mc.ci:
+        ovl = float(np.sum(np.asarray(ci_k) * ci_matrix_ref))
+        overlaps.append(abs(ovl))
+    overlaps = np.asarray(overlaps)
+    k_best = int(np.argmax(overlaps))
+    if overlaps[k_best] < 1e-3:
+        raise RuntimeError(
+            f"no CASCI root has appreciable overlap with c_hat "
+            f"(best overlap = {overlaps[k_best]:.3e} at root {k_best}); "
+            f"check ncore/ncas or the c_hat input"
+        )
+
+    # Collapse mc to the matched root so NEVPT2 uses it
+    mc.ci = mc.ci[k_best]
+    mc.e_tot = float(mc.e_tot[k_best])
+    mc.fcisolver.nroots = 1
+    mc._cs_meta_root = dict(
+        k_matched=k_best,
+        all_root_energies=[float(e) for e in mc.e_cas]
+            if hasattr(mc, "e_cas") and len(np.atleast_1d(mc.e_cas)) > 1
+            else None,
+        all_overlaps=overlaps.tolist(),
+        ncore=ncore, ncas=ncas, nelecas=nelecas,
+    )
+    return mc
+
+
+def run_multistate_nevpt2(
+    mol,
+    c_hats: Sequence[np.ndarray],
+    fci_ref: Mapping,
+    state_labels: Sequence[str] = None,
+    ncore: int = None,
+    ncas: int = None,
+    nelecas: Tuple[int, int] = None,
+    occ_threshold: float = 0.1,
+    nroots_max: int = 8,
+) -> dict:
+    """State-specific NEVPT2 across K Pfau-NES (or other) reference CI vectors.
+
+    For each ``c_hat^(k)`` in ``c_hats``:
+      1. Build a variational CASCI reference matched to that state via
+         :func:`build_casci_root_matched`,
+      2. Run NEVPT2 to obtain ``E_pt2^(k)``,
+      3. Aggregate the total energies and vertical excitation energies.
+
+    Returns a dict with per-state results and the matrix of vertical
+    excitation energies ``Delta_E[i, j] = E_total^(j) - E_total^(i)``
+    in atomic units, suitable for direct insertion in a paper table.
+
+    The CASCI active space is held fixed across states (taken from
+    the ground-state c_hat^(0) unless overridden) so the NEVPT2
+    corrections are computed in a consistent reference frame and the
+    excitation energies are physically meaningful.
+    """
+    if state_labels is None:
+        state_labels = [f"state_{k}" for k in range(len(c_hats))]
+    if len(state_labels) != len(c_hats):
+        raise ValueError(
+            f"state_labels has {len(state_labels)} entries, "
+            f"expected {len(c_hats)}"
+        )
+
+    # If active space not specified, derive from c_hat^(0) so all states
+    # share the same active space.
+    if ncore is None or ncas is None or nelecas is None:
+        from OmegaQMC.cs.properties import (
+            compute_1rdm, natural_occupations_from_rdm,
+        )
+        gamma_0 = compute_1rdm(
+            c_hats[0], fci_ref["candidate_set"],
+            fci_ref["n_orb"], fci_ref["nelec"],
+        )
+        no_occ = natural_occupations_from_rdm(gamma_0)
+        ncore_auto, ncas_auto = select_active_space(
+            no_occ, occ_threshold=occ_threshold,
+        )
+        n_total = sum(fci_ref["nelec"])
+        if ncore is None:
+            ncore = ncore_auto
+        if ncas is None:
+            ncas = ncas_auto
+        if nelecas is None:
+            n_active_e = n_total - 2 * ncore
+            nelecas = (n_active_e // 2 + n_active_e % 2,
+                       n_active_e // 2)
+
+    per_state = []
+    for k, (c_hat, label) in enumerate(zip(c_hats, state_labels)):
+        mc = build_casci_root_matched(
+            mol, c_hat, fci_ref,
+            ncore=ncore, ncas=ncas, nelecas=nelecas,
+            occ_threshold=occ_threshold, nroots_max=nroots_max,
+        )
+        res = run_nevpt2(mc)
+        res["label"] = label
+        res["root_index"] = mc._cs_meta_root["k_matched"]
+        res["max_overlap"] = float(np.max(mc._cs_meta_root["all_overlaps"]))
+        per_state.append(res)
+
+    e_totals = np.array([r["e_total"] for r in per_state])
+    e_casci = np.array([r["e_casci"] for r in per_state])
+    # Vertical excitation matrices (au)
+    delta_E_total = e_totals[None, :] - e_totals[:, None]
+    delta_E_casci = e_casci[None, :] - e_casci[:, None]
+
+    return dict(
+        per_state=per_state,
+        e_casci=e_casci,
+        e_pt2=np.array([r["e_pt2"] for r in per_state]),
+        e_total=e_totals,
+        delta_E_casci_au=delta_E_casci,
+        delta_E_total_au=delta_E_total,
+        ncore=ncore, ncas=ncas, nelecas=nelecas,
+        state_labels=list(state_labels),
+    )
+
+
 def casscf_nevpt2_reference(
     mol,
     ncas: int,
