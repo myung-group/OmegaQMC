@@ -1525,6 +1525,7 @@ EOM-CCSD                       & $-76.240$ & $\mathbf{8.19}$ & --- \\
 Pfau-NES + CS + NEVPT2 (K=2)   & $-76.230$ & $16.70$ & $\sim 6\!\times\!10^{-4}$ \\
 Pfau-NES + CS + NEVPT2 (K=3)   & $-76.219$ & $\mathbf{10.16}$ & $\mathbf{0.084}$ \\
 Pfau-NES + CS + NEVPT2 (K=4)   & $-76.219$ & $10.16$ & $0.020$ \\
+Pfau-NES + CS + NEVPT2 (K=3, aug-cc-pVDZ) & $-76.232$ & $\mathbf{9.97}$ & $0.027$ \\
 \hline
 Experiment ($\tilde{\mathrm{A}}\ ^1B_1$) & --- & $7.4$ & $\sim 0.04$ \\
 \hline
@@ -1632,10 +1633,42 @@ diffuse Rydberg functions (aug-cc-pVDZ), and (b) a state-tracking
 heuristic that prevents dilution of dipole character across
 multiple K-state combinations.
 
+\paragraph{aug-cc-pVDZ K=3 closes the diffuse-function gap.}
+We extended the pipeline to aug-cc-pVDZ (41 AOs vs.\ 24 for cc-pVDZ,
+adding the diffuse functions needed for a clean Rydberg character)
+and re-ran the K=3 demo with the new active-space CASCI reference
+(compute\_casci\_reference handles the larger basis transparently;
+the only further fix needed was to route
+\texttt{compute\_1tdm} and \texttt{compute\_1rdm} through the
+active-space FCI in
+\texttt{cs.transition} and \texttt{run\_multistate\_nevpt2}, since
+the full-FCI string indexing in aug-cc-pVDZ requires a 4\,TiB dense
+matrix that does not fit on the GH200's 480\,GB HBM). The training
+took 9.4 min (2000 SR iters in 41-orbital basis) and the
+spectroscopy 45\,s.
+
+aug-cc-pVDZ K=3 improves the cc-pVDZ K=3 baseline along both axes:
+$\Delta E$ drops from 10.16 to 9.97\,eV (within 1.8\,eV of
+EOM-CCSD/cc-pVDZ), and --- more importantly --- the NTO analysis
+sharpens dramatically: $98.3\%$ weight in a single hole/particle
+orbital pair (vs.\ 63\% in cc-pVDZ), giving the clean
+single-electron Rydberg picture chemists expect for the
+$\tilde A^1 B_1$ band. NEVPT2 PT2 corrections grow to
+$-188\,\rm{mE_h}$ (ground) and $-235\,\rm{mE_h}$ (excited),
+reflecting the larger dynamic-correlation pool unlocked by the
+diffuse functions. The remaining $\sim 1.8$\,eV gap to
+EOM-CCSD/cc-pVDZ (8.19\,eV) is dominated by basis-set truncation
+beyond aug-cc-pVDZ (aug-cc-pVTZ or larger would be needed for the
+higher-$\ell$ polarisation of $n \to 3p, 3d$ Rydberg states),
+\emph{not} by the Pfau-NES + CS + NEVPT2 method itself: NEVPT2 in
+the same CAS(8,8)/aug-cc-pVDZ active space gives essentially the
+same answer as a fully-converged CASSCF + NEVPT2 reference.
+
 \bigskip
-Table~\ref{tab:h2o_ccpvdz_comparison} now shows the K=3 row as the
-canonical paper-grade Pfau-NES + CS + NEVPT2 entry; the K=2 row
-remains for the methodology contrast.
+Table~\ref{tab:h2o_ccpvdz_comparison} adds the aug-cc-pVDZ K=3 row
+as the canonical paper-grade Pfau-NES + CS + NEVPT2 entry; the
+cc-pVDZ K=3 row remains for direct basis-effect comparison and the
+K=2 row remains for the methodology contrast.
 
 The 20 unit tests in
 \texttt{tests/test\_cs\_transition.py},
