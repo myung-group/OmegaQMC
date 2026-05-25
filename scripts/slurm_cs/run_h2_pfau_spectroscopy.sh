@@ -24,25 +24,29 @@
 #          --error=runs/h2_pfau_spec.slurm.err \
 #          scripts/slurm_cs/run_h2_pfau_spectroscopy.sh
 
-set -eo pipefail
-
 # kisti-grace SLURM has a broken default MPI plugin ("mpi/mpi/pmix")
 # that causes any implicit srun to fail before user code runs. Skip
 # the plugin entirely; we don't use MPI for the single-GPU NN-VMC code.
 export SLURM_MPI_TYPE=none
 
 # Under SLURM, $0 is /var/spool/slurm/slurmd/jobNNNNN/slurm_script
-# (a copy of the script), so dirname $0/../.. would land in
-# /var/spool/slurm rather than the project root. Use SLURM_SUBMIT_DIR
-# (the directory sbatch was invoked from) instead, falling back to
-# dirname $0/../.. for direct bash invocations outside SLURM.
+# (a copy of the script). Use SLURM_SUBMIT_DIR (the directory sbatch
+# was invoked from) instead, falling back to dirname $0/../.. for
+# direct bash invocations outside SLURM.
 if [[ -n "$SLURM_SUBMIT_DIR" ]]; then
     cd "$SLURM_SUBMIT_DIR"
 else
     cd "$(dirname "$0")/../.."
 fi
-source ~/.bashrc
+
+# Source bashrc and activate conda *before* enabling pipefail/errexit:
+# on kisti-grace mango the .bashrc / conda init returns a nonzero
+# status in non-interactive shells (harmless), which would otherwise
+# kill the job silently under set -e.
+source ~/.bashrc || true
 conda activate omegaqmc
+
+set -eo pipefail
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
