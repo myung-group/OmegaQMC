@@ -41,7 +41,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
+from jax.flatten_util import ravel_pytree
 
 from .vmcopt_nn_iradam import _VMCOptDriverNN_IRAdam
 from .psi.nn.checkpoint import save_nn_checkpoint, load_nn_checkpoint
@@ -276,110 +276,207 @@ class _VMCOptDriverNN_Pfau_K2:
         num_walkers: int = 256,
         num_steps_per_block: int = 100,
         num_blocks_equil: int = 5,
-        num_sample_blocks: int = 2,
+        num_steps_decorr: int = 10,
         mc_timestep: float = 0.1,
-        lr: float = 1e-3,
-        train_split: float = 0.8,
-        batch_size: int = 256,
-        num_epochs: int = 1,
+        lr: float = 1e-2,
+        damping: float = 1e-3,
+        cg_maxiter: int = 100,
+        max_param_change: float = 0.2,
+        jac_batch_size: int = 32,
         verbose: int = 1,
         prefix: str = "pfau_nes_k2",
+        # Adam-era kwargs retained for backward compatibility (ignored):
+        num_sample_blocks: int = None,
+        num_epochs: int = None,
+        batch_size: int = None,
+        train_split: float = None,
     ):
-        """Joint Adam loop on (params_1, params_2)."""
-        p1, p2 = self.params_1, self.params_2
+        """Joint stochastic-reconfiguration loop on (params_1, params_2).
 
-        optimizer = optax.adam(learning_rate=lr)
-        opt_state = optimizer.init((p1, p2))
+        This matches the natural-gradient training used in Pfau et al.
+        (Science 2024). Adam is the wrong optimiser for the K-state
+        determinantal loss: it has no notion of the curved Riemannian
+        geometry of the variational manifold and gets trapped in the
+        gerade subspace local minimum. SR uses the wavefunction-overlap
+        matrix S_ij = E[O_i O_j] - E[O_i]E[O_j] (with
+        O_i = d log|Psi|/d theta_i evaluated at the JOINT
+        wavefunction Psi(x_a, x_b) = det[psi_i(x_j)]) to precondition
+        the gradient.
+
+        Walkers (x_a, x_b) are sampled jointly from |Psi(x_a, x_b)|^2
+        via the existing self.joint_sweep MCMC. The per-walker
+        ``local loss'' is the trace ``trace_loss_one_walker``; the
+        per-walker derivative is the gradient of log|Psi| with respect
+        to a CONCATENATED flat parameter vector (p1_flat, p2_flat).
+        The SR force f = mean(dL * dO) is solved against
+        (dO^T dO / N + damping * I) by conjugate gradient (identical
+        machinery to vmcopt_nn_sr).
+
+        Kwargs ``num_sample_blocks``, ``num_epochs``, ``batch_size``,
+        ``train_split`` from the previous Adam call signature are kept
+        for backward compatibility but ignored: SR does one walker
+        decorrelation + one preconditioned update per outer iter.
+        """
+        p1, p2 = self.params_1, self.params_2
+        p1_flat, unravel_1 = ravel_pytree(p1)
+        p2_flat, unravel_2 = ravel_pytree(p2)
+        n_p1 = p1_flat.shape[0]
+        n_p2 = p2_flat.shape[0]
+        n_total = n_p1 + n_p2
+
         mc_stepsize = (3 * mc_timestep) ** 0.5
 
+        signed_psi_1 = self._signed_psi_1
+        signed_psi_2 = self._signed_psi_2
+        local_E_1 = self._local_E_1
+        local_E_2 = self._local_E_2
+
+        # log|Psi(x_a, x_b)| as a function of CONCATENATED flat params
+        def log_abs_joint_psi_of_concat(p_concat, x_a, x_b):
+            p1_now = unravel_1(p_concat[:n_p1])
+            p2_now = unravel_2(p_concat[n_p1:])
+            a = signed_psi_1(x_a, p1_now)
+            b = signed_psi_2(x_a, p2_now)
+            c = signed_psi_1(x_b, p1_now)
+            d = signed_psi_2(x_b, p2_now)
+            val = a * d - b * c
+            return jnp.log(jnp.abs(val) + 1e-300)
+
+        # Per-walker local loss (trace) on concatenated flat params
+        def local_loss_concat(p_concat, x_a, x_b):
+            p1_now = unravel_1(p_concat[:n_p1])
+            p2_now = unravel_2(p_concat[n_p1:])
+            a = signed_psi_1(x_a, p1_now)
+            b = signed_psi_2(x_a, p2_now)
+            c = signed_psi_1(x_b, p1_now)
+            d = signed_psi_2(x_b, p2_now)
+            ad = a * d
+            bc = b * c
+            det = ad - bc
+            e_11 = local_E_1(x_a, p1_now)
+            e_22 = local_E_2(x_b, p2_now)
+            e_12 = local_E_2(x_a, p2_now)
+            e_21 = local_E_1(x_b, p1_now)
+            return (ad * (e_11 + e_22) - bc * (e_12 + e_21)) / det
+
+        # Fused per-walker (local loss, log|psi| gradient) for SR
+        @jax.jit
+        def jac_and_loss_batch_fn(batch_xa, batch_xb, p_concat):
+            def per_walker(xa, xb):
+                L = local_loss_concat(p_concat, xa, xb)
+                O = jax.grad(log_abs_joint_psi_of_concat)(p_concat, xa, xb)
+                return L, O.astype(jnp.float32)
+            return jax.vmap(per_walker)(batch_xa, batch_xb)
+
+        # CG solve for natural gradient
+        @jax.jit
+        def sr_solve(dO, f, x0, dmp, maxiter):
+            nw = dO.shape[0]
+            dmp_f = jnp.float32(dmp)
+            def s_matvec(v):
+                t = dO @ v
+                return (dO.T @ t) / nw + dmp_f * v
+            delta_p, _ = jax.scipy.sparse.linalg.cg(
+                s_matvec, f, x0=x0, maxiter=maxiter,
+            )
+            return delta_p
+
+        # Walker init + equilibration
         rng_key, init_walker_key = jax.random.split(rng_key)
         walkers = self.initialize_joint_walkers(init_walker_key, num_walkers)
 
         if verbose >= 1:
-            print(f"Pfau-NES K=2: 2 x PsiFormer, joint walkers="
-                  f"{num_walkers}, equilibrating {num_blocks_equil} blocks")
-
-        # Equilibrate
+            print(f"Pfau-NES K=2 (SR): 2 x PsiFormer, joint walkers="
+                  f"{num_walkers}, n_params = {n_p1} + {n_p2} = {n_total}")
+            print(f"  lr = {lr}, damping = {damping}, "
+                  f"cg_maxiter = {cg_maxiter}, jac_batch = {jac_batch_size}")
+            print(f"  equilibrating {num_blocks_equil} blocks of "
+                  f"{num_steps_per_block} steps...")
         for _ in range(num_blocks_equil):
             rng_key, sub = jax.random.split(rng_key)
             carry = self.joint_sweep(
-                sub, walkers, mc_stepsize, (p1, p2),
-                num_steps_per_block,
+                sub, walkers, mc_stepsize, (p1, p2), num_steps_per_block,
             )
             _, walkers, mc_stepsize = carry
 
-        chkpt_path = f"{prefix}.chk.h5"
+        prev_delta = jnp.zeros(n_total, dtype=jnp.float32)
+        from datetime import datetime
+        t_prev = datetime.now()
+
         for iteration in range(num_iters):
-            # Sample
-            all_samples = []
-            for _ in range(num_sample_blocks):
-                rng_key, sub = jax.random.split(rng_key)
-                carry = self.joint_sweep(
-                    sub, walkers, mc_stepsize, (p1, p2),
-                    num_steps_per_block,
-                )
-                _, walkers, mc_stepsize = carry
-                all_samples.append(walkers)
-            sampled = jnp.concatenate(all_samples, axis=0)
-            n_samples = sampled.shape[0]
+            # (a) Decorrelate walkers
+            rng_key, sub = jax.random.split(rng_key)
+            carry = self.joint_sweep(
+                sub, walkers, mc_stepsize, (p1, p2), num_steps_decorr,
+            )
+            _, walkers, mc_stepsize = carry
+            xa = walkers[:, 0]
+            xb = walkers[:, 1]
 
-            # Permute + split
-            rng_key, perm_key = jax.random.split(rng_key)
-            idx = jax.random.permutation(perm_key, jnp.arange(n_samples))
-            n_train = int(train_split * n_samples)
-            train_w = sampled[idx[:n_train]]
-            valid_w = sampled[idx[n_train:]]
+            # (b) Per-walker (L, O) in batches
+            p_concat = jnp.concatenate([p1_flat, p2_flat])
+            L_parts = []
+            O_parts = []
+            for i in range(0, num_walkers, jac_batch_size):
+                end = min(i + jac_batch_size, num_walkers)
+                L_b, O_b = jac_and_loss_batch_fn(xa[i:end], xb[i:end],
+                                                  p_concat)
+                L_parts.append(L_b)
+                O_parts.append(O_b)
+            L = jnp.concatenate(L_parts, axis=0)
+            O = jnp.concatenate(O_parts, axis=0)
+            L_mean = float(jnp.mean(L))
+            L_err = float(jnp.std(L)) / max(1, L.size) ** 0.5
 
-            # Adam epochs
-            epoch_losses = []
-            for _ in range(num_epochs):
-                for si in range(0, n_train, batch_size):
-                    ei = min(si + batch_size, n_train)
-                    loss, grads = jax.value_and_grad(
-                        self.loss_fn, argnums=(0, 1),
-                    )(p1, p2, train_w[si:ei])
-                    updates, opt_state = optimizer.update(
-                        grads, opt_state, (p1, p2),
-                    )
-                    (p1, p2) = optax.apply_updates((p1, p2), updates)
-                    epoch_losses.append(loss)
+            # (c) Centered force f = mean((L - <L>)(O - <O>))
+            O_mean = jnp.mean(O, axis=0)
+            dO = O - O_mean[None, :]
+            dL = (L - jnp.mean(L)).astype(jnp.float32)
+            f = (dL @ dO) / dO.shape[0]
 
-            # Diagnostics: compute single-state energies from joint walkers
-            # (these are biased because walkers come from |det M|^2, not
-            # |psi_i|^2, but the trend is informative; we'll do clean
-            # single-state sampling at the end)
-            xa_v = valid_w[:, 0]
-            xb_v = valid_w[:, 1]
-            traces_v = jax.vmap(
-                self.trace_loss_one_walker,
-                in_axes=(0, 0, None, None),
-            )(xa_v, xb_v, p1, p2)
-            tr_mean = float(jnp.mean(traces_v))
-            tr_err = float(jnp.std(traces_v)) / max(1, traces_v.size) ** 0.5
+            # (d) CG solve
+            delta_p = sr_solve(dO, f, prev_delta, damping, cg_maxiter)
+            prev_delta = delta_p
 
+            # (e) Clip + apply
+            max_dp = float(jnp.max(jnp.abs(delta_p)))
+            scale = min(1.0, max_param_change / max(max_dp, 1e-30))
+            p_concat = p_concat - lr * scale * delta_p
+            p1_flat = p_concat[:n_p1]
+            p2_flat = p_concat[n_p1:]
+            p1 = unravel_1(p1_flat)
+            p2 = unravel_2(p2_flat)
+
+            # (f) Logging
             if verbose >= 1:
-                iter_loss = float(jnp.array(epoch_losses).mean())
+                now = datetime.now()
+                dt = (now - t_prev).total_seconds()
+                t_prev = now
                 print(f"Iter {iteration:5d} | "
-                      f"Tr(E) = {tr_mean:.6f} +/- {tr_err:.5f} | "
-                      f"Loss: {iter_loss:.6f}")
+                      f"Tr(E) = {L_mean:.6f} +/- {L_err:.5f} | "
+                      f"max_dp = {max_dp:.4e} | scale = {scale:.3f} | "
+                      f"dt = {dt:.1f}s")
 
-            # Save both checkpoints
-            if os.path.exists(f"{prefix}_1.chk.h5"):
-                os.rename(f"{prefix}_1.chk.h5", f"{prefix}_1.{iteration}.h5")
-            if os.path.exists(f"{prefix}_2.chk.h5"):
-                os.rename(f"{prefix}_2.chk.h5", f"{prefix}_2.{iteration}.h5")
-            save_nn_checkpoint(
-                f"{prefix}_1.chk.h5", p1, iteration,
-                self.config_name, self.mol_info, energy=tr_mean / 2,
-            )
-            save_nn_checkpoint(
-                f"{prefix}_2.chk.h5", p2, iteration,
-                self.config_name, self.mol_info, energy=tr_mean / 2,
-            )
+            # (g) Save checkpoints periodically
+            if (iteration + 1) % 50 == 0 or iteration == num_iters - 1:
+                if os.path.exists(f"{prefix}_1.chk.h5"):
+                    os.rename(f"{prefix}_1.chk.h5",
+                              f"{prefix}_1.{iteration}.h5")
+                if os.path.exists(f"{prefix}_2.chk.h5"):
+                    os.rename(f"{prefix}_2.chk.h5",
+                              f"{prefix}_2.{iteration}.h5")
+                save_nn_checkpoint(
+                    f"{prefix}_1.chk.h5", p1, iteration,
+                    self.config_name, self.mol_info, energy=L_mean / 2,
+                )
+                save_nn_checkpoint(
+                    f"{prefix}_2.chk.h5", p2, iteration,
+                    self.config_name, self.mol_info, energy=L_mean / 2,
+                )
 
         self.params_1 = p1
         self.params_2 = p2
-        return (p1, p2), {"trace_E": {"mean": tr_mean, "stderr": tr_err}}
+        return (p1, p2), {"trace_E": {"mean": L_mean, "stderr": L_err}}
 
 
 def get_vmcopt_nn_pfau_k2_func(

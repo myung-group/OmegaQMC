@@ -67,11 +67,12 @@ R=${R:-2.5}
 BASIS=${BASIS:-cc-pvdz}
 ANSATZ=${ANSATZ:-examples/inputs/psiformer_small.yaml}
 GS_ITERS=${GS_ITERS:-600}
-PFAU_ITERS=${PFAU_ITERS:-800}
+PFAU_ITERS=${PFAU_ITERS:-500}
 PFAU_WALKERS=${PFAU_WALKERS:-256}
-PFAU_SAMPLE_BLOCKS=${PFAU_SAMPLE_BLOCKS:-2}
-PFAU_BATCH=${PFAU_BATCH:-256}
-PFAU_EPOCHS=${PFAU_EPOCHS:-3}
+PFAU_LR=${PFAU_LR:-0.01}
+PFAU_DAMPING=${PFAU_DAMPING:-1e-3}
+PFAU_CG=${PFAU_CG:-100}
+PFAU_DECORR=${PFAU_DECORR:-10}
 SEED=${SEED:-77}
 # INIT_FROM_GROUND=1 (default) seeds both states from the trained
 # ground checkpoint with a small perturbation on state 2. Setting to 0
@@ -108,9 +109,10 @@ python examples/run_h2_pfau_nes_spectroscopy.py \
     --out-dir "$OUT_DIR" \
     --pfau-iters "$PFAU_ITERS" \
     --num-walkers "$PFAU_WALKERS" \
-    --num-sample-blocks "$PFAU_SAMPLE_BLOCKS" \
-    --batch-size "$PFAU_BATCH" \
-    --num-epochs "$PFAU_EPOCHS" \
+    --lr "$PFAU_LR" \
+    --damping "$PFAU_DAMPING" \
+    --cg-maxiter "$PFAU_CG" \
+    --num-steps-decorr "$PFAU_DECORR" \
     $INIT_ARG \
     --gs-source-dir cs_h2_nesvmc_results \
     --seed "$SEED"

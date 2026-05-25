@@ -125,7 +125,16 @@ def main():
     p.add_argument("--num-sample-blocks", type=int, default=2)
     p.add_argument("--num-epochs", type=int, default=1)
     p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=1e-2,
+                   help="SR step size (Adam-tuned default was 1e-3; "
+                        "SR's natural-gradient direction supports ~10x "
+                        "larger steps)")
+    p.add_argument("--damping", type=float, default=1e-3,
+                   help="Tikhonov damping on the SR overlap matrix")
+    p.add_argument("--cg-maxiter", type=int, default=100,
+                   help="Max CG iterations per SR solve")
+    p.add_argument("--num-steps-decorr", type=int, default=10,
+                   help="MCMC decorrelation steps per SR iter")
     p.add_argument("--mc-timestep", type=float, default=0.1)
     p.add_argument("--sample-blocks", type=int, default=50)
     p.add_argument("--sample-walkers", type=int, default=256)
@@ -183,11 +192,11 @@ def main():
             rng_opt,
             num_iters=args.pfau_iters,
             num_walkers=args.num_walkers,
-            num_sample_blocks=args.num_sample_blocks,
-            num_epochs=args.num_epochs,
-            batch_size=args.batch_size,
+            num_steps_decorr=args.num_steps_decorr,
             mc_timestep=args.mc_timestep,
             lr=args.lr,
+            damping=args.damping,
+            cg_maxiter=args.cg_maxiter,
             prefix=str(prefix),
             verbose=1,
         )

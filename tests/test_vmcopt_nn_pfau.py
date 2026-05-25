@@ -94,3 +94,36 @@ def test_initialize_joint_walkers_shape(h2_pfau_setup):
     walkers = driver.initialize_joint_walkers(jax.random.key(7), 32)
     assert walkers.shape == (32, 2, driver.nelec, 3)
     assert np.all(np.isfinite(np.asarray(walkers)))
+
+
+@pytest.mark.slow
+def test_sr_loop_runs_one_iter(h2_pfau_setup):
+    """The SR-based __call__ completes one iteration on tiny H2 STO-3G
+    without raising and produces a valid parameter pytree of the same
+    structure as the initial params."""
+    driver = get_vmcopt_nn_pfau_k2_func(
+        h2_pfau_setup["mol"], "psiformer", h2_pfau_setup["key"],
+    )
+    init_p1_leaves = jax.tree.leaves(driver.params_1)
+    init_p2_leaves = jax.tree.leaves(driver.params_2)
+    rng = jax.random.key(42)
+    (p1_out, p2_out), info = driver(
+        rng,
+        num_iters=1,
+        num_walkers=8,
+        num_steps_per_block=4,
+        num_blocks_equil=1,
+        num_steps_decorr=1,
+        cg_maxiter=4,
+        jac_batch_size=4,
+        prefix="/tmp/pfau_sr_smoke",
+        verbose=0,
+    )
+    out_p1_leaves = jax.tree.leaves(p1_out)
+    out_p2_leaves = jax.tree.leaves(p2_out)
+    assert len(out_p1_leaves) == len(init_p1_leaves)
+    assert len(out_p2_leaves) == len(init_p2_leaves)
+    for a, b in zip(out_p1_leaves, init_p1_leaves):
+        assert np.asarray(a).shape == np.asarray(b).shape
+    assert "trace_E" in info
+    assert np.isfinite(info["trace_E"]["mean"])
