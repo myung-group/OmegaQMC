@@ -1526,6 +1526,8 @@ Pfau-NES + CS + NEVPT2 (K=2)   & $-76.230$ & $16.70$ & $\sim 6\!\times\!10^{-4}$
 Pfau-NES + CS + NEVPT2 (K=3)   & $-76.219$ & $\mathbf{10.16}$ & $\mathbf{0.084}$ \\
 Pfau-NES + CS + NEVPT2 (K=4)   & $-76.219$ & $10.16$ & $0.020$ \\
 Pfau-NES + CS + NEVPT2 (K=3, aug-cc-pVDZ) & $-76.232$ & $\mathbf{9.97}$ & $0.027$ \\
+Pfau-NES + CS + NEVPT2 (K=3, aug-cc-pVDZ, FermiNet+J)
+                                & $-76.232$ & $\mathbf{9.97}$ & $0.035$ \\
 \hline
 Experiment ($\tilde{\mathrm{A}}\ ^1B_1$) & --- & $7.4$ & $\sim 0.04$ \\
 \hline
@@ -1647,6 +1649,50 @@ matrix that does not fit on the GH200's 480\,GB HBM). The training
 took 9.4 min (2000 SR iters in 41-orbital basis) and the
 spectroscopy 45\,s.
 
+\paragraph{Production-grade FermiNet + Jastrow + backflow.}
+We re-ran the aug-cc-pVDZ K=3 demonstration with the production
+FermiNet ansatz (\texttt{ferminet\_jastrow.yaml}): embedding dim
+256, 4 GNN interactions, 16 determinants, native backflow,
+deep-Jastrow head, with $738{,}560$ parameters per state. Trained
+for 3000 SR iters on 256 walkers (vs.\ 2000/64 for PsiFormer-small),
+the GS reached $E = -76.38\,E_{\rm h}$ (vs.\ PsiFormer-small's
+$-76.27$), capturing 110 m$E_{\rm h}$ more correlation. The K=3
+trace converged to $\mathrm{Tr}(E_\Psi) = -226.0\,E_{\rm h}$ vs.\
+PsiFormer's $-218.6\,E_{\rm h}$. The match-overlap of the recovered
+excited state with the CAS(8,8) 1B$_1$ root improved from 0.34
+to 0.48, the NTO weights stayed at $99.4\%$ on eigenstate 2 and
+$97.2\%$ on the selected excited state 3 (vs.\ 98.3\% for
+PsiFormer), and the oscillator strength rose from 0.027 to 0.035
+(closer to the experimental $\sim 0.04$).
+
+The CAS+PT2 vertical excitation, however, remained at 9.97\,eV.
+This is not an artifact of the FermiNet training; it is the
+direct signature of the bottleneck having shifted from NN quality
+to CAS(8,8) truncation of the NEVPT2 reference: the recovered
+c-vectors of both ansatzes project onto the same lowest CAS(8,8)
+eigenvector via the maximum-overlap matching, and NEVPT2's PT2
+correction is computed from that CAS root, not from the NN-recovered
+c-vector directly. With FermiNet+J, the recovered c-vectors live
+$\sim 20$ orders of magnitude further out of the basis
+(${\rm proj\_mass}^{(1)} = 5\times 10^{-20}$ vs.\ $9.7\times 10^{-3}$
+for PsiFormer-small), reflecting the basis-extension correlation
+the larger network captures --- which is precisely the correlation
+that aug-cc-pVDZ + CAS(8,8) cannot represent. The CS pipeline as
+formulated extracts only the basis-resolved component, so the
+NEVPT2 result is unchanged. The methodology improvement
+demonstrated is on the orbital decomposition (NTO purity) and on
+state-quality diagnostics (match-overlap, $f$), not on the absolute
+energy.
+
+To unlock the FermiNet+J correlation through NEVPT2 we would need
+either a larger active space (CAS(8,12) including the 3s$_{a_1}$
+Rydberg orbital explicitly) or a direct $\langle\Psi_{\rm NN}|H|\Psi_{\rm NN}\rangle$
+energy evaluation rather than CS projection followed by basis-CASCI.
+Both are clean follow-ups; the present results document the
+diminishing returns from ansatz quality alone once the active space
+becomes the bottleneck.
+
+\bigskip
 aug-cc-pVDZ K=3 improves the cc-pVDZ K=3 baseline along both axes:
 $\Delta E$ drops from 10.16 to 9.97\,eV (within 1.8\,eV of
 EOM-CCSD/cc-pVDZ), and --- more importantly --- the NTO analysis
