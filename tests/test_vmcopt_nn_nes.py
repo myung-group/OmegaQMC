@@ -18,7 +18,9 @@ import pytest
 from OmegaQMC.utils import Mole_custom
 from OmegaQMC.vmcopt_nn_nes import (
     _VMCOptDriverNN_NES,
+    _VMCOptDriverNN_NES_Basis,
     get_vmcopt_nn_nes_func,
+    get_vmcopt_nn_nes_basis_func,
 )
 from OmegaQMC.vmcopt_nn_iradam import _VMCOptDriverNN_IRAdam
 from OmegaQMC.psi.nn.checkpoint import save_nn_checkpoint
@@ -129,3 +131,66 @@ def test_loss_fn_gradient_exists(h2_setup):
     assert all(np.all(np.isfinite(np.asarray(g))) for g in leaves), (
         "gradient contains non-finite values"
     )
+
+
+# ---------- basis-resolved NES tests ----------------------------------------
+
+
+@pytest.fixture(scope="module")
+def h2_fci_ref(h2_setup):
+    """Build the FCI reference dict for the synthetic-Psi_0 evaluator."""
+    from OmegaQMC.cs.reference import compute_fci_reference
+    return compute_fci_reference(
+        h2_setup["mol"], n_alpha=1, n_beta=1, candidate_tol=1e-8,
+    )
+
+
+@pytest.mark.slow
+def test_nes_basis_driver_instantiates(h2_setup, h2_fci_ref):
+    """get_vmcopt_nn_nes_basis_func runs and exposes the right hooks."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_b = get_vmcopt_nn_nes_basis_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=1.0,
+    )
+    assert hasattr(nes_b, "loss_fn_basis")
+    assert hasattr(nes_b, "evaluate_psi_synth")
+    assert hasattr(nes_b, "c_hat_ground")
+    assert nes_b.lambda_penalty == 1.0
+
+
+@pytest.mark.slow
+def test_evaluate_psi_synth_shape_and_finite(h2_setup, h2_fci_ref):
+    """Psi_synth evaluation returns a finite array of the right shape."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_b = get_vmcopt_nn_nes_basis_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=1.0,
+    )
+    rng = np.random.default_rng(0)
+    walkers = rng.normal(size=(20, 2, 3))
+    psi_synth = nes_b.evaluate_psi_synth(walkers)
+    assert psi_synth.shape == (20,)
+    assert np.all(np.isfinite(psi_synth))
+
+
+@pytest.mark.slow
+def test_loss_fn_basis_is_finite_and_differentiable(h2_setup, h2_fci_ref):
+    """The basis-resolved loss returns a finite scalar with finite grads."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_b = get_vmcopt_nn_nes_basis_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=1.0,
+    )
+    rng = np.random.default_rng(4)
+    walkers = rng.normal(size=(8, 2, 3))
+    psi_synth = jnp.asarray(nes_b.evaluate_psi_synth(walkers))
+    walkers_jx = jnp.asarray(walkers)
+    loss = float(nes_b.loss_fn_basis(nes_b.init_params, walkers_jx, psi_synth))
+    assert np.isfinite(loss)
+    grads = jax.grad(nes_b.loss_fn_basis)(nes_b.init_params, walkers_jx, psi_synth)
+    leaves = jax.tree.leaves(grads)
+    assert all(np.all(np.isfinite(np.asarray(g))) for g in leaves)

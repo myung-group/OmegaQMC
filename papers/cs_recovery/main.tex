@@ -926,15 +926,56 @@ real-space NN: $\Psi_{\rm NN}^{(k)}$ extends beyond any chosen
 Gaussian basis (as documented in
 \S\ref{sec:h4_linear},\S\ref{sec:h2}), and the penalty-method
 orthogonalisation can be satisfied by changes in those
-basis-incomplete components alone. To obtain CI-resolved excited
-states, either (i) the NN must be constrained or biased toward the
-chosen Gaussian basis, or (ii) the penalty must specifically
-target basis-resolved orthogonality, e.g. via
-$|\mathbb{E}[c_{I}^{(1)\star} c_{I}^{(0)}]|^{2}$ summed over the
-candidate set rather than a real-space ratio. Both are interesting
-directions for follow-up; the
-\texttt{OmegaQMC.vmcopt\_nn\_nes} infrastructure provides the
-foundation in either case.
+basis-incomplete components alone.
+
+To address this we implemented a \emph{basis-resolved} penalty
+variant in which the orthogonalisation target is the synthetic
+ground state
+$\Psi_{\rm synth}^{(0)}(R) = \sum_I \widehat{c}^{(0)}_I D_I(R)$
+constructed from the recovered ground-state CI vector, rather
+than the raw $\Psi_{\rm NN}^{(0)}$. Because
+$\Psi_{\rm synth}^{(0)}$ lies entirely in
+$\mathrm{span}\{D_I\}$, the resulting penalty
+\begin{equation}
+F_{\rm CI}(\theta_1) \;=\;
+\frac{\bigl(\mathbb{E}[\Psi_{\rm synth}^{(0)} / \Psi_1]\bigr)^{2}}
+{\mathbb{E}[(\Psi_{\rm synth}^{(0)} / \Psi_1)^{2}]}
+\end{equation}
+is the basis-projected cosine-squared between $\Psi_{\rm NN}^{(1)}$
+and the FCI-basis projection of $\Psi_{\rm NN}^{(0)}$, by the
+sampling identity
+$\mathbb{E}_{|\Psi_1|^{2}/Z_1}[(\Psi_{\rm synth}/\Psi_1)^{2}] =
+\langle \Psi_{\rm synth} | \Psi_{\rm synth} \rangle / Z_1$ which
+cancels the $Z_1$ factor in the squared-mean numerator. Initialising
+$\Psi_1$ from the ground-state checkpoint (so the initial overlap is
+large enough that the penalty has appreciable gradient against the
+energy term) and training with $\lambda = 10$ for 500 Adam iterations
+on H$_2$/cc-pVDZ pushed the excited-state energy from
+$-1.087$ to $-0.59\,E_{\rm h}$ ($\sim 500\,{\rm m}E_{\rm h}$ above
+the ground state, consistent with the H$_2$ singlet excitation
+energy in this basis), with the in-batch cos$^{2}$ estimator
+driven below 0.05.
+
+However, post-training CS recovery on a fresh 12{,}800-walker bank
+gave $\langle \widehat{c}^{(0)} | \widehat{c}^{(1)} \rangle = 0.978$
+--- still high. The two estimators (in-batch during training vs.\
+full-bank post-hoc) disagree because the cos$^{2}$ ratio of squared
+means is high-variance on the small training batches: the optimiser
+finds parameter regions where the per-batch cos$^{2}$ is small by
+accidental sign cancellation of the per-walker ratio, while the
+underlying CI overlap remains large. This is a structural limitation
+of in-batch ratio-of-means estimators, not of the basis-resolved
+formulation itself. Resolution requires either (i) larger per-step
+batches (10$^{3}$--10$^{4}$ walkers) so the cos$^{2}$ estimator
+matches its post-hoc value, (ii) a bi-batch estimator that uses
+independent samples for numerator and denominator, or (iii)
+direct penalisation of
+$|\sum_I \widehat{c}^{(0)}_I \mathbb{E}[f_I^{(1)}]|^{2}$ with the
+$\widehat{c}^{(1)}_I$ computed across the full bank each iteration.
+The third route is the most direct extension of the
+\texttt{OmegaQMC.cs.scaling} streaming-mean infrastructure
+and is the most promising direction for a future paper-grade NES
+demonstration.
 
 The downstream applications this unlocks are: transition density
 matrices
