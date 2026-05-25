@@ -1268,8 +1268,31 @@ fragility of SA-CASSCF currently forces unsatisfactory choices ---
 either tightly constrained active spaces that miss important physics,
 or expensive multi-state DMRG references. NES-VMC + CS replaces both.
 
-\paragraph{Excited-state spectroscopy from CS + Pfau-NES: three
-concrete novelty pillars.}
+\paragraph{Goal of this section: NN-VMC $\to$ chemist's language bridge.}
+Before laying out the pipeline it is worth stating clearly what
+this section is and is not trying to do. Pfau-NES + neural-network
+ansatze (FermiNet, PauliNet, PsiFormer) already produce excited-
+state energies to chemical accuracy with sufficient compute, as
+Pfau et al.\ have demonstrated. We are \emph{not} attempting to
+re-derive their absolute-energy benchmarks. Instead we treat the
+trained $\psi_k^{\rm NN}$ as a given black-box object and build the
+machinery that translates it into the standard language of
+quantum chemistry --- CI vectors, transition density matrices,
+natural transition orbitals, NEVPT2 corrections --- so that the
+chemical content of each NN excited state can be inspected,
+classified, and compared to traditional electronic-structure
+benchmarks. The CAS active space is, in this view, the
+\emph{vocabulary} of the chemist's language: a small CAS gives a
+compact HOMO$\to$LUMO-style picture, a larger CAS captures more
+of the NN's correlation and yields a richer multi-orbital
+decomposition. The match-overlap diagnostic between recovered
+$\widehat c^{(k)}$ and the closest CAS eigenvector quantifies when
+the chosen vocabulary is rich enough to represent the NN
+excited state faithfully. The convergence of this match-overlap
+with CAS size, rather than the absolute excitation energy, is
+the primary observable of the methodology.
+
+\paragraph{Three concrete novelty pillars.}
 Pfau et al.\ alone gives $K$ orthogonal real-space wavefunctions
 $\psi_k(R)$ as black-box neural networks. Beyond the per-state
 energies $E_k$, the trained $\psi_k$ carry no human-readable
