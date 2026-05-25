@@ -1530,6 +1530,8 @@ Pfau-NES + CS + NEVPT2 (K=3, aug-cc-pVDZ, FermiNet+J)
                                 & $-76.232$ & $\mathbf{9.97}$ & $0.035$ \\
 Pfau-NES + CS + NEVPT2 (K=3, aug-cc-pVDZ, FermiNet+J, CAS(12,(4,4)))
                                 & $-76.237$ & $\mathbf{9.63}$ & $0.102$ \\
+Pfau-NES + CS + NEVPT2 (K=3, aug-cc-pVTZ, FermiNet+J, CAS(12,(4,4)), 3k iters)
+                                & $-76.311$ & $9.94$ & $0.127$ \\
 \hline
 Experiment ($\tilde{\mathrm{A}}\ ^1B_1$) & --- & $7.4$ & $\sim 0.04$ \\
 \hline
@@ -1732,6 +1734,36 @@ dominated by the basis-set incompleteness of aug-cc-pVDZ ($\sim
 ref.~\cite{schreiber2008benchmarks}) and the residual K=3 span
 imperfection ($\sim 0.5$\,eV); the active-space contribution has
 been substantially reduced.
+
+\paragraph{Counter-intuitive aug-cc-pVTZ result reveals a training
+budget bottleneck.}
+Extending to aug-cc-pVTZ (92 AOs) with the same K=3 training
+budget (3000 SR iters, 256 walkers) on FermiNet+Jastrow gave
+$\Delta E = 9.94\,{\rm eV}$, \emph{worse} than the aug-cc-pVDZ
+result by $0.31$\,eV --- contrary to the basis-extension
+expectation. The diagnostic explains why: pre-rotation CI
+overlaps between the three Pfau-NES states are
+$0.94, 0.96, 0.99$ (vs.\ $0.31, 0.68, 0.40$ in
+aug-cc-pVDZ), meaning the K=3 manifold has effectively collapsed
+to a $\sim 1$-dimensional subspace at the larger basis. The
+3000-iter / 256-walker training budget that converged the K=3
+subspace adequately in 41-AO aug-cc-pVDZ is undersized for the
+92-AO TZ basis: per-walker MCMC step covers proportionally less of
+the (now larger) configuration space, walker decorrelation lags,
+and the SR Jacobian sampling becomes too noisy to drive the K-state
+span to the lowest-3 eigenstates of the determinantal loss. The
+per-state ground-state energies do continue to improve ($E_g$ drops
+from $-76.237$ to $-76.311\,E_{\rm h}$) but the K-state span does
+not, so the rotation extracts a less-orthogonal set of approximate
+eigenstates and the post-rotation excited eigenvalue is higher.
+
+This is a real-world bottleneck for paper-grade applications:
+basis-set extension alone does not improve the result without
+proportional Pfau-NES training-budget extension. We submitted a
+followup at 8000 iters / 512 walkers; if this recovers the basis
+benefit then the limiting factor in our pipeline is genuinely
+``Pfau-NES sampling vs.\ basis size'', a quantifiable observation
+the paper documents but does not exhaustively solve.
 
 \bigskip
 aug-cc-pVDZ K=3 improves the cc-pVDZ K=3 baseline along both axes:
