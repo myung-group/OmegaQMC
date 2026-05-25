@@ -221,6 +221,7 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
         c_hat_ground,
         fci_ref,
         lambda_penalty: float = 1.0,
+        penalty_mode: str = "cos2",
     ):
         """Construct a basis-resolved NES-VMC driver.
 
@@ -235,13 +236,25 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
                 :func:`OmegaQMC.cs.reference.compute_fci_reference`,
                 supplying the candidate set, natural orbitals, and
                 ``nelec`` for ``Psi_synth^(0)`` evaluation.
-            lambda_penalty: weight on the basis-resolved overlap-squared
-                penalty term.
+            lambda_penalty: weight on the basis-resolved penalty term.
+            penalty_mode: one of ``"cos2"`` (default; scale-invariant
+                cos^2 of the real-space angle, post-hoc CI overlap stalls
+                at ~0.9 due to in-batch estimator cheating) or
+                ``"abs_overlap"`` (route-(a) absolute-overlap-squared
+                penalty with stop-gradient on the scale-normalising
+                denominator; decouples the gradient from the noisy
+                denominator while preserving scale invariance).
         """
         super().__init__(mol_info, config, init_key)
         self.c_hat_ground = np.asarray(c_hat_ground, dtype=np.float64)
         self.fci_ref = fci_ref
         self.lambda_penalty = float(lambda_penalty)
+        if penalty_mode not in ("cos2", "abs_overlap"):
+            raise ValueError(
+                f"penalty_mode must be 'cos2' or 'abs_overlap', "
+                f"got {penalty_mode!r}",
+            )
+        self.penalty_mode = penalty_mode
 
         from .cs.estimators import (
             evaluate_orbitals_on_walkers, evaluate_ci_wavefunction,
@@ -277,7 +290,7 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
             return sign * jnp.exp(log_amp)
 
         @jax.jit
-        def loss_fn_basis(params, batch_walkers, batch_psi_synth):
+        def loss_fn_basis_cos2(params, batch_walkers, batch_psi_synth):
             energies = compute_batch_energy(batch_walkers, params)
             e_loss = 0.2 * energies.mean() + 0.8 * energies.std()
             psi_1 = jax.vmap(signed_psi_one, in_axes=(0, None))(
@@ -293,7 +306,31 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
             # degenerate Psi_NN = 0 case at all sampled walkers.
             cos2 = (ratio.mean()) ** 2 / (jnp.mean(ratio ** 2) + 1e-30)
             return e_loss + lambda_penalty * cos2
-        self.loss_fn_basis = loss_fn_basis
+
+        @jax.jit
+        def loss_fn_basis_abs(params, batch_walkers, batch_psi_synth):
+            # Route-(a) absolute-overlap penalty with stop-gradient on
+            # the scale-normalising denominator. The denominator value
+            # (1/Z_1 estimate) is still used to make the penalty scale-
+            # invariant in Psi_1, but its *gradient* is suppressed so
+            # the optimiser cannot exploit the cos^2 denominator's
+            # flat-manifold pathway. This isolates Adam's update to the
+            # numerator (squared mean overlap), which directly maps to
+            # |<Psi_synth | Psi_1>|^2 / Z_1.
+            energies = compute_batch_energy(batch_walkers, params)
+            e_loss = 0.2 * energies.mean() + 0.8 * energies.std()
+            psi_1 = jax.vmap(signed_psi_one, in_axes=(0, None))(
+                batch_walkers, params,
+            )
+            ratio = batch_psi_synth / psi_1
+            denom = jax.lax.stop_gradient(jnp.mean(ratio ** 2) + 1e-30)
+            penalty = (ratio.mean()) ** 2 / denom
+            return e_loss + lambda_penalty * penalty
+
+        if self.penalty_mode == "cos2":
+            self.loss_fn_basis = loss_fn_basis_cos2
+        else:
+            self.loss_fn_basis = loss_fn_basis_abs
 
     def __call__(
         self,
@@ -427,6 +464,7 @@ def get_vmcopt_nn_nes_basis_func(
     fci_ref,
     lambda_penalty: float = 1.0,
     init_from_ground_checkpoint: str = None,
+    penalty_mode: str = "cos2",
 ):
     """Factory for the basis-resolved NES-VMC driver.
 
@@ -444,12 +482,17 @@ def get_vmcopt_nn_nes_basis_func(
     recommended for the basis-resolved variant, where a random
     initialisation has accidentally small basis-projected overlap and
     Adam will not feel any pressure to orthogonalise.
+
+    ``penalty_mode``: ``"cos2"`` (scale-invariant cos^2 of real-space
+    angle) or ``"abs_overlap"`` (route-(a) absolute-overlap-squared with
+    stop-gradient on the scale-normalising denominator).
     """
     driver = _VMCOptDriverNN_NES_Basis(
         mol_info, config, init_key,
         c_hat_ground=c_hat_ground,
         fci_ref=fci_ref,
         lambda_penalty=lambda_penalty,
+        penalty_mode=penalty_mode,
     )
     if init_from_ground_checkpoint is not None:
         ground_params, _meta = load_nn_checkpoint(

@@ -102,6 +102,11 @@ def main():
     p.add_argument("--init-from-ground", action="store_true",
                    help="initialise Psi_1 from the trained ground-state "
                         "params so the penalty has appreciable gradient")
+    p.add_argument("--penalty-mode", default="cos2",
+                   choices=["cos2", "abs_overlap"],
+                   help="cos2: scale-invariant real-space cosine "
+                        "(default); abs_overlap: route-(a) absolute-"
+                        "overlap with stop-gradient denominator")
     args = p.parse_args()
 
     R_str = f"R{args.R:.3f}".replace(".", "p")
@@ -151,6 +156,7 @@ def main():
             init_from_ground_checkpoint=(str(chk_gs)
                                           if args.init_from_ground
                                           else None),
+            penalty_mode=args.penalty_mode,
         )
         nes_b(
             opt_key, num_iters=args.es_iters,
