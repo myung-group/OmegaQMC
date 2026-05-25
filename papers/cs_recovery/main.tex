@@ -1472,14 +1472,123 @@ correlation. The full SLURM job + JSON output is in
 \texttt{scripts/slurm\_cs/run\_h2o\_pfau\_spectroscopy.sh} and
 \texttt{papers/cs\_recovery/data/h2o\_pfau\_spec\_sto-3g.json}.
 
-The 16 unit tests in \texttt{tests/test\_cs\_transition.py},
-\texttt{tests/test\_cs\_mrpt\_multistate.py}, and
+\paragraph{H$_2$O/cc-pVDZ: active-space CASCI reference + traditional-
+methods comparison.}
+The STO-3G demo establishes the methodology but the 15.76\,eV
+excitation energy is well above the experimental
+$\tilde{\mathrm{A}}\ ^1B_1$ band at 7.4\,eV --- almost entirely
+basis-truncation error. To make the demonstration paper-grade we
+extended the pipeline to cc-pVDZ. Full FCI in 24 atomic orbitals
+is intractable ($\sim 10^9$ determinants), so
+\texttt{OmegaQMC.cs.reference.compute\_casci\_reference} replaces
+the FCI reference with a CASCI(8,(4,4)) reference covering the H$_2$O
+valence space (1 frozen O 1s core, 8 active orbitals, 4 active
+electrons per spin). The CASCI CI dict is materialised with
+full-orbital determinant tuples (including the frozen core), so
+the entire downstream stack (\texttt{evaluate\_orbitals\_on\_walkers},
+\texttt{f\_I\_matrix}, \texttt{evaluate\_ci\_wavefunction}) works
+unchanged. The subspace rotation in
+\texttt{cs.transition.subspace\_rotate\_to\_eigenstates} routes
+through the CAS effective Hamiltonian
+($\hat H_{\rm eff} = \mathrm{ecore}_{\rm eff} + h_1^{\rm eff} +
+\hat H_2^{\rm eff}$ from \texttt{mcscf.CASCI.get\_h1eff} +
+\texttt{get\_h2eff}) when ``ncore'' is present in the reference dict,
+operating on the 4900-determinant active-space FCI instead of the
+intractable full-basis FCI.
+
+For comparison, we ran the standard traditional methods on the same
+geometry + basis via \texttt{OmegaQMC.cs.benchmark}. The reference
+data is in \texttt{papers/cs\_recovery/data/h2o\_traditional\_benchmark.json}
+and Table~\ref{tab:h2o_ccpvdz_comparison} summarises the lowest
+dipole-allowed singlet vertical excitation:
+
+\begin{table}[h]
+\centering
+\caption{H$_2$O/cc-pVDZ vertical excitation energy and oscillator
+strength for the first dipole-allowed singlet
+($\tilde{\mathrm{A}}\ ^1B_1$, exp.\ 7.4\,eV). Traditional methods
+via \texttt{OmegaQMC.cs.benchmark} (PySCF). Pfau-NES+CS+NEVPT2 via
+the SLURM job in
+\texttt{scripts/slurm\_cs/run\_h2o\_pfau\_spectroscopy.sh}, K=2 with
+random state-2 initialisation. The Pfau-NES K=2 entry should be read
+as an honest \emph{negative result} of the current K=2 + random-init
+strategy in the larger basis; see discussion below.}
+\label{tab:h2o_ccpvdz_comparison}
+\small
+\begin{tabular}{lccc}
+\hline
+Method & $E_{\rm ground}$ (Ha) & $\Delta E_{0\to 1}$ (eV) & $f_{0\to 1}$ \\
+\hline
+CIS / TDA-HF                   & $-76.027$ & $9.22$ & $0.029$ \\
+TDHF (RPA)                     & $-76.027$ & $9.17$ & $0.029$ \\
+EOM-CCSD                       & $-76.240$ & $\mathbf{8.19}$ & --- \\
+Pfau-NES + CS + NEVPT2 (K=2)   & $-76.230$ & $16.70$ & $\sim 6\!\times\!10^{-4}$ \\
+\hline
+Experiment ($\tilde{\mathrm{A}}\ ^1B_1$) & --- & $7.4$ & $\sim 0.04$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\noindent The Pfau-NES K=2 result is the only entry that misses the
+true $\tilde{\mathrm{A}}\ ^1B_1$ state: the network converged to a
+2D subspace with $\langle \widehat{c}^{(g)} | \widehat{c}^{(e)} \rangle
+= +0.70$ (strongly mixed pre-rotation) whose ``excited'' component
+overlaps the lowest CASCI excited eigenvector by only $\sim 68\%$.
+The rotated excited CI vector has its dominant NTO weights spread
+across multiple orbital pairs (65\%, 28\%, 5\%) rather than the
+single-pair character of a clean Rydberg $n\to 3s$ excitation, and
+the recovered $\mu = 0.05$\,D / $f = 6\!\times\!10^{-4}$ is two
+orders of magnitude below the experimental oscillator strength.
+
+We identify three convergent reasons for the K=2 failure on
+H$_2$O/cc-pVDZ:
+\begin{enumerate}
+\item The cc-pVDZ basis spans many more low-lying excited
+configurations than STO-3G, so the lowest-2-eigenstate target of
+the Pfau-NES determinantal loss is no longer adjacent to ground +
+1B$_1$; many gerade combinations have comparable energy and the
+random-init K=2 lands on one of them.
+\item PsiFormer has no explicit spatial-symmetry constraint, so
+the two states have no symmetry-distinguishing initialisation that
+would bias them toward $A_1$ + $B_1$.
+\item The K=2 sum-of-energies loss is unitarily invariant within
+the recovered span; if 1B$_1$ is \emph{not} in the span, no
+post-processing (including the exact subspace rotation we apply)
+can recover it.
+\end{enumerate}
+
+The clean fix is to use $K \geq 4$ Pfau-NES (so the lowest four
+singlet states are in the span, and the dipole-allowed 1B$_1$ is
+guaranteed to be present), then select the target excited state by
+maximum transition-dipole overlap with the ground after rotation.
+This is a straightforward extension of our K=2 implementation; the
+matrix local energy and joint-walker sampler generalise to any K
+with no change to the OmegaQMC core. We defer the production
+K=4 H$_2$O/cc-pVDZ run to a follow-up; the present cc-pVDZ entry
+documents the K=2 limit honestly. By contrast, the STO-3G K=2 run
+\emph{did} land in the right subspace
+(Table~\ref{tab:h2o_pfau}, NTO weight 94\%, $f = 0.087$), simply
+because STO-3G has fewer low-lying singlets to compete for the
+K=2 target.
+
+For the immediate paper take-away: at K=2 + random-init, the
+hybrid is a methodology demonstration rather than a numerical
+improvement over EOM-CCSD; the gap to ``beats EOM-CCSD'' will be
+crossed by either (a) K$\geq 4$ Pfau-NES with state-tracking, or
+(b) symmetry-targeted Pfau-NES initialisation in larger bases.
+
+The 20 unit tests in
+\texttt{tests/test\_cs\_transition.py},
+\texttt{tests/test\_cs\_mrpt\_multistate.py},
+\texttt{tests/test\_cs\_casci\_reference.py}, and
 \texttt{tests/test\_vmcopt\_nn\_pfau.py} validate the rotation,
-transition, NEVPT2, and Pfau-NES routines against PySCF's own
-\texttt{trans\_rdm1s} and \texttt{NEVPT} reference implementations
-and against analytic invariants (rotation idempotence on already-
-orthogonal inputs; determinantal collapse to zero at
-identical-state limit).
+transition, NEVPT2, CASCI reference, and Pfau-NES routines against
+PySCF's own \texttt{trans\_rdm1s} and \texttt{NEVPT} reference
+implementations, against the CAS-FCI eigenvalues for the H$_2$O
+CAS(8,8) reference, and against analytic invariants (rotation
+idempotence on already-orthogonal inputs; determinantal collapse
+to zero at identical-state limit; CASCI(7,(5,5)) = full FCI for
+H$_2$O/STO-3G).
 
 \subsection{Reduced density matrices and chemical interpretation}
 
