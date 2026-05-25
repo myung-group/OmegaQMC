@@ -14,7 +14,12 @@ estimators : f_I(R_k) computation and Lasso/soft-threshold recovery (JAX).
 scaling    : Sweep orchestrator emitting cells/aux for one (R, basis).
 walkers    : Streaming HDF5 dumper/loader for the VMC walker bank.
 properties : 1-RDM, dipole, quadrupole, MR diagnostics from a recovered c_hat.
-mrpt       : c_hat → CASCI → NEVPT2 (post-HF multireference PT bridge).
+mrpt       : c_hat → CASCI → NEVPT2 (post-HF multireference PT bridge);
+             includes build_casci_root_matched + run_multistate_nevpt2 for
+             state-specific NEVPT2 on top of Pfau-NES excited references.
+transition : 1-TDM γ^(0k), length-gauge transition dipoles, oscillator
+             strengths, and Natural Transition Orbitals from two c_hat
+             vectors (the spectroscopy bridge for Pfau-NES excited states).
 plots      : Headline scaling plots (matplotlib, imported lazily).
 """
 
@@ -82,4 +87,15 @@ from OmegaQMC.cs.mrpt import (
     run_nevpt2,
     casscf_nevpt2_reference,
     compare_nevpt2,
+    build_casci_root_matched,
+    run_multistate_nevpt2,
+)
+
+from OmegaQMC.cs.transition import (
+    compute_1tdm,
+    transition_dipole,
+    oscillator_strength,
+    natural_transition_orbitals,
+    report_transition_properties,
+    print_transition_summary,
 )
