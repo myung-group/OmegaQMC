@@ -62,10 +62,11 @@ R=${R:-2.5}
 BASIS=${BASIS:-cc-pvdz}
 ANSATZ=${ANSATZ:-examples/inputs/psiformer_small.yaml}
 GS_ITERS=${GS_ITERS:-600}
-PFAU_ITERS=${PFAU_ITERS:-1000}
-PFAU_WALKERS=${PFAU_WALKERS:-512}
-PFAU_SAMPLE_BLOCKS=${PFAU_SAMPLE_BLOCKS:-4}
-PFAU_BATCH=${PFAU_BATCH:-512}
+PFAU_ITERS=${PFAU_ITERS:-800}
+PFAU_WALKERS=${PFAU_WALKERS:-256}
+PFAU_SAMPLE_BLOCKS=${PFAU_SAMPLE_BLOCKS:-2}
+PFAU_BATCH=${PFAU_BATCH:-256}
+PFAU_EPOCHS=${PFAU_EPOCHS:-3}
 SEED=${SEED:-77}
 
 echo "=== H2 Pfau-NES + CS spectroscopy on $(hostname) — $(date) ==="
@@ -92,6 +93,7 @@ python examples/run_h2_pfau_nes_spectroscopy.py \
     --num-walkers "$PFAU_WALKERS" \
     --num-sample-blocks "$PFAU_SAMPLE_BLOCKS" \
     --batch-size "$PFAU_BATCH" \
+    --num-epochs "$PFAU_EPOCHS" \
     --init-from-ground \
     --gs-source-dir cs_h2_nesvmc_results \
     --seed "$SEED"
