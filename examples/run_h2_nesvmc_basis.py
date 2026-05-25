@@ -103,10 +103,16 @@ def main():
                    help="initialise Psi_1 from the trained ground-state "
                         "params so the penalty has appreciable gradient")
     p.add_argument("--penalty-mode", default="cos2",
-                   choices=["cos2", "abs_overlap"],
+                   choices=["cos2", "abs_overlap", "lagrangian"],
                    help="cos2: scale-invariant real-space cosine "
                         "(default); abs_overlap: route-(a) absolute-"
-                        "overlap with stop-gradient denominator")
+                        "overlap with stop-gradient denominator; "
+                        "lagrangian: route-(b) adaptive lambda via "
+                        "dual ascent on the cos^2 constraint")
+    p.add_argument("--lambda-lr", type=float, default=1.0,
+                   help="dual-ascent step size for lambda (lagrangian)")
+    p.add_argument("--lambda-max", type=float, default=1e4,
+                   help="upper bound on lambda (lagrangian)")
     args = p.parse_args()
 
     R_str = f"R{args.R:.3f}".replace(".", "p")
@@ -166,6 +172,7 @@ def main():
             batch_size=args.batch_size,
             mc_timestep=args.mc_timestep, lr=args.lr,
             prefix=str(prefix_es), verbose=1,
+            lambda_lr=args.lambda_lr, lambda_max=args.lambda_max,
         )
     else:
         print(f"\n[2/4] Reusing excited-state checkpoint {chk_es.name}")

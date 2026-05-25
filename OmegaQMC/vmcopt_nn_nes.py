@@ -249,12 +249,16 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
         self.c_hat_ground = np.asarray(c_hat_ground, dtype=np.float64)
         self.fci_ref = fci_ref
         self.lambda_penalty = float(lambda_penalty)
-        if penalty_mode not in ("cos2", "abs_overlap"):
+        if penalty_mode not in ("cos2", "abs_overlap", "lagrangian"):
             raise ValueError(
-                f"penalty_mode must be 'cos2' or 'abs_overlap', "
-                f"got {penalty_mode!r}",
+                f"penalty_mode must be 'cos2', 'abs_overlap', or "
+                f"'lagrangian'; got {penalty_mode!r}",
             )
         self.penalty_mode = penalty_mode
+        # Adaptive Lagrangian state (route (b)). Only used when
+        # penalty_mode == "lagrangian". Mutated each outer iter by
+        # __call__ via dual ascent on the overlap-squared constraint.
+        self._lambda_state = float(lambda_penalty)
 
         from .cs.estimators import (
             evaluate_orbitals_on_walkers, evaluate_ci_wavefunction,
@@ -327,10 +331,36 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
             penalty = (ratio.mean()) ** 2 / denom
             return e_loss + lambda_penalty * penalty
 
+        @jax.jit
+        def loss_fn_basis_lagrangian(
+            params, batch_walkers, batch_psi_synth, lambda_now,
+        ):
+            # Route-(b) adaptive Lagrangian: identical penalty shape to
+            # abs_overlap, but lambda is a runtime argument set by the
+            # outer __call__ via dual ascent on the overlap constraint.
+            # The Lagrangian update is
+            #   lambda_{n+1} = max(lambda_n + lr_lambda * overlap^2, 0)
+            # so when the constraint is violated (overlap large) lambda
+            # grows and pushes the penalty harder; when the constraint
+            # is satisfied lambda stays flat. This is the dual-ascent
+            # method of Arrow-Hurwicz applied to the orthogonality
+            # constraint cos^2 = 0.
+            energies = compute_batch_energy(batch_walkers, params)
+            e_loss = 0.2 * energies.mean() + 0.8 * energies.std()
+            psi_1 = jax.vmap(signed_psi_one, in_axes=(0, None))(
+                batch_walkers, params,
+            )
+            ratio = batch_psi_synth / psi_1
+            denom = jax.lax.stop_gradient(jnp.mean(ratio ** 2) + 1e-30)
+            penalty = (ratio.mean()) ** 2 / denom
+            return e_loss + lambda_now * penalty
+
         if self.penalty_mode == "cos2":
             self.loss_fn_basis = loss_fn_basis_cos2
-        else:
+        elif self.penalty_mode == "abs_overlap":
             self.loss_fn_basis = loss_fn_basis_abs
+        else:
+            self.loss_fn_basis = loss_fn_basis_lagrangian
 
     def __call__(
         self,
@@ -348,12 +378,22 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
         batch_size: int = 128,
         verbose: int = 1,
         prefix: str = "nesopt",
+        lambda_lr: float = 1.0,
+        lambda_max: float = 1e4,
+        constraint_target: float = 0.0,
     ):
         """Adam loop with the basis-resolved penalty.
 
         The synthetic Psi_synth^(0) values are pre-computed at every
         sampled walker each outer iteration (numpy/PySCF, outside JIT)
         and passed into the JIT'd loss function.
+
+        For ``penalty_mode == "lagrangian"`` (route (b)):
+        ``lambda_lr`` is the step size for dual ascent on lambda;
+        ``lambda_max`` caps lambda to prevent runaway; and
+        ``constraint_target`` is the desired cos^2 (default 0). After
+        each outer iter, lambda is updated as
+        ``lambda += lambda_lr * max(cos^2 - constraint_target^2, 0)``.
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
@@ -398,14 +438,20 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
 
             # (d) Adam epochs
             epoch_losses = []
+            use_lagrangian = (self.penalty_mode == "lagrangian")
             for _ in range(num_epochs):
                 for si in range(0, n_train, batch_size):
                     ei = min(si + batch_size, n_train)
                     batch = train_w[si:ei]
                     batch_synth = train_psi_synth[si:ei]
-                    loss, grads = jax.value_and_grad(
-                        self.loss_fn_basis,
-                    )(params, batch, batch_synth)
+                    if use_lagrangian:
+                        loss, grads = jax.value_and_grad(
+                            self.loss_fn_basis,
+                        )(params, batch, batch_synth, self._lambda_state)
+                    else:
+                        loss, grads = jax.value_and_grad(
+                            self.loss_fn_basis,
+                        )(params, batch, batch_synth)
                     updates, opt_state = optimizer.update(
                         grads, opt_state, params,
                     )
@@ -438,14 +484,25 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
             mean_r2 = float(jnp.mean(r ** 2))
             cos2_est = mean_r ** 2 / max(mean_r2, 1e-30)
 
+            # (f) Lagrangian dual ascent on lambda (route (b))
+            if use_lagrangian:
+                violation = max(cos2_est - constraint_target ** 2, 0.0)
+                new_lambda = min(
+                    self._lambda_state + lambda_lr * violation,
+                    lambda_max,
+                )
+                self._lambda_state = new_lambda
+
             if verbose >= 1:
                 iter_loss = float(jnp.array(epoch_losses).mean())
+                lam_tag = (f" | lambda = {self._lambda_state:7.2f}"
+                           if use_lagrangian else "")
                 print(f"Iter {iteration:5d} | "
                       f"E = {iter_e:.6f} +/- {iter_err:.5f} | "
                       f"cos^2 = {cos2_est:.5f} | "
-                      f"Loss: {iter_loss:.6f}")
+                      f"Loss: {iter_loss:.6f}{lam_tag}")
 
-            # (f) Save checkpoint
+            # (g) Save checkpoint
             if os.path.exists(chkpt_path):
                 os.rename(chkpt_path, f"{prefix}.{iteration}.h5")
             save_nn_checkpoint(

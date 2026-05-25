@@ -1068,17 +1068,91 @@ configurations that dominate $\widehat{c}^{(0)}$.
 This is decisive: no scalar penalty hyperparameter $\lambda$ on
 any of the three penalty designs can produce a state that is
 \emph{both} physical and CI-orthogonal when the NN ansatz extends
-substantially beyond the chosen Gaussian basis. The remaining
-clean routes are therefore (b) a constrained-optimisation
-approach that projects the gradient onto the orthogonality
-manifold rather than minimising a soft penalty (sidesteps the
-hyperparameter altogether), and (c) an architectural change so
-that $\Psi_{\rm NN}$ lies in (or is biased toward) the chosen
-Gaussian basis (e.g.\ by a Gaussian-product backbone, or by
-training the NN against a basis-restricted reference). The
-\texttt{OmegaQMC.vmcopt\_nn\_nes} module exposes four skeleton
-implementations across the three penalty axes; the four
-trajectories together delineate the design space's boundary.
+substantially beyond the chosen Gaussian basis. We probed the two
+remaining clean routes proposed above.
+
+\paragraph{Route (b): adaptive Lagrangian.}
+The adaptive-Lagrangian variant (\texttt{penalty\_mode="lagrangian"})
+replaces the scalar $\lambda$ with a state variable updated by
+dual ascent
+\(
+\lambda_{n+1} = \min\!\big(\lambda_n + \eta_\lambda\,\mathrm{cos}^{2},\;\lambda_{\max}\big)
+\),
+so $\lambda$ grows whenever the orthogonality constraint is
+violated. On H$_2$/cc-pVDZ with $\eta_\lambda = 5$, $\lambda_{\max}
+= 100$, GS init, $\lambda_0 = 0.5$: dual ascent saturated
+$\lambda$ at $100$ by iter $\sim 50$, drove the energy to
+$+0.37\,E_{\rm h}$, and produced
+$\langle \widehat{c}^{(0)} | \widehat{c}^{(1)} \rangle = 0$ exactly
+--- but with ${\rm proj\_mass}^{(1)} = 9.4 \times 10^{-53}$ (in
+floating-point underflow). The recovered ``CI vector'' is
+numerically zero, so the orthogonality is mathematically vacuous.
+The Lagrangian thus \emph{confirms} the trade-off is structural:
+the only way the optimiser can satisfy the constraint exactly is to
+drive the NN entirely outside the basis, where the CI vector
+degenerates to the zero vector (which is orthogonal to anything).
+
+\paragraph{Route (c): basis-restricted ansatz baseline.}
+The cleanest demonstration of route (c) is the FCI second-root
+itself: a pure CI ansatz $\Psi^{(k)} = \sum_I c^{(k)}_I D_I$ with no
+neural component is basis-restricted by construction, and
+orthogonality of the two roots is exact by the spectral theorem.
+For H$_2$/cc-pVDZ at $R = 2.5\,a_{0}$:
+
+\begin{table}[h]
+\centering
+\caption{Route (c) FCI second-root baseline at $R = 2.5\,a_0$ in
+the NO basis.}
+\label{tab:route-c}
+\small
+\begin{tabular}{lcc}
+\hline
+Quantity & Value & Notes \\
+\hline
+$E^{(0)}$ &  $-1.0869\,E_{\rm h}$ & matches single-root FCI \\
+$E^{(1)}$ &  $-0.9423\,E_{\rm h}$ & $\sigma_g^+ \to \sigma_u^+$ at 3.93 eV \\
+$\langle \widehat{c}^{(0)} | \widehat{c}^{(1)} \rangle$
+  & $1.9 \times 10^{-17}$ & machine precision \\
+${\rm proj\_mass}^{(1)}$ & $1.0$ & exact \\
+\hline
+\end{tabular}
+\end{table}
+
+Route (c) achieves \emph{both} physicality and exact orthogonality.
+The price is the absence of out-of-basis correlation: the
+ground-state energy reaches only the cc-pVDZ FCI limit
+($-1.087\,E_{\rm h}$) rather than the NN-improved energy, and the
+excited state is the cc-pVDZ basis-set truncation of the true
+excited state. The CS pipeline is unnecessary in this regime
+since the CI vector is the ansatz itself.
+
+\paragraph{Synthesis: the Slater--Jastrow CI hybrid.}
+The five soft-penalty implementations all fail for the same
+structural reason; route (c) succeeds but discards the very
+out-of-basis correlation that motivated NN-VMC. The natural
+synthesis is the Slater--Jastrow CI ansatz
+\begin{equation}
+\Psi^{(k)}(R) \;=\; J(R;\theta_{\rm NN}^{(k)})\;
+                    \sum_{I \in \mathcal{C}} c^{(k)}_I D_I(R)\,,
+\end{equation}
+where $c^{(k)}$ is an explicit learnable CI vector and the neural
+Jastrow $J(\cdot;\theta_{\rm NN})$ provides a multiplicative
+out-of-basis correction. Orthogonality is enforced \emph{exactly}
+on the $c^{(k)}$ vectors (no MC sampling, no penalty
+hyperparameter), and the Jastrow recovers the dynamic correlation
+that made the NN-VMC ansatz attractive in the first place. CS
+recovery is not needed for the $c$ coefficients (they are explicit
+parameters), but a residual CS estimator on the Jastrow-modulated
+remainder could still be informative.
+
+This is the recommended architecture for any future
+implementation of CI-orthogonal excited states with NN-VMC--like
+correlation accuracy. The \texttt{OmegaQMC.vmcopt\_nn\_nes}
+module exposes five skeleton implementations across the three
+penalty axes plus the FCI baseline (\texttt{run\_h2\_route\_c\_baseline.py});
+the six trajectories together delineate the design space's
+boundary and point to the SJ-CI hybrid as the unique unexplored
+corner.
 
 The downstream applications this unlocks are: transition density
 matrices

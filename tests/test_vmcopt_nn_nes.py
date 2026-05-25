@@ -258,6 +258,34 @@ def test_loss_fn_basis_abs_mode_is_finite(h2_setup, h2_fci_ref):
 
 
 @pytest.mark.slow
+def test_loss_fn_basis_lagrangian_mode_is_finite(h2_setup, h2_fci_ref):
+    """Route-(b) Lagrangian mode loss takes lambda as runtime arg."""
+    ref = h2_fci_ref
+    c_true = np.array([ref["ci_dict"][k] for k in ref["candidate_set"]])
+    nes_b = get_vmcopt_nn_nes_basis_func(
+        h2_setup["mol"], "psiformer", h2_setup["key"],
+        c_hat_ground=c_true, fci_ref=ref, lambda_penalty=2.5,
+        penalty_mode="lagrangian",
+    )
+    assert nes_b.penalty_mode == "lagrangian"
+    assert nes_b._lambda_state == 2.5
+    rng = np.random.default_rng(9)
+    walkers = rng.normal(size=(8, 2, 3))
+    psi_synth = jnp.asarray(nes_b.evaluate_psi_synth(walkers))
+    walkers_jx = jnp.asarray(walkers)
+    # Lagrangian loss takes (params, walkers, psi_synth, lambda)
+    loss = float(nes_b.loss_fn_basis(
+        nes_b.init_params, walkers_jx, psi_synth, 5.0,
+    ))
+    assert np.isfinite(loss)
+    grads = jax.grad(nes_b.loss_fn_basis)(
+        nes_b.init_params, walkers_jx, psi_synth, 5.0,
+    )
+    leaves = jax.tree.leaves(grads)
+    assert all(np.all(np.isfinite(np.asarray(g))) for g in leaves)
+
+
+@pytest.mark.slow
 def test_loss_fn_ci_is_finite_and_differentiable(h2_setup, h2_fci_ref):
     """The CI-overlap loss returns a finite scalar with finite grads."""
     ref = h2_fci_ref
