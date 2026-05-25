@@ -48,6 +48,7 @@ from OmegaQMC.cs.estimators import (
 )
 from OmegaQMC.cs.transition import (
     report_transition_properties, print_transition_summary,
+    subspace_rotate_to_eigenstates,
 )
 from OmegaQMC.cs.mrpt import run_multistate_nevpt2
 from OmegaQMC.psi.nn.adapter import make_nn_log_psi
@@ -135,6 +136,18 @@ def main():
                    help="Max CG iterations per SR solve")
     p.add_argument("--num-steps-decorr", type=int, default=10,
                    help="MCMC decorrelation steps per SR iter")
+    p.add_argument("--nevpt2-ncas", type=int, default=None,
+                   help="Force the NEVPT2 active-space orbital count "
+                        "(default: auto-derive from c_hat 1-RDM "
+                        "occupations). For H2/cc-pVDZ at R=2.5 use 2.")
+    p.add_argument("--nevpt2-nelecas", type=str, default=None,
+                   help="Force NEVPT2 (n_alpha,n_beta) active electrons, "
+                        "e.g. '1,1' for H2.")
+    p.add_argument("--nevpt2-occ-threshold", type=float, default=0.05,
+                   help="Activity threshold for auto active-space "
+                        "selection; lowered to 0.05 (default 0.1) so "
+                        "HF-dominated Pfau-NES c_hats still yield a "
+                        "non-empty active space")
     p.add_argument("--mc-timestep", type=float, default=0.1)
     p.add_argument("--sample-blocks", type=int, default=50)
     p.add_argument("--sample-walkers", type=int, default=256)
@@ -267,9 +280,39 @@ def main():
                 for i in np.argsort(-np.abs(c_e))[:3]]}")
     print(f"  <c_g | c_e> = {float(np.dot(c_g, c_e)):+.5f}")
 
+    # --- 3.5 Subspace rotation: extract eigenstates from the K=2 span ---
+    # Pfau's trace loss is invariant under unitary mixing within the
+    # span of the trial wavefunctions; the network learns the
+    # lowest-K-eigenstate subspace but the individual psi_i can be any
+    # basis of it. Diagonalising the 2x2 H matrix in the recovered-CI
+    # basis returns the actual energy eigenstates.
+    print(f"\n[Step 3.5] Subspace rotation to extract eigenstates")
+    rot = subspace_rotate_to_eigenstates([c_g, c_e], fci_ref, mol)
+    c_g_rot, c_e_rot = rot["c_eig"][0], rot["c_eig"][1]
+    E_g_rot, E_e_rot = float(rot["E_eig"][0]), float(rot["E_eig"][1])
+    delta_E_rot = E_e_rot - E_g_rot
+    print(f"  input CI overlap |<c_g|c_e>|/(||c_g|| ||c_e||) "
+          f"= {rot['input_ci_overlap']:.5f}")
+    print(f"  rotated E_g = {E_g_rot:.6f} Ha  "
+          f"(was {E_g:.6f} from sampling)")
+    print(f"  rotated E_e = {E_e_rot:.6f} Ha  "
+          f"(was {E_e:.6f} from sampling)")
+    print(f"  delta E (rotated) = {delta_E_rot:.6f} Ha "
+          f"({delta_E_rot*27.2114:.4f} eV)")
+    print(f"  c_g_rot (top 3): "
+          f"{[(str(fci_ref['candidate_set'][i]), f'{c_g_rot[i]:+.4f}')
+                for i in np.argsort(-np.abs(c_g_rot))[:3]]}")
+    print(f"  c_e_rot (top 3): "
+          f"{[(str(fci_ref['candidate_set'][i]), f'{c_e_rot[i]:+.4f}')
+                for i in np.argsort(-np.abs(c_e_rot))[:3]]}")
+    print(f"  <c_g_rot | c_e_rot> = "
+          f"{float(np.dot(c_g_rot, c_e_rot)):+.2e}")
+    # Use rotated vectors and energies for transition analysis
+    c_g, c_e = c_g_rot, c_e_rot
+    delta_E = delta_E_rot
+
     # --- 4. Transition properties (Pillar 1 + 2) ---
-    print(f"\n[Step 4] Transition properties + NTO analysis")
-    delta_E = E_e - E_g
+    print(f"\n[Step 4] Transition properties + NTO analysis (rotated)")
     trans = report_transition_properties(
         c_g, c_e, fci_ref, mol, delta_E_au=delta_E,
     )
@@ -285,9 +328,16 @@ def main():
     # --- 5. State-specific NEVPT2 (Pillar 3) ---
     print(f"\n[Step 5] State-specific NEVPT2 on Pfau-NES references")
     try:
+        nelecas_arg = None
+        if args.nevpt2_nelecas is not None:
+            parts = args.nevpt2_nelecas.split(",")
+            nelecas_arg = (int(parts[0]), int(parts[1]))
         nevpt2 = run_multistate_nevpt2(
             mol, c_hats=[c_g, c_e], fci_ref=fci_ref,
             state_labels=["ground", "excited"],
+            ncas=args.nevpt2_ncas,
+            nelecas=nelecas_arg,
+            occ_threshold=args.nevpt2_occ_threshold,
             nroots_max=4,
         )
         print(f"  Active space: CAS({nevpt2['ncas']},{nevpt2['nelecas']}), "

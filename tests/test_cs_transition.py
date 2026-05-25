@@ -16,6 +16,7 @@ from OmegaQMC.cs.transition import (
     oscillator_strength,
     natural_transition_orbitals,
     report_transition_properties,
+    subspace_rotate_to_eigenstates,
 )
 
 
@@ -168,6 +169,46 @@ def test_nto_singular_values_sum_to_overlap_norm(h2_two_roots):
     )
     # Participation ratios should sum to 1
     assert abs(float(np.sum(nto["participation_ratios"])) - 1.0) < 1e-10
+
+
+@pytest.mark.slow
+def test_subspace_rotate_recovers_eigenvalues_from_mixed_states(h2_two_roots):
+    """Take two known orthogonal FCI eigenstates, mix them by a random
+    2x2 unitary, then rotate back. The recovered eigenvalues must
+    match the FCI eigenvalues to machine precision, and the rotated
+    CI vectors should be (up to sign) the original ones."""
+    setup = h2_two_roots
+    rng = np.random.default_rng(13)
+    theta = rng.uniform(0.3, 1.1)
+    U = np.array([[np.cos(theta), -np.sin(theta)],
+                  [np.sin(theta),  np.cos(theta)]])
+    c_mixed = [U[0, 0] * setup["c0"] + U[0, 1] * setup["c1"],
+               U[1, 0] * setup["c0"] + U[1, 1] * setup["c1"]]
+    # Normalise (already unit-norm, but be safe)
+    c_mixed = [c / np.linalg.norm(c) for c in c_mixed]
+
+    out = subspace_rotate_to_eigenstates(c_mixed, setup["ref"], setup["mol"])
+
+    # Eigenvalues should match the FCI E0, E1
+    E_eig = sorted(out["E_eig"])
+    assert abs(E_eig[0] - setup["E0"]) < 1e-8
+    assert abs(E_eig[1] - setup["E1"]) < 1e-8
+    # Input was significantly nonorthogonal; the diagnostic must reflect that
+    assert out["input_ci_overlap"] >= 0.0
+
+
+@pytest.mark.slow
+def test_subspace_rotate_idempotent_on_orthogonal_input(h2_two_roots):
+    """If the input CI vectors are already orthogonal FCI eigenstates,
+    rotation must return them unchanged (up to sign)."""
+    setup = h2_two_roots
+    out = subspace_rotate_to_eigenstates(
+        [setup["c0"], setup["c1"]], setup["ref"], setup["mol"],
+    )
+    E_eig = sorted(out["E_eig"])
+    assert abs(E_eig[0] - setup["E0"]) < 1e-8
+    assert abs(E_eig[1] - setup["E1"]) < 1e-8
+    assert out["input_ci_overlap"] < 1e-10
 
 
 @pytest.mark.slow

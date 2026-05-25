@@ -113,6 +113,7 @@ python examples/run_h2_pfau_nes_spectroscopy.py \
     --damping "$PFAU_DAMPING" \
     --cg-maxiter "$PFAU_CG" \
     --num-steps-decorr "$PFAU_DECORR" \
+    --nevpt2-ncas 2 --nevpt2-nelecas 1,1 \
     $INIT_ARG \
     --gs-source-dir cs_h2_nesvmc_results \
     --seed "$SEED"

@@ -204,6 +204,142 @@ def report_transition_properties(
     )
 
 
+def subspace_rotate_to_eigenstates(
+    c_hats: Sequence[np.ndarray],
+    fci_ref: Mapping,
+    mol,
+) -> dict:
+    """Diagonalise the K-state Hamiltonian within the span of the
+    Pfau-NES-recovered CI vectors to extract energy eigenstates.
+
+    Pfau et al.'s determinantal loss
+    L(theta) = Tr(M^{-1}(M (*) H_loc)) is invariant under unitary
+    mixing within the span of the K trial wavefunctions: the network
+    learns *the lowest-K-eigenstate subspace* but the individual
+    psi_i's can be any basis of that subspace. In practice, when
+    initialised from the ground checkpoint with a small perturbation,
+    both psi_i's converge to nearly-parallel CI vectors (CI overlap
+    ~ 1) even though the trace Tr(E_Psi) reaches the correct sum
+    sum_k E_k of eigenvalues.
+
+    To recover the actual energy eigenstates we solve the
+    generalised K x K eigenproblem
+        H v = E S v,    H_ij = <Psi_i | H | Psi_j>,
+                        S_ij = <Psi_i | Psi_j>
+    in the basis of CS-recovered CI vectors. The eigenvectors v give
+    the unitary rotation; the rotated CI vectors
+        c^(k)_eig = sum_i v_ki c_hat^(i)
+    are pure energy eigenstates of H restricted to the K-state span.
+
+    Returns a dict with:
+      ``c_eig``           : list of K rotated CI vectors (each unit-norm,
+                            sign-aligned)
+      ``E_eig``           : numpy array of K eigenvalues (Ha)
+      ``rotation``        : the K x K eigenvector matrix V
+      ``overlap_matrix``  : the K x K input overlap matrix S
+      ``H_matrix``        : the K x K input Hamiltonian matrix H
+      ``input_ci_overlap``: max_{i != j} |S_ij| / sqrt(S_ii S_jj),
+                            the worst nonorthogonality of the input
+                            (1 -> very stuck states; 0 -> already
+                            orthogonal)
+
+    Notes
+    -----
+    * The H matrix is computed via PySCF's
+      ``direct_spin1.contract_2e`` after absorbing h1 into h2, so the
+      cost is one CI-vector contraction per state pair. Negligible
+      compared to the Pfau-NES training step.
+    * Sign alignment: each rotated vector is multiplied by -1 if its
+      leading (reference-determinant) coefficient is negative, matching
+      the CS-pipeline convention.
+    * The K-state span is a SUBSET of the full Hilbert space. The
+      eigenvalues returned are eigenvalues of P_K H P_K, where P_K is
+      the projector onto the span; they may be higher than the true
+      lowest-K eigenvalues of H if the network did not capture the
+      correct subspace (e.g. if both states ended up in a single
+      symmetry sector and the lowest excited state was excluded).
+    """
+    from pyscf import scf, ao2mo
+    from pyscf import fci as pyscf_fci
+
+    candidate = fci_ref["candidate_set"]
+    n_orb = int(fci_ref["n_orb"])
+    nelec = tuple(fci_ref["nelec"])
+    no_coeff = np.asarray(fci_ref["no_coeff_ao"])
+
+    K = len(c_hats)
+    if K < 2:
+        raise ValueError("need at least K=2 CI vectors to rotate")
+
+    # Build CI matrices in PySCF layout
+    ci_matrices = [
+        reshape_chat_to_pyscf_matrix(c, candidate, n_orb, nelec[0], nelec[1])
+        for c in c_hats
+    ]
+
+    # Build h1 + h2 in NO basis (transform from AO)
+    mf = scf.RHF(mol).run(verbose=0)
+    h1_ao = mf.get_hcore()
+    h1 = no_coeff.T @ h1_ao @ no_coeff
+    h2 = ao2mo.restore(1, ao2mo.kernel(mol, no_coeff), n_orb)
+    ecore = float(mol.energy_nuc())
+
+    # Absorbed h: lets a single contract_2e do the full H @ ci
+    h2_eff = pyscf_fci.direct_spin1.absorb_h1e(
+        h1, h2, n_orb, nelec, 0.5,
+    )
+
+    # Compute H |Psi_j> and overlap matrices
+    H_ci = [
+        pyscf_fci.direct_spin1.contract_2e(h2_eff, cj, n_orb, nelec)
+        for cj in ci_matrices
+    ]
+    H_mat = np.zeros((K, K), dtype=np.float64)
+    S_mat = np.zeros((K, K), dtype=np.float64)
+    for i in range(K):
+        for j in range(K):
+            ovl = float(np.sum(ci_matrices[i] * ci_matrices[j]))
+            H_mat[i, j] = float(np.sum(ci_matrices[i] * H_ci[j])) + ecore * ovl
+            S_mat[i, j] = ovl
+    H_mat = 0.5 * (H_mat + H_mat.T)
+    S_mat = 0.5 * (S_mat + S_mat.T)
+
+    # Generalised eigenproblem H V = S V E
+    from scipy.linalg import eigh
+    E_eig, V = eigh(H_mat, S_mat)
+
+    # Form rotated CI vectors and normalise/sign-align in basis
+    c_eig = []
+    for k in range(K):
+        c_k = sum(float(V[i, k]) * np.asarray(c_hats[i])
+                  for i in range(K))
+        nrm = float(np.linalg.norm(c_k))
+        if nrm < 1e-30:
+            c_k_n = c_k
+        else:
+            c_k_n = c_k / nrm
+        if c_k_n[0] < 0:
+            c_k_n = -c_k_n
+        c_eig.append(c_k_n)
+
+    # Diagnostic: worst input nonorthogonality
+    worst = 0.0
+    for i in range(K):
+        for j in range(i + 1, K):
+            denom = (S_mat[i, i] * S_mat[j, j]) ** 0.5
+            if denom > 1e-30:
+                worst = max(worst, abs(S_mat[i, j]) / denom)
+
+    return dict(
+        c_eig=c_eig,
+        E_eig=E_eig,
+        rotation=V,
+        overlap_matrix=S_mat,
+        H_matrix=H_mat,
+        input_ci_overlap=float(worst),
+    )
+
+
 def print_transition_summary(report: dict, label: str = "0->1") -> None:
     """One-paragraph summary for stdout / log files."""
     mu_d = report["transition_dipole"]["mu_debye"]
