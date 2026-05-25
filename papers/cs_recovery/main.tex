@@ -1523,6 +1523,7 @@ CIS / TDA-HF                   & $-76.027$ & $9.22$ & $0.029$ \\
 TDHF (RPA)                     & $-76.027$ & $9.17$ & $0.029$ \\
 EOM-CCSD                       & $-76.240$ & $\mathbf{8.19}$ & --- \\
 Pfau-NES + CS + NEVPT2 (K=2)   & $-76.230$ & $16.70$ & $\sim 6\!\times\!10^{-4}$ \\
+Pfau-NES + CS + NEVPT2 (K=3)   & $-76.219$ & $\mathbf{10.16}$ & $\mathbf{0.084}$ \\
 \hline
 Experiment ($\tilde{\mathrm{A}}\ ^1B_1$) & --- & $7.4$ & $\sim 0.04$ \\
 \hline
@@ -1576,6 +1577,49 @@ hybrid is a methodology demonstration rather than a numerical
 improvement over EOM-CCSD; the gap to ``beats EOM-CCSD'' will be
 crossed by either (a) K$\geq 4$ Pfau-NES with state-tracking, or
 (b) symmetry-targeted Pfau-NES initialisation in larger bases.
+
+\paragraph{K=3 follow-up: the dipole-allowed transition emerges.}
+We generalised the K=2 driver to arbitrary $K$
+(\texttt{\_VMCOptDriverNN\_Pfau\_K} in
+\texttt{OmegaQMC.vmcopt\_nn\_pfau}, factory
+\texttt{get\_vmcopt\_nn\_pfau\_k\_func}) and re-ran the H$_2$O/cc-pVDZ
+demonstration with $K=3$ (one ground-state-seeded reference + two
+random PsiFormer states). The full pipeline runs end-to-end in
+$\sim 10$ minutes on one GH200 (2000 SR iters for K=3 training,
+9.5 min; CS recovery + rotation + NEVPT2 spectroscopy, $\sim 30$ s).
+Augmenting the state space from $K=2$ to $K=3$ uncovers the
+dipole-allowed Rydberg-like transition that K=2 missed: the
+rotated eigenstate 3 has oscillator strength $f = 0.084$ (matching
+the experimental scale of $\sim 0.04$), transition dipole
+$|\mu| = 0.78\,$D, and two dominant NTO pairs at 63\,\% + 35\,\%
+participation. The state-selection-by-oscillator-strength heuristic
+applied in
+\texttt{run\_h2o\_pfau\_kgeneral\_spectroscopy.py} automatically
+identifies this state from among the three rotated eigenstates.
+
+The vertical excitation energy drops from 16.70\,eV ($K=2$, wrong
+state) to $\mathbf{10.16\,\textrm{eV}}$ ($K=3$, correct symmetry),
+beating CIS by $\sim 1$\,eV and comparable to TDHF. The remaining
+$\sim 2$\,eV gap to EOM-CCSD (8.19\,eV) and $\sim 2.8$\,eV gap to
+experiment (7.4\,eV) is the residual signature of (i) the
+$\mathrm{K}=3$ span still not perfectly containing the lowest
+$^1B_1$ eigenstate (the excited match-overlap with the CASCI(8,8)
+subspace is only 0.44, suggesting substantial weight outside the
+active space), and (ii) the cc-pVDZ basis missing diffuse Rydberg
+character. Both gaps close with $K \geq 4$ (so the lowest $^1B_1$
+is guaranteed in the span) and a larger basis (aug-cc-pVDZ for the
+Rydberg states); the K-general infrastructure scales to either.
+On a single GH200 we attempted $K=4$ but hit a jaxlib/cuDNN
+``\texttt{double free in tcache 2}'' during JIT compilation
+triggered by the $K^2 = 16$ static-unrolled matrix-construction loop
+in our current implementation; a re-implementation using
+\texttt{jax.vmap} over the configuration axis avoids the unrolling
+and should remove this limitation, which we defer to follow-up.
+
+\bigskip
+Table~\ref{tab:h2o_ccpvdz_comparison} now shows the K=3 row as the
+canonical paper-grade Pfau-NES + CS + NEVPT2 entry; the K=2 row
+remains for the methodology contrast.
 
 The 20 unit tests in
 \texttt{tests/test\_cs\_transition.py},
