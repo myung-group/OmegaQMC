@@ -297,7 +297,9 @@ def main():
               f"{dE_total_eV:.4f} eV ({nevpt2['delta_E_total_au'][0,1]*1000:.2f} mE_h)")
     except Exception as exc:
         nevpt2 = None
-        print(f"  NEVPT2 step failed: {exc}")
+        import traceback
+        print(f"  NEVPT2 step failed: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
 
     # --- 6. Save numerical results ---
     summary = dict(

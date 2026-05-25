@@ -62,7 +62,10 @@ R=${R:-2.5}
 BASIS=${BASIS:-cc-pvdz}
 ANSATZ=${ANSATZ:-examples/inputs/psiformer_small.yaml}
 GS_ITERS=${GS_ITERS:-600}
-PFAU_ITERS=${PFAU_ITERS:-500}
+PFAU_ITERS=${PFAU_ITERS:-1000}
+PFAU_WALKERS=${PFAU_WALKERS:-512}
+PFAU_SAMPLE_BLOCKS=${PFAU_SAMPLE_BLOCKS:-4}
+PFAU_BATCH=${PFAU_BATCH:-512}
 SEED=${SEED:-77}
 
 echo "=== H2 Pfau-NES + CS spectroscopy on $(hostname) — $(date) ==="
@@ -86,6 +89,9 @@ echo ">>> Step 2: Pfau-NES K=2 training + CS spectroscopy ($PFAU_ITERS iters)"
 python examples/run_h2_pfau_nes_spectroscopy.py \
     --R "$R" --basis "$BASIS" --ansatz "$ANSATZ" \
     --pfau-iters "$PFAU_ITERS" \
+    --num-walkers "$PFAU_WALKERS" \
+    --num-sample-blocks "$PFAU_SAMPLE_BLOCKS" \
+    --batch-size "$PFAU_BATCH" \
     --init-from-ground \
     --gs-source-dir cs_h2_nesvmc_results \
     --seed "$SEED"
