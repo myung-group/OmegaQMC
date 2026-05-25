@@ -35,19 +35,32 @@ SEED=${SEED:-77}
 INIT_PERT=${INIT_PERT:-0.5}
 INIT_RANDOM_STATES=${INIT_RANDOM_STATES:-2}
 
-echo "=== H2O Pfau-NES K=$K, $BASIS — $(date) ==="
+ANSATZ=${ANSATZ:-examples/inputs/psiformer_small.yaml}
+# ANSATZ can be a YAML path OR a built-in config name (paulinet,
+# ferminet, ferminet_jastrow, ferminet_jastrow_complex, deeperwin,
+# psiformer). Production-grade FermiNet + Jastrow + backflow:
+# ANSATZ=ferminet_jastrow.
+
+# Suffix for output directories so different ansatz runs don't collide
+ANSATZ_TAG=$(basename "$ANSATZ" .yaml | sed 's|/|_|g')
+OUT_TAG=${OUT_TAG:-${ANSATZ_TAG}}
+
+echo "=== H2O Pfau-NES K=$K, $BASIS, ANSATZ=$ANSATZ — $(date) ==="
 echo "  ITERS=$ITERS WALKERS=$WALKERS LR=$LR SEED=$SEED"
 echo "  INIT_PERT=$INIT_PERT INIT_RANDOM_STATES=$INIT_RANDOM_STATES"
+echo "  OUT_TAG=$OUT_TAG"
 
-# Pre-flight: ensure H2O ground state checkpoint exists
-GS_CKPT="cs_h2o_pfau_gs/h2o_gs_${BASIS}.chk.h5"
+# Pre-flight: ensure H2O ground state checkpoint for this ansatz exists
+GS_DIR="cs_h2o_pfau_gs_${OUT_TAG}"
+GS_CKPT="${GS_DIR}/h2o_gs_${BASIS}.chk.h5"
+GS_ITERS=${GS_ITERS:-1500}
 if [[ ! -f "$GS_CKPT" ]]; then
-    echo ">>> GS checkpoint missing, training first"
+    echo ">>> GS checkpoint missing, training first ($GS_ITERS iters)"
     python examples/run_h2o_groundstate_only.py \
         --basis "$BASIS" \
-        --ansatz examples/inputs/psiformer_small.yaml \
-        --out-dir cs_h2o_pfau_gs \
-        --gs-iters 1500 \
+        --ansatz "$ANSATZ" \
+        --out-dir "$GS_DIR" \
+        --gs-iters "$GS_ITERS" \
         --seed 11
 fi
 
@@ -55,6 +68,7 @@ echo ""
 echo ">>> Step 1: K=$K training"
 python examples/run_h2o_pfau_kgeneral_train.py \
     --basis "$BASIS" \
+    --ansatz "$ANSATZ" \
     --K "$K" \
     --iters "$ITERS" \
     --walkers "$WALKERS" \
@@ -62,7 +76,7 @@ python examples/run_h2o_pfau_kgeneral_train.py \
     --seed "$SEED" \
     --init-perturbation "$INIT_PERT" \
     --init-random-states "$INIT_RANDOM_STATES" \
-    --gs-source-dir cs_h2o_pfau_gs \
-    --out-dir cs_h2o_pfau_k${K}_results
+    --gs-source-dir "$GS_DIR" \
+    --out-dir cs_h2o_pfau_k${K}_${OUT_TAG}_results
 
 echo "=== done — $(date) ==="
