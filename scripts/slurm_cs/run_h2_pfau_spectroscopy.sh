@@ -48,6 +48,13 @@ conda activate omegaqmc
 
 set -eo pipefail
 
+# The omegaqmc conda env has OmegaQMC pip-installed (editable) from
+# the main worktree at ~/Workspace/OmegaQMC, which does NOT contain
+# our compressed-sensing branch's new modules. Prepend our worktree
+# to PYTHONPATH so Python picks up vmcopt_nn_pfau, cs.transition,
+# cs.mrpt updates, etc., before falling back to the editable install.
+export PYTHONPATH="$PWD:$PYTHONPATH"
+
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 
