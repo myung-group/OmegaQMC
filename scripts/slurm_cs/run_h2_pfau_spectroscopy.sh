@@ -73,6 +73,13 @@ PFAU_SAMPLE_BLOCKS=${PFAU_SAMPLE_BLOCKS:-2}
 PFAU_BATCH=${PFAU_BATCH:-256}
 PFAU_EPOCHS=${PFAU_EPOCHS:-3}
 SEED=${SEED:-77}
+# INIT_FROM_GROUND=1 (default) seeds both states from the trained
+# ground checkpoint with a small perturbation on state 2. Setting to 0
+# uses two independently-random parameter inits, avoiding the gerade-
+# subspace local minimum that trapped both states near the ground when
+# init-from-ground was used with PsiFormer + 1% noise.
+INIT_FROM_GROUND=${INIT_FROM_GROUND:-1}
+OUT_DIR=${OUT_DIR:-cs_h2_pfau_spec_results}
 
 echo "=== H2 Pfau-NES + CS spectroscopy on $(hostname) — $(date) ==="
 echo "  R=$R  BASIS=$BASIS  ansatz=$ANSATZ"
@@ -92,14 +99,19 @@ python examples/run_h2_groundstate_only.py \
 # Step 2: Pfau-NES K=2 + spectroscopy
 echo ""
 echo ">>> Step 2: Pfau-NES K=2 training + CS spectroscopy ($PFAU_ITERS iters)"
+INIT_ARG=""
+if [[ "$INIT_FROM_GROUND" == "1" ]]; then
+    INIT_ARG="--init-from-ground"
+fi
 python examples/run_h2_pfau_nes_spectroscopy.py \
     --R "$R" --basis "$BASIS" --ansatz "$ANSATZ" \
+    --out-dir "$OUT_DIR" \
     --pfau-iters "$PFAU_ITERS" \
     --num-walkers "$PFAU_WALKERS" \
     --num-sample-blocks "$PFAU_SAMPLE_BLOCKS" \
     --batch-size "$PFAU_BATCH" \
     --num-epochs "$PFAU_EPOCHS" \
-    --init-from-ground \
+    $INIT_ARG \
     --gs-source-dir cs_h2_nesvmc_results \
     --seed "$SEED"
 
