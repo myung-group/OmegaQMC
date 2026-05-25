@@ -484,17 +484,29 @@ def get_vmcopt_nn_pfau_k2_func(
     config,
     init_key,
     init_from_ground_checkpoint: str = None,
+    init_perturbation: float = 0.5,
+    init_state2_random: bool = False,
 ):
     """Factory for the Pfau-NES K=2 driver.
 
     ``init_key`` is split into two sub-keys for the two state
     parameter inits.
 
-    ``init_from_ground_checkpoint`` (optional): if supplied, both
-    state 1 and state 2 NN parameters are initialised from the
-    ground-state checkpoint. The determinantal training will then
-    break the degeneracy via the matrix-energy gradient. Recommended
-    for well-conditioned starting points.
+    ``init_from_ground_checkpoint`` (optional): if supplied, state 1
+    is initialised from the ground-state checkpoint. State 2 is then
+    either (a) a random PsiFormer init if ``init_state2_random=True``
+    (independent draw from the PsiFormer prior, completely different
+    parameters from the ground state, and the strongest available
+    symmetry-breaker), or (b) the same ground-state checkpoint with
+    Gaussian noise of std ``init_perturbation`` added per parameter.
+
+    The perturbation default was 0.01 in earlier versions, which left
+    the K=2 manifold essentially one-dimensional ({GS + tiny noise})
+    and made the orthogonal direction within the recovered span
+    unphysical. Increased to 0.5 (50% per-parameter relative noise)
+    to give state 2 a meaningful initial distance from the ground.
+    For a really clean break of the gerade-trap, set
+    ``init_state2_random=True``.
     """
     k1, k2 = jax.random.split(init_key)
     driver = _VMCOptDriverNN_Pfau_K2(mol_info, config, k1, k2)
@@ -503,16 +515,19 @@ def get_vmcopt_nn_pfau_k2_func(
             init_from_ground_checkpoint, driver.driver_1.init_params,
         )
         driver.params_1 = ground_params
-        # State 2: also init from ground but with slight perturbation
-        # (otherwise det(M) = 0 identically). Add small Gaussian noise.
-        import jax.tree as tree
-        rng = jax.random.split(init_key, 3)[2]
-        keys = jax.random.split(rng, len(jax.tree.leaves(ground_params)))
-        leaves = jax.tree.leaves(ground_params)
-        treedef = jax.tree.structure(ground_params)
-        perturbed = [
-            leaf + 0.01 * jax.random.normal(k, leaf.shape)
-            for leaf, k in zip(leaves, keys)
-        ]
-        driver.params_2 = jax.tree.unflatten(treedef, perturbed)
+        if init_state2_random:
+            # Leave driver.params_2 at its independent random init;
+            # do nothing further.
+            pass
+        else:
+            rng = jax.random.split(init_key, 3)[2]
+            keys = jax.random.split(rng, len(jax.tree.leaves(ground_params)))
+            leaves = jax.tree.leaves(ground_params)
+            treedef = jax.tree.structure(ground_params)
+            perturbed = [
+                leaf + float(init_perturbation)
+                       * jax.random.normal(k, leaf.shape)
+                for leaf, k in zip(leaves, keys)
+            ]
+            driver.params_2 = jax.tree.unflatten(treedef, perturbed)
     return driver

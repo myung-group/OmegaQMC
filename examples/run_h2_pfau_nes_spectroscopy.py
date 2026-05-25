@@ -153,6 +153,14 @@ def main():
     p.add_argument("--sample-walkers", type=int, default=256)
     p.add_argument("--candidate-tol", type=float, default=1e-6)
     p.add_argument("--init-from-ground", action="store_true")
+    p.add_argument("--init-perturbation", type=float, default=0.5,
+                   help="Gaussian noise std on state-2 params when "
+                        "--init-from-ground (default 0.5 to escape the "
+                        "gerade-trap that 1% noise produces)")
+    p.add_argument("--init-state2-random", action="store_true",
+                   help="With --init-from-ground: state 2 is a fully "
+                        "random PsiFormer init instead of GS + noise. "
+                        "The strongest symmetry-breaker available.")
     p.add_argument("--skip-train", action="store_true",
                    help="reuse existing Pfau-NES checkpoints if present")
     args = p.parse_args()
@@ -199,6 +207,8 @@ def main():
             init_from_ground_checkpoint=(
                 str(chk_gs_ref) if chk_gs_ref else None
             ),
+            init_perturbation=args.init_perturbation,
+            init_state2_random=args.init_state2_random,
         )
         rng_opt = jax.random.split(init_key, 4)[3]
         driver(

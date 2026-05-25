@@ -80,6 +80,8 @@ SEED=${SEED:-77}
 # subspace local minimum that trapped both states near the ground when
 # init-from-ground was used with PsiFormer + 1% noise.
 INIT_FROM_GROUND=${INIT_FROM_GROUND:-1}
+INIT_STATE2_RANDOM=${INIT_STATE2_RANDOM:-1}
+INIT_PERTURBATION=${INIT_PERTURBATION:-0.5}
 OUT_DIR=${OUT_DIR:-cs_h2_pfau_spec_results}
 
 echo "=== H2 Pfau-NES + CS spectroscopy on $(hostname) — $(date) ==="
@@ -102,7 +104,10 @@ echo ""
 echo ">>> Step 2: Pfau-NES K=2 training + CS spectroscopy ($PFAU_ITERS iters)"
 INIT_ARG=""
 if [[ "$INIT_FROM_GROUND" == "1" ]]; then
-    INIT_ARG="--init-from-ground"
+    INIT_ARG="--init-from-ground --init-perturbation $INIT_PERTURBATION"
+    if [[ "$INIT_STATE2_RANDOM" == "1" ]]; then
+        INIT_ARG="$INIT_ARG --init-state2-random"
+    fi
 fi
 python examples/run_h2_pfau_nes_spectroscopy.py \
     --R "$R" --basis "$BASIS" --ansatz "$ANSATZ" \
