@@ -39,7 +39,9 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export PYTHONUNBUFFERED=1
 
-BASIS=${BASIS:-sto-3g}
+BASIS=${BASIS:-cc-pvdz}
+CAS_NCAS=${CAS_NCAS:-8}
+CAS_NELECAS=${CAS_NELECAS:-4,4}
 ANSATZ=${ANSATZ:-examples/inputs/psiformer_small.yaml}
 GS_ITERS=${GS_ITERS:-1500}
 PFAU_ITERS=${PFAU_ITERS:-800}
@@ -78,6 +80,10 @@ fi
 
 echo ""
 echo ">>> Step 2: H2O Pfau-NES K=2 + spectroscopy ($PFAU_ITERS iters)"
+CAS_ARG=""
+if [[ -n "$CAS_NCAS" ]]; then
+    CAS_ARG="--cas-ncas $CAS_NCAS --cas-nelecas $CAS_NELECAS"
+fi
 python examples/run_h2o_pfau_nes_spectroscopy.py \
     --basis "$BASIS" --ansatz "$ANSATZ" \
     --out-dir "$OUT_DIR" \
@@ -87,6 +93,7 @@ python examples/run_h2o_pfau_nes_spectroscopy.py \
     --damping "$PFAU_DAMPING" \
     --cg-maxiter "$PFAU_CG" \
     --num-steps-decorr "$PFAU_DECORR" \
+    $CAS_ARG \
     $INIT_ARG \
     --gs-source-dir cs_h2o_pfau_gs \
     --seed "$SEED"

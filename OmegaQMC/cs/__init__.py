@@ -40,6 +40,7 @@ from OmegaQMC.cs.analysis import (
 from OmegaQMC.cs.reference import (
     build_h4_square,
     compute_fci_reference,
+    compute_casci_reference,
     K_eff,
     K_eff_table,
     max_c_corr,

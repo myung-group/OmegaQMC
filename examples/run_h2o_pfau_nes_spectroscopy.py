@@ -49,7 +49,9 @@ import numpy as np
 from OmegaQMC.utils import Mole_custom
 from OmegaQMC.vmc_nn import get_vmc_nn_func
 from OmegaQMC.vmcopt_nn_pfau import get_vmcopt_nn_pfau_k2_func
-from OmegaQMC.cs.reference import compute_fci_reference
+from OmegaQMC.cs.reference import (
+    compute_fci_reference, compute_casci_reference,
+)
 from OmegaQMC.cs.walkers import load_walker_bank
 from OmegaQMC.cs.estimators import (
     evaluate_orbitals_on_walkers, f_I_matrix, normalize_and_align,
@@ -176,6 +178,13 @@ def main():
     p.add_argument("--sample-blocks", type=int, default=50)
     p.add_argument("--sample-walkers", type=int, default=256)
     p.add_argument("--candidate-tol", type=float, default=1e-6)
+    p.add_argument("--cas-ncas", type=int, default=None,
+                   help="If set, use CASCI(ncas, nelecas) reference "
+                        "instead of full FCI. Required for cc-pVDZ "
+                        "where full FCI is intractable.")
+    p.add_argument("--cas-nelecas", type=str, default=None,
+                   help="CASCI active electrons as 'n_alpha,n_beta', "
+                        "e.g. '4,4' for H2O CAS(8,8)")
     p.add_argument("--init-from-ground", action="store_true")
     p.add_argument("--init-perturbation", type=float, default=0.5,
                    help="Gaussian noise std on state-2 params when "
@@ -211,10 +220,20 @@ def main():
     mol = build_h2o(args.basis)
     # H2O is closed-shell 10-electron; in C2v singlet ground both alpha
     # and beta channels have 5 occupied spin-orbitals.
-    fci_ref = compute_fci_reference(
-        mol, n_alpha=5, n_beta=5,
-        candidate_tol=args.candidate_tol,
-    )
+    if args.cas_ncas is not None:
+        parts = args.cas_nelecas.split(",")
+        nelecas = (int(parts[0]), int(parts[1]))
+        print(f"  Using CASCI({args.cas_ncas},{nelecas}) reference "
+              f"(full FCI intractable in {args.basis})")
+        fci_ref = compute_casci_reference(
+            mol, ncas=args.cas_ncas, nelecas=nelecas,
+            candidate_tol=args.candidate_tol,
+        )
+    else:
+        fci_ref = compute_fci_reference(
+            mol, n_alpha=5, n_beta=5,
+            candidate_tol=args.candidate_tol,
+        )
     n_det = len(fci_ref["candidate_set"])
     print(f"  mol: {mol.nao} AOs, |candidate set| = {n_det}")
     print(f"  E_FCI (ground, full {mol.nao}-orb) = "
