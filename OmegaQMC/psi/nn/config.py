@@ -14,7 +14,8 @@ import yaml
 _CONF_DIR = os.path.join(os.path.dirname(__file__), 'conf')
 
 _BUILTIN_CONFIGS = {
-    'paulinet', 'ferminet', 'deeperwin', 'psiformer',
+    'paulinet', 'ferminet', 'ferminet_jastrow', 'ferminet_jastrow_complex',
+    'deeperwin', 'psiformer',
 }
 
 
