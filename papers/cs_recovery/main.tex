@@ -1524,6 +1524,7 @@ TDHF (RPA)                     & $-76.027$ & $9.17$ & $0.029$ \\
 EOM-CCSD                       & $-76.240$ & $\mathbf{8.19}$ & --- \\
 Pfau-NES + CS + NEVPT2 (K=2)   & $-76.230$ & $16.70$ & $\sim 6\!\times\!10^{-4}$ \\
 Pfau-NES + CS + NEVPT2 (K=3)   & $-76.219$ & $\mathbf{10.16}$ & $\mathbf{0.084}$ \\
+Pfau-NES + CS + NEVPT2 (K=4)   & $-76.219$ & $10.16$ & $0.020$ \\
 \hline
 Experiment ($\tilde{\mathrm{A}}\ ^1B_1$) & --- & $7.4$ & $\sim 0.04$ \\
 \hline
@@ -1609,12 +1610,27 @@ active space), and (ii) the cc-pVDZ basis missing diffuse Rydberg
 character. Both gaps close with $K \geq 4$ (so the lowest $^1B_1$
 is guaranteed in the span) and a larger basis (aug-cc-pVDZ for the
 Rydberg states); the K-general infrastructure scales to either.
-On a single GH200 we attempted $K=4$ but hit a jaxlib/cuDNN
+$K=4$ initially hit a jaxlib/cuDNN
 ``\texttt{double free in tcache 2}'' during JIT compilation
 triggered by the $K^2 = 16$ static-unrolled matrix-construction loop
-in our current implementation; a re-implementation using
-\texttt{jax.vmap} over the configuration axis avoids the unrolling
-and should remove this limitation, which we defer to follow-up.
+in our first implementation; replacing the explicit \texttt{for}
+loops with double \texttt{jax.vmap} (over the state and
+configuration axes simultaneously) collapses $K^2$ separate
+\texttt{signed\_psi} subgraphs into a single vmap-traced one and
+removes the limitation. With the vmap variant K=4 trains in
+$\sim 3$ minutes (faster than the K=3 unrolled version) but the
+spectroscopic numbers do not improve over K=3 at fixed
+hyperparameters: the dipole-allowed transition character is now
+spread across three eigenstates of the rotated K=4 subspace (top
+NTO weights $43, 29, 18\%$ in eigenstate 2 instead of $63, 35\%$
+in eigenstate 3 of K=3), giving a lower per-eigenstate oscillator
+strength ($f = 0.020$) and the same CAS+PT2 vertical excitation
+(10.16\,eV, because the same CAS(8,8) root matches the
+projected c-vector). The remaining gap to EOM-CCSD will not close
+by K-increase alone; reaching 8.19\,eV requires (a) a basis with
+diffuse Rydberg functions (aug-cc-pVDZ), and (b) a state-tracking
+heuristic that prevents dilution of dipole character across
+multiple K-state combinations.
 
 \bigskip
 Table~\ref{tab:h2o_ccpvdz_comparison} now shows the K=3 row as the
