@@ -610,17 +610,49 @@ class _VMCOptDriverNN_Pfau_K:
 
         # Build K x K M matrix at a single joint walker (x_stack shape
         # (K, n_elec, 3)) for an arbitrary tuple of K params.
+        #
+        # Implementation: double jax.vmap rather than K^2 explicit
+        # unrolling. The explicit-loop version (kept commented below for
+        # reference) generates K^2 separate signed_psi subgraphs which
+        # blow up cuDNN allocation for K >= 4 ("double free in tcache
+        # 2"). The vmap version stacks params into a single pytree
+        # whose leaves have a leading (K, ...) state axis, then vmaps
+        # signed_psi over (i = state) and (j = configuration) so the
+        # JIT graph contains a SINGLE signed_psi traced under nested
+        # vmap rather than K^2 copies. Works for arbitrary K.
+        def _stack_params(params_tuple):
+            return jax.tree.map(lambda *args: jnp.stack(args), *params_tuple)
+
+        # signed_psi(x, p) is the per-walker scalar wavefunction at a
+        # single configuration with a single state's params. Wrap with
+        # nested vmap to give it (x_stack, params_stack) -> (K, K).
+        def psi_all_states_one_x(x, params_stack):
+            # vmap over the state axis i (first axis of params_stack
+            # leaves); returns shape (K,) -- psi_i(x) for all i.
+            return jax.vmap(lambda p: signed_psi(x, p))(params_stack)
+
         def build_M(x_stack, params_tuple):
-            # Static unroll over (i, j) -- K is fixed at construction
-            cols = []
-            for j in range(K):
-                col = jnp.stack(
-                    [signed_psi(x_stack[j], params_tuple[i])
-                     for i in range(K)]
-                )
-                cols.append(col)
-            return jnp.stack(cols, axis=1)  # shape (K, K)
+            params_stack = _stack_params(params_tuple)
+            # vmap over the configuration axis j; for each j we get
+            # the K-vector of psi_i(x_j). Stack as rows then transpose
+            # so M[i, j] = psi_i(x_j).
+            rows_by_j = jax.vmap(
+                lambda x: psi_all_states_one_x(x, params_stack)
+            )(x_stack)  # shape (K, K), [j, i] indexing
+            return rows_by_j.T  # shape (K, K), [i, j] indexing
         self._build_M = build_M
+        self._stack_params = _stack_params
+
+        def E_loc_all_states_one_x(x, params_stack):
+            return jax.vmap(lambda p: local_E(x, p))(params_stack)
+
+        def build_E_loc(x_stack, params_tuple):
+            params_stack = _stack_params(params_tuple)
+            rows_by_j = jax.vmap(
+                lambda x: E_loc_all_states_one_x(x, params_stack)
+            )(x_stack)  # [j, i]
+            return rows_by_j.T  # [i, j]
+        self._build_E_loc = build_E_loc
 
         def joint_psi(x_stack, params_tuple):
             """Det of the K x K state-configuration matrix."""
@@ -631,26 +663,30 @@ class _VMCOptDriverNN_Pfau_K:
             return jnp.log(jnp.abs(joint_psi(x_stack, params_tuple)) + 1e-300)
         self.log_abs_joint_psi = log_abs_joint_psi
 
+        def is_valid_single(elec):
+            d_en = elec[:, None, :] - nuc_crds[None, :, :]
+            d_ee = elec[i_e] - elec[j_e]
+            return ((jnp.linalg.norm(d_en, axis=-1).min()
+                     > MIN_DIST_THRESHOLD)
+                    & (jnp.linalg.norm(d_ee, axis=-1).min()
+                       > MIN_DIST_THRESHOLD))
+
         @jax.jit
         def joint_metropolis(rng_key, x_stack, step_size, params_tuple):
-            """Move all K configurations jointly; accept by |det M|^2 ratio."""
+            """Move all K configurations jointly; accept by |det M|^2 ratio.
+
+            Uses jax.vmap over the K axis to avoid K-explicit unrolling
+            of proposal generation and validity checks (which blew up
+            JIT graph size for K >= 4).
+            """
             key_prop, key_accept = jax.random.split(rng_key)
             keys_per = jax.random.split(key_prop, K)
-            proposals = jnp.stack(
-                [x_stack[j] + step_size
-                       * jax.random.normal(keys_per[j], x_stack[j].shape)
-                 for j in range(K)]
-            )
-            def is_valid(elec):
-                d_en = elec[:, None, :] - nuc_crds[None, :, :]
-                d_ee = elec[i_e] - elec[j_e]
-                return ((jnp.linalg.norm(d_en, axis=-1).min()
-                         > MIN_DIST_THRESHOLD)
-                        & (jnp.linalg.norm(d_ee, axis=-1).min()
-                           > MIN_DIST_THRESHOLD))
-            valid = jnp.all(jnp.stack(
-                [is_valid(proposals[j]) for j in range(K)]
-            ))
+
+            def propose_one(key, x_j):
+                return x_j + step_size * jax.random.normal(key, x_j.shape)
+            proposals = jax.vmap(propose_one)(keys_per, x_stack)
+
+            valid = jnp.all(jax.vmap(is_valid_single)(proposals))
             lp_old = log_abs_joint_psi(x_stack, params_tuple)
             lp_new = log_abs_joint_psi(proposals, params_tuple)
             accept = ((jax.random.uniform(key_accept)
@@ -689,14 +725,7 @@ class _VMCOptDriverNN_Pfau_K:
             Trace = sum_k (M^{-1} HM)[k, k].
             """
             M = build_M(x_stack, params_tuple)
-            cols_E = []
-            for j in range(K):
-                col_E = jnp.stack(
-                    [local_E(x_stack[j], params_tuple[i])
-                     for i in range(K)]
-                )
-                cols_E.append(col_E)
-            E_loc = jnp.stack(cols_E, axis=1)
+            E_loc = build_E_loc(x_stack, params_tuple)
             HM = M * E_loc
             return jnp.trace(jnp.linalg.solve(M, HM))
         self.trace_loss_one_walker = trace_loss_one_walker
@@ -756,17 +785,12 @@ class _VMCOptDriverNN_Pfau_K:
                 + 1e-300
             )
 
+        build_E_loc_fn = self._build_E_loc
+
         def local_loss_of_concat(p_concat, x_stack):
             params_tuple = split_concat(p_concat)
             M = build_M_fn(x_stack, params_tuple)
-            cols_E = []
-            for j in range(K):
-                col_E = jnp.stack(
-                    [local_E(x_stack[j], params_tuple[i])
-                     for i in range(K)]
-                )
-                cols_E.append(col_E)
-            E_loc = jnp.stack(cols_E, axis=1)
+            E_loc = build_E_loc_fn(x_stack, params_tuple)
             HM = M * E_loc
             return jnp.trace(jnp.linalg.solve(M, HM))
 
