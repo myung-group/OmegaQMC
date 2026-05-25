@@ -259,8 +259,9 @@ def subspace_rotate_to_eigenstates(
       correct subspace (e.g. if both states ended up in a single
       symmetry sector and the lowest excited state was excluded).
     """
-    from pyscf import scf, ao2mo
+    from pyscf import scf, ao2mo, mcscf
     from pyscf import fci as pyscf_fci
+    from pyscf.fci import cistring
 
     candidate = fci_ref["candidate_set"]
     n_orb = int(fci_ref["n_orb"])
@@ -271,29 +272,73 @@ def subspace_rotate_to_eigenstates(
     if K < 2:
         raise ValueError("need at least K=2 CI vectors to rotate")
 
-    # Build CI matrices in PySCF layout
-    ci_matrices = [
-        reshape_chat_to_pyscf_matrix(c, candidate, n_orb, nelec[0], nelec[1])
-        for c in c_hats
-    ]
+    is_casci = ("ncore" in fci_ref and "ncas" in fci_ref
+                and "nelecas_active" in fci_ref)
 
-    # Build h1 + h2 in NO basis (transform from AO)
-    mf = scf.RHF(mol).run(verbose=0)
-    h1_ao = mf.get_hcore()
-    h1 = no_coeff.T @ h1_ao @ no_coeff
-    h2 = ao2mo.restore(1, ao2mo.kernel(mol, no_coeff), n_orb)
-    ecore = float(mol.energy_nuc())
+    if is_casci:
+        # CASCI reference: contract in the (much smaller) active-space
+        # FCI to avoid the intractable full-basis contract_2e.
+        ncore = int(fci_ref["ncore"])
+        ncas = int(fci_ref["ncas"])
+        nelecas = tuple(fci_ref["nelecas_active"])
 
-    # Absorbed h: lets a single contract_2e do the full H @ ci
-    h2_eff = pyscf_fci.direct_spin1.absorb_h1e(
-        h1, h2, n_orb, nelec, 0.5,
-    )
+        # Convert each candidate's full-orbital tuple
+        # (0,...,ncore-1, ncore+a_0, ncore+a_1, ...) to active-space
+        # tuple (a_0, a_1, ...)
+        active_cand = []
+        for (occ_a, occ_b) in candidate:
+            act_a = tuple(o - ncore for o in occ_a[ncore:])
+            act_b = tuple(o - ncore for o in occ_b[ncore:])
+            active_cand.append((act_a, act_b))
 
-    # Compute H |Psi_j> and overlap matrices
-    H_ci = [
-        pyscf_fci.direct_spin1.contract_2e(h2_eff, cj, n_orb, nelec)
-        for cj in ci_matrices
-    ]
+        # Build active-space CI matrices
+        ci_matrices = [
+            reshape_chat_to_pyscf_matrix(
+                c, active_cand, ncas, nelecas[0], nelecas[1],
+            )
+            for c in c_hats
+        ]
+
+        # Build CASCI effective h1, h2, ecore using PySCF
+        mf = scf.RHF(mol).run(verbose=0)
+        mc = mcscf.CASCI(mf, ncas, nelecas)
+        mc.ncore = ncore
+        mc.mo_coeff = no_coeff
+        mc.verbose = 0
+        h1eff, ecore_eff = mc.get_h1eff()
+        h2eff = mc.get_h2eff()
+        h2eff = ao2mo.restore(1, h2eff, ncas)
+
+        h2_eff_absorbed = pyscf_fci.direct_spin1.absorb_h1e(
+            h1eff, h2eff, ncas, nelecas, 0.5,
+        )
+        H_ci = [
+            pyscf_fci.direct_spin1.contract_2e(
+                h2_eff_absorbed, cj, ncas, nelecas,
+            )
+            for cj in ci_matrices
+        ]
+        ecore = float(ecore_eff)
+    else:
+        # Full-FCI reference: contract in the full basis (small system)
+        ci_matrices = [
+            reshape_chat_to_pyscf_matrix(
+                c, candidate, n_orb, nelec[0], nelec[1],
+            )
+            for c in c_hats
+        ]
+        mf = scf.RHF(mol).run(verbose=0)
+        h1_ao = mf.get_hcore()
+        h1 = no_coeff.T @ h1_ao @ no_coeff
+        h2 = ao2mo.restore(1, ao2mo.kernel(mol, no_coeff), n_orb)
+        ecore = float(mol.energy_nuc())
+        h2_eff = pyscf_fci.direct_spin1.absorb_h1e(
+            h1, h2, n_orb, nelec, 0.5,
+        )
+        H_ci = [
+            pyscf_fci.direct_spin1.contract_2e(h2_eff, cj, n_orb, nelec)
+            for cj in ci_matrices
+        ]
     H_mat = np.zeros((K, K), dtype=np.float64)
     S_mat = np.zeros((K, K), dtype=np.float64)
     for i in range(K):

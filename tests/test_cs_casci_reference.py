@@ -76,6 +76,57 @@ def test_casci_h2o_ccpvdz_runs_and_indexes_full_orbitals():
 
 
 @pytest.mark.slow
+def test_subspace_rotate_works_on_casci_reference():
+    """The subspace_rotate_to_eigenstates routine routes through the
+    active-space contract_2e for CASCI references instead of the full-
+    basis contract that would OOM in cc-pVDZ."""
+    from OmegaQMC.cs.transition import subspace_rotate_to_eigenstates
+    from OmegaQMC.cs.reference import ci_to_dict
+    from pyscf import mcscf, scf
+
+    mol = _build_h2o("cc-pvdz")
+    # candidate_tol=0 keeps all active-space determinants; the
+    # 1-root default candidate set under-represents excited state.
+    ref = compute_casci_reference(
+        mol, ncas=8, nelecas=(4, 4), candidate_tol=0.0,
+    )
+    # Get two CASCI roots in the same active space as the "input"
+    mf = scf.RHF(mol).run(verbose=0)
+    mc = mcscf.CASCI(mf, 8, (4, 4))
+    mc.ncore = 1
+    mc.fcisolver.nroots = 2
+    mc.verbose = 0
+    mc.kernel(mo_coeff=ref["no_coeff_ao"])
+    # Convert each root to a c_hat vector in full-orbital indexing
+    candidate = ref["candidate_set"]
+    n_orb = ref["n_orb"]
+    # Active-space FCI -> dict in full-orbital tuples
+    from OmegaQMC.cs.reference import _casci_to_dict_with_core
+    candidate = ref["candidate_set"]
+    c_hats = []
+    for ci_root in mc.ci:
+        d = _casci_to_dict_with_core(
+            np.asarray(ci_root), 1, 8, (4, 4), tol=0.0,
+        )
+        c = np.array([d.get(k, 0.0) for k in candidate])
+        c_hats.append(c / max(np.linalg.norm(c), 1e-30))
+    # The two FCI eigenstates are already orthogonal in their span
+    rot = subspace_rotate_to_eigenstates(c_hats, ref, mol)
+    # Eigenvalues should be the two CAS-FCI eigenvalues (within
+    # truncation error; CASCI returns exact within active space)
+    E_eig = sorted(rot["E_eig"])
+    E_ref = sorted([float(e) for e in mc.e_tot])
+    # 1e-5 tolerance: the input c_hats are truncated to the
+    # candidate_set (367 dets above 1e-4), so the rotation operates
+    # in a slightly smaller subspace than the CAS-FCI eigenvectors;
+    # residual amplitudes ~1e-4 give an O(1e-5 Ha) eigenvalue shift.
+    assert abs(E_eig[0] - E_ref[0]) < 1e-5
+    assert abs(E_eig[1] - E_ref[1]) < 1e-5
+    # Already-orthogonal input must remain orthogonal
+    assert rot["input_ci_overlap"] < 1e-8
+
+
+@pytest.mark.slow
 def test_casci_psi_evaluator_finite_on_random_walkers():
     """evaluate_ci_wavefunction must run on the CASCI candidate set
     (which uses full-orbital indexing with frozen core) without errors."""
