@@ -69,15 +69,16 @@ echo "=== H2 Pfau-NES + CS spectroscopy on $(hostname) — $(date) ==="
 echo "  R=$R  BASIS=$BASIS  ansatz=$ANSATZ"
 echo "  GS_ITERS=$GS_ITERS  PFAU_ITERS=$PFAU_ITERS"
 
-# Step 1: GS bootstrap (re-uses existing run_h2_nesvmc.py with
-# --skip-es-train so only the GS training + walker bank get produced)
+# Step 1: GS bootstrap (uses the minimal GS-only driver to avoid
+# run_h2_nesvmc.py's mandatory excited-state sampling step that
+# would fail without a pre-existing ES checkpoint).
 echo ""
 echo ">>> Step 1: Train ground state ($GS_ITERS SR iters)"
-python examples/run_h2_nesvmc.py \
+python examples/run_h2_groundstate_only.py \
     --R "$R" --basis "$BASIS" --ansatz "$ANSATZ" \
     --out-dir cs_h2_nesvmc_results \
-    --gs-iters "$GS_ITERS" --skip-es-train \
-    --seed-gs 11
+    --gs-iters "$GS_ITERS" \
+    --seed 11
 
 # Step 2: Pfau-NES K=2 + spectroscopy
 echo ""
