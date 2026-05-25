@@ -1151,8 +1151,97 @@ correlation accuracy. The \texttt{OmegaQMC.vmcopt\_nn\_nes}
 module exposes five skeleton implementations across the three
 penalty axes plus the FCI baseline (\texttt{run\_h2\_route\_c\_baseline.py});
 the six trajectories together delineate the design space's
-boundary and point to the SJ-CI hybrid as the unique unexplored
-corner.
+boundary.
+
+\paragraph{Pfau et al.\ (2024) determinantal NES-VMC.}
+A complementary route was published while this work was in
+preparation: Pfau et al.\ \cite{Pfau2024ExcitedStates} cast the $K$-state
+excited-state problem as a single ground-state problem on an
+expanded $K\!N$-particle system. The $K$-state ``super-wavefunction''
+is the determinant of the single-state ansatze evaluated at $K$
+independent configurations,
+\begin{equation}
+\Psi(\mathbf{x}^{1},\ldots,\mathbf{x}^{K}) \;=\;
+\det\!\bigl[\psi_i(\mathbf{x}^{j})\bigr]_{i,j=1\ldots K},
+\end{equation}
+and walkers $(\mathbf{x}^{1},\ldots,\mathbf{x}^{K})$ are sampled
+jointly from $|\Psi|^{2}$. The matrix local energy
+$\mathbf{E}_\Psi = M^{-1}(M \odot \mathbf{e}_{\rm loc})$ with
+$M_{ij} = \psi_i(\mathbf{x}^j)$ and
+$\mathbf{e}_{\rm loc}[i,j] = (H \psi_i)(\mathbf{x}^j)/\psi_i(\mathbf{x}^j)$
+satisfies
+$\mathbb{E}[\,{\rm Tr}\,\mathbf{E}_\Psi\,] = \sum_k E_k$ for any
+choice of ansatze that span the lowest $K$ eigenstates, and the
+gradient $\nabla_\theta\,{\rm Tr}\,\mathbf{E}_\Psi$ is an
+unbiased estimator for the sum-of-energies. Orthogonality is
+enforced \emph{structurally} by the determinant: if any two
+$\psi_i = \psi_j$, the matrix $M$ is rank-deficient and $\Psi = 0$
+everywhere, so the sampling weight collapses and the loss explodes.
+There are no penalty terms, no $\lambda$, no scale issues, and no
+basis-incompleteness pathway---the determinantal collapse is a
+\emph{real-space} constraint that operates on the full NN
+representation, not on its basis projection.
+
+We implemented Pfau-NES for $K=2$ in
+\texttt{\_VMCOptDriverNN\_Pfau\_K2} (file
+\texttt{OmegaQMC/vmcopt\_nn\_pfau.py}). The driver maintains two
+independent PsiFormer parameter sets, a joint walker bank of
+shape $(N_w, 2, n_{\rm elec}, 3)$, a joint Metropolis sampler on
+$|\det M|^{2}$, and a JIT'd 2$\times$2 closed-form trace
+$
+{\rm Tr}\,\mathbf{E}_\Psi
+= (ad(e_{11} + e_{22}) - bc(e_{12} + e_{21}))/(ad - bc)
+$
+with $M = \begin{bsmallmatrix} a & b \\ c & d \end{bsmallmatrix}$
+and $e_{ij}$ the standard single-state local energy of state $i$
+at configuration $j$. After training, each $\psi_i$ is sampled
+independently via the existing single-state walker bank
+infrastructure and the standard CS pipeline recovers its CI
+vector.
+
+On the H$_2$/cc-pVDZ test case with both states initialised from
+the ground-state checkpoint (with a 1\% Gaussian perturbation on
+the second to break degeneracy), 500 Adam iterations of Pfau-NES
+gave:
+\begin{itemize}
+\item $E_2 = -1.051\,E_{\rm h}$ (ground-like state, slightly above the
+  cc-pVDZ FCI limit of $-1.087$);
+\item $\widehat{c}^{(2)} = (+0.998,\, -0.058,\, +0.004,\ldots)$
+  --- HF-dominated ground-state-like CI vector;
+\item $\widehat{c}^{(1)} = (+0.035,\, -0.986,\, +0.004,\ldots)$
+  --- doubly-excited $(1,1)$-dominated 1$\Sigma_g^+$ excited state;
+\item $\langle \widehat{c}^{(1)} | \widehat{c}^{(2)} \rangle =
+  +0.090$ --- nearly CI-orthogonal;
+\item ${\rm proj\_mass}^{(1)} = 1.06\times 10^{-4}$,
+  ${\rm proj\_mass}^{(2)} = 1.12\times 10^{-3}$ ---
+  \emph{both states retain meaningful basis-projected mass}, in
+  contrast to all five soft-penalty designs.
+\end{itemize}
+
+Pfau-NES is the first method we tested that gives both small CI
+overlap (below $0.1$) and physically meaningful CI vectors (proj-mass
+$\sim 10^{-4}$, not the floating-point-zero of the penalty methods).
+The state PsiFormer-Pfau converges to is the second
+$1\Sigma_g^+$ rather than the lowest excited (the
+$1\Sigma_u^+$ that the FCI two-root in Table~\ref{tab:route-c}
+identifies) because the PsiFormer architecture imposes no
+spatial-symmetry constraint, and the determinantal sum-of-energies
+loss happens to prefer the two gerade states over the gerade--
+ungerade combination at our hyperparameters. Targeting the lowest
+excited state would require either a spatial-symmetry-broken
+parameterisation, a state-targeting loss reweighting (Pfau et al.\
+discuss this for $S^2$/spin selection), or training to a
+geometry where the excited-state ordering differs.
+
+The full set of seven trajectories (five penalty designs, the
+FCI baseline, and Pfau-NES) sketches the genuine boundary of the
+design space: \emph{structural} constraints (determinantal
+collapse, explicit CI-vector parameterisation) succeed where soft
+penalty hyperparameters cannot. The SJ-CI hybrid combining
+Pfau-NES's matrix-energy loss with explicit learnable CI vectors
+remains the most attractive paper-grade architecture, since it
+inherits Pfau's exact orthogonality \emph{and} explicit access to
+$\widehat{c}^{(k)}$ without an MC sampling step.
 
 The downstream applications this unlocks are: transition density
 matrices
