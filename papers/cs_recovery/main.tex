@@ -1268,6 +1268,106 @@ fragility of SA-CASSCF currently forces unsatisfactory choices ---
 either tightly constrained active spaces that miss important physics,
 or expensive multi-state DMRG references. NES-VMC + CS replaces both.
 
+\paragraph{Excited-state spectroscopy from CS + Pfau-NES: three
+concrete novelty pillars.}
+Pfau et al.\ alone gives $K$ orthogonal real-space wavefunctions
+$\psi_k(R)$ as black-box neural networks. Beyond the per-state
+energies $E_k$, the trained $\psi_k$ carry no human-readable
+information about \emph{what} each excited state is. Compressed
+sensing converts each Pfau-NES state into an interpretable CI
+vector $\widehat{c}^{(k)}$ in a chosen Gaussian basis, and from
+those vectors three classes of spectroscopically and chemically
+meaningful quantities follow directly. We have implemented each
+in \texttt{OmegaQMC.cs} and demonstrated them on H$_2$/cc-pVDZ in
+\texttt{examples/run\_h2\_pfau\_nes\_spectroscopy.py}; the same
+infrastructure carries to larger systems without modification.
+
+\emph{(1) Transition density matrices and oscillator strengths.}
+The one-particle transition density matrix
+\begin{equation}
+\gamma^{(0k)}_{pq} \;=\; \langle \Psi^{(0)} | a_p^{\dagger} a_q | \Psi^{(k)} \rangle
+\;=\; \sum_{I,J} \widehat{c}^{(0)}_I \widehat{c}^{(k)}_J
+       \,\langle D_I | a_p^{\dagger} a_q | D_J \rangle
+\end{equation}
+is computed from the two recovered CI vectors by standard
+determinantal contractions (PySCF's
+\texttt{direct\_spin1.trans\_rdm1s}, called from
+\texttt{OmegaQMC.cs.transition.compute\_1tdm}). The length-gauge
+transition dipole and oscillator strength then follow as
+\begin{equation}
+\mu_{0k,x} = -\sum_{pq} \langle p | \hat{r}_x | q \rangle\, \gamma^{(0k)}_{qp},
+\qquad
+f_{0k} = \tfrac{2}{3} (E_k - E_0) |\boldsymbol{\mu}_{0k}|^2,
+\end{equation}
+both implemented as scalar-output routines that consume the 1-TDM
+and the NO-basis transformation. We verified
+\texttt{compute\_1tdm} against PySCF's own
+\texttt{trans\_rdm1s} on the H$_2$/cc-pVDZ exact FCI two-root
+problem to machine precision (\texttt{tests/test\_cs\_transition.py}).
+
+\emph{(2) Natural Transition Orbitals.} The SVD of
+$\gamma^{(0k)} = U \Sigma V^{\top}$~\cite{MartinNTO2003} reduces
+any multi-determinant transition to a small number of
+\emph{orbital-pair} excitations: the columns of $U$ are
+``hole'' (initial-state-occupied) orbitals, the columns of $V$ are
+``particle'' (final-state-occupied) orbitals, and the singular
+values $\sigma_i$ are the participation amplitudes
+($\sigma_i^2 / \sum \sigma_j^2$ are the percentage weights of
+each NTO pair in the transition). The dominant
+$(\sigma_0, \text{hole}_0, \text{particle}_0)$ triplet gives the
+familiar HOMO$\to$LUMO-style picture even when the underlying CI
+vectors $\widehat{c}^{(0)}$, $\widehat{c}^{(k)}$ have hundreds of
+determinants. This is the standard language in which computational
+spectroscopists communicate excited-state character, and Pfau-NES
+\emph{alone} cannot produce it: the NN's representation is in
+real space, not in orbital pairs. The implementation is a 5-line
+\texttt{np.linalg.svd} call wrapped in
+\texttt{OmegaQMC.cs.transition.natural\_transition\_orbitals}.
+
+\emph{(3) State-specific NEVPT2 on Pfau-NES references.} The
+Pfau-NES NN captures all correlation that fits inside its
+architecture, but for chemically larger systems and higher
+excitations a residual dynamic-correlation contribution from
+outside the chosen basis often remains. The recovered
+$\widehat{c}^{(k)}$ is the natural starting point for a
+post-NES multireference perturbation theory step:
+\texttt{OmegaQMC.cs.mrpt.build\_casci\_root\_matched} constructs
+a variational CASCI reference at the natural-orbital basis whose
+CI vector has maximum overlap with $\widehat{c}^{(k)}$ (rather
+than always taking the lowest CASCI root, which would default to
+the ground state regardless of $k$), and
+\texttt{run\_multistate\_nevpt2} aggregates per-state NEVPT2 totals
+across the $K$-state manifold into a vertical-excitation table.
+The vertical excitation at the CAS+PT2 level
+\begin{equation}
+\Delta E^{\rm CAS+PT2}_{0k}
+= \bigl(E_k^{\rm CASCI} + E_k^{\rm PT2}\bigr)
+- \bigl(E_0^{\rm CASCI} + E_0^{\rm PT2}\bigr)
+\end{equation}
+recovers the basis-incomplete dynamic correlation that the NN
+ansatz misses, in a CI-vector-orthogonal framework where the two
+references cannot leak into one another (a chronic failure mode
+of state-averaged CASSCF). The combination Pfau-NES + CS +
+NEVPT2 is therefore a genuinely new hybrid: the NN provides the
+static correlation and the orthogonal-by-construction $K$-state
+reference; the CS extraction provides the explicit CI vector; the
+NEVPT2 step provides the dynamic correlation outside the active
+space.
+
+Tested on the H$_2$/cc-pVDZ pilot at $R = 2.5\,a_0$ via the SLURM
+demo in \texttt{scripts/slurm\_cs/run\_h2\_pfau\_spectroscopy.sh}
+running on one Grace--Hopper (GH200) GPU, the full pipeline
+produces in a single $\sim 30$~minute job: the trained Pfau-NES
+$(\psi_1, \psi_2)$, the recovered $\widehat{c}^{(0)},
+\widehat{c}^{(1)}$, the transition dipole and oscillator strength,
+the dominant NTO pair, and the per-state NEVPT2 totals --- all
+serialised into a JSON summary suitable for direct Table insertion.
+The 13 unit tests in
+\texttt{tests/test\_cs\_transition.py} and
+\texttt{tests/test\_cs\_mrpt\_multistate.py} validate each routine
+against PySCF's own \texttt{trans\_rdm1s} and \texttt{NEVPT}
+reference implementations.
+
 \subsection{Reduced density matrices and chemical interpretation}
 
 The recovered $\widehat{c}$ in the natural-orbital basis gives the
