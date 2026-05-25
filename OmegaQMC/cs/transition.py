@@ -48,14 +48,54 @@ def compute_1tdm(
     candidate_set: Sequence,
     n_orb: int,
     nelec: Tuple[int, int],
+    casci_meta: dict = None,
 ) -> np.ndarray:
     """One-particle transition density matrix in the NO basis.
 
     Returns gamma_pq = <Psi_bra | a_p^dagger a_q | Psi_ket> with shape
     ``(n_orb, n_orb)``. Both CI vectors must be expressed in the same
     candidate set / NO basis (the standard output of the CS pipeline).
+
+    For active-space CASCI references where n_orb >> ncas, pass
+    ``casci_meta = {"ncore": ..., "ncas": ..., "nelecas": (na, nb)}``
+    to do the trans_rdm1s contraction in the (much smaller) active-
+    space FCI; otherwise allocating the full
+    ``(n_strings_a, n_strings_b)`` zero matrix can OOM
+    (e.g.\ aug-cc-pVDZ H2O has 749k alpha strings -> 4 TiB array).
+    The returned gamma is embedded back into the full-orbital
+    ``(n_orb, n_orb)`` shape with core entries set to identity (core
+    contributes diagonally to the 1-RDM for both bra and ket, so it
+    cancels in the transition density).
     """
     from pyscf import fci as pyscf_fci
+
+    if casci_meta is not None:
+        ncore = int(casci_meta["ncore"])
+        ncas = int(casci_meta["ncas"])
+        nelecas = tuple(casci_meta["nelecas"])
+        # Convert candidate set to active-space indexing
+        active_cand = []
+        for (occ_a, occ_b) in candidate_set:
+            act_a = tuple(o - ncore for o in occ_a[ncore:])
+            act_b = tuple(o - ncore for o in occ_b[ncore:])
+            active_cand.append((act_a, act_b))
+        ci_bra = reshape_chat_to_pyscf_matrix(
+            c_hat_bra, active_cand, ncas, nelecas[0], nelecas[1],
+        )
+        ci_ket = reshape_chat_to_pyscf_matrix(
+            c_hat_ket, active_cand, ncas, nelecas[0], nelecas[1],
+        )
+        dm_a_act, dm_b_act = pyscf_fci.direct_spin1.trans_rdm1s(
+            ci_bra, ci_ket, ncas, nelecas,
+        )
+        gamma_active = (np.asarray(dm_a_act) + np.asarray(dm_b_act))
+        # Embed into full-orbital matrix: core block has the static
+        # core 1-TDM which equals zero for orthogonal bra/ket (the
+        # frozen core is identical in both states, so the core block
+        # only contributes when bra=ket; for transitions it cancels).
+        gamma_full = np.zeros((n_orb, n_orb), dtype=np.float64)
+        gamma_full[ncore:ncore + ncas, ncore:ncore + ncas] = gamma_active
+        return gamma_full
 
     ci_bra = reshape_chat_to_pyscf_matrix(
         c_hat_bra, candidate_set, n_orb, nelec[0], nelec[1],
@@ -63,8 +103,6 @@ def compute_1tdm(
     ci_ket = reshape_chat_to_pyscf_matrix(
         c_hat_ket, candidate_set, n_orb, nelec[0], nelec[1],
     )
-    # PySCF returns (dm_a, dm_b) — spin-up and spin-down components.
-    # We need the spin-summed transition density.
     dm_a, dm_b = pyscf_fci.direct_spin1.trans_rdm1s(
         ci_bra, ci_ket, n_orb, nelec,
     )
@@ -186,8 +224,16 @@ def report_transition_properties(
     nelec = tuple(fci_ref["nelec"])
     no_coeff = fci_ref["no_coeff_ao"]
 
+    casci_meta = None
+    if "ncore" in fci_ref and "ncas" in fci_ref:
+        casci_meta = dict(
+            ncore=int(fci_ref["ncore"]),
+            ncas=int(fci_ref["ncas"]),
+            nelecas=tuple(fci_ref["nelecas_active"]),
+        )
     gamma_01 = compute_1tdm(
         c_hat_bra, c_hat_ket, candidate, n_orb, nelec,
+        casci_meta=casci_meta,
     )
     mu = transition_dipole(mol, no_coeff, gamma_01)
     f = oscillator_strength(mu["mu_au"], delta_E_au)
