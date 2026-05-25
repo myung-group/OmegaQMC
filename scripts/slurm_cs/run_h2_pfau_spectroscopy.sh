@@ -31,7 +31,16 @@ set -eo pipefail
 # the plugin entirely; we don't use MPI for the single-GPU NN-VMC code.
 export SLURM_MPI_TYPE=none
 
-cd "$(dirname "$0")/../.."
+# Under SLURM, $0 is /var/spool/slurm/slurmd/jobNNNNN/slurm_script
+# (a copy of the script), so dirname $0/../.. would land in
+# /var/spool/slurm rather than the project root. Use SLURM_SUBMIT_DIR
+# (the directory sbatch was invoked from) instead, falling back to
+# dirname $0/../.. for direct bash invocations outside SLURM.
+if [[ -n "$SLURM_SUBMIT_DIR" ]]; then
+    cd "$SLURM_SUBMIT_DIR"
+else
+    cd "$(dirname "$0")/../.."
+fi
 source ~/.bashrc
 conda activate omegaqmc
 
