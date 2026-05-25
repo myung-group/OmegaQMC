@@ -531,3 +531,386 @@ def get_vmcopt_nn_pfau_k2_func(
             ]
             driver.params_2 = jax.tree.unflatten(treedef, perturbed)
     return driver
+
+
+# ===========================================================================
+# K-general Pfau-NES driver (any K >= 2)
+# ===========================================================================
+#
+# The K=2 driver above hardcodes the determinantal-matrix arithmetic. For
+# H2O/cc-pVDZ K=2 is not enough -- the lowest 1B1 state is the 4th
+# eigenstate, so K=2 finds two gerade combinations of (1A1)_ground +
+# (1A1)_doubly-excited and misses the dipole-allowed band entirely. This
+# K-general driver uses double-vmap over (state, configuration) to build
+# the K x K matrix M[i,j] = psi_i(x^j) at every joint walker and computes
+# Tr(M^{-1}(M (*) E_loc)) symbolically via jnp.linalg.solve.
+
+
+class _VMCOptDriverNN_Pfau_K:
+    """Pfau-NES driver for arbitrary K (Pfau et al., Science 2024).
+
+    All K states share the same NN architecture (config); only the
+    parameter sets differ. The joint walker has shape
+    ``(num_walkers, K, n_elec, 3)``, MCMC-sampled from
+    |det M(x^1, ..., x^K)|^2 with M[i,j] = psi_i(x^j).
+    """
+
+    def __init__(self, mol_info, config, init_keys):
+        if len(init_keys) < 2:
+            raise ValueError("Need at least K=2 initial state keys")
+        self.K = len(init_keys)
+        self.drivers = [
+            _VMCOptDriverNN_IRAdam(mol_info, config, k) for k in init_keys
+        ]
+        d0 = self.drivers[0]
+        self.mol_info = mol_info
+        self.config_name = d0.config_name
+        self.nelec = d0.nelec
+        self.nuc_crds = d0.nuc_crds
+        self.params = tuple(d.init_params for d in self.drivers)
+
+        # All states share the same log_psi (same architecture); we pass
+        # different params per state.
+        log_psi_signed = d0.log_psi.signed
+        nuc_crds = self.nuc_crds
+        i_e, j_e = jnp.triu_indices(self.nelec, k=1)
+        charges = d0.charges
+
+        enr = 0.0
+        n_nuc = len(charges)
+        for a in range(n_nuc):
+            for b in range(a + 1, n_nuc):
+                rab = float(jnp.linalg.norm(nuc_crds[a] - nuc_crds[b]))
+                enr += float(charges[a]) * float(charges[b]) / rab
+        enr_nn_jx = jnp.asarray(enr, dtype=jnp.float64)
+        lap_grad = d0.lap_grad
+
+        def signed_psi(x, p):
+            sgn, lam = log_psi_signed(x, nuc_crds, p)
+            return sgn * jnp.exp(lam)
+        self._signed_psi = signed_psi
+
+        @jax.jit
+        def _energy_ee_en(elec):
+            d_ee = elec[i_e] - elec[j_e]
+            d_en = elec[:, None, :] - nuc_crds[None, :, :]
+            return (jnp.sum(1.0 / jnp.linalg.norm(d_ee, axis=-1))
+                    - jnp.sum(charges[None, :]
+                              / jnp.linalg.norm(d_en, axis=-1)))
+
+        @jax.jit
+        def local_E(elec, p):
+            lap, grad = lap_grad(elec, nuc_crds, p)
+            return _energy_ee_en(elec) - 0.5 * (
+                lap + jnp.dot(grad, grad)
+            ) + enr_nn_jx
+        self._local_E = local_E
+
+        K = self.K
+
+        # Build K x K M matrix at a single joint walker (x_stack shape
+        # (K, n_elec, 3)) for an arbitrary tuple of K params.
+        def build_M(x_stack, params_tuple):
+            # Static unroll over (i, j) -- K is fixed at construction
+            cols = []
+            for j in range(K):
+                col = jnp.stack(
+                    [signed_psi(x_stack[j], params_tuple[i])
+                     for i in range(K)]
+                )
+                cols.append(col)
+            return jnp.stack(cols, axis=1)  # shape (K, K)
+        self._build_M = build_M
+
+        def joint_psi(x_stack, params_tuple):
+            """Det of the K x K state-configuration matrix."""
+            return jnp.linalg.det(build_M(x_stack, params_tuple))
+        self.joint_psi = joint_psi
+
+        def log_abs_joint_psi(x_stack, params_tuple):
+            return jnp.log(jnp.abs(joint_psi(x_stack, params_tuple)) + 1e-300)
+        self.log_abs_joint_psi = log_abs_joint_psi
+
+        @jax.jit
+        def joint_metropolis(rng_key, x_stack, step_size, params_tuple):
+            """Move all K configurations jointly; accept by |det M|^2 ratio."""
+            key_prop, key_accept = jax.random.split(rng_key)
+            keys_per = jax.random.split(key_prop, K)
+            proposals = jnp.stack(
+                [x_stack[j] + step_size
+                       * jax.random.normal(keys_per[j], x_stack[j].shape)
+                 for j in range(K)]
+            )
+            def is_valid(elec):
+                d_en = elec[:, None, :] - nuc_crds[None, :, :]
+                d_ee = elec[i_e] - elec[j_e]
+                return ((jnp.linalg.norm(d_en, axis=-1).min()
+                         > MIN_DIST_THRESHOLD)
+                        & (jnp.linalg.norm(d_ee, axis=-1).min()
+                           > MIN_DIST_THRESHOLD))
+            valid = jnp.all(jnp.stack(
+                [is_valid(proposals[j]) for j in range(K)]
+            ))
+            lp_old = log_abs_joint_psi(x_stack, params_tuple)
+            lp_new = log_abs_joint_psi(proposals, params_tuple)
+            accept = ((jax.random.uniform(key_accept)
+                       < jnp.exp(2.0 * (lp_new - lp_old)))
+                      & valid)
+            new = jnp.where(accept, proposals, x_stack)
+            return new, accept
+        self._joint_metropolis = joint_metropolis
+
+        @partial(jax.jit, static_argnums=(3,))
+        def joint_sweep(rng_key, walkers, step_size, num_steps, params_tuple):
+            """walkers shape (N, K, n_elec, 3)."""
+            def step(carry, _):
+                rk, wlk, ss = carry
+                rk0, rk1 = jax.random.split(rk)
+                keys = jax.random.split(rk1, wlk.shape[0])
+                wlk_new, acc = jax.vmap(
+                    joint_metropolis,
+                    in_axes=(0, 0, None, None),
+                )(keys, wlk, ss, params_tuple)
+                ar = acc.mean()
+                ss_new = ss * (0.6 + ar)
+                return (rk0, wlk_new, ss_new), ar
+            carry, _ = jax.lax.scan(
+                step, (rng_key, walkers, step_size),
+                jnp.arange(num_steps),
+            )
+            return carry
+        self.joint_sweep = joint_sweep
+
+        def trace_loss_one_walker(x_stack, params_tuple):
+            """Tr(M^{-1} (M (*) E_loc)) at a single joint walker.
+
+            E_loc[i, j] = local_E(x_stack[j], params_tuple[i]).
+            HM[i, j] = M[i, j] * E_loc[i, j].
+            Trace = sum_k (M^{-1} HM)[k, k].
+            """
+            M = build_M(x_stack, params_tuple)
+            cols_E = []
+            for j in range(K):
+                col_E = jnp.stack(
+                    [local_E(x_stack[j], params_tuple[i])
+                     for i in range(K)]
+                )
+                cols_E.append(col_E)
+            E_loc = jnp.stack(cols_E, axis=1)
+            HM = M * E_loc
+            return jnp.trace(jnp.linalg.solve(M, HM))
+        self.trace_loss_one_walker = trace_loss_one_walker
+
+    def initialize_joint_walkers(self, rng_key, num_walkers):
+        keys = jax.random.split(rng_key, self.K)
+        wks = [d.initialize_walkers(k, num_walkers)
+               for d, k in zip(self.drivers, keys)]
+        return jnp.stack(wks, axis=1)  # (N, K, nelec, 3)
+
+    def __call__(
+        self,
+        rng_key,
+        num_iters: int = 200,
+        num_walkers: int = 256,
+        num_steps_per_block: int = 100,
+        num_blocks_equil: int = 5,
+        num_steps_decorr: int = 10,
+        mc_timestep: float = 0.1,
+        lr: float = 1e-2,
+        damping: float = 1e-3,
+        cg_maxiter: int = 100,
+        max_param_change: float = 0.2,
+        jac_batch_size: int = 16,
+        verbose: int = 1,
+        prefix: str = "pfau_nes_k",
+    ):
+        """SR joint loop on all K parameter sets."""
+        K = self.K
+        params_list = list(self.params)
+        flat_list, unravels = [], []
+        for p in params_list:
+            f, u = ravel_pytree(p)
+            flat_list.append(f)
+            unravels.append(u)
+        sizes = [f.shape[0] for f in flat_list]
+        offsets = [0]
+        for s in sizes:
+            offsets.append(offsets[-1] + s)
+        n_total = offsets[-1]
+
+        mc_stepsize = (3 * mc_timestep) ** 0.5
+        signed_psi = self._signed_psi
+        local_E = self._local_E
+        build_M_fn = self._build_M
+
+        def split_concat(p_concat):
+            return tuple(
+                unravels[i](p_concat[offsets[i]:offsets[i+1]])
+                for i in range(K)
+            )
+
+        def log_abs_joint_of_concat(p_concat, x_stack):
+            params_tuple = split_concat(p_concat)
+            return jnp.log(
+                jnp.abs(jnp.linalg.det(build_M_fn(x_stack, params_tuple)))
+                + 1e-300
+            )
+
+        def local_loss_of_concat(p_concat, x_stack):
+            params_tuple = split_concat(p_concat)
+            M = build_M_fn(x_stack, params_tuple)
+            cols_E = []
+            for j in range(K):
+                col_E = jnp.stack(
+                    [local_E(x_stack[j], params_tuple[i])
+                     for i in range(K)]
+                )
+                cols_E.append(col_E)
+            E_loc = jnp.stack(cols_E, axis=1)
+            HM = M * E_loc
+            return jnp.trace(jnp.linalg.solve(M, HM))
+
+        @jax.jit
+        def jac_and_loss_batch(batch_walkers, p_concat):
+            def per_walker(x_stack):
+                L = local_loss_of_concat(p_concat, x_stack)
+                O = jax.grad(log_abs_joint_of_concat)(p_concat, x_stack)
+                return L, O.astype(jnp.float32)
+            return jax.vmap(per_walker)(batch_walkers)
+
+        @jax.jit
+        def sr_solve(dO, f, x0, dmp, maxiter):
+            nw = dO.shape[0]
+            dmp_f = jnp.float32(dmp)
+            def s_matvec(v):
+                t = dO @ v
+                return (dO.T @ t) / nw + dmp_f * v
+            delta_p, _ = jax.scipy.sparse.linalg.cg(
+                s_matvec, f, x0=x0, maxiter=maxiter,
+            )
+            return delta_p
+
+        rng_key, init_walker_key = jax.random.split(rng_key)
+        walkers = self.initialize_joint_walkers(init_walker_key, num_walkers)
+
+        if verbose >= 1:
+            print(f"Pfau-NES K={K} (SR): {K} x PsiFormer, joint walkers="
+                  f"{num_walkers}, n_params = "
+                  f"{' + '.join(str(s) for s in sizes)} = {n_total}")
+            print(f"  lr={lr}, damping={damping}, cg_maxiter={cg_maxiter}, "
+                  f"jac_batch={jac_batch_size}")
+
+        for _ in range(num_blocks_equil):
+            rng_key, sub = jax.random.split(rng_key)
+            params_tuple = tuple(params_list)
+            carry = self.joint_sweep(
+                sub, walkers, mc_stepsize, num_steps_per_block, params_tuple,
+            )
+            _, walkers, mc_stepsize = carry
+
+        prev_delta = jnp.zeros(n_total, dtype=jnp.float32)
+        from datetime import datetime
+        t_prev = datetime.now()
+        for iteration in range(num_iters):
+            rng_key, sub = jax.random.split(rng_key)
+            params_tuple = tuple(params_list)
+            carry = self.joint_sweep(
+                sub, walkers, mc_stepsize, num_steps_decorr, params_tuple,
+            )
+            _, walkers, mc_stepsize = carry
+
+            p_concat = jnp.concatenate(flat_list)
+            L_parts, O_parts = [], []
+            for i in range(0, num_walkers, jac_batch_size):
+                end = min(i + jac_batch_size, num_walkers)
+                Lb, Ob = jac_and_loss_batch(walkers[i:end], p_concat)
+                L_parts.append(Lb)
+                O_parts.append(Ob)
+            L = jnp.concatenate(L_parts, axis=0)
+            O = jnp.concatenate(O_parts, axis=0)
+            L_mean = float(jnp.mean(L))
+            L_err = float(jnp.std(L)) / max(1, L.size) ** 0.5
+
+            O_mean = jnp.mean(O, axis=0)
+            dO = O - O_mean[None, :]
+            dL = (L - jnp.mean(L)).astype(jnp.float32)
+            f = (dL @ dO) / dO.shape[0]
+            delta_p = sr_solve(dO, f, prev_delta, damping, cg_maxiter)
+            prev_delta = delta_p
+            max_dp = float(jnp.max(jnp.abs(delta_p)))
+            scale = min(1.0, max_param_change / max(max_dp, 1e-30))
+            p_concat = p_concat - lr * scale * delta_p
+            flat_list = [p_concat[offsets[i]:offsets[i+1]] for i in range(K)]
+            params_list = [unravels[i](flat_list[i]) for i in range(K)]
+
+            if verbose >= 1:
+                now = datetime.now()
+                dt = (now - t_prev).total_seconds()
+                t_prev = now
+                print(f"Iter {iteration:5d} | "
+                      f"Tr(E) = {L_mean:.6f} +/- {L_err:.5f} | "
+                      f"max_dp = {max_dp:.4e} | scale = {scale:.3f} | "
+                      f"dt = {dt:.1f}s")
+
+            if (iteration + 1) % 50 == 0 or iteration == num_iters - 1:
+                for k_idx in range(K):
+                    chk_k = f"{prefix}_{k_idx+1}.chk.h5"
+                    if os.path.exists(chk_k):
+                        os.rename(chk_k, f"{prefix}_{k_idx+1}.{iteration}.h5")
+                    save_nn_checkpoint(
+                        chk_k, params_list[k_idx], iteration,
+                        self.config_name, self.mol_info, energy=L_mean / K,
+                    )
+
+        self.params = tuple(params_list)
+        return tuple(params_list), {
+            "trace_E": {"mean": L_mean, "stderr": L_err},
+        }
+
+
+def get_vmcopt_nn_pfau_k_func(
+    mol_info,
+    config,
+    init_key,
+    K: int = 4,
+    init_from_ground_checkpoint: str = None,
+    init_perturbation: float = 0.5,
+    init_random_states: int = None,
+):
+    """Factory for the K-general Pfau-NES driver.
+
+    ``K``: number of states.
+    ``init_from_ground_checkpoint``: if given, state 0 (and optionally
+        more) is initialised from the GS ckpt; the rest are either
+        random PsiFormer inits (if ``init_random_states >= 1``) or the
+        GS checkpoint perturbed by Gaussian noise of std
+        ``init_perturbation``.
+    ``init_random_states``: number of states (counting from K-1
+        backward) that get fully random inits. The default (None) uses
+        the perturbation strategy for all non-ground states.
+    """
+    keys = jax.random.split(init_key, K)
+    driver = _VMCOptDriverNN_Pfau_K(mol_info, config, list(keys))
+    if init_from_ground_checkpoint is not None:
+        ground_params, _ = load_nn_checkpoint(
+            init_from_ground_checkpoint, driver.drivers[0].init_params,
+        )
+        new_params = [ground_params]
+        n_rand = init_random_states if init_random_states is not None else 0
+        n_perturb_start = 1
+        n_perturb_end = K - n_rand
+        for k in range(1, n_perturb_end):
+            rng = jax.random.split(init_key, K + k)[K + k - 1]
+            leaves = jax.tree.leaves(ground_params)
+            treedef = jax.tree.structure(ground_params)
+            sub_keys = jax.random.split(rng, len(leaves))
+            perturbed = [
+                leaf + float(init_perturbation)
+                       * jax.random.normal(sk, leaf.shape)
+                for leaf, sk in zip(leaves, sub_keys)
+            ]
+            new_params.append(jax.tree.unflatten(treedef, perturbed))
+        for k in range(n_perturb_end, K):
+            new_params.append(driver.drivers[k].init_params)
+        driver.params = tuple(new_params)
+    return driver

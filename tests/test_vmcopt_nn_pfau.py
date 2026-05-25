@@ -9,6 +9,8 @@ from OmegaQMC.utils import Mole_custom
 from OmegaQMC.vmcopt_nn_pfau import (
     _VMCOptDriverNN_Pfau_K2,
     get_vmcopt_nn_pfau_k2_func,
+    _VMCOptDriverNN_Pfau_K,
+    get_vmcopt_nn_pfau_k_func,
 )
 
 
@@ -127,3 +129,50 @@ def test_sr_loop_runs_one_iter(h2_pfau_setup):
         assert np.asarray(a).shape == np.asarray(b).shape
     assert "trace_E" in info
     assert np.isfinite(info["trace_E"]["mean"])
+
+
+@pytest.mark.slow
+def test_pfau_k3_driver_runs_one_iter(h2_pfau_setup):
+    """K=3 generic driver constructs, samples joint walkers, and runs
+    one SR iteration on H2/STO-3G."""
+    driver = get_vmcopt_nn_pfau_k_func(
+        h2_pfau_setup["mol"], "psiformer", h2_pfau_setup["key"], K=3,
+    )
+    assert driver.K == 3
+    assert len(driver.params) == 3
+    rng = jax.random.key(7)
+    walkers = driver.initialize_joint_walkers(rng, 4)
+    assert walkers.shape == (4, 3, driver.nelec, 3)
+    (p1, p2, p3), info = driver(
+        rng,
+        num_iters=1,
+        num_walkers=4,
+        num_steps_per_block=2,
+        num_blocks_equil=1,
+        num_steps_decorr=1,
+        cg_maxiter=2,
+        jac_batch_size=2,
+        prefix="/tmp/pfau_k3_smoke",
+        verbose=0,
+    )
+    leaves1 = jax.tree.leaves(p1)
+    leaves3 = jax.tree.leaves(p3)
+    assert len(leaves1) == len(leaves3)
+    assert np.isfinite(info["trace_E"]["mean"])
+
+
+@pytest.mark.slow
+def test_pfau_k_joint_psi_zero_when_states_collapse(h2_pfau_setup):
+    """If all K states share identical parameters, det M = 0
+    identically (the Pfau structural orthogonality)."""
+    driver = get_vmcopt_nn_pfau_k_func(
+        h2_pfau_setup["mol"], "psiformer", h2_pfau_setup["key"], K=3,
+    )
+    p0 = driver.params[0]
+    driver.params = (p0, p0, p0)
+    rng = np.random.default_rng(0)
+    x_stack = jnp.asarray(rng.normal(size=(3, driver.nelec, 3)))
+    val = float(driver.joint_psi(x_stack, driver.params))
+    assert abs(val) < 1e-8, (
+        f"K=3 joint Psi should vanish at identical-state limit, got {val}"
+    )
