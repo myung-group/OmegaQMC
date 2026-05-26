@@ -7,19 +7,29 @@ Y-axis (right): |E_PT2^exc| in m E_h
 import matplotlib.pyplot as plt
 import numpy as np
 
-# From tab:cas_size_convergence (CAS 16/20 TBD until SLURM 5275/5276 finish; placeholder)
+# From tab:cas_size_convergence
+# At CAS(16) the bright-state selector picks a different rotated eigenstate
+# than at CAS(12), so the excited-state match-overlap is lower despite the
+# better ground-state match-overlap (0.48 -> 0.90). We plot the
+# ground-state match-overlap as the framework's primary convergence signal.
 cas_sizes = np.array([8, 12, 16, 20])
-match_overlap = np.array([0.48, 0.48, np.nan, np.nan])  # known points
-pt2_mE         = np.array([235,  201,  np.nan, np.nan])
-dE_CASPT2_eV   = np.array([9.97, 9.63, np.nan, np.nan])
+match_overlap_gs  = np.array([0.48, 0.48, 0.90, np.nan])
+match_overlap_exc = np.array([0.48, 0.48, 0.23, np.nan])
+pt2_mE            = np.array([235,  201,  183,  np.nan])
+dE_CASPT2_eV      = np.array([9.97, 9.63, 9.70, np.nan])
+match_overlap = match_overlap_gs   # for plotting + TBD annotation
 
 fig, ax = plt.subplots(figsize=(6.4, 4.0))
 
 color_m = "#3a3"
 color_e = "#c66"
-ax.plot(cas_sizes, match_overlap, "o-", color=color_m, markersize=7,
+ax.plot(cas_sizes, match_overlap_gs, "o-", color=color_m, markersize=7,
         markerfacecolor=color_m, markeredgecolor="black",
-        markeredgewidth=0.6, label=r"match-overlap $|\langle\widehat{c}^{(\mathrm{exc})}|v^{\mathrm{CAS}}\rangle|$")
+        markeredgewidth=0.6, label=r"match-overlap $|\langle\widehat{c}^{(0)}|v^{\mathrm{CAS}}_0\rangle|$ (ground)")
+ax.plot(cas_sizes, match_overlap_exc, "o:", color=color_m, markersize=6,
+        markerfacecolor="white", markeredgecolor=color_m,
+        markeredgewidth=1.0, label=r"match-overlap $|\langle\widehat{c}^{(\mathrm{exc})}|v^{\mathrm{CAS}}_{\mathrm{matched}}\rangle|$",
+        alpha=0.7)
 ax.set_xlabel("CAS active-space size (orbitals)", fontsize=10)
 ax.set_ylabel(r"match-overlap with closest CAS eigenstate", fontsize=10, color=color_m)
 ax.tick_params(axis="y", labelcolor=color_m)
