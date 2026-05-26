@@ -64,6 +64,7 @@ vertical IP = −ε^QP_HOMO and EA = −ε^QP_LUMO.
 """
 
 import math
+import warnings
 
 import numpy as np
 import scipy.linalg as la
@@ -235,9 +236,19 @@ def run_qed_gw(qedhf, orbs=None, direct=True, mode='linG0W0', eta=1e-3,
         qedhf: dict returned by :func:`OmegaQMC.qed_hf.run_qed_hf`.
         orbs: list of *spatial* orbital indices (0-based) to report
             QP energies for. ``None`` → HOMO and LUMO.
-        direct: True → QED-dRPA-based W (standard GW choice); False →
-            antisymmetric QED-RPA W (non-standard, included for
-            symmetry with :func:`qed_rpa.run_qed_rpa`).
+        direct: True → QED-dRPA-based W (the standard GW choice — only
+            direct Coulomb screening in W, so Σ_c does not contain any
+            exchange-line diagrams). False → screen the antisymmetrised
+            interaction ⟨pq‖rs⟩, i.e. build W from the full QED-RPA.
+            WARNING: ``direct=False`` is exposed for completeness only
+            and is NOT a recommended production setting — every loop in
+            W then carries a bare-exchange line which, when convolved
+            with G in Σ_c, double-counts the Fock exchange already
+            sitting inside ε^HF_p (the LHS of the QP equation). The
+            resulting quasiparticle energies are unphysical (e.g. IPs
+            ≳ 40 eV on water/cc-pVDZ). A proper "GW + exchange in W"
+            requires a compensating vertex (GWΓ, SOSEX, BSE-style
+            schemes) and is not implemented here.
         mode: one of ``'linG0W0'``, ``'G0W0'``, ``'evGW'``. See module
             docstring for the precise definition of each.
         eta: imaginary regulariser in the Σ_c denominators (Ha).
@@ -254,6 +265,18 @@ def run_qed_gw(qedhf, orbs=None, direct=True, mode='linG0W0', eta=1e-3,
     if mode not in ('linG0W0', 'G0W0', 'evGW'):
         raise ValueError(
             f"mode must be one of 'linG0W0', 'G0W0', 'evGW'; got {mode!r}")
+    if not direct:
+        warnings.warn(
+            "direct=False uses antisymmetric ⟨pq||rs⟩ throughout. Every "
+            "loop in W then contains a bare-exchange line, and Σ_c "
+            "double-counts the Fock exchange already in ε^HF. QP "
+            "energies will be unphysical (e.g. IP ≳ 40 eV on water/"
+            "cc-pVDZ). Use direct=True for production GW; the proper "
+            "way to put exchange into W requires a vertex correction "
+            "(GWΓ / SOSEX / BSE) that is not implemented here.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     static = _build_static_quantities(qedhf, direct=direct)
     eps_HF = static['eps_HF']
