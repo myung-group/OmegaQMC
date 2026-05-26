@@ -1772,6 +1772,54 @@ nuclear forces using PGCS.
                             grd_err[i, 2],
                         )
                     )
+                F_sys = -np.asarray(grd_tot).sum(axis=0)
+                dF_sys = np.sqrt(
+                    (np.asarray(grd_err) ** 2).sum(axis=0)
+                )
+                fout.write("Total force on system\n")
+                fout.write(
+                    "    {:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}\n"
+                    .format(
+                        F_sys[0], dF_sys[0],
+                        F_sys[1], dF_sys[1],
+                        F_sys[2], dF_sys[2],
+                    )
+                )
+                coords_np = np.asarray(myMol.atom_coords())
+                centroid = coords_np.mean(axis=0)
+                F_np = -np.asarray(grd_tot)
+                dF_np = np.asarray(grd_err)
+                fout.write(
+                    "Torque per atom (about centroid)\n"
+                )
+                for i in range(num_nuc):
+                    x, y, z = coords_np[i] - centroid
+                    Fx, Fy, Fz = F_np[i]
+                    dFx, dFy, dFz = dF_np[i]
+                    tau_i = np.array([
+                        y * Fz - z * Fy,
+                        z * Fx - x * Fz,
+                        x * Fy - y * Fx,
+                    ])
+                    dtau_i = np.sqrt(np.array([
+                        (y * dFz) ** 2 + (z * dFy) ** 2,
+                        (z * dFx) ** 2 + (x * dFz) ** 2,
+                        (x * dFy) ** 2 + (y * dFx) ** 2,
+                    ]))
+                    fout.write(
+                        "{:4s}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}\n"
+                        .format(
+                            myMol.atom_symbol(i),
+                            tau_i[0], dtau_i[0],
+                            tau_i[1], dtau_i[1],
+                            tau_i[2], dtau_i[2],
+                        )
+                    )
                 fout.write("Total torque\n")
                 fout.write(
                     "    {:>16.6g} ± {:>12.6g}"
@@ -1889,6 +1937,57 @@ nuclear forces using PGCS.
                             -avg_grd_tot[i, 1], avg_grd_err[i, 1],
                             -avg_grd_tot[i, 2], avg_grd_err[i, 2],
                             fid, n_states,
+                        )
+                    )
+                F_sys = -np.asarray(avg_grd_tot).sum(axis=0)
+                dF_sys = np.sqrt(
+                    (np.asarray(avg_grd_err) ** 2).sum(axis=0)
+                )
+                fout.write(
+                    "Total force on system (averaged)\n"
+                )
+                fout.write(
+                    "    {:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}\n"
+                    .format(
+                        F_sys[0], dF_sys[0],
+                        F_sys[1], dF_sys[1],
+                        F_sys[2], dF_sys[2],
+                    )
+                )
+                coords_np = np.asarray(myMol.atom_coords())
+                centroid = coords_np.mean(axis=0)
+                F_np = -np.asarray(avg_grd_tot)
+                dF_np = np.asarray(avg_grd_err)
+                fout.write(
+                    "Torque per atom (about centroid,"
+                    " averaged)\n"
+                )
+                for i in range(num_nuc):
+                    x, y, z = coords_np[i] - centroid
+                    Fx, Fy, Fz = F_np[i]
+                    dFx, dFy, dFz = dF_np[i]
+                    tau_i = np.array([
+                        y * Fz - z * Fy,
+                        z * Fx - x * Fz,
+                        x * Fy - y * Fx,
+                    ])
+                    dtau_i = np.sqrt(np.array([
+                        (y * dFz) ** 2 + (z * dFy) ** 2,
+                        (z * dFx) ** 2 + (x * dFz) ** 2,
+                        (x * dFy) ** 2 + (y * dFx) ** 2,
+                    ]))
+                    fout.write(
+                        "{:4s}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}\n"
+                        .format(
+                            myMol.atom_symbol(i),
+                            tau_i[0], dtau_i[0],
+                            tau_i[1], dtau_i[1],
+                            tau_i[2], dtau_i[2],
                         )
                     )
                 fout.write(
