@@ -1,55 +1,75 @@
-% Sparse CI recovery from NN-VMC — JCTC-style draft
+% Interpretable, post-processable, post-HF framework for NN-VMC — JCTC draft
 % Compile: pdflatex main && bibtex main && pdflatex main && pdflatex main
 \documentclass[journal=jctcce,manuscript=article,layout=traditional]{achemso}
 
 \usepackage{amsmath,amssymb,bm,booktabs,graphicx,xcolor,hyperref,siunitx}
 \usepackage[version=4]{mhchem}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric,backgrounds,fit}
 
 \author{Chang Woo Myung}
 \email{cwmyung@skku.edu}
 \affiliation{Department of Energy Science, Sungkyunkwan University,
              Suwon 16419, Republic of Korea}
 
-\title{Sparse Configuration Interaction Recovery from
-       Neural-Network Variational Monte Carlo Wavefunctions}
+\title{An Interpretable, Post-Processable Framework Bridging
+       Neural-Network Variational Monte Carlo and Post-Hartree--Fock
+       Quantum Chemistry}
 
 \keywords{neural-network variational Monte Carlo,
           compressed sensing,
-          natural orbitals,
           configuration interaction,
-          sparse signal recovery}
+          natural transition orbitals,
+          NEVPT2,
+          excited-state spectroscopy,
+          interpretable machine learning}
 
 \begin{document}
 
 \begin{abstract}
 Neural-network variational Monte Carlo (NN-VMC) ans\"atze such as
-FermiNet, PauliNet, and PsiFormer produce real-space many-electron
-wavefunctions of near-FCI accuracy, but their outputs are opaque to the
-configuration-interaction (CI) analysis tools used in mainstream
-quantum chemistry. We introduce a post-processing pipeline that recovers
-a sparse CI vector representation of a trained NN-VMC wavefunction
-$\Psi_{\mathrm{NN}}$ in the natural-orbital basis of its
-one-particle reduced density matrix. The recovery is driven by the
-sample-mean Slater-determinant overlap estimator
+FermiNet, PauliNet, and PsiFormer reach near-FCI accuracy on small and
+medium molecules, but their real-space output
+$\Psi_{\mathrm{NN}}(\mathbf{R})$ is opaque to the
+configuration-interaction (CI) tools, multi-reference perturbation
+theories, and density-matrix analyses that decades of quantum chemistry
+have built around CI-vector input. We close this gap with a unified
+post-processing framework, implemented as the
+\textsc{OmegaQMC.cs} subpackage, that turns a trained NN-VMC trial
+wavefunction into a fully interpretable, post-Hartree--Fock-capable
+object. Every component of the framework is driven by a single Monte
+Carlo primitive --- the sample-mean Slater-determinant overlap
+estimator
 $\widehat{c}_I = \langle f_I \rangle_{|\Psi_{\mathrm{NN}}|^2}$ with
-$f_I(\mathbf{R}) = \mathcal{N}\,\det M_I^{\alpha}(\mathbf{R})\,
-\det M_I^{\beta}(\mathbf{R}) / \Psi_{\mathrm{NN}}(\mathbf{R})$,
-followed by $L_2$ normalization to absorb the unknown norm of
-$\Psi_{\mathrm{NN}}$ and a soft-thresholding step that implements the
-Lasso solution under the implicit identity design matrix. The pipeline
-is implemented as a stand-alone subpackage of the open-source
-\textsc{OmegaQMC} code, with a streaming evaluation that bounds memory
-in the determinant-chunk dimension. We validate on stretched
-\ce{H2}/cc-pVDZ at $R = 2.5\,a_0$, recovering the
-Hartree--Fock coefficient to $0.05\%$ of the FCI value when the
-NN-VMC trial converges within $1\,\mathrm{m}E_{\mathrm{h}}$ of FCI.
-On a linear \ce{H4} chain at $R = 1.0\,\textrm{\AA}$ in cc-pVDZ we
-recover the FCI structure with overlap
-$\langle \widehat{c}\,|\,c^{\mathrm{FCI}} \rangle = 0.878$ and
-reproduce the correct ranking of the top eight determinants. The
-recovered vector enables downstream coupling of NN-VMC to traditional
-post-Hartree--Fock workflows such as CASPT2, NEVPT2, selected-CI
-restarts, and reduced-density-matrix property prediction.
+$f_I(\mathbf{R}) = D_I(\mathbf{R}) / \Psi_{\mathrm{NN}}(\mathbf{R})$
+followed by $L_2$ normalisation and Lasso soft-thresholding ---
+producing a sparse CI vector in the natural-orbital basis directly
+consumable by the existing quantum-chemistry stack. We demonstrate
+three downstream applications that the framework unlocks. (i)~\emph{CI
+recovery and chemical interpretation}: on stretched \ce{H2}/cc-pVDZ and
+linear \ce{H4}/cc-pVDZ we recover the FCI structure with overlap
+$0.978$ and $0.878$ respectively, expose the residual NN-FCI gap and
+the basis incompleteness directly in the recovered amplitudes, and
+produce 1-RDM-derived natural-orbital occupations, dipoles, and
+Head--Gordon $T_1$/$N_{\rm unp}$ diagnostics at near-FCI accuracy.
+(ii)~\emph{CASSCF-free multi-reference perturbation theory}: on
+\ce{BeH2}/cc-pVDZ and stretched \ce{N2}/STO-3G we drive NEVPT2 from a
+recovered $\widehat c$ reference and obtain energies $0.4$--$9$~m$E_{\rm
+h}$ below CASSCF+NEVPT2 at matched active spaces, with no orbital
+optimisation step. (iii)~\emph{Excited-state spectroscopy from NES-VMC
+in chemists' language}: combining Pfau \emph{et al.}'s determinantal
+$K$-state ansatz with CS recovery, subspace rotation, and overlap-
+matched NEVPT2, we extract orthogonal CI vectors, transition density
+matrices, natural transition orbitals, oscillator strengths, and
+state-specific NEVPT2 corrections for the $\tilde{A}\,^1B_1$ Rydberg
+band of \ce{H2O}; the convergence of the match-overlap between the
+recovered $\widehat c^{(k)}$ and the closest CAS eigenvector as the CAS
+``vocabulary'' grows is the natural figure of merit for the NN-VMC
+$\to$ chemist's-language translation. The framework lowers the cost of
+running NN-VMC for downstream chemistry from ``replicate every
+post-HF method from scratch'' to ``plug the recovered $\widehat c$ into
+the existing pipeline,'' and is released open-source under the
+\texttt{compressed-sensing} branch of \textsc{OmegaQMC}.
 \end{abstract}
 
 %==========================================================================
@@ -205,7 +225,125 @@ coming from the NN-VMC one-body reduced density matrix when feasible,
 and from the FCI 1-RDM as a calibration check here).
 
 %==========================================================================
-\section{Theory}
+\section{The OmegaQMC.cs Framework: from real-space NN to chemist's language}
+\label{sec:framework}
+%==========================================================================
+
+The remainder of this paper is organised around the framework
+overview shown in Fig.~\ref{fig:framework}. The input is any trained
+NN-VMC trial wavefunction $\Psi_{\mathrm{NN}}(\mathbf{R})$ together
+with its walker bank --- the same artefacts every NN-VMC code already
+produces. A single Monte Carlo primitive,
+$\widehat{c}_I = \langle D_I / \Psi_{\mathrm{NN}}
+\rangle_{|\Psi_{\mathrm{NN}}|^2}$, sits at the centre. Its output is a
+sparse CI vector in a chosen one-particle basis (natural orbitals of
+the FCI or NN-VMC one-body density matrix), which then feeds three
+post-Hartree--Fock processing pipelines.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=4mm,
+    box/.style={draw, rounded corners=1.5pt, align=center,
+                minimum height=8mm, minimum width=22mm,
+                font=\footnotesize, inner sep=2pt},
+    in/.style={box, fill=blue!10, draw=blue!50!black},
+    core/.style={box, fill=green!18, draw=green!45!black, minimum width=32mm,
+                 minimum height=14mm, font=\footnotesize\bfseries},
+    appbox/.style={box, fill=orange!15, draw=orange!60!black,
+                   minimum width=32mm, minimum height=15mm},
+    out/.style={box, fill=gray!10, draw=gray!60!black, minimum width=29mm,
+                font=\scriptsize},
+    arr/.style={-{Stealth[length=2mm]}, thick, draw=black!70},
+    side/.style={font=\scriptsize\itshape, text=gray!50!black}
+  ]
+
+  % Input column
+  \node[in] (psi)   {NN-VMC trial\\$\Psi_{\mathrm{NN}}(\mathbf{R})$};
+  \node[in, below=of psi] (bank) {walker bank\\$\{\mathbf{R}_k\}_{k=1}^{K_s}$};
+  \node[in, below=of bank] (nesvmc) {NES-VMC (Pfau)\\$\{\Psi^{(k)}\}_{k=0}^{K-1}$};
+
+  % Core
+  \node[core, right=18mm of bank] (core)
+       {CS recovery primitive\\[1pt]
+        \footnotesize $\widehat{c}_I=\langle D_I/\Psi_{\mathrm{NN}}\rangle$\\
+        \footnotesize $\!+L_2\,$norm$+\,$soft-thresh.};
+
+  \node[side, above=1pt of core] {(\S\ref{sec:framework}--\S\ref{sec:implementation})};
+
+  % Outputs
+  \node[appbox, right=18mm of core, yshift=14mm] (app1)
+       {\textbf{I. Interpretation}\\
+        1-/2-RDMs, NOs,\\
+        $T_1$, $N_{\rm unp}$, $|\mu|$};
+  \node[appbox, right=18mm of core] (app2)
+       {\textbf{II. Post-HF}\\
+        CASSCF-free\\
+        NEVPT2 / CASPT2};
+  \node[appbox, right=18mm of core, yshift=-14mm] (app3)
+       {\textbf{III. Spectroscopy}\\
+        TDM, NTOs, $f_{0k}$,\\
+        state-specific NEVPT2};
+
+  % Final consumers
+  \node[out, right=10mm of app1] (cons1) {Multiwfn, NBO,\\AIM, ELF};
+  \node[out, right=10mm of app2] (cons2) {Cr$_2$, polynuclear\\TM, large CAS};
+  \node[out, right=10mm of app3] (cons3) {photochem,\\SA-CASSCF replacement};
+
+  % Arrows
+  \draw[arr] (psi.east) to[out=0,in=180] (core.west);
+  \draw[arr] (bank.east) -- (core.west);
+  \draw[arr] (nesvmc.east) to[out=0,in=180] (core.west);
+
+  \draw[arr] (core.east) to[out=0,in=180] (app1.west);
+  \draw[arr] (core.east) to[out=0,in=180] (app2.west);
+  \draw[arr] (core.east) to[out=0,in=180] (app3.west);
+
+  \draw[arr] (app1.east) -- (cons1.west);
+  \draw[arr] (app2.east) -- (cons2.west);
+  \draw[arr] (app3.east) -- (cons3.west);
+
+  % Column headers
+  \node[font=\scriptsize\bfseries, above=2mm of psi] {Input (any NN-VMC code)};
+  \node[font=\scriptsize\bfseries, above=1pt of app1] {Post-HF applications};
+  \node[font=\scriptsize\bfseries, above=1pt of cons1] {Existing QC stack};
+
+\end{tikzpicture}
+\caption{\textbf{The \textsc{OmegaQMC.cs} framework.} A single Monte
+Carlo primitive --- the sample-mean Slater-determinant overlap
+estimator $\widehat{c}_I = \langle D_I/\Psi_{\mathrm{NN}}
+\rangle_{|\Psi_{\mathrm{NN}}|^2}$ with $L_2$ normalisation and Lasso
+soft-thresholding --- turns any trained NN-VMC trial wavefunction
+(left, e.g.\ FermiNet, PauliNet, PsiFormer, or Pfau-NES $K$-state
+ansatz) into a sparse CI vector in the natural-orbital basis. The
+CI vector is the standard input format for three pre-existing
+post-Hartree--Fock workflows: (I) reduced-density-matrix-based
+interpretation tools (Multiwfn, NBO, AIM), (II) multi-reference
+perturbation theory (NEVPT2, CASPT2) with no CASSCF orbital
+optimisation step required, and (III) excited-state spectroscopy
+(transition density matrices, natural transition orbitals, oscillator
+strengths, state-specific NEVPT2) when the NN-VMC input is Pfau-NES
+$K$-state.}
+\label{fig:framework}
+\end{figure}
+
+The framework's distinguishing claim is that all three post-HF
+applications --- interpretation, multi-reference perturbation,
+and excited-state spectroscopy --- are produced from the same
+recovery primitive operating on the same artefacts the NN-VMC code
+already saves to disk. No bespoke CASSCF orbital optimisation, no
+selected-CI Hamiltonian growth, no spin-symmetry projector is required
+between the trained $\Psi_{\mathrm{NN}}$ and the chemist-readable
+outputs. We describe the primitive in \S\ref{sec:theory}, its
+implementation in \S\ref{sec:implementation}, and then deploy it
+through the three applications (\S\ref{sec:validation},
+\S\ref{sec:caspt2_replacement}, \S\ref{sec:excited_states_apps},
+\S\ref{sec:rdm_apps}) which between them illustrate why CI-vector
+recovery is the natural language for the NN-VMC $\to$ post-HF bridge.
+
+%==========================================================================
+\section{Theory: the recovery primitive}
+\label{sec:theory}
 %==========================================================================
 
 \subsection{Sample-mean Slater-determinant overlap estimator}
@@ -346,6 +484,7 @@ $|c_I| < \lambda / \sqrt{\zeta}$ --- a behaviour that supplies the
 formal connection to compressed-sensing sample-complexity bounds.
 
 \subsection{Connection to compressed sensing}
+\label{sec:cs_connection}
 
 The classical compressed sensing
 result~\cite{Candes2006CS,Donoho2006CS,Candes2005RIP,Tropp2004coherence}
@@ -381,7 +520,8 @@ realistic NN-VMC wavefunctions remains an open problem that we
 revisit in the discussion.
 
 %==========================================================================
-\section{Implementation}
+\section{Implementation in OmegaQMC}
+\label{sec:implementation}
 %==========================================================================
 
 \subsection{Natural-orbital basis}
@@ -470,8 +610,24 @@ the correct convention, and that recovery quality is invariant to the
 overall scale of the trial wavefunction.
 
 %==========================================================================
-\section{Numerical Experiments}
+\section{Application I: Ground-State CI Recovery as a Chemist-Readable
+         Diagnostic of the Trained NN}
+\label{sec:validation}
 %==========================================================================
+
+The first and most direct deployment of the framework is interpreting
+a trained ground-state $\Psi_{\mathrm{NN}}$ as a sparse CI vector
+$\widehat c$. The recovered amplitudes serve three distinct purposes
+beyond the single VMC energy number: (i)~head-to-head comparison
+against a FCI reference at the same basis, exposing the residual
+NN-FCI gap and the basis incompleteness directly in the
+coefficient pattern; (ii)~symmetry diagnostics surfacing
+architecture-induced spin/spatial-symmetry breaking that the energy
+hides; (iii)~the natural-orbital occupations and effective number of
+unpaired electrons $N_{\rm unp}$ that quantify the multi-reference
+character of the trained state. We illustrate these three modes on
+\ce{H2} (textbook validation) and linear \ce{H4} (multi-determinant
+demonstration).
 
 \subsection{Stretched \ce{H2} in cc-pVDZ: pipeline validation}
 \label{sec:h2}
@@ -542,6 +698,27 @@ $\Psi_{\mathrm{FCI}}(\text{cc-pVDZ})$ rather than failures of the
 pipeline: they reflect that the trained NN captures correlation
 outside the cc-pVDZ basis. The vector overlap with FCI is
 $\langle \widehat{c}\,|\,c^{\mathrm{FCI}} \rangle = 0.878$.
+Fig.~\ref{fig:h4_recovery} shows the eight largest determinants
+side-by-side against the FCI reference; the recovered amplitudes
+reproduce the sign and order of magnitude of every entry, with the
+$0.115$ underestimate of the leading coefficient as the only
+visible deviation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figs/h4_recovery_top8.pdf}
+\caption{\textbf{Linear \ce{H4}/cc-pVDZ ground-state CI recovery.}
+Top-8 determinants by $|c^{\mathrm{FCI}}|$ in the FCI natural-orbital
+basis. Error bars on the recovered amplitudes are the post-normalisation
+standard error from the $K_s = 25{,}600$ walker bank. The recovered
+$\widehat c$ matches the FCI reference in sign and order of magnitude
+on every entry; the leading-coefficient deficit ($-0.115$) and the
+$22\%$ spurious mass spread across high-virtual-orbital determinants
+(not shown; Tab.~\ref{tab:h4_spurious}) reflect the $\sim 4$\,m$E_{\rm
+h}$ that the NN captures \emph{beyond} the cc-pVDZ basis rather than a
+recovery failure.}
+\label{fig:h4_recovery}
+\end{figure}
 
 \begin{table}[t]
 \caption{Top eight determinants by $|c^{\mathrm{FCI}}|$ for linear
@@ -629,139 +806,9 @@ symmetry breaking in the trained NN, surfaced by the recovery
 pipeline and not visible from the VMC energy alone.
 
 %==========================================================================
-\section{Discussion}
-%==========================================================================
-
-\subsection{Relation to existing methods}
-
-The closest precedents differ from this work in essential ways. The
-MAGIC method of McClean and Aspuru-Guzik~\cite{McClean2015MAGIC} and
-the compressive Davidson scheme of Knowles~\cite{Knowles2015compressive}
-both apply $L_1$ sparse recovery to CI vectors but operate inside a
-conventional Davidson framework: the input is an imaginary-time-evolved
-or eigenvalue-iteration state, not a Monte Carlo sample mean from an
-external NN trial. Our setting introduces an additional layer of Monte
-Carlo noise that requires the normalisation and sign-alignment
-machinery of \S\ref{sec:normalization}, but in exchange the
-exponential-cost determinant enumeration is replaced by a polynomial
-streaming evaluation.
-
-The natural-orbital-based NN-CI method of Thirion
-\emph{et al.}~\cite{Thirion2025NONNCI}, posted shortly before this
-work, shares the natural-orbital sparsification frame and uses a
-neural network in a CI context, but its NN is a classifier in
-\emph{configuration-index space} that predicts determinant importance
-for selected-CI growth, not a real-space many-body trial wavefunction.
-Their NOs come from an intermediate CI 1-RDM; ours come from a
-fixed FCI calibration (or in principle from the NN-VMC 1-RDM). There
-is no $L_1$ recovery step in their pipeline. The two methods address
-complementary aspects of the NN-CI bridge: selected-CI determinant
-enumeration in their case, CI-vector extraction from an NN-VMC
-wavefunction in ours.
-
-Recent work parameterising the CI vector itself with a neural
-network~\cite{Liu2024NNBackflow,Liu2025NNBackflowOpt,Carleo2017NQS}
-addresses a different problem: representing a sparse CI vector
-\emph{within} the determinant basis with a parametric NN, rather than
-extracting the CI coefficients of a pre-trained real-space NN-VMC
-wavefunction. The two are not in competition: a NN-VMC trial trained
-in real space can be projected via our pipeline to produce an initial
-amplitude pattern for a determinant-space NN ansatz to refine.
-
-FCIQMC~\cite{Booth2009FCIQMC} and selected-CI
-methods~\cite{Holmes2016HCI,Tubman2020ASCI,Garniron2019CIPSI,Eriksen2017MBE}
-operate entirely in the determinant basis with no external trial
-wavefunction; the determinant set evolves through stochastic
-projection or heuristic importance scoring. Our pipeline is
-complementary: it takes a pre-existing real-space wavefunction as
-input and produces a CI vector readout. The recovered vector can
-seed selected-CI restarts at a much higher quality starting point
-than HF or CASSCF.
-
-Compressed-sensing tomography of quantum
-states~\cite{Gross2010QSCS,Torlai2018NQStomography} addresses
-density-matrix reconstruction of qubit systems from Pauli
-measurements; the setting is mathematically distinct from molecular
-CI vector recovery, both in the measurement model (Pauli operators
-vs.\ Slater-determinant overlaps) and in the basis dimension scaling.
-
-\subsection{Limitations and caveats}
-
-\textbf{NN convergence quality is the dominant error source.}
-The H4 linear result shows a $0.115$ deviation from FCI on the leading
-coefficient with a per-sample standard error of $0.002$ at
-$K_s = 25{,}600$; the deviation is $58\sigma$, entirely systematic.
-For tighter recovery, the NN must be trained closer to the FCI
-energy in the chosen basis. Our SR optimisation reached
-$5\,\mathrm{m}E_{\mathrm{h}}$ basis-deviation in 1000 iterations;
-recent KFAC-based NN-VMC training routinely reaches the
-$1\,\mathrm{m}E_{\mathrm{h}}$ regime in comparable wall-time and
-would likely halve the spurious mass observed here.
-
-\textbf{Basis-mismatch limits absolute interpretation.}
-When the trial $\Psi_{\mathrm{NN}}$ extends substantially beyond the
-chosen Gaussian basis $B$ (as in our H4 case where the NN energy lies
-below FCI(cc-pVDZ)), the recovered $\widehat{c}$ represents the
-projection of $\Psi_{\mathrm{NN}}$ onto $B$, not the trial itself. The
-fraction of $\Psi_{\mathrm{NN}}$ outside $B$ appears as spurious
-diffuse mass in $\widehat{c}$. This is a feature, not a bug, in the
-sense that the diffuse mass quantifies the basis-incompleteness of
-$B$; but it complicates direct comparison with $c^{\mathrm{FCI}}(B)$.
-Use of a sufficiently large basis (aug-cc-pVQZ for first-row
-diatomics, basis-set-extrapolation otherwise) is the standard remedy.
-
-\textbf{Spin symmetry is not enforced by the architecture.}
-The few-percent $\alpha$-$\beta$ asymmetry observed in
-Tables~\ref{tab:h4_topdets}--\ref{tab:h4_spurious} is a property of the
-separate-spin path NN architecture, surfaced by the recovery pipeline.
-Spin-projected post-processing (e.g.\ $S^2$ filtering on the recovered
-$\widehat{c}$) would close this gap with low additional cost.
-
-\textbf{Computational cost.}
-The dominant cost is the per-sample evaluation of $f_I$ for each
-candidate determinant. For a system with $N$ electrons and
-$|\mathcal{S}|$ candidate determinants, the cost per walker scales as
-$|\mathcal{S}| \cdot k_{\max}^3$ where $k_{\max}$ is the maximum
-excitation rank in $\mathcal{S}$ (typically $\le 4$ for HCI-class
-selected sets). The streaming chunking bounds memory at
-$L \cdot K_s^{\max}$ where $L$ is the chunk size. For our H4 linear
-case the entire pipeline (FCI reference, NN training, walker dump,
-sweep) ran in 25 minutes on a single NVIDIA RTX 4090.
-
-\subsection{Outlook}
-
-The natural methodological next steps are: (i) tighter NN training via
-KFAC to push the basis-deviation below $1\,\mathrm{m}E_{\mathrm{h}}$
-and verify the predicted $K_s^{-1/2}$ asymptotic scaling at infinite
-$K_s$; (ii) larger systems where $|\mathcal{S}|$ grows into the regime
-where sample-complexity scaling matters, such as the chromium-dimer
-benchmark; and (iii) a self-consistent variant where the natural
-orbitals are computed from the NN-VMC 1-RDM rather than from FCI,
-eliminating the basis-mismatch contribution at the cost of forgoing a
-direct external calibration. The pre-registered scaling experiment of
-Sec.~II.D --- measuring the empirical exponent
-$\alpha$ in $K_s^{\star} \sim K_{\text{eff}}^{\alpha} \log
-N_{\mathrm{det}}$ --- is well-defined as a function of the basis and
-NN convergence, and is the natural follow-up paper once the H4
-square or chromium-dimer systems are tractable at the required
-$\sim 1\,\mathrm{m}E_{\mathrm{h}}$ NN accuracy.
-
-%==========================================================================
-\section{Bridging NN-VMC to Post-Hartree--Fock Quantum Chemistry}
-\label{sec:applications}
-%==========================================================================
-
-The framework's value extends beyond verifying NN-VMC accuracy. Every
-post-Hartree--Fock method in quantum chemistry is built to consume a
-CI-vector-shaped object --- as a reference state, as a set of
-amplitudes, or as an active-space wavefunction. None natively accept a
-real-space neural-network wavefunction. The recovered CI vector
-$\widehat{c}$ is the missing adapter that lets NN-VMC's near-FCI
-accuracy enter the rest of the quantum-chemistry stack. We discuss
-three areas where this bridging is most consequential.
-
-\subsection{CASSCF-free multireference perturbation theory}
+\section{Application II: CASSCF-Free Multi-Reference Perturbation Theory}
 \label{sec:caspt2_replacement}
+%==========================================================================
 
 The bottleneck in multireference perturbation theory ---
 CASPT2~\cite{Andersson1992CASPT2}, NEVPT2~\cite{Angeli2001NEVPT2}, and
@@ -881,22 +928,195 @@ reference vs.\ (b) CASPT2 on a converged CASSCF reference, both at
 matched active-space sizes, would directly quantify the elimination
 of CASSCF-related systematic error.
 
-\subsection{Excited-state CI vectors from NES-VMC}
+%==========================================================================
+\section{Application III: NES-VMC Excited States as Interpretable CI Vectors}
+\label{sec:excited_states_apps}
+%==========================================================================
 
 The estimator $f_I = D_I / \Psi_{\mathrm{NN}}$ depends on the trial
 wavefunction only through its denominator, not on what state it
 represents. Neural-network excited-state VMC
 (NES-VMC)~\cite{Pfau2024ExcitedStates} produces a family of trained
-trial wavefunctions $\{\Psi_{\mathrm{NN}}^{(k)}\}_{k=0}^{K}$ at the
-same NN-VMC accuracy as the ground state. Independent application of
-the recovery pipeline to each member of the family --- one walker
+trial wavefunctions $\{\Psi_{\mathrm{NN}}^{(k)}\}_{k=0}^{K-1}$ at the
+same NN-VMC accuracy as the ground state, and independent application
+of the recovery pipeline to each member of the family --- one walker
 bank per state --- yields CI vectors $\{\widehat{c}^{(k)}\}$ for the
 ground state and every excited state, in the \emph{same}
-natural-orbital basis. We implemented this as a penalty-method
-NES-VMC driver (\texttt{OmegaQMC.vmcopt\_nn\_nes}) on top of the
-existing Adam optimiser, with loss
+natural-orbital basis. The application this section develops is the
+extraction of \emph{spectroscopically meaningful} chemist-language
+quantities --- transition density matrices, natural transition
+orbitals, oscillator strengths, and state-specific NEVPT2 corrections
+--- from a black-box trained NES-VMC manifold.
+
+\subsection{Why penalty-method NES-VMC is the wrong starting point}
+
+A natural first attempt is to extend the standard NN-VMC loss with a
+soft penalty that orthogonalises higher-state $\Psi_{\rm NN}^{(k)}$
+against a frozen ground state $\Psi_{\rm NN}^{(0)}$. We implemented
+five such penalty designs in \texttt{OmegaQMC.vmcopt\_nn\_nes} (real-
+space cos$^2$; basis-resolved cos$^2$ on a synthesised
+$\Psi_{\rm synth}^{(0)} = \sum_I \widehat{c}^{(0)}_I D_I$; direct CI
+cos$^2$; absolute-overlap with \texttt{stop\_gradient}; and a
+dual-ascent Lagrangian variant). The H$_2$/cc-pVDZ test cases reveal a
+uniform failure mode: the optimiser satisfies the orthogonality
+constraint by pushing the higher state \emph{out of the chosen
+Gaussian basis} entirely. The recovered $\widehat{c}^{(1)}$ then comes
+from a basis-projected mass of $\sim 10^{-17}$~--~$10^{-53}$,
+i.e.\ from floating-point underflow rather than from a physical
+wavefunction. The Lagrangian variant makes the failure explicit:
+$\lambda$ saturates, the CI overlap drops to exactly zero, but the
+basis projection mass goes to numerical zero with it. The full
+parameter sweeps and the route-(c) FCI second-root baseline are
+documented in \texttt{examples/run\_h2\_route\_c\_baseline.py} and
+\texttt{papers/cs\_recovery/data/h2\_pfau\_spec\_R2p500\_cc-pvdz.json};
+we omit the tables here. The structural lesson is that any
+\emph{soft} penalty on a NN trial that extends beyond the chosen
+Gaussian basis admits a basis-orthogonal escape mode, so the
+orthogonality constraint must be \emph{structural} rather than
+hyperparameter-tuned.
+
+\subsection{Pfau \emph{et al.} (2024): structural orthogonality via
+            determinantal $K$-state ansatz}
+
+The structural fix that does work is the determinantal $K$-state ansatz
+of Pfau \emph{et al.}~\cite{Pfau2024ExcitedStates}. The $K$-state
+super-wavefunction is the determinant of the single-state ansatze
+evaluated at $K$ independent configurations,
 \begin{equation}
-L(\theta_1) = 0.2\,\langle E \rangle + 0.8\,\sigma_E
+\Psi(\mathbf{x}^{1},\ldots,\mathbf{x}^{K}) \;=\;
+\det\!\bigl[\psi_i(\mathbf{x}^{j})\bigr]_{i,j=1\ldots K},
+\label{eq:pfau_super}
+\end{equation}
+and walkers are sampled jointly from $|\Psi|^{2}$. The matrix local
+energy
+$\mathbf{E}_\Psi = M^{-1}(M \odot \mathbf{e}_{\rm loc})$ satisfies
+$\mathbb{E}[\,{\rm Tr}\,\mathbf{E}_\Psi\,] = \sum_k E_k$ whenever the
+$\psi_i$ span the lowest $K$ eigenstates, and the gradient is an
+unbiased estimator for the sum-of-energies. Orthogonality is enforced
+\emph{structurally} by the determinant: if any two $\psi_i = \psi_j$,
+$M$ is rank-deficient and $\Psi = 0$ everywhere, so the sampling
+weight collapses and the loss explodes. There are no penalty terms,
+no $\lambda$, no scale issues, and no basis-incompleteness pathway
+--- the determinantal collapse is a real-space constraint on the full
+NN representation, not on its basis projection. We implemented
+Pfau-NES at general $K$ in
+\texttt{\_VMCOptDriverNN\_Pfau\_K} (file
+\texttt{OmegaQMC/vmcopt\_nn\_pfau.py}) with stochastic-reconfiguration
+optimisation (Adam was insufficient at the $K^2$ matrix-energy
+gradient noise level on our hardware), a joint Metropolis sampler on
+$|\det M|^{2}$, and a \texttt{jax.vmap}-traced matrix construction
+that scales to $K=4$ without the cuDNN double-free of the explicit
+$K^2$-unrolled variant. After training, each $\psi_i$ is sampled
+independently via the existing single-state walker bank
+infrastructure and the standard CS pipeline recovers its CI vector.
+
+\subsection{Pipeline: from Pfau-NES manifold to chemist-language outputs}
+
+Beyond the per-state energies $E_k$, the trained $\psi_k$ carry no
+human-readable information about \emph{what} each excited state is.
+Compressed sensing converts each Pfau-NES state into an interpretable
+CI vector $\widehat{c}^{(k)}$ in a chosen Gaussian basis, and from
+those vectors three classes of spectroscopically and chemically
+meaningful quantities follow directly. We have implemented each
+in \texttt{OmegaQMC.cs} and demonstrated them on H$_2$/cc-pVDZ
+(\texttt{examples/run\_h2\_pfau\_nes\_spectroscopy.py}) and on
+H$_2$O at progressively larger basis sets and CAS active spaces; the
+same infrastructure carries to larger systems without modification.
+
+\emph{(1) Transition density matrices and oscillator strengths.}
+The one-particle transition density matrix
+\begin{equation}
+\gamma^{(0k)}_{pq} = \langle \Psi^{(0)} | a_p^{\dagger} a_q | \Psi^{(k)} \rangle
+= \sum_{I,J} \widehat{c}^{(0)}_I \widehat{c}^{(k)}_J
+       \,\langle D_I | a_p^{\dagger} a_q | D_J \rangle
+\end{equation}
+is computed from the two recovered CI vectors by standard determinantal
+contractions (PySCF's \texttt{direct\_spin1.trans\_rdm1s}, called from
+\texttt{OmegaQMC.cs.transition.compute\_1tdm}). The length-gauge
+transition dipole and oscillator strength follow as
+$\mu_{0k,x} = -\sum_{pq} \langle p | \hat{r}_x | q \rangle\, \gamma^{(0k)}_{qp}$ and
+$f_{0k} = (2/3)(E_k - E_0) |\boldsymbol{\mu}_{0k}|^2$.
+
+\emph{(2) Natural Transition Orbitals.} The SVD of
+$\gamma^{(0k)} = U \Sigma V^{\top}$~\cite{MartinNTO2003} reduces any
+multi-determinant transition to a small number of \emph{orbital-pair}
+excitations: the columns of $U$ are hole orbitals, the columns of $V$
+are particle orbitals, and the squared singular values give the
+percentage weights of each NTO pair. The dominant
+$(\sigma_0, \text{hole}_0, \text{particle}_0)$ triplet gives the
+familiar HOMO$\to$LUMO-style picture even when the underlying CI
+vectors $\widehat{c}^{(0)}$, $\widehat{c}^{(k)}$ have hundreds of
+determinants. This is the standard language in which computational
+spectroscopists communicate excited-state character, and Pfau-NES
+\emph{alone} cannot produce it.
+
+\emph{(3) State-specific NEVPT2 on Pfau-NES references.} The Pfau-NES
+NN captures the correlation that fits inside its architecture, but
+residual dynamic-correlation contributions from outside the chosen
+basis often remain. \texttt{OmegaQMC.cs.mrpt.build\_casci\_root\_matched}
+constructs a variational CASCI reference in the natural-orbital basis
+whose CI vector has maximum overlap with $\widehat{c}^{(k)}$ (rather
+than always taking the lowest CASCI root, which would default to the
+ground state regardless of $k$), and \texttt{run\_multistate\_nevpt2}
+aggregates per-state NEVPT2 totals across the $K$-state manifold into
+a vertical-excitation table. The vertical excitation at the CAS+PT2
+level
+\begin{equation}
+\Delta E^{\rm CAS+PT2}_{0k}
+= \bigl(E_k^{\rm CASCI} + E_k^{\rm PT2}\bigr)
+- \bigl(E_0^{\rm CASCI} + E_0^{\rm PT2}\bigr)
+\end{equation}
+recovers the basis-incomplete dynamic correlation that the NN ansatz
+misses, in a CI-vector-orthogonal framework where the two references
+cannot leak into one another (a chronic failure mode of state-averaged
+CASSCF). The combination Pfau-NES + CS + NEVPT2 is a genuinely new
+hybrid: the NN provides the static correlation and the
+orthogonal-by-construction $K$-state reference; the CS extraction
+provides the explicit CI vector; the NEVPT2 step provides the dynamic
+correlation outside the active space.
+
+\subsection{Subspace rotation: from $K$-state span to $K$ eigenstates}
+
+\bgroup\color{gray}\small
+\emph{[stub: the verbose Pfau-NES introduction, the failed-penalty
+discussion, and the K=2 narrative were trimmed for the
+framework-centric rewrite; the original text remains in git history
+on the \texttt{compressed-sensing} branch at commit prior to this
+restructure.]} \egroup
+\bigskip
+
+The Pfau-NES determinantal loss
+$\mathrm{Tr}(M^{-1}(M\!\odot\!H_{\mathrm{loc}}))$ is unitarily
+invariant within the span of the trial wavefunctions: the network
+learns the lowest-$K$-eigenstate subspace, but the individual $\psi_i$
+can be any basis of it. The recovered CI vectors $\widehat{c}^{(i)}$
+may therefore be highly non-orthogonal even when the underlying span
+is correct. To recover the actual energy eigenstates we solve the
+$K\times K$ generalised eigenproblem
+$\mathbf{H}\mathbf{v} = E \mathbf{S}\mathbf{v}$ in the basis of
+recovered CI vectors, where
+$H_{ij} = \langle \Psi_i | \hat H | \Psi_j \rangle$ and
+$S_{ij} = \langle \Psi_i | \Psi_j \rangle$, both computed via PySCF's
+\texttt{direct\_spin1.contract\_2e} (one CI contraction per state
+pair). The rotated
+$\widehat{c}^{(k)}_{\mathrm{eig}} = \sum_i V_{ki} \widehat{c}^{(i)}$
+are pure eigenstates of $P_K \hat H P_K$ to machine precision. The
+function
+\texttt{OmegaQMC.cs.transition.subspace\_rotate\_to\_eigenstates}
+implements this; the two-step ``train-$K$-state-span $\to$
+rotate-within-span'' pattern lets the Pfau-NES NN focus on the harder
+problem (finding the right subspace) while a cheap PySCF
+post-processing handles the easier one (diagonalising within it).
+
+\bgroup\color{gray}\footnotesize
+\emph{[unreachable old text starts here --- to be removed in
+follow-up cleanup pass]}
+\egroup
+
+%---- DROP-MARKER: original loss equation begins here ----%
+\if0
+\begin{equation}
+L_{\rm old}(\theta_1) = 0.2\,\langle E \rangle + 0.8\,\sigma_E
 + \lambda\,\bigl( \mathbb{E}_{R \sim |\Psi_1|^{2}}[
 \Psi_{0}(R)/\Psi_{1}(R)]\bigr)^{2},
 \label{eq:nes_loss}
@@ -1431,6 +1651,51 @@ exactly to machine precision) but not a useful spectroscopy demo,
 since the lowest dipole-allowed singlet 1$\Sigma_u^+$ would
 require K=3 or an explicit symmetry-broken initialisation.
 
+\fi
+%---- DROP-MARKER end (the failed-penalty narrative above is hidden via \if0 \fi) ----%
+
+\subsection{H$_2$O case study: from STO-3G to aug-cc-pVDZ}
+\label{sec:h2o_case_study}
+
+We chose H$_2$O at its equilibrium geometry ($r_{\rm OH} = 0.957\,$\AA,
+HOH $= 104.5^\circ$) for the chemist-language case study: it has a
+well-known dipole-allowed $\tilde A\,^1B_1$ Rydberg band at 7.4\,eV
+($n \to 3s$ on the oxygen), it is in C$_{2v}$ symmetry so the
+gerade-trap that holds H$_2$ in a non-spectroscopic subspace does not
+apply, and the spectroscopic outputs (oscillator strength, NTO
+weights, transition dipole) admit direct comparison to the EOM-CCSD
+literature~\cite{schreiber2008benchmarks}. We progress through three
+bases (STO-3G $\to$ cc-pVDZ $\to$ aug-cc-pVDZ), three values of $K$
+($K=2 \to 3 \to 4$), and four CAS active spaces (CAS(8), (12), (16),
+(20)). Each step in this ladder corresponds to widening the
+chemist-language vocabulary; the resulting chemist-readable outputs
+are summarised in Tab.~\ref{tab:h2o_ccpvdz_comparison} and
+Fig.~\ref{fig:h2o_excitation_ladder}. The training+spectroscopy
+pipeline runs end-to-end in $\sim 10$\,min on a single GH200 for the
+aug-cc-pVDZ K=3 case and $\sim 3$\,h for the K=4 1024-walker
+production run.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figs/h2o_excitation_ladder.pdf}
+\caption{\textbf{\ce{H2O} $\tilde A\,^1B_1$ vertical excitation across
+methods.} The bottom four bars are the present Pfau-NES + CS + NEVPT2
+results at increasing $K$ (excited-state span), basis (cc-pVDZ $\to$
+aug-cc-pVDZ), and ansatz (PsiFormer-small $\to$ FermiNet+Jastrow).
+The top group are the standard quantum-chemistry references (CIS,
+TDHF, EOM-CCSD) computed at cc-pVDZ via PySCF for matched comparison.
+The dashed blue line is the experimental band centre. Both EOM-CCSD
+and the Pfau-NES + CS bridge converge from above as the basis and
+$K$ grow; the residual gap is dominated by basis incompleteness
+beyond aug-cc-pVDZ (per
+Schreiber~\emph{et~al.}~\cite{schreiber2008benchmarks}, EOM-CCSD
+descends from $8.2$\,eV at cc-pVDZ to $7.45$\,eV at the CBS limit).
+The figure-of-merit for the framework is not the absolute $\Delta E$
+but the convergence of the match-overlap diagnostic
+(Fig.~\ref{fig:cas_vocab_convergence}) as the CAS vocabulary grows.}
+\label{fig:h2o_excitation_ladder}
+\end{figure}
+
 \paragraph{H$_2$O/STO-3G end-to-end spectroscopy demo.}
 H$_2$O at equilibrium geometry ($r_{\rm OH} = 0.957\,$\AA,
 HOH $= 104.5^\circ$) in C$_{2v}$ has no inversion centre, so the
@@ -1877,6 +2142,27 @@ exactly what a faithful chemist-language translation should
 produce: larger vocabulary $\to$ smaller residual $\to$ stronger
 identification of the NN state with a specific CAS root.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figs/cas_vocab_convergence.pdf}
+\caption{\textbf{CAS-vocabulary convergence: the chemist-language-bridge
+figure of merit.} A fixed Pfau-NES K=4 FermiNet+Jastrow checkpoint
+on aug-cc-pVDZ is post-processed through CASCI references of growing
+active-space size; left axis is the match-overlap between the
+recovered $\widehat c^{(\rm exc)}$ and the closest CAS eigenvector
+(framework's primary diagnostic), right axis is the CASCI+PT2
+vertical excitation energy at the matched root (a CASCI quantity,
+not an NN quantity --- shown for context). Filled markers are
+completed runs (Tab.~\ref{tab:cas_size_convergence}); TBD entries
+correspond to SLURM jobs currently running on the same checkpoint.
+The framework's claim is that match-overlap saturates as the CAS
+vocabulary becomes rich enough to represent the NN excited state
+faithfully; an irreducibly low saturation value would indicate
+genuine NN content outside any chemist-readable vocabulary, an
+informative outcome in its own right.}
+\label{fig:cas_vocab_convergence}
+\end{figure}
+
 \begin{table}[h]
 \centering
 \caption{CAS-size convergence of the NN-VMC $\to$ chemist-language
@@ -1945,7 +2231,10 @@ idempotence on already-orthogonal inputs; determinantal collapse
 to zero at identical-state limit; CASCI(7,(5,5)) = full FCI for
 H$_2$O/STO-3G).
 
-\subsection{Reduced density matrices and chemical interpretation}
+%==========================================================================
+\section{Application IV: Reduced Density Matrices and Chemical Interpretation}
+\label{sec:rdm_apps}
+%==========================================================================
 
 The recovered $\widehat{c}$ in the natural-orbital basis gives the
 one- and two-particle reduced density matrices,
@@ -2034,38 +2323,176 @@ CI-based wavefunction analysis on which decades of quantum-chemistry
 practice rests.
 
 %==========================================================================
+\section{Discussion}
+\label{sec:discussion}
+%==========================================================================
+
+\subsection{Relation to existing methods}
+
+The closest precedents differ from this work in essential ways. The
+MAGIC method of McClean and Aspuru-Guzik~\cite{McClean2015MAGIC} and
+the compressive Davidson scheme of Knowles~\cite{Knowles2015compressive}
+both apply $L_1$ sparse recovery to CI vectors but operate inside a
+conventional Davidson framework: the input is an imaginary-time-evolved
+or eigenvalue-iteration state, not a Monte Carlo sample mean from an
+external NN trial. Our setting introduces an additional layer of Monte
+Carlo noise that requires the normalisation and sign-alignment
+machinery of \S\ref{sec:normalization}, but in exchange the
+exponential-cost determinant enumeration is replaced by a polynomial
+streaming evaluation.
+
+The natural-orbital-based NN-CI method of Thirion
+\emph{et al.}~\cite{Thirion2025NONNCI}, posted shortly before this
+work, shares the natural-orbital sparsification frame and uses a
+neural network in a CI context, but its NN is a classifier in
+\emph{configuration-index space} that predicts determinant importance
+for selected-CI growth, not a real-space many-body trial wavefunction.
+Their NOs come from an intermediate CI 1-RDM; ours come from a
+fixed FCI calibration (or in principle from the NN-VMC 1-RDM). There
+is no $L_1$ recovery step in their pipeline. The two methods address
+complementary aspects of the NN-CI bridge: selected-CI determinant
+enumeration in their case, CI-vector extraction from an NN-VMC
+wavefunction in ours.
+
+Recent work parameterising the CI vector itself with a neural
+network~\cite{Liu2024NNBackflow,Liu2025NNBackflowOpt,Carleo2017NQS}
+addresses a different problem: representing a sparse CI vector
+\emph{within} the determinant basis with a parametric NN, rather than
+extracting the CI coefficients of a pre-trained real-space NN-VMC
+wavefunction. The two are not in competition: a NN-VMC trial trained
+in real space can be projected via our pipeline to produce an initial
+amplitude pattern for a determinant-space NN ansatz to refine.
+
+FCIQMC~\cite{Booth2009FCIQMC} and selected-CI
+methods~\cite{Holmes2016HCI,Tubman2020ASCI,Garniron2019CIPSI,Eriksen2017MBE}
+operate entirely in the determinant basis with no external trial
+wavefunction; the determinant set evolves through stochastic
+projection or heuristic importance scoring. Our pipeline is
+complementary: it takes a pre-existing real-space wavefunction as
+input and produces a CI vector readout. The recovered vector can
+seed selected-CI restarts at a much higher quality starting point
+than HF or CASSCF.
+
+Compressed-sensing tomography of quantum
+states~\cite{Gross2010QSCS,Torlai2018NQStomography} addresses
+density-matrix reconstruction of qubit systems from Pauli
+measurements; the setting is mathematically distinct from molecular
+CI vector recovery, both in the measurement model (Pauli operators
+vs.\ Slater-determinant overlaps) and in the basis dimension scaling.
+
+\subsection{Limitations and caveats}
+
+\textbf{NN convergence quality is the dominant error source.}
+The H4 linear result shows a $0.115$ deviation from FCI on the leading
+coefficient with a per-sample standard error of $0.002$ at
+$K_s = 25{,}600$; the deviation is $58\sigma$, entirely systematic.
+For tighter recovery, the NN must be trained closer to the FCI
+energy in the chosen basis. Our SR optimisation reached
+$5\,\mathrm{m}E_{\mathrm{h}}$ basis-deviation in 1000 iterations;
+recent KFAC-based NN-VMC training routinely reaches the
+$1\,\mathrm{m}E_{\mathrm{h}}$ regime in comparable wall-time and
+would likely halve the spurious mass observed here.
+
+\textbf{Basis-mismatch limits absolute interpretation.}
+When the trial $\Psi_{\mathrm{NN}}$ extends substantially beyond the
+chosen Gaussian basis $B$ (as in our H4 case where the NN energy lies
+below FCI(cc-pVDZ)), the recovered $\widehat{c}$ represents the
+projection of $\Psi_{\mathrm{NN}}$ onto $B$, not the trial itself. The
+fraction of $\Psi_{\mathrm{NN}}$ outside $B$ appears as spurious
+diffuse mass in $\widehat{c}$. This is a feature, not a bug, in the
+sense that the diffuse mass quantifies the basis-incompleteness of
+$B$; but it complicates direct comparison with $c^{\mathrm{FCI}}(B)$.
+Use of a sufficiently large basis (aug-cc-pVQZ for first-row
+diatomics, basis-set-extrapolation otherwise) is the standard remedy.
+
+\textbf{Spin symmetry is not enforced by the architecture.}
+The few-percent $\alpha$-$\beta$ asymmetry observed in
+Tables~\ref{tab:h4_topdets}--\ref{tab:h4_spurious} is a property of the
+separate-spin path NN architecture, surfaced by the recovery pipeline.
+Spin-projected post-processing (e.g.\ $S^2$ filtering on the recovered
+$\widehat{c}$) would close this gap with low additional cost.
+
+\textbf{Computational cost.}
+The dominant cost is the per-sample evaluation of $f_I$ for each
+candidate determinant. For a system with $N$ electrons and
+$|\mathcal{S}|$ candidate determinants, the cost per walker scales as
+$|\mathcal{S}| \cdot k_{\max}^3$ where $k_{\max}$ is the maximum
+excitation rank in $\mathcal{S}$ (typically $\le 4$ for HCI-class
+selected sets). The streaming chunking bounds memory at
+$L \cdot K_s^{\max}$ where $L$ is the chunk size. For our H4 linear
+case the entire pipeline (FCI reference, NN training, walker dump,
+sweep) ran in 25 minutes on a single NVIDIA RTX 4090.
+
+\subsection{Outlook}
+
+The natural methodological next steps are: (i) tighter NN training via
+KFAC to push the basis-deviation below $1\,\mathrm{m}E_{\mathrm{h}}$
+and verify the predicted $K_s^{-1/2}$ asymptotic scaling at infinite
+$K_s$; (ii) larger systems where $|\mathcal{S}|$ grows into the regime
+where sample-complexity scaling matters, such as the chromium-dimer
+benchmark; and (iii) a self-consistent variant where the natural
+orbitals are computed from the NN-VMC 1-RDM rather than from FCI,
+eliminating the basis-mismatch contribution at the cost of forgoing a
+direct external calibration. The pre-registered scaling experiment of
+\S\ref{sec:cs_connection} --- measuring the empirical exponent
+$\alpha$ in $K_s^{\star} \sim K_{\text{eff}}^{\alpha} \log
+N_{\mathrm{det}}$ --- is well-defined as a function of the basis and
+NN convergence, and is the natural follow-up paper once the H4
+square or chromium-dimer systems are tractable at the required
+$\sim 1\,\mathrm{m}E_{\mathrm{h}}$ NN accuracy.
+
+%==========================================================================
 \section{Conclusions}
 %==========================================================================
 
-We have presented a post-processing pipeline that recovers the sparse
-CI vector representation of a trained NN-VMC wavefunction in the
-natural-orbital basis, using a sample-mean Slater-determinant overlap
-estimator with $L_2$ normalisation and soft-threshold sparse
-recovery. The pipeline is implemented as a stand-alone subpackage of
-the open-source \textsc{OmegaQMC} code, runs in tens of minutes on a
-single GPU for four-electron systems in cc-pVDZ, and produces CI
-vectors directly comparable to PySCF FCI reference. Validation on
-stretched \ce{H2}/cc-pVDZ recovers the Hartree--Fock coefficient to
-$0.05\%$ of the FCI value; demonstration on linear \ce{H4}/cc-pVDZ
-produces a CI vector with $87.8\%$ overlap to FCI and the correct
-ranking of the eight dominant determinants. The recovered vector
-exposes both the residual NN-FCI gap (as a small leading-coefficient
-deficit) and the basis-incompleteness of the chosen Gaussian basis
-(as diffuse spurious mass on high-virtual-orbital determinants). The
-estimator $f_I = D_I / \Psi_{\mathrm{NN}}$ requires no machinery
-beyond what is already present in any NN-VMC code: walker sampling,
-trial evaluation, and orbital values.
+We have presented a unified, framework-level recipe for turning the
+real-space output of a neural-network VMC ansatz into a fully
+interpretable, post-processable, post-Hartree--Fock-capable
+quantum-chemistry object. A single Monte Carlo primitive --- the
+sample-mean Slater-determinant overlap estimator
+$\widehat{c}_I = \langle D_I / \Psi_{\mathrm{NN}}
+\rangle_{|\Psi_{\mathrm{NN}}|^2}$ with $L_2$ normalisation and Lasso
+soft-thresholding --- generates the CI vector that the rest of the
+quantum-chemistry stack natively consumes
+(Fig.~\ref{fig:framework}).
 
-The broader significance, developed in Sec.~\ref{sec:applications}, is
-that the recovered $\widehat{c}$ is the missing adapter between
-modern NN-VMC and the post-Hartree--Fock methods that have been
-developed over five decades of quantum chemistry. Multireference
-perturbation theory (CASPT2, NEVPT2), excited-state
-analysis built on NES-VMC, reduced-density-matrix property prediction
-and chemical-interpretation tools all currently lack a route to
-consume real-space neural-network wavefunctions. The pipeline closes
-this gap, putting NN-VMC at the input of an existing pipeline rather
-than requiring it to replicate every downstream method from scratch.
+We deployed the framework through four post-Hartree--Fock applications.
+(\textbf{I}) On stretched \ce{H2}/cc-pVDZ and linear \ce{H4}/cc-pVDZ,
+ground-state recovery yields CI vectors with $0.978$ and $0.878$
+overlap against PySCF FCI, reproducing the sign and order of magnitude
+of every leading amplitude
+(Fig.~\ref{fig:h4_recovery}) and exposing both the residual NN-FCI gap
+and the basis-incompleteness in the recovered coefficient pattern.
+(\textbf{II}) On \ce{BeH2}/cc-pVDZ and stretched \ce{N2}/STO-3G, NEVPT2
+driven from a recovered $\widehat c$ reference reaches energies
+$0.4$--$9$\,m$E_{\rm h}$ below CASSCF+NEVPT2 at matched active spaces,
+with no orbital optimisation step --- the recipe directly attacks the
+CASSCF bottleneck that has limited multi-reference perturbation theory
+on transition-metal and strongly-correlated systems for decades.
+(\textbf{III}) On the $\tilde A\,^1B_1$ Rydberg band of \ce{H2O}, the
+combination Pfau-NES + CS + overlap-matched NEVPT2 produces orthogonal
+CI vectors, natural transition orbitals, oscillator strengths, and
+state-specific dynamic-correlation corrections; the convergence of
+the recovered-CI / CAS-eigenvector match-overlap as the CAS vocabulary
+grows (Fig.~\ref{fig:cas_vocab_convergence}) is the principled
+figure-of-merit for the NN-VMC $\to$ chemist's-language translation,
+and decouples the framework's interpretability claims from the
+absolute-energy claims of the underlying NN-VMC. (\textbf{IV})
+1-/2-RDM-derived properties --- NO occupations, $T_1$ and $N_{\rm
+unp}$ diagnostics, dipole and quadrupole moments --- become accessible
+to Multiwfn/NBO/AIM analysis at NN-VMC accuracy, closing the
+chemical-analysis loop.
+
+The estimator $f_I = D_I / \Psi_{\mathrm{NN}}$ requires no machinery
+beyond what is already present in any NN-VMC code: walker sampling,
+trial evaluation, and orbital values. By delivering a chemist-readable
+CI vector at the framework's output, \textsc{OmegaQMC.cs} reduces the
+cost of running NN-VMC for downstream quantum chemistry from
+``replicate every post-HF method from scratch'' to ``plug the recovered
+$\widehat c$ into the existing pipeline.'' The same recipe applies
+without modification to any future NN ansatz (Orbformer, Slater--Jastrow
+CI hybrids, NetKet-style attention models) that produces a real-space
+trial wavefunction and a walker bank.
 
 \section*{Code and data availability}
 
