@@ -16,6 +16,22 @@ where:
 
 Reference: arXiv:2410.18838
 
+Reference wavefunction
+----------------------
+The QED-FCI eigenvalue itself is invariant under unitary rotations of
+the one-particle MO basis, so any orthonormal orbital set spanning the
+AO basis yields the same ``e_qed_fci``. The *correlation energy*,
+however, is referenced to a mean field. To make
+    E_corr(QED) = E_QED-FCI − E_QED-HF
+the natural cavity-aware analogue of the usual FCI correlation
+energy, this module runs a dipole-gauge QED-HF on ``(mol, omega,
+coupling_vec)`` (closed-shell only — see :mod:`OmegaQMC.addons.qed_hf`)
+and uses those orbitals to build the integrals. The QED-HF energy and
+the resulting correlation energy are returned in the output dict.
+
+For open-shell systems QED-HF is not currently implemented; the code
+falls back to ``mf.mo_coeff`` and reports ``e_qed_hf = None``.
+
 Note on DSE basis-set treatment (proper_dse flag):
   In a truncated basis, the operator-squared form D̂² is NOT the same
   as the true (∑_i ε·r̂_i)². They agree only in the complete-basis
@@ -30,10 +46,14 @@ Note on DSE basis-set treatment (proper_dse flag):
   reproduce the legacy (operator-squared) behaviour.
 """
 
+import warnings
+
 import numpy as np
 from scipy.linalg import eigh
 from pyscf import ao2mo, fci
 from pyscf.fci import direct_spin1, cistring
+
+from OmegaQMC.addons.qed_hf import run_qed_hf
 
 
 def _build_fci_matrices(h1e, eri, dip_mo, norb, nelec, enuc):
@@ -84,7 +104,8 @@ def _build_fci_matrices(h1e, eri, dip_mo, norb, nelec, enuc):
     return H_mat, D_mat, ndim
 
 
-def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
+def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
+                use_qed_hf_reference=True):
     """QED-FCI: exact diagonalization of the Pauli-Fierz Hamiltonian.
 
     Builds the full Hamiltonian in the product basis |FCI⟩ ⊗ |n_ph⟩
@@ -94,6 +115,16 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
         H = H_elec + DSE + √(Ω/2)·(â+â†)·D + Ω·â†â
 
     The photon Fock space is truncated at nph_max photons.
+
+    The reference orbitals used to build the integrals are taken from a
+    dipole-gauge QED-HF run on ``(mol, omega, coupling_vec)`` whenever
+    ``use_qed_hf_reference=True`` (default) and the molecule is
+    closed-shell. The QED-FCI eigenvalue is orbital-invariant, but
+    using QED-HF orbitals makes the reported correlation energy
+    ``e_corr_qed = e_qed_fci − e_qed_hf`` the natural cavity-aware
+    analogue of the FCI correlation energy. For open-shell systems
+    QED-HF is not available; the code falls back to ``mf.mo_coeff`` and
+    reports ``e_qed_hf = None``.
 
     Args:
         mf: PySCF mean-field object (must have run kernel()).
@@ -107,11 +138,20 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
             dipole matrices. This makes the DSE exact in any basis.
             If False, use the legacy operator-squared form (D̂²) which
             is exact only in the complete-basis limit.
+        use_qed_hf_reference: If True (default), use QED-HF orbitals
+            and report the correlation energy relative to QED-HF. If
+            False, use ``mf.mo_coeff`` directly (legacy behaviour).
 
     Returns:
         dict with:
             'e_qed_fci': QED-FCI ground state energy.
             'e_fci': standard FCI energy (no cavity).
+            'e_qed_hf': QED-HF reference energy (None if not used).
+            'e_hf': bare HF energy of the supplied ``mf`` (``mf.e_tot``).
+            'e_corr_qed': QED correlation energy
+                e_qed_fci − e_qed_hf (None if QED-HF was not run).
+            'e_corr': bare correlation energy e_fci − e_hf.
+            'reference': 'QED-HF' if QED-HF orbitals were used, else 'HF'.
             'eigenvalues': all eigenvalues of the product Hamiltonian.
             'eigenvectors': corresponding eigenvectors.
             'nph_max': photon truncation used.
@@ -127,24 +167,51 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
     mol = mf.mol
     norb = mol.nao_nr()
     nelec = mol.nelec
-    mo_coeff = np.asarray(mf.mo_coeff)
     enuc = mol.energy_nuc()
 
-    # --- Electronic integrals in MO basis ---
-    h1e = mo_coeff.T @ np.asarray(mf.get_hcore()) @ mo_coeff
-    eri_mo = ao2mo.full(mol, mo_coeff)
-    eri_mo_full = ao2mo.restore(1, eri_mo, norb)
-
-    # --- Dipole matrix ---
+    # --- Coupling vector → magnitude λ and polarization ε ---
     coupling_vec = np.asarray(coupling_vec, dtype=np.float64)
     lam = np.linalg.norm(coupling_vec)
-
     if lam > 1e-15:
         epsilon = coupling_vec / lam
     else:
         epsilon = np.array([0.0, 0.0, 1.0])
         lam = 0.0
 
+    # --- Reference wavefunction: QED-HF (closed shell) or fall back ---
+    # QED-HF is implemented for closed-shell molecules only. For
+    # open-shell inputs we transparently fall back to ``mf.mo_coeff``.
+    # FCI is orbital-invariant in the full one-particle basis, so the
+    # eigenvalue ``e_qed_fci`` is independent of this choice; the
+    # orbital set only fixes which mean field defines the correlation
+    # energy.
+    closed_shell = (nelec[0] == nelec[1])
+    e_qed_hf = None
+    reference = 'HF'
+    if use_qed_hf_reference and closed_shell:
+        qedhf = run_qed_hf(
+            mol, omega, lambda_cav=tuple(coupling_vec.tolist()),
+        )
+        mo_coeff = np.asarray(qedhf['C'])
+        e_qed_hf = float(qedhf['E_qed_hf'])
+        reference = 'QED-HF'
+    else:
+        if use_qed_hf_reference and not closed_shell:
+            warnings.warn(
+                "qed_fci: QED-HF reference requested but molecule is "
+                "open-shell; falling back to mf.mo_coeff. The QED-FCI "
+                "energy is unaffected, but e_corr_qed will be None.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        mo_coeff = np.asarray(mf.mo_coeff)
+
+    # --- Electronic integrals in the chosen MO basis ---
+    h1e = mo_coeff.T @ np.asarray(mf.get_hcore()) @ mo_coeff
+    eri_mo = ao2mo.full(mol, mo_coeff)
+    eri_mo_full = ao2mo.restore(1, eri_mo, norb)
+
+    # --- Dipole matrix in the chosen MO basis ---
     dip_ao = mol.intor('int1e_r', comp=3)
     dip_ao_proj = lam * np.einsum('k,kpq->pq', epsilon, dip_ao)
     dip_mo = mo_coeff.T @ dip_ao_proj @ mo_coeff
@@ -244,9 +311,23 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True):
         weight_n = np.sum(psi_gs[r0:r1] ** 2)
         n_photon += n * weight_n
 
+    # --- Correlation energies ---
+    # The bare ``e_hf`` is taken from the supplied mean-field object so
+    # ``e_corr = e_fci − e_hf`` is always defined. The QED correlation
+    # energy is defined only when a QED-HF reference was actually
+    # computed (closed-shell, use_qed_hf_reference=True).
+    e_hf = float(mf.e_tot) if getattr(mf, 'e_tot', None) is not None else None
+    e_corr = (e_fci - e_hf) if e_hf is not None else None
+    e_corr_qed = (e_gs - e_qed_hf) if e_qed_hf is not None else None
+
     return {
         'e_qed_fci': e_gs,
         'e_fci': e_fci,
+        'e_qed_hf': e_qed_hf,
+        'e_hf': e_hf,
+        'e_corr_qed': e_corr_qed,
+        'e_corr': e_corr,
+        'reference': reference,
         'eigenvalues': eigenvalues,
         'eigenvectors': eigenvectors,
         'nph_max': nph_max,
