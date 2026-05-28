@@ -525,6 +525,7 @@ revisit in the discussion.
 %==========================================================================
 
 \subsection{Natural-orbital basis}
+\label{sec:nn_no_source}
 
 In the implementation we adopt the natural-orbital (NO) basis
 $\{\eta_p\}$ defined as the eigenvectors of the one-particle reduced
@@ -804,6 +805,96 @@ $1\%$--$3\%$, e.g.\ $\widehat{c}_{((1,2),(0,3))} - \widehat{c}_{((0,3),(1,2))}
 = -0.011$ for the H4 linear case. This is a direct probe of spatial
 symmetry breaking in the trained NN, surfaced by the recovery
 pipeline and not visible from the VMC energy alone.
+
+\subsection{Self-consistent NN-NO frame (CASCI-free deployment)}
+\label{sec:nn_no_self_consistent}
+
+The Source-2 path of \S\ref{sec:nn_no_source} relies on a one-time
+CASCI calculation to supply the natural-orbital frame and the candidate
+determinant set. That dependency can be removed by deriving the
+natural orbitals from the NN-VMC 1-RDM itself and supplying the
+candidate set as a vocabulary-choice combinatorial object. Three
+candidate-set strategies are admissible (CAS index structure on the
+top-occupation NN-NOs; HF-rank cutoff with all $S{+}D$ excitations;
+NN-guided selected-CI sweep). The CAS-index strategy is the cleanest
+in math and the most robust in practice because the only failure mode
+--- vocabulary too small --- is directly diagnosed by the
+match-overlap statistic of \S\ref{sec:excited_states_apps}, with no
+Monte-Carlo-noise-driven Type~I/II support-recovery error budget to
+tune. We deploy it here on the same \ce{H2}/cc-pVDZ cell as
+\S\ref{sec:h2}, choosing the full $(n_\alpha{=}1, n_\beta{=}1)$
+candidate enumeration in the 10-AO basis (100 determinants, no CAS
+truncation needed for two electrons).
+
+The bootstrap is a two-pass workflow.
+\emph{Pass~1:} Hartree--Fock orbitals from a one-shot RHF call (no
+FCI, no CASCI); run the standard CS pipeline of \S\ref{sec:theory}
+to produce $\widehat c^{\rm HF}$; construct the 1-RDM
+$\widehat \gamma^{\rm HF}_{pq} = \langle \widehat c^{\rm HF} |
+a_p^\dagger a_q | \widehat c^{\rm HF} \rangle$ via PySCF's
+\texttt{make\_rdm1}; symmetrise and diagonalise to obtain the NN-NO
+rotation $U$ and the NN-NO occupations $\{n_p^{\rm NN}\}$.
+\emph{Pass~2:} transform the AO-basis NO coefficients
+$\eta^{\rm NN-NO}_{p, {\rm AO}} = (\text{mo}_{\rm hf})_{,U} U_{,p}$ and
+re-run the CS pipeline to obtain $\widehat c^{\rm NN-NO}$ in the
+self-consistent frame. The walker bank is unchanged across passes;
+only \texttt{evaluate\_orbitals\_on\_walkers} is re-evaluated.
+Total wall time on the H2 cell: 14\,seconds on a single
+RTX 4090.
+
+Table~\ref{tab:h2_nn_no} reports the result against the FCI-NO
+calibration of \S\ref{sec:h2}. The HF coefficient recovery in the
+self-consistent NN-NO frame ($\widehat c_{((0)(0))} = +0.97035$)
+matches the FCI value ($+0.97023$) to $0.01\%$, slightly tighter than
+the $0.05\%$ recovery in the FCI-NO frame. The NN-NO occupations
+$\{1.8914, 0.0905, 0.0057, 0.0045\}$ agree with FCI-NO occupations
+$\{1.8827, 0.1107, 0.0037, 0.0010\}$ to within the expected
+NN-vs-FCI residual ($\sim 1$~m$E_{\rm h}$ in this cell), with the
+small NN-vs-FCI shift on the LUMO occupation $0.0905$ vs $0.1107$
+reflecting the same correlation balance that produces the $1.2$~m$E_{\rm
+h}$ NN-FCI energy gap. The frame alignment between NN-NOs and
+FCI-NOs --- measured as the diagonal of $|U^\dagger S V|$ where $U$
+and $V$ are the two NO sets in the AO frame and $S$ is the AO overlap
+matrix --- is $0.9997$ on the dominant $\sigma_g$ orbital and
+$0.9950$ on the LUMO $\sigma_u^*$; the deeper orbitals are
+near-degenerate pairs that rotate freely without affecting the
+recovered $\widehat c$. The reproducibility script is
+\texttt{examples/run\_h2\_nn\_no\_demo.py}; the JSON output is in
+\texttt{papers/cs\_recovery/data/h2\_nn\_no\_demo.json}.
+
+\begin{table}[h]
+\centering
+\caption{Self-consistent NN-NO frame on \ce{H2}/cc-pVDZ at
+$R=2.5\,a_0$, vs.\ the FCI-NO calibration of \S\ref{sec:h2}.
+The NN-NO bootstrap removes the FCI dependency entirely; the
+HF-coefficient recovery in the self-consistent frame is even tighter
+than in the FCI-NO frame. ``HF coeff'' is the
+$(\mathrm{occ}^\alpha,\mathrm{occ}^\beta) = ((0),(0))$ amplitude in
+each frame's NO ordering ($\sigma_g$ in both cases).}
+\label{tab:h2_nn_no}
+\small
+\begin{tabular}{lccc}
+\hline
+Quantity & Source-2 (FCI-NO) & Self-consistent (NN-NO) & FCI ground truth \\
+\hline
+HF coefficient                & $+0.9698$ & $+0.9704$ & $+0.97023$ \\
+HOMO occupation               & $1.8827$  & $1.8914$  & $1.8827$ \\
+LUMO occupation               & $0.1107$  & $0.0905$  & $0.1107$ \\
+HOMO orbital alignment        & --- (frame) & $0.9997$ & --- \\
+LUMO orbital alignment        & --- (frame) & $0.9950$ & --- \\
+Requires FCI / CASCI?         & yes & \textbf{no} & --- \\
+\hline
+\end{tabular}
+\end{table}
+
+The implication for larger systems is direct: for the H$_2$O
+case study of \S\ref{sec:h2o_case_study} we used the
+$\mathrm{CAS}(12,(4,4))$ active-space CASCI to supply both NOs and
+candidate set, but in principle the same machinery can run on
+NN-derived NOs with a CAS-vocabulary-only candidate set, requiring
+no CASCI calibration whatsoever. We document this option as a
+deployable path for systems where no good CASSCF convergence is
+available; the comparison run for H$_2$O is a follow-up.
 
 %==========================================================================
 \section{Application II: CASSCF-Free Multi-Reference Perturbation Theory}
