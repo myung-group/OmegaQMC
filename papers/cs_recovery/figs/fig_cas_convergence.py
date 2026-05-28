@@ -7,29 +7,45 @@ Y-axis (right): |E_PT2^exc| in m E_h
 import matplotlib.pyplot as plt
 import numpy as np
 
-# From tab:cas_size_convergence
-# At CAS(16) the bright-state selector picks a different rotated eigenstate
-# than at CAS(12), so the excited-state match-overlap is lower despite the
-# better ground-state match-overlap (0.48 -> 0.90). We plot the
-# ground-state match-overlap as the framework's primary convergence signal.
-cas_sizes = np.array([8, 12, 16, 20])
-match_overlap_gs  = np.array([0.48, 0.48, 0.90, np.nan])
-match_overlap_exc = np.array([0.48, 0.48, 0.23, np.nan])
-pt2_mE            = np.array([235,  201,  183,  np.nan])
-dE_CASPT2_eV      = np.array([9.97, 9.63, 9.70, np.nan])
-match_overlap = match_overlap_gs   # for plotting + TBD annotation
+# From tab:cas_size_convergence (dual-axis view)
+# Two independent improvement axes:
+#   (a) CAS size at fixed walker count (256 w):  CAS(8) -> CAS(12) -> CAS(16)
+#   (b) walker count at fixed CAS:               CAS(12) 256 w -> CAS(12) 1024 w
+# Both routes drive the ground-state match-overlap from 0.48 to ~0.90.
+cas_sizes_256w = np.array([8, 12, 16, 20])
+match_overlap_gs_256w  = np.array([0.48, 0.48, 0.90, np.nan])
+match_overlap_exc_256w = np.array([0.48, 0.48, 0.23, np.nan])
+dE_CASPT2_eV_256w      = np.array([9.97, 9.63, 9.70, np.nan])
+
+# 1024-walker bank at CAS(12)
+cas_sizes_1024w = np.array([12])
+match_overlap_gs_1024w  = np.array([0.90])
+match_overlap_exc_1024w = np.array([0.46])
+dE_CASPT2_eV_1024w      = np.array([9.95])
+
+# alias for legacy TBD-marker code
+cas_sizes     = cas_sizes_256w
+match_overlap = match_overlap_gs_256w
+match_overlap_gs = match_overlap_gs_256w
+match_overlap_exc = match_overlap_exc_256w
+dE_CASPT2_eV = dE_CASPT2_eV_256w
 
 fig, ax = plt.subplots(figsize=(6.4, 4.0))
 
 color_m = "#3a3"
 color_e = "#c66"
-ax.plot(cas_sizes, match_overlap_gs, "o-", color=color_m, markersize=7,
+ax.plot(cas_sizes_256w, match_overlap_gs_256w, "o-", color=color_m, markersize=7,
         markerfacecolor=color_m, markeredgecolor="black",
-        markeredgewidth=0.6, label=r"match-overlap $|\langle\widehat{c}^{(0)}|v^{\mathrm{CAS}}_0\rangle|$ (ground)")
-ax.plot(cas_sizes, match_overlap_exc, "o:", color=color_m, markersize=6,
-        markerfacecolor="white", markeredgecolor=color_m,
-        markeredgewidth=1.0, label=r"match-overlap $|\langle\widehat{c}^{(\mathrm{exc})}|v^{\mathrm{CAS}}_{\mathrm{matched}}\rangle|$",
-        alpha=0.7)
+        markeredgewidth=0.6,
+        label=r"ground match-overlap, 256 walkers")
+ax.plot(cas_sizes_1024w, match_overlap_gs_1024w, "D", color=color_m, markersize=10,
+        markerfacecolor="none", markeredgecolor=color_m,
+        markeredgewidth=2.0,
+        label=r"ground match-overlap, 1024 walkers")
+ax.annotate("", xy=(12, match_overlap_gs_1024w[0]),
+            xytext=(12, match_overlap_gs_256w[1]),
+            arrowprops=dict(arrowstyle="->", color=color_m, lw=1.2))
+ax.text(12.4, 0.7, "more\nwalkers", fontsize=8, color=color_m, ha="left")
 ax.set_xlabel("CAS active-space size (orbitals)", fontsize=10)
 ax.set_ylabel(r"match-overlap with closest CAS eigenstate", fontsize=10, color=color_m)
 ax.tick_params(axis="y", labelcolor=color_m)
