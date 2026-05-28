@@ -887,6 +887,27 @@ Requires FCI / CASCI?         & yes & \textbf{no} & --- \\
 \end{tabular}
 \end{table}
 
+\paragraph{Eliminating the HF step.} The Pass-1 frame above used HF
+orbitals only as one convenient orthonormal basis; HF itself plays
+no physical role in the bootstrap. Replacing the RHF call with
+L\"owdin orthogonalisation of the raw AOs --- $\eta_{\rm L\ddot{o}wdin} =
+S^{-1/2} \chi$ where $S$ is the AO overlap matrix --- removes the
+SCF iteration entirely. The empirical test on the same \ce{H2} cell
+confirms unitary covariance: Pass-1 $\widehat c$ in L\"owdin basis is
+spread across many AOs (the $((0),(0))$ amplitude is only $0.137$
+because the L\"owdin $(0,0)$ determinant has both electrons on the
+first H atom rather than one per atom), but the eigenvalues of the
+resulting 1-RDM and the Pass-2 $\widehat c$ in the NN-NO frame are
+\emph{identical to the HF-bootstrap result to printed precision}:
+NN-NO occupations $\{1.8914, 0.0905, 0.0057, 0.0045\}$, Pass-2 HF
+amplitude $+0.97035$, NN-NO/FCI-NO orbital alignment
+$0.9997$ / $0.9950$ on the dominant pair (cf.\
+Tab.~\ref{tab:h2_nn_no} and
+\texttt{papers/cs\_recovery/data/h2\_nn\_no\_demo\_lowdin.json}).
+The framework is therefore literally free of HF, CASSCF, CASCI, and
+FCI; the only irreducible inputs are an AO basis choice and the
+candidate vocabulary.
+
 The implication for larger systems is direct: for the H$_2$O
 case study of \S\ref{sec:h2o_case_study} we used the
 $\mathrm{CAS}(12,(4,4))$ active-space CASCI to supply both NOs and

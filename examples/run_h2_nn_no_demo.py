@@ -6,7 +6,7 @@ unchanged. Two-pass workflow:
 
   Pass 1: HF orbitals -> c_hat^HF -> 1-RDM in HF basis -> diagonalise
           gives NN-NOs as the rotation U from HF to NN-NO basis.
-  Pass 2: NN-NO orbitals (mo_coeff_hf @ U) -> c_hat^NN-NO.
+  Pass 2: NN-NO orbitals (pass1_coeff @ U) -> c_hat^NN-NO.
 
 For H2 at R=2.5 a0 in cc-pVDZ the candidate set is enumerated as the
 full (n_alpha=1, n_beta=1) combinatorics in the 10-AO basis (100
@@ -93,6 +93,9 @@ def main():
                     default="cs_h2_nn_no_demo/h2_R2p500_cc-pvdz_nn_no.json")
     ap.add_argument("--psi-batch", type=int, default=2048)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--pass1-basis", choices=["hf", "lowdin"], default="hf",
+                    help="Phase-1 orbital frame; 'hf' runs RHF, 'lowdin' "
+                         "uses S^(-1/2) on the raw AOs (no SCF iteration).")
     args = ap.parse_args()
 
     cell_dir = Path(args.cell_dir)
@@ -109,9 +112,21 @@ def main():
     n_orb = int(mol.nao)
     print(f"  mol: {n_orb} AOs, nelec=({n_alpha},{n_beta})")
 
-    # 1) HF orbitals (no FCI run)
-    E_HF, mo_coeff_hf = run_rhf(mol)
-    print(f"  E_HF = {E_HF: .6f} Ha")
+    # 1) Pass-1 orthonormal one-particle basis (no FCI / CASCI)
+    if args.pass1_basis == "hf":
+        E_HF, pass1_coeff = run_rhf(mol)
+        print(f"  Pass-1 basis: HF orbitals  (E_HF = {E_HF: .6f} Ha)")
+    elif args.pass1_basis == "lowdin":
+        import scipy.linalg as sla
+        S = mol.intor("int1e_ovlp")
+        pass1_coeff = np.asarray(sla.fractional_matrix_power(S, -0.5).real)
+        E_HF = float("nan")  # not computed
+        # Sanity-check orthonormality: pass1_coeff^T S pass1_coeff = I
+        ortho_err = float(np.max(np.abs(
+            pass1_coeff.T @ S @ pass1_coeff - np.eye(n_orb)
+        )))
+        print(f"  Pass-1 basis: Löwdin AOs  (no SCF; "
+              f"orthonormality residual = {ortho_err:.2e})")
 
     # 2) Candidate set = all determinants in the 10-AO basis (100 dets)
     candidate_set = enumerate_all_determinants(n_orb, n_alpha, n_beta)
@@ -134,7 +149,7 @@ def main():
 
     # 4) Pass 1: CS sweep in HF basis
     c_hat_hf, c_raw_hf = cs_sweep_one_basis(
-        mol, walkers, psi_vals, mo_coeff_hf,
+        mol, walkers, psi_vals, pass1_coeff,
         candidate_set, n_alpha, n_beta,
     )
     # sign-align to make c_HF[(0)(0)] > 0
@@ -150,7 +165,7 @@ def main():
     n_nn = n_nn[order]
     U = U[:, order]
     # NN-NO orbital coefficients in AO basis
-    nn_no_coeff_ao = np.asarray(mo_coeff_hf) @ U
+    nn_no_coeff_ao = np.asarray(pass1_coeff) @ U
     print(f"  NN-NO occupations (top 4): "
           f"{n_nn[0]:.4f}, {n_nn[1]:.4f}, {n_nn[2]:.4f}, {n_nn[3]:.4f}")
 
