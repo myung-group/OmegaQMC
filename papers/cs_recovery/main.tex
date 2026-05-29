@@ -55,10 +55,10 @@ the basis incompleteness directly in the recovered amplitudes, and
 produce 1-RDM-derived natural-orbital occupations, dipoles, and
 Head--Gordon $T_1$/$N_{\rm unp}$ diagnostics at near-FCI accuracy.
 (ii)~\emph{CASSCF-free multi-reference perturbation theory}: on
-\ce{BeH2}/cc-pVDZ (single-reference) and \ce{C2}/cc-pVDZ
-(strongly multireference, $|c_{\rm HF}|^{2} \approx 0.7$) we drive
-NEVPT2 from a recovered $\widehat c$ reference and obtain energies
-at or below CASSCF+NEVPT2 at matched active spaces, with no orbital
+converged \ce{BeH2}/cc-pVDZ, NEVPT2 driven from a recovered
+$\widehat c$ reference obtains energies $0.4$--$4.0$\,m$E_{\rm h}$
+\emph{below} CASSCF+NEVPT2 at matched CAS sizes
+$(4{,}(2{,}2)), (8{,}(3{,}3)), (10{,}(3{,}3))$, with no orbital
 optimisation step. (iii)~\emph{Excited-state spectroscopy from NES-VMC
 in chemists' language}: combining Pfau \emph{et al.}'s determinantal
 $K$-state ansatz with CS recovery, subspace rotation, and overlap-
@@ -1160,29 +1160,31 @@ state-averaging schemes, and convergence accelerators; in many cases
 they fail to converge to the chemically correct root at all.
 CASPT2 cannot proceed without a CASSCF reference.
 
-We demonstrate the framework on two trial cases: the closed-shell
-single-reference \ce{BeH2}/cc-pVDZ and the strongly multireference
-\ce{C2}/cc-pVDZ near its equilibrium bond length. Both use FermiNet
-with a deep Jastrow head~\cite{Hermann2020PauliNet} as the trial
-wavefunction ($\sim 700{,}000$ parameters), stochastic-reconfiguration
-training to convergence (5000 SR iterations at 1024 walkers each;
-energy plateau within $1\,{\rm m}E_{\rm h}$), and a 200-block,
-$51{,}200$-walker evaluation bank.
+We demonstrate the framework on closed-shell single-reference
+\ce{BeH2}/cc-pVDZ. The trial uses FermiNet with a deep Jastrow
+head~\cite{Hermann2020PauliNet} ($\sim 700{,}000$ parameters),
+stochastic-reconfiguration training to convergence (5000 SR
+iterations at 1024 walkers; energy plateau within $1\,{\rm m}E_{\rm
+h}$), and a 200-block, $51{,}200$-walker evaluation bank.
 
-For \ce{BeH2} at $R_{\rm Be-H} = 1.33$~\AA\ in cc-pVDZ, the converged
-trial reaches $E_{\rm NN} = -15.9021(8)\,E_{\rm h}$, sitting
-$65.7\,{\rm m}E_{\rm h}$ \emph{below} FCI(cc-pVDZ) due to
-beyond-basis correlation captured by the FermiNet+J ansatz
-(\S\ref{sec:beh2_convergence}). The basis-projected $\widehat c$
-recovered via the HF-Pass-1, NN-NO-Pass-2 bootstrap
-(\S\ref{sec:nn_no_self_consistent}) carries the in-basis component
-that NEVPT2 uses as its reference. For \ce{C2} at the experimental
-equilibrium $R_{\rm C-C} = 1.243$~\AA\ in cc-pVDZ, the converged trial
-reaches $E_{\rm NN} = [\text{TBD}]\,E_{\rm h}$ ($|c_{\rm HF}|^{2}
-\approx 0.7$ at FCI; a stringent multireference test). Full FCI in
-cc-pVDZ is intractable for \ce{C2} ($\sim 7 \times 10^{8}$
-determinants in 28 AOs), so the validation reference is
-CASCI$(8,(6,6))$ in the NN-derived natural-orbital frame.
+At $R_{\rm Be-H} = 1.33$~\AA\ in cc-pVDZ, the converged trial reaches
+$E_{\rm NN} = -15.9021(8)\,E_{\rm h}$, sitting $65.7\,{\rm m}E_{\rm
+h}$ \emph{below} FCI(cc-pVDZ) due to beyond-basis correlation
+captured by the FermiNet+J ansatz (\S\ref{sec:beh2_convergence}).
+The basis-projected $\widehat c$ recovered via the HF-Pass-1,
+NN-NO-Pass-2 bootstrap (\S\ref{sec:nn_no_self_consistent}) carries
+the in-basis component that NEVPT2 uses as its reference. A
+strongly-multireference test case (e.g.\ \ce{C2}/cc-pVDZ near
+equilibrium) is desirable as a stress-test for the CASSCF-free
+NEVPT2 claim, but our pilot training on \ce{C2}/cc-pVDZ produced an
+NN trial sitting $\sim 350\,{\rm m}E_{\rm h}$ below FCI(cc-pVDZ),
+placing it in the pathological regime of
+\S\ref{sec:nn_no_self_consistent} where the basis-projected fraction
+of the trial is negligible and the recovered $\widehat c$ is
+dominated by noise. We defer a paper-grade \ce{C2} demonstration to
+a follow-up that uses a larger basis (aug-cc-pVTZ) or a
+basis-constrained training scheme that keeps the trial
+representable in the target basis.
 
 For each cell, the recovered CI vector $\widehat{c}$ was projected
 into the indicated active space, the active-space Hamiltonian
@@ -1197,11 +1199,8 @@ system & active space & $E_{\rm tot}$ ($\widehat{c}$ in NN-NOs) & $E_{\rm tot}$ 
 \ce{BeH2}/cc-pVDZ & CAS(4,(2,2))   & $-15.8211$ & $-15.8171$ & $-3.98$ \\
 \ce{BeH2}/cc-pVDZ & CAS(8,(3,3))   & $-15.8274$ & $-15.8243$ & $-3.08$ \\
 \ce{BeH2}/cc-pVDZ & CAS(10,(3,3))  & $-15.8315$ & $-15.8312$ & $-0.36$ \\
-\ce{C2}/cc-pVDZ   & CAS(6,(4,4))   & TBD & TBD & TBD \\
-\ce{C2}/cc-pVDZ   & CAS(8,(6,6))   & TBD & TBD & TBD \\
 \midrule
 FCI(cc-pVDZ \ce{BeH2})   &  & $-15.8364$  &  &       \\
-CASCI(\ce{C2}, 8,(6,6))  &  & TBD         &  &       \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -1216,18 +1215,17 @@ cannot reach at the same CAS size, and the advantage becomes small
 ($<1$\,m$E_{\rm h}$) once the CAS is large enough to make the
 orbital-optimisation step less important. The gap to FCI(cc-pVDZ) at
 the largest tested CAS is $4.9$\,m$E_{\rm h}$ for $\widehat c$-NEVPT2
-vs $5.2$\,m$E_{\rm h}$ for CASSCF+NEVPT2. The strongly-correlated
-\ce{C2}/cc-pVDZ case ($|c_{\rm ref}|^{2} \approx 0.7$ at FCI) is
-expected to show a larger advantage at small active spaces, since
-multireference character strains the CASSCF reference more severely;
-those numbers are pending the C$_2$ training and recovery. A previously reported pilot on
-\ce{N2}/STO-3G yielded an NN trial sitting $\sim 1.5\,E_{\rm h}$
-\emph{below} FCI(STO-3G), which violates the in-basis recovery
-assumption discussed in \S\ref{sec:nn_no_self_consistent} (the
-trial cannot be projected meaningfully onto the STO-3G FCI candidate
-set); we omit that pilot from the present analysis and replace it
-with the \ce{C2}/cc-pVDZ cell, where the trial is representable in
-the basis.
+vs $5.2$\,m$E_{\rm h}$ for CASSCF+NEVPT2. A previously reported
+pilot on \ce{N2}/STO-3G yielded an NN trial sitting $\sim 1.5\,E_{\rm
+h}$ \emph{below} FCI(STO-3G), and a pilot on \ce{C2}/cc-pVDZ sat
+$\sim 350\,{\rm m}E_{\rm h}$ \emph{below} FCI(cc-pVDZ); both violate
+the in-basis recovery assumption discussed in
+\S\ref{sec:nn_no_self_consistent} (the trial cannot be projected
+meaningfully onto the candidate set) and are omitted from the
+present analysis. A strongly-multireference paper-grade
+demonstration that respects the in-basis assumption (e.g.\ a
+basis-constrained training scheme, or a larger basis aug-cc-pVTZ
+for \ce{C2}) is left to follow-up.
 
 The NN-VMC + CS pipeline supplies the same object CASSCF would have
 produced --- a multireference active-space wavefunction in an
