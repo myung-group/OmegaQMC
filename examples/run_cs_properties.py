@@ -70,6 +70,8 @@ def build_mol(geometry: str, R: float, basis: str, unit: str,
                  ("H", [-0.758, 0.586, 0.000])]
     elif geometry == "n2":
         atoms = [("N", [0, 0, 0]), ("N", [0, 0, R])]
+    elif geometry == "c2":
+        atoms = [("C", [0, 0, 0]), ("C", [0, 0, R])]
     else:
         raise ValueError(f"unknown geometry '{geometry}' / tag '{geometry_tag}'")
     mol = Mole_custom()
@@ -83,7 +85,7 @@ def main():
     p.add_argument("--cell-dir", required=True,
                    help="Cell directory containing the checkpoint + walker bank")
     p.add_argument("--geometry", required=True,
-                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2"])
+                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2"])
     p.add_argument("--geometry-tag", default="",
                    help="extra geometry qualifier (e.g. 'linear' or 'square' for H4)")
     p.add_argument("--R", type=float, default=1.0)
