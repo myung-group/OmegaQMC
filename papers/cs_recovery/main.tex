@@ -5,6 +5,8 @@
 \usepackage{amsmath,amssymb,bm,booktabs,graphicx,xcolor,hyperref,siunitx}
 \usepackage[version=4]{mhchem}
 \usepackage{tikz}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,backgrounds,fit}
 
 \author{Chang Woo Myung}
@@ -12,9 +14,9 @@
 \affiliation{Department of Energy Science, Sungkyunkwan University,
              Suwon 16419, Republic of Korea}
 
-\title{An Interpretable, Post-Processable Framework Bridging
-       Neural-Network Variational Monte Carlo and Post-Hartree--Fock
-       Quantum Chemistry}
+\title{Bridging Neural-Network Variational Monte Carlo and
+       Post-Hartree--Fock Quantum Chemistry by Sparse CI Vector
+       Recovery}
 
 \keywords{neural-network variational Monte Carlo,
           compressed sensing,
@@ -523,15 +525,145 @@ $N_{\mathrm{det}}$ from the union bound but no further compression. The
 $K$ scaling enters through the support-recovery analysis of Lasso
 under the so-called \emph{beta-min} condition: the smallest non-zero
 $|c_I|$ must exceed $\lambda$ for soft-thresholding to recover the
-correct support. Empirical characterisation of how
-$K_s^{\star}(\eta, K_{\text{eff}}, N_{\mathrm{det}})$ scales for
-realistic NN-VMC wavefunctions remains an open problem that we
-revisit in the discussion.
+correct support.
+
+We probe the predicted $K_s^{-1/2}$ scaling empirically on the
+\ce{H4} linear / cc-pVDZ cell of \S\ref{sec:h4_linear} by
+subsampling the existing $K_s^{\rm max}=25{,}600$-walker bank at
+$K_s \in \{200, 400, \ldots, 25{,}600\}$ with five seeds each and
+recording the recovery error $\|\widehat c - c^{\rm FCI}\|_2$
+(Fig.~\ref{fig:h4_Ks_scaling}). A power-law fit over the noise-
+dominated portion ($K_s \le 6400$) gives an exponent of $-0.29$, a
+mixture of the predicted $K_s^{-1/2}$ MC-noise scaling and the
+constant bias floor set by the NN-FCI residual. As the NN trial
+in this cell sits within $5$\,m$E_{\rm h}$ of FCI (not deeply
+converged), the bias floor is reached around $K_s \approx 10^4$,
+preventing a clean isolation of the pure-MC slope. Fully-converged
+trials (e.g.\ the BeH$_2$ cell of \S\ref{sec:beh2_convergence})
+would expose the asymptotic $-1/2$ exponent at higher $K_s$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{figs/h4_Ks_scaling.pdf}
+\caption{\textbf{Empirical $K_s$-scaling of the recovery error on
+\ce{H4} linear / cc-pVDZ.} Subsampling the existing walker bank at
+$K_s \in \{200, \ldots, 25{,}600\}$ with five seeds. The dashed red
+line is a power-law fit on $K_s \le 6400$, giving slope $-0.29$; the
+dotted grey line shows the pure $K_s^{-1/2}$ prediction. The
+saturation at the high-$K_s$ end is the NN-FCI bias floor; pure
+$K_s^{-1/2}$ scaling would emerge with a more converged trial.}
+\label{fig:h4_Ks_scaling}
+\end{figure}
+
+The Lasso soft-thresholding step plays a quantitatively meaningful
+role when $N_{\rm det} \gg K_{\rm eff}$. On the H$_2$O ground-state
+recovery at CAS(16,(4,4)) with $|\mathcal{S}|=1661$ active-space
+candidate determinants, the recovered $|\widehat c_I|$ distribution
+exhibits a clear noise floor at $\sigma \approx 2.7\!\times\!10^{-3}$
+(median of the bulk distribution beyond the top-100 amplitudes;
+Fig.~\ref{fig:h2o_lambda_sweep}, right panel). Soft-thresholding at
+$\lambda \approx 2\sigma$ retains $29\%$ of the candidate
+determinants while preserving $97\%$ of the $L_2$ signal mass and
+zeroing out the noise-dominated tail; at $\lambda \approx 7\sigma$
+only $2.3\%$ of candidates survive, yet $\|\widehat c^{\rm Lasso}\|_2
+\ge 0.95$. This is where the compressed-sensing component of the
+framework earns its name: a large basis with many small noise-
+dominated coefficients is compressed to a parsimonious sparse vector
+that downstream observables can consume.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figs/h2o_lambda_sweep.pdf}
+\caption{\textbf{Lasso compression on \ce{H2O}/aug-cc-pVDZ CAS(16)
+recovery.} Left: surviving fraction of the $|\mathcal{S}|=1661$-
+determinant candidate set vs.\ soft-threshold $\lambda$. Vertical
+gray lines mark the noise scale $\sigma$ and the recommended
+$\lambda \approx 2\sigma$. Right: histogram of $|\widehat c_I|$
+showing the clear noise-vs-signal separation. Soft-thresholding at
+$\lambda \approx 2\sigma$ retains 29\% of candidates while
+preserving 97\% of the $L_2$ mass, with the surviving coefficients
+concentrating on the chemically meaningful determinants.}
+\label{fig:h2o_lambda_sweep}
+\end{figure}
 
 %==========================================================================
 \section{Implementation in OmegaQMC}
 \label{sec:implementation}
 %==========================================================================
+
+The complete framework, from a trained NN-VMC checkpoint to a
+chemist-readable CI vector and downstream observables, is summarised
+in Algorithm~\ref{alg:framework}.
+
+\begin{algorithm}[h]
+\caption{NN-VMC $\to$ chemist-language CI vector via the
+\textsc{OmegaQMC.cs} framework. The only mean-field input is one
+RHF SCF cycle; no CASSCF, CASCI, or FCI is invoked. All
+downstream observables (NTOs, NEVPT2, 1-/2-RDM properties) follow
+from the returned $\widehat c^{\rm NN-NO,\, Lasso}$ and
+$C_{\rm NN-NO}$.}
+\label{alg:framework}
+\begin{algorithmic}[1]
+\Require Trained trial $\Psi_{\rm NN}$, walker bank
+         $\{R_k\}_{k=1}^{K_s} \sim |\Psi_{\rm NN}|^2/Z$,
+         AO basis $\{\chi_\mu\}$, chemist vocabulary
+         $\mathrm{CAS}(n_{\rm cas},(n_\alpha^{\rm cas},n_\beta^{\rm cas}))$,
+         threshold $\lambda$
+\State $C_{\rm HF} \gets \textsc{RHF}(\mathrm{mol})$
+       \Comment{one SCF cycle, $\sim$ seconds}
+\State Enumerate candidate set $\mathcal{S} \gets
+       \{ (\mathrm{occ}^\alpha,\mathrm{occ}^\beta) :
+          \mathrm{occ}^\sigma \subset \{0,\dots,n_{\rm cas}-1\},
+          |\mathrm{occ}^\sigma| = n_\sigma^{\rm cas} \}$
+       \Comment{$|\mathcal{S}| = \binom{n_{\rm cas}}{n_\alpha^{\rm cas}}
+                                  \binom{n_{\rm cas}}{n_\beta^{\rm cas}}$}
+\State $v^{\rm HF}_p(\mathbf{r}_i^k) \gets
+       \sum_\mu C_{\rm HF}[\mu,p]\,\chi_\mu(\mathbf{r}_i^k)$
+       \Comment{Pass 1: orbital values, $K_s$ walker positions}
+\For{each $I \in \mathcal{S}$}
+  \State $\widetilde c_I^{\,\rm HF} \gets
+         \frac{1}{K_s}\sum_{k=1}^{K_s}
+         \frac{D_I^{\rm HF}(R_k)}{\Psi_{\rm NN}(R_k)}$
+         \Comment{sample-mean overlap estimator}
+\EndFor
+\State $\widehat c^{\rm HF} \gets
+       \widetilde c^{\,\rm HF} \,/\, \|\widetilde c^{\,\rm HF}\|_2$
+       \Comment{$L_2$ normalisation absorbs $\sqrt{Z}$}
+\State $\widehat \gamma^{\rm HF}_{pq} \gets
+       \sum_{I,J \in \mathcal{S}}
+       \widehat c^{\rm HF}_I \, \widehat c^{\rm HF}_J \,
+       \langle D_I | a_p^\dagger a_q | D_J \rangle$
+       \Comment{PySCF \texttt{make\_rdm1}}
+\State $\widehat \gamma^{\rm HF} \gets
+       \tfrac{1}{2}(\widehat \gamma^{\rm HF} +
+                    \widehat \gamma^{\rm HF\,\top})$
+       \Comment{symmetrise}
+\State $(n_p^{\rm NN}, U) \gets
+       \textsc{Eigh}(\widehat \gamma^{\rm HF})$
+       \Comment{NN-NOs = columns of $U$ in HF coordinates}
+\State $C_{\rm NN-NO} \gets C_{\rm HF}\,U$
+       \Comment{Pass 2 orbital coefficients in AO basis}
+\State $v^{\rm NN-NO}_p(\mathbf{r}_i^k) \gets
+       \sum_\mu C_{\rm NN-NO}[\mu,p]\,\chi_\mu(\mathbf{r}_i^k)$
+       \Comment{Pass 2: re-evaluate orbitals on the same walker bank}
+\For{each $I \in \mathcal{S}$}
+  \State $\widetilde c_I^{\,\rm NN-NO} \gets
+         \frac{1}{K_s}\sum_{k=1}^{K_s}
+         \frac{D_I^{\rm NN-NO}(R_k)}{\Psi_{\rm NN}(R_k)}$
+\EndFor
+\State $\widehat c^{\rm NN-NO} \gets
+       \widetilde c^{\,\rm NN-NO} \,/\,
+       \|\widetilde c^{\,\rm NN-NO}\|_2$
+\State $\widehat c^{\rm NN-NO,\,\rm Lasso}_I \gets
+       \mathrm{soft}_\lambda(\widehat c^{\rm NN-NO}_I)
+       = \mathrm{sign}(\widehat c^{\rm NN-NO}_I)
+         \max(|\widehat c^{\rm NN-NO}_I| - \lambda, 0)$
+       \Comment{soft-thresholding (\S\ref{sec:cs_connection});
+                reference determinant excluded}
+\State \Return $\widehat c^{\rm NN-NO,\,\rm Lasso}$ and
+       $C_{\rm NN-NO}$ for downstream NTOs / NEVPT2 / RDM analysis
+\end{algorithmic}
+\end{algorithm}
 
 \subsection{Natural-orbital basis}
 \label{sec:nn_no_source}
