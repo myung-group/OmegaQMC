@@ -65,7 +65,15 @@ state-specific NEVPT2 corrections for the $\tilde{A}\,^1B_1$ Rydberg
 band of \ce{H2O}; the convergence of the match-overlap between the
 recovered $\widehat c^{(k)}$ and the closest CAS eigenvector as the CAS
 ``vocabulary'' grows is the natural figure of merit for the NN-VMC
-$\to$ chemist's-language translation. The framework lowers the cost of
+$\to$ chemist's-language translation. At deployment, the framework requires only a single Hartree--Fock SCF
+cycle to seed the Pass-1 orbital frame; no CASSCF, CASCI, or FCI step
+appears anywhere. We validate this on a fully-converged
+\ce{BeH2}/cc-pVDZ FermiNet+Jastrow trial sitting $65.7$\,m$E_{\rm h}$
+\emph{below} FCI(cc-pVDZ): the HF-seeded NN-NO bootstrap recovers the
+reference-determinant amplitude to $0.95$ vs FCI's $0.98$ and the
+dominant orbital alignment to $0.9998$, confirming the framework
+remains diagnostic in the beyond-basis-correlation regime.
+The framework lowers the cost of
 running NN-VMC for downstream chemistry from ``replicate every
 post-HF method from scratch'' to ``plug the recovered $\widehat c$ into
 the existing pipeline,'' and is released open-source under the
@@ -2718,7 +2726,17 @@ chemical-analysis loop.
 
 The estimator $f_I = D_I / \Psi_{\mathrm{NN}}$ requires no machinery
 beyond what is already present in any NN-VMC code: walker sampling,
-trial evaluation, and orbital values. By delivering a chemist-readable
+trial evaluation, and orbital values. At deployment the framework
+needs exactly one mean-field input --- a single Hartree--Fock SCF cycle
+to seed the Pass-1 orbital frame --- and no CASSCF, CASCI, or FCI
+calculation at any step (\S\ref{sec:nn_no_self_consistent}). The
+recipe is empirically robust against beyond-basis correlation:
+on a fully-converged \ce{BeH2}/cc-pVDZ FermiNet+Jastrow trial that
+sits $65.7$\,m$E_{\rm h}$ \emph{below} FCI(cc-pVDZ), the
+HF-seeded NN-NO bootstrap still recovers the reference-determinant
+amplitude to $0.95$ vs FCI's $0.98$ and the dominant orbital
+alignment to $0.9998$ (\S\ref{sec:beh2_convergence}).
+By delivering a chemist-readable
 CI vector at the framework's output, \textsc{OmegaQMC.cs} reduces the
 cost of running NN-VMC for downstream quantum chemistry from
 ``replicate every post-HF method from scratch'' to ``plug the recovered

@@ -4,6 +4,12 @@
 cusp_params.pkl
 _build
 
+# CS-recovery output / scratch directories (paper-grade JSONs are
+# copied into papers/cs_recovery/data/ when they belong in the manuscript)
+cs_h2_nn_no_demo/
+cs_pilot_results_converged/
+cs_nn_no_lowdin_results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
