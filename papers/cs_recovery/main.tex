@@ -905,8 +905,96 @@ $0.9997$ / $0.9950$ on the dominant pair (cf.\
 Tab.~\ref{tab:h2_nn_no} and
 \texttt{papers/cs\_recovery/data/h2\_nn\_no\_demo\_lowdin.json}).
 The framework is therefore literally free of HF, CASSCF, CASCI, and
-FCI; the only irreducible inputs are an AO basis choice and the
-candidate vocabulary.
+FCI on systems where the candidate set spans the full $(n_\alpha,
+n_\beta)$ enumeration, as for \ce{H2}/cc-pVDZ.
+
+\paragraph{Larger systems: candidate-set vs Pass-1-basis compatibility.}
+On systems where the candidate set must be filtered (e.g.\ a fixed
+amplitude threshold $|c_I| > \eta$ or a CAS truncation), the
+choice of Pass-1 basis matters: the index tuples
+$(\mathrm{occ}^\alpha, \mathrm{occ}^\beta)$ that the candidate set
+records refer to "the $I$-th orbital of the current basis," so a
+candidate set defined by amplitude in basis $A$ does not pick out
+the dominant determinants in basis $B$. We verified this on a
+fully-converged \ce{BeH2}/cc-pVDZ NN trial (FermiNet+J, 5000 SR
+iterations at 1024 walkers, $E_{\rm NN} = -15.9021\,E_{\rm h}$;
+\textbf{65.7\,m$E_{\rm h}$ below FCI(cc-pVDZ)}; see
+\S\ref{sec:beh2_convergence}). With the filtered candidate set
+($|c^{\rm FCI}_I| > 10^{-4}$, 2076 determinants),
+HF Pass-1 produces a clean bootstrap (NN-NO occupations
+$\{1.997, 1.876, 1.873, 0.030, 0.023, 0.020\}$, Pass-2 reference
+amplitude $+0.952$ vs FCI's $+0.978$, orbital alignment $0.9998$ on
+$1\sigma_g$), whereas L\"owdin Pass-1 fails (NN-NO occupations
+$\{1.97, 0.78, 0.75, 0.60, 0.57, 0.22\}$, Pass-2 reference
+amplitude $+0.142$) --- the L\"owdin basis's atom-localised
+"reference" determinant is physically meaningless for \ce{BeH2}'s
+delocalised valence, so the candidate set does not span the
+trial's dominant content in that basis. Empirically: \emph{use
+L\"owdin Pass-1 only with full-enumeration candidate sets; use HF
+Pass-1 for filtered candidate sets that derive from a CI calculation
+or from CAS-vocabulary indices in HF orbital ordering.} HF in this
+deployment costs one SCF cycle ($\sim$~seconds for any first- or
+second-row system) and does not introduce CASSCF or CI machinery.
+
+\subsection{Converged-NN validation on \ce{BeH2}/cc-pVDZ}
+\label{sec:beh2_convergence}
+
+To confirm that CI-vector recovery improves systematically with NN
+convergence, we trained the same FermiNet+Jastrow ansatz on
+\ce{BeH2} at $R_{\rm Be-H} = 1.33$\,\AA\ in cc-pVDZ to deep
+convergence: 5000 SR iterations at 1024 walkers (vs the pilot's 1000
+iterations at 128 walkers), followed by a 200-block,
+51\,200-walker evaluation. The trajectory shows energy plateau over
+the last 1000 SR iters within 0.3\,m$E_{\rm h}$; the long
+evaluation gives $E_{\rm NN} = -15.90209(79)\,E_{\rm h}$, sitting
+$65.7$\,m$E_{\rm h}$ \emph{below} FCI(cc-pVDZ) --- a clear
+beyond-basis-correlation regime in which the NN trial is no longer
+representable inside the cc-pVDZ FCI candidate space.
+Table~\ref{tab:beh2_converged} summarises the CS-recovery results
+side-by-side with the pilot.
+
+\begin{table}[h]
+\centering
+\caption{Effect of NN-VMC convergence on CS-recovered CI-vector
+quality (\ce{BeH2}/cc-pVDZ, FermiNet+Jastrow, HF Pass-1, NN-NO
+Pass-2 in the L\"owdin-bootstrap pipeline). Pilot: 1000 SR iters
+@ 128 walkers; converged: 5000 SR iters @ 1024 walkers. The
+converged NN sits 65.7\,m$E_{\rm h}$ \emph{below} FCI(cc-pVDZ); even
+in this beyond-basis regime, the HF-Pass-1 NN-NO bootstrap recovers
+both the reference-determinant amplitude and the leading NO
+occupations to within 2--5\% of FCI.}
+\label{tab:beh2_converged}
+\small
+\begin{tabular}{lccc}
+\hline
+Quantity & Pilot & Converged & FCI(cc-pVDZ) \\
+\hline
+$E_{\rm NN}$ ($E_{\rm h}$)        & $-15.835$  & $\mathbf{-15.9021(8)}$  & $-15.8364$ \\
+$\Delta E$ to FCI (m$E_{\rm h}$)  & $+1.3$     & $\mathbf{-65.7}$        & --- \\
+Reference amplitude $C_0$         & $0.902$    & $\mathbf{0.952}$        & $0.978$ \\
+NO occupation #1 ($1\sigma_g$)    & $1.97$     & $\mathbf{1.997}$        & $2.000$ \\
+NO occupation #2 (Be--H bonding)  & $1.77$     & $\mathbf{1.876}$        & $1.957$ \\
+NO occupation #3 (Be--H bonding)  & $1.76$     & $\mathbf{1.873}$        & $1.956$ \\
+NN-NO orbital alignment #1        & ---        & $\mathbf{0.9998}$       & --- \\
+\hline
+\end{tabular}
+\end{table}
+
+\noindent The improvement on every diagnostic shows the framework is
+not converged-NN-saturation-limited at 1000 iterations: training
+longer cleans up the residual undertraining noise in the recovered
+$\widehat c$, and the well-converged NN at 5000 iterations gives
+near-FCI NO occupations on the dominant orbitals and a $C_0$ within
+3\% of FCI even though the NN's total energy is 65.7\,m$E_{\rm h}$
+below FCI(cc-pVDZ). The remaining 2--5\% gap between the converged
+$\widehat c$ and FCI on the valence occupations is the
+\emph{basis-projection} component of the NN trial: that fraction of
+the NN's correlation energy that lives inside the cc-pVDZ
+candidate space; the rest of the 65.7\,m$E_{\rm h}$ beyond-FCI
+correlation lives outside the cc-pVDZ basis and is invisible to a
+CI recovery in that basis. Reproducibility:
+\texttt{examples/run\_nn\_no\_lowdin\_demo.py --pass1-basis hf};
+JSON output \texttt{papers/cs\_recovery/data/beh2\_R1p330\_cc-pvdz\_HF\_nn\_no.json}.
 
 The implication for larger systems is direct: for the H$_2$O
 case study of \S\ref{sec:h2o_case_study} we used the
