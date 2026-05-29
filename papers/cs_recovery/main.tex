@@ -1133,6 +1133,46 @@ CI recovery in that basis. Reproducibility:
 \texttt{examples/run\_nn\_no\_lowdin\_demo.py --pass1-basis hf};
 JSON output \texttt{papers/cs\_recovery/data/beh2\_R1p330\_cc-pvdz\_HF\_nn\_no.json}.
 
+\paragraph{Energy convergence does not imply CI-vector convergence.}
+To document the rate at which the recovered CI vector converges with
+training duration, we re-trained the same FermiNet+Jastrow ansatz on
+\ce{BeH2}/cc-pVDZ at four intermediate iteration counts
+$\{500, 1000, 2000, 3500\}$ with the same 1024-walker SR setup and a
+200-block, 51\,200-walker evaluation bank for each, and applied the
+HF-Pass-1 NN-NO recovery to every checkpoint
+(Fig.~\ref{fig:beh2_convergence_study}). The reference-amplitude
+error $|C_0^{\widehat c} - C_0^{\rm FCI}|$ falls from $0.43$ at 500
+iterations to $0.04$ at 1000 iterations, then \emph{plateaus} at
+$\sim 0.03$--$0.06$ over the next $4{,}500$ iterations, eventually
+reaching $0.027$ at 5000 iterations. The dominant valence NO
+occupations follow the same pattern: a rapid early improvement from
+$\sim 1.2$ at 500 iterations to $\sim 1.84$ at 1000, with the
+remaining $\sim 0.08$ gap to the FCI value of $1.96$ closing only
+slowly through the rest of training. By contrast, the per-iteration
+VMC energy plateaus much earlier ($\sim 1000$ SR iterations on this
+cell). The takeaway is that CI-vector convergence is a separate
+observable from energy convergence: practitioners deploying the
+framework should monitor a CI-vector diagnostic ($C_0$, NO
+occupations, or projection mass) alongside the VMC energy and stop
+training when both have plateaued.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figs/beh2_convergence_study.pdf}
+\caption{\textbf{CI-vector convergence with SR training duration on
+\ce{BeH2}/cc-pVDZ.} Left: reference-determinant amplitude deviation
+$|C_0^{\widehat c} - C_0^{\rm FCI}|$ vs.\ training iterations.
+Right: valence NO occupation deviations $|n_p^{\widehat c} - n_p^{\rm
+FCI}|$ for the two Be--H bonding orbitals. Both diagnostics show a
+rapid initial drop in the first $1000$ iterations followed by a
+slow plateau; the per-iteration VMC energy plateaus at the same
+point but the CI vector continues to improve slowly over the next
+4000 iterations. Reproducibility:
+\texttt{papers/cs\_recovery/figs/fig\_convergence\_study.py}; data
+in \texttt{data/beh2\_iter\{500,1000,2000,3500\}\_properties.json}.}
+\label{fig:beh2_convergence_study}
+\end{figure}
+
 The implication for larger systems is direct: for the H$_2$O
 case study of \S\ref{sec:h2o_case_study} we used the
 $\mathrm{CAS}(12,(4,4))$ active-space CASCI to supply both NOs and
