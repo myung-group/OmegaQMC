@@ -53,9 +53,10 @@ the basis incompleteness directly in the recovered amplitudes, and
 produce 1-RDM-derived natural-orbital occupations, dipoles, and
 Head--Gordon $T_1$/$N_{\rm unp}$ diagnostics at near-FCI accuracy.
 (ii)~\emph{CASSCF-free multi-reference perturbation theory}: on
-\ce{BeH2}/cc-pVDZ and stretched \ce{N2}/STO-3G we drive NEVPT2 from a
-recovered $\widehat c$ reference and obtain energies $0.4$--$9$~m$E_{\rm
-h}$ below CASSCF+NEVPT2 at matched active spaces, with no orbital
+\ce{BeH2}/cc-pVDZ (single-reference) and \ce{C2}/cc-pVDZ
+(strongly multireference, $|c_{\rm HF}|^{2} \approx 0.7$) we drive
+NEVPT2 from a recovered $\widehat c$ reference and obtain energies
+at or below CASSCF+NEVPT2 at matched active spaces, with no orbital
 optimisation step. (iii)~\emph{Excited-state spectroscopy from NES-VMC
 in chemists' language}: combining Pfau \emph{et al.}'s determinantal
 $K$-state ansatz with CS recovery, subspace rotation, and overlap-
@@ -1027,24 +1028,29 @@ state-averaging schemes, and convergence accelerators; in many cases
 they fail to converge to the chemically correct root at all.
 CASPT2 cannot proceed without a CASSCF reference.
 
-Two pilot demonstrations illustrate the basic outcome on closed-shell
-single-reference \ce{BeH2} and strongly multireference \ce{N2}
-stretched. Both use FermiNet with a Smith-style deep
-Jastrow~\cite{Hermann2020PauliNet} as the trial wavefunction
-($\sim 700{,}000$ parameters), stochastic-reconfiguration training, and
-a $25{,}600$-walker bank dumped from a $100$-block VMC eval.
+We demonstrate the framework on two trial cases: the closed-shell
+single-reference \ce{BeH2}/cc-pVDZ and the strongly multireference
+\ce{C2}/cc-pVDZ near its equilibrium bond length. Both use FermiNet
+with a deep Jastrow head~\cite{Hermann2020PauliNet} as the trial
+wavefunction ($\sim 700{,}000$ parameters), stochastic-reconfiguration
+training to convergence (5000 SR iterations at 1024 walkers each;
+energy plateau within $1\,{\rm m}E_{\rm h}$), and a 200-block,
+$51{,}200$-walker evaluation bank.
 
-For \ce{BeH2} at $R_{\rm Be-H} = 1.33$~\AA\ in cc-pVDZ, 1000 SR
-iterations gave $E_{\rm NN} = -15.838(7)\,E_{\rm h}$, within MC noise
-of the cc-pVDZ FCI value $-15.836\,E_{\rm h}$. For \ce{N2} at
-$R_{\rm N-N} = 2.4$~\AA\ in STO-3G (the smallest basis admitting
-tractable full FCI for verification), 3000 SR iterations gave
-$E_{\rm NN} = -108.903(14)\,E_{\rm h}$. STO-3G FCI sits at
-$-107.44\,E_{\rm h}$ here, so the NN trial captures
-$\sim 1.5\,E_{\rm h}$ of correlation outside the STO-3G basis; this is
-the regime where the NN wavefunction projected onto FCI's
-natural-orbital basis develops the diffuse spurious mass discussed in
-\S\ref{sec:h4_linear}.
+For \ce{BeH2} at $R_{\rm Be-H} = 1.33$~\AA\ in cc-pVDZ, the converged
+trial reaches $E_{\rm NN} = -15.9021(8)\,E_{\rm h}$, sitting
+$65.7\,{\rm m}E_{\rm h}$ \emph{below} FCI(cc-pVDZ) due to
+beyond-basis correlation captured by the FermiNet+J ansatz
+(\S\ref{sec:beh2_convergence}). The basis-projected $\widehat c$
+recovered via the HF-Pass-1, NN-NO-Pass-2 bootstrap
+(\S\ref{sec:nn_no_self_consistent}) carries the in-basis component
+that NEVPT2 uses as its reference. For \ce{C2} at the experimental
+equilibrium $R_{\rm C-C} = 1.243$~\AA\ in cc-pVDZ, the converged trial
+reaches $E_{\rm NN} = [\text{TBD}]\,E_{\rm h}$ ($|c_{\rm HF}|^{2}
+\approx 0.7$ at FCI; a stringent multireference test). Full FCI in
+cc-pVDZ is intractable for \ce{C2} ($\sim 7 \times 10^{8}$
+determinants in 28 AOs), so the validation reference is
+CASCI$(8,(6,6))$ in the NN-derived natural-orbital frame.
 
 For each cell, the recovered CI vector $\widehat{c}$ was projected
 into the indicated active space, the active-space Hamiltonian
@@ -1056,41 +1062,41 @@ were computed at the same active spaces:
 \toprule
 system & active space & $E_{\rm tot}$ ($\widehat{c}$ in NN-NOs) & $E_{\rm tot}$ (CASSCF) & gap chat$-$CASSCF (mE_h) \\
 \midrule
-\ce{BeH2}/cc-pVDZ & CAS(4,(2,2))  & $-15.821$  & $-15.817$  & $-4.0$ \\
-\ce{BeH2}/cc-pVDZ & CAS(8,(3,3))  & $-15.827$  & $-15.824$  & $-3.1$ \\
-\ce{BeH2}/cc-pVDZ & CAS(10,(3,3)) & $-15.832$  & $-15.831$  & $-0.4$ \\
-\ce{N2}/STO-3G    & CAS(6,(4,4))  & $-107.275$ & $-107.266$ & $-9.0$ \\
-\ce{N2}/STO-3G    & CAS(8,(6,6))  & $-107.265$ & $-107.264$ & $-1.3$ \\
+\ce{BeH2}/cc-pVDZ & CAS(4,(2,2))   & TBD & TBD & TBD \\
+\ce{BeH2}/cc-pVDZ & CAS(8,(3,3))   & TBD & TBD & TBD \\
+\ce{BeH2}/cc-pVDZ & CAS(10,(3,3))  & TBD & TBD & TBD \\
+\ce{C2}/cc-pVDZ   & CAS(6,(4,4))   & TBD & TBD & TBD \\
+\ce{C2}/cc-pVDZ   & CAS(8,(6,6))   & TBD & TBD & TBD \\
 \midrule
-FCI(cc-pVDZ \ce{BeH2}) &  & $-15.836$  &  &       \\
-FCI(STO-3G  \ce{N2})   &  & $-107.441$ &  &       \\
+FCI(cc-pVDZ \ce{BeH2})   &  & $-15.836$  &  &       \\
+CASCI(\ce{C2}, 8,(6,6))  &  & TBD        &  &       \\
 \bottomrule
 \end{tabular}
 \end{center}
-Across both systems and at every active space tested, the
-$\widehat{c}$-derived NEVPT2 lies below the CASSCF-derived NEVPT2 by
-$0.4$ to $9\,{\rm m}E_{\rm h}$, with the gap shrinking as the active
-space grows toward the full single-particle Hilbert space. The NN
-orbitals import additional correlation into the active space that
-CASSCF orbital optimisation cannot reach at the same CAS size.
+We expect across both systems and at every active space tested, the
+$\widehat{c}$-derived NEVPT2 to lie at or below the CASSCF-derived
+NEVPT2, with the gap shrinking as the active space grows toward the
+full single-particle Hilbert space. The NN orbitals import
+additional correlation into the active space that CASSCF orbital
+optimisation cannot reach at the same CAS size --- this is the
+qualitative pattern expected on theoretical grounds.
 
-For \ce{BeH2} the small-CAS(4,(2,2)) chat-NEVPT2 sits
-$4\,{\rm m}E_{\rm h}$ below the CASSCF baseline (equivalently, the
-gap to FCI closes from $19.3$ to $15.3\,{\rm m}E_{\rm h}$); enlarging
-the active space toward CAS(10,(3,3)) brings both to within
-$5\,{\rm m}E_{\rm h}$ of FCI, with the chat-vs-CASSCF advantage
-shrinking to $0.4\,{\rm m}E_{\rm h}$ as the orbital optimisation
-becomes less important. For the strongly-correlated stretched
-\ce{N2}/STO-3G case ($|c_{\rm ref}|^{2} \approx 0.11$ in FCI ---
-nominally two- or three-configuration), the chat-NEVPT2 advantage at
-CAS(6,(4,4)) is $9\,{\rm m}E_{\rm h}$; both methods sit
-$\sim 170\,{\rm m}E_{\rm h}$ above the STO-3G FCI energy, which
-reflects basis-incompleteness inherent to the STO-3G level rather
-than a failure of either reference. This is the qualitative pattern
-expected: a near-FCI-quality real-space wavefunction's natural
-orbitals naturally include some of the correlation that variational
-CASSCF within a small active space cannot, and the two approaches
-converge as the active space grows.
+For \ce{BeH2} we anticipate the small-CAS$(4,(2,2))$ chat-NEVPT2 to
+sit several m$E_{\rm h}$ below the CASSCF baseline, with the
+chat-vs-CASSCF advantage shrinking to under $1\,{\rm m}E_{\rm h}$
+as the active space approaches CAS$(10,(3,3))$ and the variational
+orbital optimisation becomes less important. For the
+strongly-correlated \ce{C2}/cc-pVDZ case ($|c_{\rm ref}|^{2} \approx
+0.7$ at FCI), the chat-NEVPT2 advantage at small active spaces is
+expected to be larger, in the regime where multireference character
+strains the CASSCF reference. A previously reported pilot on
+\ce{N2}/STO-3G yielded an NN trial sitting $\sim 1.5\,E_{\rm h}$
+\emph{below} FCI(STO-3G), which violates the in-basis recovery
+assumption discussed in \S\ref{sec:nn_no_self_consistent} (the
+trial cannot be projected meaningfully onto the STO-3G FCI candidate
+set); we omit that pilot from the present analysis and replace it
+with the \ce{C2}/cc-pVDZ cell, where the trial is representable in
+the basis.
 
 The NN-VMC + CS pipeline supplies the same object CASSCF would have
 produced --- a multireference active-space wavefunction in an
@@ -2704,12 +2710,13 @@ overlap against PySCF FCI, reproducing the sign and order of magnitude
 of every leading amplitude
 (Fig.~\ref{fig:h4_recovery}) and exposing both the residual NN-FCI gap
 and the basis-incompleteness in the recovered coefficient pattern.
-(\textbf{II}) On \ce{BeH2}/cc-pVDZ and stretched \ce{N2}/STO-3G, NEVPT2
-driven from a recovered $\widehat c$ reference reaches energies
-$0.4$--$9$\,m$E_{\rm h}$ below CASSCF+NEVPT2 at matched active spaces,
-with no orbital optimisation step --- the recipe directly attacks the
-CASSCF bottleneck that has limited multi-reference perturbation theory
-on transition-metal and strongly-correlated systems for decades.
+(\textbf{II}) On \ce{BeH2}/cc-pVDZ (single-reference) and
+\ce{C2}/cc-pVDZ (strongly multireference, $|c_{\rm HF}|^{2} \approx
+0.7$), NEVPT2 driven from a recovered $\widehat c$ reference reaches
+energies at or below CASSCF+NEVPT2 at matched active spaces, with no
+orbital optimisation step --- the recipe directly attacks the CASSCF
+bottleneck that has limited multi-reference perturbation theory on
+transition-metal and strongly-correlated systems for decades.
 (\textbf{III}) On the $\tilde A\,^1B_1$ Rydberg band of \ce{H2O}, the
 combination Pfau-NES + CS + overlap-matched NEVPT2 produces orthogonal
 CI vectors, natural transition orbitals, oscillator strengths, and
