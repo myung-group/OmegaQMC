@@ -32,6 +32,18 @@ the resulting correlation energy are returned in the output dict.
 For open-shell systems QED-HF is not currently implemented; the code
 falls back to ``mf.mo_coeff`` and reports ``e_qed_hf = None``.
 
+Photon basis (coherent_state flag)
+----------------------------------
+By default (``coherent_state=True``) the photon Fock states are built
+in the coherent-state (displaced) frame b = a + z, z = ⟨D̂⟩/√(2Ω),
+where ⟨D̂⟩ is the reference-determinant dipole expectation. This is the
+CS-QED-FCI of Vu et al., J. Chem. Theory Comput. 20, 1214 (2024). The
+displacement is an exact unitary transform of the Pauli-Fierz
+Hamiltonian, so the energy is unchanged at convergence in ``nph_max``,
+but for polar molecules (e.g. LiH) the displaced basis converges at
+``nph_max=1`` whereas the raw photon-number basis needs many Fock
+states. Set ``coherent_state=False`` for the raw PN basis (a=0).
+
 Note on DSE basis-set treatment (proper_dse flag):
   In a truncated basis, the operator-squared form D̂² is NOT the same
   as the true (∑_i ε·r̂_i)². They agree only in the complete-basis
@@ -105,7 +117,7 @@ def _build_fci_matrices(h1e, eri, dip_mo, norb, nelec, enuc):
 
 
 def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
-                use_qed_hf_reference=True):
+                use_qed_hf_reference=True, coherent_state=True):
     """QED-FCI: exact diagonalization of the Pauli-Fierz Hamiltonian.
 
     Builds the full Hamiltonian in the product basis |FCI⟩ ⊗ |n_ph⟩
@@ -141,6 +153,17 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
         use_qed_hf_reference: If True (default), use QED-HF orbitals
             and report the correlation energy relative to QED-HF. If
             False, use ``mf.mo_coeff`` directly (legacy behaviour).
+        coherent_state: If True (default), work in the coherent-state
+            (displaced) photon basis b = a + z, with z = ⟨D̂⟩/√(2Ω)
+            and ⟨D̂⟩ the dipole expectation in the reference
+            determinant. This is the "CS-QED-FCI" of Vu et al., J.
+            Chem. Theory Comput. 20, 1214 (2024); the displacement is
+            an exact unitary transform, so the energy is unchanged at
+            convergence, but the Fock truncation converges far faster
+            for polar molecules (e.g. LiH already converges at
+            nph_max=1). If False, use the raw photon-number (Fock)
+            basis centred at a=0 (PN-QED-FCI), which converges slowly
+            for polar systems.
 
     Returns:
         dict with:
@@ -157,7 +180,14 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
             'nph_max': photon truncation used.
             'ndim_elec': electronic FCI dimension.
             'ndim_total': total product space dimension.
-            'n_photon': expectation value of photon number in ground state.
+            'n_photon': expectation value of the photon number in the
+                ground state. With ``coherent_state=True`` this is the
+                displaced-frame number ⟨b†b⟩ (the photon fluctuation
+                about the coherent mean), not the bare ⟨a†a⟩.
+            'coherent_state': whether the coherent-state photon basis
+                was used.
+            'cs_displacement': the coherent-state displacement z =
+                ⟨D̂⟩/√(2Ω) (0.0 when ``coherent_state=False`` or λ=0).
             'proper_dse': whether the proper-DSE 1-body correction was
                 applied.
             'dse_correction_norm': Frobenius norm of the 1-body correction
@@ -270,6 +300,24 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
     H_elec = 0.5 * (H_elec + H_elec.T)
     D_elec = 0.5 * (D_elec + D_elec.T)
 
+    # --- Coherent-state (displaced) photon basis ---
+    # Displace b = a + z with z = d0/√(2Ω), d0 = ⟨D̂⟩ in the reference
+    # determinant. This is an exact unitary transform of the Pauli-Fierz
+    # Hamiltonian (eigenvalues unchanged at convergence):
+    #   diagonal block:  H_elec → H_elec − d0·D + ½·d0²·I
+    #   photon coupling: D      → D − d0·I        (fluctuation dipole)
+    # The displaced Fock truncation converges far faster for polar
+    # molecules — this reproduces the CS-QED-FCI of Vu et al. 2024.
+    cs_displacement = 0.0
+    if coherent_state and lam > 0:
+        na_ref, nb_ref = nelec
+        d0 = (sum(dip_mo[i, i] for i in range(na_ref))
+              + sum(dip_mo[i, i] for i in range(nb_ref)))
+        eye = np.eye(ndim_elec)
+        H_elec = H_elec - d0 * D_elec + 0.5 * d0 ** 2 * eye
+        D_elec = D_elec - d0 * eye
+        cs_displacement = float(d0 / np.sqrt(2.0 * omega))
+
     # --- Build product space Hamiltonian ---
     nph = nph_max + 1  # photon Fock states: |0⟩, |1⟩, ..., |nph_max⟩
     ndim_total = ndim_elec * nph
@@ -334,6 +382,8 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
         'ndim_elec': ndim_elec,
         'ndim_total': ndim_total,
         'n_photon': n_photon,
+        'coherent_state': bool(coherent_state and lam > 0),
+        'cs_displacement': cs_displacement,
         'proper_dse': bool(proper_dse and lam > 0),
         'dse_correction_norm': dse_correction_norm,
     }

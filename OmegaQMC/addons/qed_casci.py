@@ -10,12 +10,16 @@ one-particle MO basis (``ncas = nmo - ncore`` with all valence
 electrons active).
 
 Following Vu et al., J. Chem. Theory Comput. 20, 1214 (2024)
-[doi:10.1021/acs.jctc.3c01207], this implementation corresponds to a
-**CS-QED-CASCI in orbital choice** (QED-HF reference) combined with a
-**PN-QED-CASCI photon basis** (raw photon Fock states |0⟩…|nph_max⟩,
-without the coherent-state shift Û_CS = exp[z(b†-b)] of the paper).
-At convergence in ``nph_max`` the two photon bases give identical
-energies; the CS basis just converges faster at strong coupling.
+[doi:10.1021/acs.jctc.3c01207], this implementation is a **CS-QED-CASCI**:
+the QED-HF reference fixes the orbital choice, and (with the default
+``coherent_state=True``) the photon Fock states are built in the
+coherent-state frame Û_CS = exp[z(b†-b)], z = ⟨D̂⟩/√(2Ω). The
+displacement is an exact unitary transform of the Pauli-Fierz
+Hamiltonian, so the energy is unchanged at convergence in ``nph_max``;
+the coherent-state basis just converges far faster (e.g. LiH already
+converges at nph_max=1, whereas the raw photon-number basis needs many
+Fock states). Set ``coherent_state=False`` to recover the raw
+photon-number (PN) basis centred at a=0.
 
 The total dipole μ̂ = μ̂_e + μ_n is approximated by the electronic
 part μ̂_e only (matching qed_fci.py and qed_hf.py). For neutral
@@ -112,7 +116,7 @@ def _parse_active_space(mol, ncas, nelecas):
 
 def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
                   nph_max=10, proper_dse=True,
-                  use_qed_hf_reference=True):
+                  use_qed_hf_reference=True, coherent_state=True):
     """QED-CASCI: exact diagonalization of the Pauli-Fierz Hamiltonian
     in an electronic active space tensored with a truncated photon
     Fock space.
@@ -143,6 +147,14 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
             of Vu et al. 2024). Falls back to ``mf.mo_coeff`` for
             open-shell systems with a RuntimeWarning. Set to False
             to force HF orbitals (PN-QED-CASCI orbital choice).
+        coherent_state: If True (default), use the coherent-state
+            (displaced) photon basis b = a + z with z = ⟨D̂⟩/√(2Ω),
+            matching the CS-QED-CASCI photon basis of Vu et al. 2024.
+            The displacement is an exact unitary transform (energy
+            unchanged at convergence in ``nph_max``) but converges far
+            faster for polar molecules. With the same reference dipole,
+            this stays bit-identical to ``run_qed_fci`` at full active
+            space. If False, use the raw photon-number (Fock) basis.
 
     Returns:
         dict with:
@@ -166,7 +178,13 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
             'nph_max'            : Photon truncation used.
             'ndim_elec'          : Electronic CASCI dimension.
             'ndim_total'         : Total product-space dimension.
-            'n_photon'           : <n_ph> in the ground state.
+            'n_photon'           : <n_ph> in the ground state. With
+                                   ``coherent_state=True`` this is the
+                                   displaced-frame ⟨b†b⟩, not ⟨a†a⟩.
+            'coherent_state'     : Whether the coherent-state photon
+                                   basis was used.
+            'cs_displacement'    : Coherent-state displacement z =
+                                   ⟨D̂_total⟩/√(2Ω) (0.0 if disabled).
             'd_core_const'       : Constant electronic dipole shift
                                    from the frozen core
                                    (= 2 Σ_{i∈core} d_ii).
@@ -296,6 +314,25 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
     # contribution as a uniform diagonal shift.
     D_total = D_elec + d_core_const * np.eye(ndim_elec)
 
+    # --- Coherent-state (displaced) photon basis ---
+    # Displace b = a + z with z = d0/√(2Ω), where d0 = ⟨D̂_total⟩ in the
+    # QED-HF reference determinant (doubly-occupied core + active-occupied
+    # orbitals). Exact unitary transform of the Pauli-Fierz Hamiltonian:
+    #   diagonal block:  H_elec → H_elec − d0·D_total + ½·d0²·I
+    #   photon coupling: D_total → D_total − d0·I   (fluctuation dipole)
+    # At full active space d0 equals the run_qed_fci displacement, so the
+    # two methods stay bit-identical. Matches CS-QED-CASCI of Vu et al.
+    cs_displacement = 0.0
+    if coherent_state and lam > 0:
+        d0 = d_core_const + (
+            sum(dip_act[i, i] for i in range(nelecas_a))
+            + sum(dip_act[i, i] for i in range(nelecas_b))
+        )
+        eye = np.eye(ndim_elec)
+        H_elec = H_elec - d0 * D_total + 0.5 * d0 ** 2 * eye
+        D_total = D_total - d0 * eye
+        cs_displacement = float(d0 / np.sqrt(2.0 * omega))
+
     # --- Standard CASCI (no cavity) in the same reference orbitals ---
     # Used to report the bare correlation energy alongside the cavity
     # one. We feed the *reference* MO coefficients explicitly so the
@@ -362,6 +399,8 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
         'ndim_total': int(ndim_total),
         'n_photon': float(n_photon),
         'd_core_const': float(d_core_const),
+        'coherent_state': bool(coherent_state and lam > 0),
+        'cs_displacement': cs_displacement,
         'proper_dse': bool(proper_dse and lam > 0),
         'dse_correction_norm': dse_correction_norm,
     }
