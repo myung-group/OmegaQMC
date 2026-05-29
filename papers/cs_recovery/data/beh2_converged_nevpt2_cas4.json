@@ -1,0 +1,36 @@
+{
+  "prefix": "beh2_ferminet_jastrow_R1p330_cc-pvdz",
+  "molecule": "beh2",
+  "geometry_tag": "",
+  "R": 1.33,
+  "basis": "cc-pvdz",
+  "K_s": 51200,
+  "proj_mass": 1.920416054128196e-05,
+  "E_HF": -15.767319227638536,
+  "E_FCI": -15.836403823256424,
+  "ncas": 4,
+  "nelecas": [
+    2,
+    2
+  ],
+  "ncore": 1,
+  "n_det_kept_in_active": 10,
+  "chat": {
+    "e_casci": -15.779018288499458,
+    "e_pt2": -0.042078337208515934,
+    "e_total": -15.821096625707973,
+    "ncore": 1.0,
+    "ncas": 4.0,
+    "n_det_kept_in_active": 10.0
+  },
+  "casscf": {
+    "e_hf": -15.767319227638536,
+    "e_casscf": -15.774361332360243,
+    "e_pt2": -0.04275760963001872,
+    "e_total": -15.817118941990262,
+    "ncas": 4.0
+  },
+  "delta_total": -0.003977683717710789,
+  "delta_pt2": 0.0006792724215027857,
+  "delta_reference": -0.004656956139214685
+}

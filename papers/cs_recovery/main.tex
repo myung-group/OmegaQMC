@@ -1194,34 +1194,33 @@ were computed at the same active spaces:
 \toprule
 system & active space & $E_{\rm tot}$ ($\widehat{c}$ in NN-NOs) & $E_{\rm tot}$ (CASSCF) & gap chat$-$CASSCF (mE_h) \\
 \midrule
-\ce{BeH2}/cc-pVDZ & CAS(4,(2,2))   & TBD & TBD & TBD \\
-\ce{BeH2}/cc-pVDZ & CAS(8,(3,3))   & TBD & TBD & TBD \\
-\ce{BeH2}/cc-pVDZ & CAS(10,(3,3))  & TBD & TBD & TBD \\
+\ce{BeH2}/cc-pVDZ & CAS(4,(2,2))   & $-15.8211$ & $-15.8171$ & $-3.98$ \\
+\ce{BeH2}/cc-pVDZ & CAS(8,(3,3))   & $-15.8274$ & $-15.8243$ & $-3.08$ \\
+\ce{BeH2}/cc-pVDZ & CAS(10,(3,3))  & $-15.8315$ & $-15.8312$ & $-0.36$ \\
 \ce{C2}/cc-pVDZ   & CAS(6,(4,4))   & TBD & TBD & TBD \\
 \ce{C2}/cc-pVDZ   & CAS(8,(6,6))   & TBD & TBD & TBD \\
 \midrule
-FCI(cc-pVDZ \ce{BeH2})   &  & $-15.836$  &  &       \\
-CASCI(\ce{C2}, 8,(6,6))  &  & TBD        &  &       \\
+FCI(cc-pVDZ \ce{BeH2})   &  & $-15.8364$  &  &       \\
+CASCI(\ce{C2}, 8,(6,6))  &  & TBD         &  &       \\
 \bottomrule
 \end{tabular}
 \end{center}
-We expect across both systems and at every active space tested, the
-$\widehat{c}$-derived NEVPT2 to lie at or below the CASSCF-derived
-NEVPT2, with the gap shrinking as the active space grows toward the
-full single-particle Hilbert space. The NN orbitals import
-additional correlation into the active space that CASSCF orbital
-optimisation cannot reach at the same CAS size --- this is the
-qualitative pattern expected on theoretical grounds.
-
-For \ce{BeH2} we anticipate the small-CAS$(4,(2,2))$ chat-NEVPT2 to
-sit several m$E_{\rm h}$ below the CASSCF baseline, with the
-chat-vs-CASSCF advantage shrinking to under $1\,{\rm m}E_{\rm h}$
-as the active space approaches CAS$(10,(3,3))$ and the variational
-orbital optimisation becomes less important. For the
-strongly-correlated \ce{C2}/cc-pVDZ case ($|c_{\rm ref}|^{2} \approx
-0.7$ at FCI), the chat-NEVPT2 advantage at small active spaces is
-expected to be larger, in the regime where multireference character
-strains the CASSCF reference. A previously reported pilot on
+On \ce{BeH2}/cc-pVDZ the $\widehat{c}$-derived NEVPT2 lies below the
+CASSCF-derived NEVPT2 at every tested active space: $-3.98$,
+$-3.08$, $-0.36$\,m$E_{\rm h}$ for CAS$(4,(2,2))$, $(8,(3,3))$, and
+$(10,(3,3))$ respectively. The gap shrinks monotonically as the
+active space grows toward the full single-particle Hilbert space, in
+line with the qualitative expectation: the NN-derived NOs import
+correlation into the active space that CASSCF orbital optimisation
+cannot reach at the same CAS size, and the advantage becomes small
+($<1$\,m$E_{\rm h}$) once the CAS is large enough to make the
+orbital-optimisation step less important. The gap to FCI(cc-pVDZ) at
+the largest tested CAS is $4.9$\,m$E_{\rm h}$ for $\widehat c$-NEVPT2
+vs $5.2$\,m$E_{\rm h}$ for CASSCF+NEVPT2. The strongly-correlated
+\ce{C2}/cc-pVDZ case ($|c_{\rm ref}|^{2} \approx 0.7$ at FCI) is
+expected to show a larger advantage at small active spaces, since
+multireference character strains the CASSCF reference more severely;
+those numbers are pending the C$_2$ training and recovery. A previously reported pilot on
 \ce{N2}/STO-3G yielded an NN trial sitting $\sim 1.5\,E_{\rm h}$
 \emph{below} FCI(STO-3G), which violates the in-basis recovery
 assumption discussed in \S\ref{sec:nn_no_self_consistent} (the
