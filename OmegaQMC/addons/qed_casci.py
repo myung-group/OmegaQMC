@@ -9,6 +9,14 @@ methods coincide in the limit where the active space spans the full
 one-particle MO basis (``ncas = nmo - ncore`` with all valence
 electrons active).
 
+Closed-shell molecules use a restricted QED-HF reference and pyscf's
+spin-free FCI solver. Open-shell molecules are dispatched to
+:func:`_run_qed_ucasci`, the spin-unrestricted QED-UCASCI: separate
+α/β orbital sets from a QED-UHF reference, a spin-polarised frozen
+core, three ERI blocks (αα/αβ/ββ) and the ``direct_uhf`` solver —
+exactly the scheme of pyscf's ``mcscf.UCASCI``. It reduces to
+open-shell QED-FCI at full active space.
+
 Following Vu et al., J. Chem. Theory Comput. 20, 1214 (2024)
 [doi:10.1021/acs.jctc.3c01207], this implementation is a **CS-QED-CASCI**:
 the QED-HF reference fixes the orbital choice, and (with the default
@@ -62,9 +70,11 @@ import warnings
 import numpy as np
 from scipy.linalg import eigh
 from pyscf import ao2mo, mcscf
+from pyscf.fci import direct_uhf
 
-from OmegaQMC.addons.qed_fci import _build_fci_matrices
+from OmegaQMC.addons.qed_fci import _build_fci_matrices, _build_uhf_ci_matrices
 from OmegaQMC.addons.qed_hf import run_qed_hf
+from OmegaQMC.addons.qed_uhf import run_qed_uhf
 
 
 def _parse_active_space(mol, ncas, nelecas):
@@ -144,9 +154,11 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
             (operator-squared form, exact only in the CBS limit).
         use_qed_hf_reference: If True (default), use cavity-relaxed
             QED-HF orbitals (matches the CS-QED-CASCI orbital choice
-            of Vu et al. 2024). Falls back to ``mf.mo_coeff`` for
-            open-shell systems with a RuntimeWarning. Set to False
-            to force HF orbitals (PN-QED-CASCI orbital choice).
+            of Vu et al. 2024) — restricted QED-HF for closed-shell
+            molecules and spin-unrestricted QED-UHF for open-shell
+            molecules (dispatched to the QED-UCASCI path; see
+            :func:`_run_qed_ucasci`). Set to False to force the
+            ``mf.mo_coeff`` orbitals (PN-QED-CASCI orbital choice).
         coherent_state: If True (default), use the coherent-state
             (displaced) photon basis b = a + z with z = ⟨D̂⟩/√(2Ω),
             matching the CS-QED-CASCI photon basis of Vu et al. 2024.
@@ -194,6 +206,17 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
                                    1-body correction (full MO basis).
     """
     mol = mf.mol
+
+    # Open-shell molecules use the spin-unrestricted (QED-UCASCI) path:
+    # separate α/β orbital sets and the direct_uhf solver, exactly as
+    # pyscf's ``mcscf.UCASCI``. The closed-shell path below is unchanged.
+    if mol.nelec[0] != mol.nelec[1]:
+        return _run_qed_ucasci(
+            mf, ncas, nelecas, omega, coupling_vec,
+            nph_max=nph_max, proper_dse=proper_dse,
+            use_qed_hf_reference=use_qed_hf_reference,
+            coherent_state=coherent_state)
+
     norb = mol.nao_nr()
     enuc = mol.energy_nuc()
 
@@ -391,6 +414,240 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
         'reference': reference,
         'ncas': int(ncas),
         'ncore': int(ncore),
+        'nelecas': nelec_act,
+        'eigenvalues': eigenvalues,
+        'eigenvectors': eigenvectors,
+        'nph_max': int(nph_max),
+        'ndim_elec': int(ndim_elec),
+        'ndim_total': int(ndim_total),
+        'n_photon': float(n_photon),
+        'd_core_const': float(d_core_const),
+        'coherent_state': bool(coherent_state and lam > 0),
+        'cs_displacement': cs_displacement,
+        'proper_dse': bool(proper_dse and lam > 0),
+        'dse_correction_norm': dse_correction_norm,
+    }
+
+
+def _parse_active_space_uhf(mol, ncas, nelecas):
+    """Active-space partition for an open-shell (unrestricted) reference.
+
+    Returns ``(ncore_a, ncore_b, nelecas_a, nelecas_b)``. The α/β cores
+    are chosen so that ``ncore_σ + nelecas_σ`` equals the molecular α/β
+    electron count, allowing a spin-polarised (``ncore_a ≠ ncore_b``)
+    frozen core, exactly as in pyscf's ``mcscf.UCASCI``.
+    """
+    if isinstance(nelecas, (int, np.integer)):
+        nelecas_int = int(nelecas)
+        nelecas_b = (nelecas_int - mol.spin) // 2
+        nelecas_a = nelecas_int - nelecas_b
+    else:
+        nelecas_a, nelecas_b = int(nelecas[0]), int(nelecas[1])
+
+    na_tot, nb_tot = mol.nelec
+    ncore_a = na_tot - nelecas_a
+    ncore_b = nb_tot - nelecas_b
+    if ncore_a < 0 or ncore_b < 0:
+        raise ValueError(
+            f"Active electrons ({nelecas_a}α, {nelecas_b}β) exceed the "
+            f"molecular electron count ({na_tot}α, {nb_tot}β)."
+        )
+    norb = mol.nao_nr()
+    if ncas + max(ncore_a, ncore_b) > norb:
+        raise ValueError(
+            f"ncas + max(ncore) = {ncas + max(ncore_a, ncore_b)} exceeds "
+            f"nmo = {norb}."
+        )
+    if not (0 <= nelecas_a <= ncas and 0 <= nelecas_b <= ncas):
+        raise ValueError(
+            f"Active electrons ({nelecas_a}α, {nelecas_b}β) inconsistent "
+            f"with ncas = {ncas}."
+        )
+    return ncore_a, ncore_b, nelecas_a, nelecas_b
+
+
+def _run_qed_ucasci(mf, ncas, nelecas, omega, coupling_vec,
+                    nph_max=10, proper_dse=True,
+                    use_qed_hf_reference=True, coherent_state=True):
+    """Open-shell QED-CASCI (QED-UCASCI).
+
+    Spin-unrestricted counterpart of :func:`run_qed_casci`, following
+    pyscf's ``mcscf.UCASCI`` scheme: separate α/β orbital sets (from a
+    QED-UHF reference), a spin-polarised frozen core dressed with the
+    DSE-augmented effective potential ``J[Dt] − K[D_σ]``, three ERI
+    blocks (αα/αβ/ββ), and the ``direct_uhf`` CI solver. The photon
+    Fock-space coupling, coherent-state displacement and diagonalisation
+    are identical to the closed-shell path. Reduces to open-shell
+    :func:`OmegaQMC.addons.qed_fci.run_qed_fci` at full active space.
+
+    Returns the same dict as :func:`run_qed_casci`, with ``ncore`` and
+    ``nelecas`` reported as ``(α, β)`` tuples and ``reference`` either
+    ``'QED-UHF'`` or ``'UHF'``.
+    """
+    mol = mf.mol
+    norb = mol.nao_nr()
+    enuc = mol.energy_nuc()
+
+    ncore_a, ncore_b, nelecas_a, nelecas_b = _parse_active_space_uhf(
+        mol, ncas, nelecas)
+    nelec_act = (nelecas_a, nelecas_b)
+
+    # --- Coupling vector → magnitude λ and polarization ε ---
+    coupling_vec = np.asarray(coupling_vec, dtype=np.float64)
+    lam = float(np.linalg.norm(coupling_vec))
+    if lam > 1e-15:
+        epsilon = coupling_vec / lam
+    else:
+        epsilon = np.array([0.0, 0.0, 1.0])
+        lam = 0.0
+
+    # --- Reference orbitals: QED-UHF or fall back to mf.mo_coeff ---
+    e_qed_hf = None
+    reference = 'HF'
+    if use_qed_hf_reference:
+        qeduhf = run_qed_uhf(mol, omega, lambda_cav=tuple(coupling_vec.tolist()))
+        Ca = np.asarray(qeduhf['Ca'])
+        Cb = np.asarray(qeduhf['Cb'])
+        e_qed_hf = float(qeduhf['E_qed_uhf'])
+        reference = 'QED-UHF'
+    else:
+        mo = np.asarray(mf.mo_coeff)
+        Ca, Cb = (mo[0], mo[1]) if mo.ndim == 3 else (mo, mo)
+
+    mo_core_a, mo_cas_a = Ca[:, :ncore_a], Ca[:, ncore_a:ncore_a + ncas]
+    mo_core_b, mo_cas_b = Cb[:, :ncore_b], Cb[:, ncore_b:ncore_b + ncas]
+
+    # --- AO operators ---
+    hcore_ao = np.asarray(mf.get_hcore())
+    dip_ao = mol.intor('int1e_r', comp=3)
+    dip_ao_proj = lam * np.einsum('k,kpq->pq', epsilon, dip_ao)  # λ ε·r̂ (AO)
+    hcore_dse_ao = hcore_ao
+    if proper_dse and lam > 0:
+        quad_ao = mol.intor('int1e_rr', comp=9).reshape(3, 3, norb, norb)
+        quad_ao_proj = np.einsum('a,b,abpq->pq', epsilon, epsilon, quad_ao)
+        hcore_dse_ao = hcore_ao + 0.5 * (lam ** 2) * quad_ao_proj
+
+    # --- Frozen-core effective potential (bare + DSE), per spin ---
+    # corevhf_σ = J[D_core_α+D_core_β] − K[D_core_σ], built from the
+    # DSE-augmented two-electron interaction (bare J/K + DSE J/K). Reduces
+    # to the closed-shell (2J − K) dressing when D_core_α = D_core_β.
+    D_core_a = mo_core_a @ mo_core_a.T
+    D_core_b = mo_core_b @ mo_core_b.T
+    D_core_t = D_core_a + D_core_b
+    vj, vk = mf.get_jk(mol, np.array([D_core_a, D_core_b]), hermi=1)
+    J_tot = vj[0] + vj[1]
+    corevhf_a_bare = J_tot - vk[0]
+    corevhf_b_bare = J_tot - vk[1]
+    if lam > 0:
+        scaled = np.einsum('pq,pq->', D_core_t, dip_ao_proj)
+        J_dse = scaled * dip_ao_proj
+        corevhf_a = corevhf_a_bare + (J_dse - dip_ao_proj @ D_core_a @ dip_ao_proj)
+        corevhf_b = corevhf_b_bare + (J_dse - dip_ao_proj @ D_core_b @ dip_ao_proj)
+    else:
+        corevhf_a, corevhf_b = corevhf_a_bare, corevhf_b_bare
+
+    def _h1eff(mo_cas, hcore_eff, corevhf):
+        return mo_cas.T @ (hcore_eff + corevhf) @ mo_cas
+
+    def _ecore(hcore_eff, cva, cvb):
+        return float(
+            enuc
+            + np.einsum('pq,pq->', D_core_a, hcore_eff)
+            + np.einsum('pq,pq->', D_core_b, hcore_eff)
+            + 0.5 * np.einsum('pq,pq->', D_core_a, cva)
+            + 0.5 * np.einsum('pq,pq->', D_core_b, cvb))
+
+    # --- Active-space two-electron integrals (chemist), bare ---
+    eri_aa_bare = ao2mo.restore(1, ao2mo.full(mol, mo_cas_a), ncas)
+    eri_bb_bare = ao2mo.restore(1, ao2mo.full(mol, mo_cas_b), ncas)
+    eri_ab_bare = ao2mo.general(
+        mol, (mo_cas_a, mo_cas_a, mo_cas_b, mo_cas_b),
+        compact=False).reshape(ncas, ncas, ncas, ncas)
+
+    # --- Standard CASCI (no cavity) in the same QED-UHF orbitals ---
+    e_casci, _ = direct_uhf.kernel(
+        (_h1eff(mo_cas_a, hcore_ao, corevhf_a_bare),
+         _h1eff(mo_cas_b, hcore_ao, corevhf_b_bare)),
+        (eri_aa_bare, eri_ab_bare, eri_bb_bare),
+        ncas, nelec_act, ecore=_ecore(hcore_ao, corevhf_a_bare, corevhf_b_bare))
+    e_casci = float(e_casci)
+
+    # --- DSE-augmented active integrals + dipole ---
+    d_cas_a = mo_cas_a.T @ dip_ao_proj @ mo_cas_a
+    d_cas_b = mo_cas_b.T @ dip_ao_proj @ mo_cas_b
+    eri_aa = eri_aa_bare + np.einsum('pq,rs->pqrs', d_cas_a, d_cas_a)
+    eri_ab = eri_ab_bare + np.einsum('pq,rs->pqrs', d_cas_a, d_cas_b)
+    eri_bb = eri_bb_bare + np.einsum('pq,rs->pqrs', d_cas_b, d_cas_b)
+    h1eff_a = _h1eff(mo_cas_a, hcore_dse_ao, corevhf_a)
+    h1eff_b = _h1eff(mo_cas_b, hcore_dse_ao, corevhf_b)
+    e_core = _ecore(hcore_dse_ao, corevhf_a, corevhf_b)
+
+    dse_correction_norm = 0.0
+    if proper_dse and lam > 0:
+        da = Ca.T @ (0.5 * (lam ** 2) * quad_ao_proj) @ Ca
+        db = Cb.T @ (0.5 * (lam ** 2) * quad_ao_proj) @ Cb
+        dse_correction_norm = float(
+            0.5 * (np.linalg.norm(da) + np.linalg.norm(db)))
+
+    # --- Electronic CI matrices (DSE-dressed) ---
+    H_elec, D_elec, ndim_elec = _build_uhf_ci_matrices(
+        h1eff_a, h1eff_b, eri_aa, eri_ab, eri_bb,
+        d_cas_a, d_cas_b, ncas, nelec_act, e_core)
+    H_elec = 0.5 * (H_elec + H_elec.T)
+    D_elec = 0.5 * (D_elec + D_elec.T)
+
+    # Constant electronic-dipole shift from the frozen core
+    d_core_const = float(np.einsum('pq,pq->', D_core_t, dip_ao_proj))
+    D_total = D_elec + d_core_const * np.eye(ndim_elec)
+
+    # --- Coherent-state (displaced) photon basis ---
+    cs_displacement = 0.0
+    if coherent_state and lam > 0:
+        d0 = (d_core_const
+              + sum(d_cas_a[i, i] for i in range(nelecas_a))
+              + sum(d_cas_b[i, i] for i in range(nelecas_b)))
+        eye = np.eye(ndim_elec)
+        H_elec = H_elec - d0 * D_total + 0.5 * d0 ** 2 * eye
+        D_total = D_total - d0 * eye
+        cs_displacement = float(d0 / np.sqrt(2.0 * omega))
+
+    # --- Product-space Pauli-Fierz Hamiltonian ---
+    nph = nph_max + 1
+    ndim_total = ndim_elec * nph
+    H_total = np.zeros((ndim_total, ndim_total))
+    for n in range(nph):
+        r0, r1 = n * ndim_elec, (n + 1) * ndim_elec
+        H_total[r0:r1, r0:r1] = H_elec + omega * n * np.eye(ndim_elec)
+        if n + 1 < nph:
+            m0, m1 = (n + 1) * ndim_elec, (n + 2) * ndim_elec
+            coupling_matrix = np.sqrt(omega / 2.0) * np.sqrt(n + 1) * D_total
+            H_total[m0:m1, r0:r1] += coupling_matrix
+            H_total[r0:r1, m0:m1] += coupling_matrix.T
+    H_total = 0.5 * (H_total + H_total.T)
+
+    eigenvalues, eigenvectors = eigh(H_total)
+    e_gs = float(eigenvalues[0])
+    psi_gs = eigenvectors[:, 0]
+
+    n_photon = 0.0
+    for n in range(nph):
+        r0, r1 = n * ndim_elec, (n + 1) * ndim_elec
+        n_photon += n * float(np.sum(psi_gs[r0:r1] ** 2))
+
+    e_hf = float(mf.e_tot) if getattr(mf, 'e_tot', None) is not None else None
+    e_corr = (e_casci - e_hf) if e_hf is not None else None
+    e_corr_qed = (e_gs - e_qed_hf) if e_qed_hf is not None else None
+
+    return {
+        'e_qed_casci': e_gs,
+        'e_casci': e_casci,
+        'e_qed_hf': e_qed_hf,
+        'e_hf': e_hf,
+        'e_corr_qed': e_corr_qed,
+        'e_corr': e_corr,
+        'reference': reference,
+        'ncas': int(ncas),
+        'ncore': (int(ncore_a), int(ncore_b)),
         'nelecas': nelec_act,
         'eigenvalues': eigenvalues,
         'eigenvectors': eigenvectors,
