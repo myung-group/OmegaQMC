@@ -30,7 +30,7 @@ import numpy as np
 import jax
 
 from OmegaQMC.utils import Mole_custom
-from OmegaQMC.cs.reference import compute_fci_reference
+from OmegaQMC.cs.reference import compute_fci_reference, compute_casci_reference
 from OmegaQMC.cs.walkers import load_walker_bank
 from OmegaQMC.cs.estimators import (
     evaluate_orbitals_on_walkers, f_I_matrix,
@@ -65,6 +65,16 @@ def main():
     p.add_argument("--ansatz", required=True)
     p.add_argument("--n-alpha", type=int, required=True)
     p.add_argument("--n-beta", type=int, required=True)
+    p.add_argument("--ref-ncas", type=int, default=None,
+                   help="If set, use CASCI(ref_ncas, ref_nelecas) as the "
+                        "FCI reference instead of full FCI. Required when "
+                        "full FCI is intractable (e.g. C2/cc-pVDZ).")
+    p.add_argument("--ref-nelecas", type=parse_nelecas, default=None,
+                   help="electron counts for the CASCI reference, "
+                        "e.g. '4,4'.")
+    p.add_argument("--ref-ncore", type=int, default=None,
+                   help="frozen-core count for the CASCI reference; "
+                        "auto-derived if omitted.")
     p.add_argument("--ncas", type=int, default=None,
                    help="if omitted, auto-select from NO occupations")
     p.add_argument("--nelecas", type=parse_nelecas, default=None,
@@ -88,10 +98,26 @@ def main():
     print(f"=== NEVPT2 from CS — {prefix} ===")
     mol = build_mol(args.molecule, args.R, args.basis, args.unit,
                     args.geometry_tag)
-    fci_ref = compute_fci_reference(
-        mol, n_alpha=args.n_alpha, n_beta=args.n_beta,
-        candidate_tol=args.candidate_tol,
-    )
+    if args.ref_ncas is not None:
+        if args.ref_nelecas is None:
+            sys.exit("--ref-ncas requires --ref-nelecas")
+        ncore = args.ref_ncore
+        if ncore is None:
+            ncore = (args.n_alpha + args.n_beta
+                     - sum(args.ref_nelecas)) // 2
+        print(f"  using CASCI({args.ref_ncas},{tuple(args.ref_nelecas)}) "
+              f"reference; ncore={ncore}")
+        fci_ref = compute_casci_reference(
+            mol, ncas=args.ref_ncas,
+            nelecas=tuple(args.ref_nelecas),
+            ncore=ncore,
+            candidate_tol=args.candidate_tol,
+        )
+    else:
+        fci_ref = compute_fci_reference(
+            mol, n_alpha=args.n_alpha, n_beta=args.n_beta,
+            candidate_tol=args.candidate_tol,
+        )
     print(f"  mol: {mol.nao} AOs, {mol.nelec} electrons")
     print(f"  E_HF  = {fci_ref['E_HF']: .6f} Ha")
     print(f"  E_FCI = {fci_ref['E_FCI']: .6f} Ha")
