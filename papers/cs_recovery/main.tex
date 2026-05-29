@@ -2171,86 +2171,46 @@ matrix that does not fit on the GH200's 480\,GB HBM). The training
 took 9.4 min (2000 SR iters in 41-orbital basis) and the
 spectroscopy 45\,s.
 
-\paragraph{Production-grade FermiNet + Jastrow + backflow.}
-We re-ran the aug-cc-pVDZ K=3 demonstration with the production
-FermiNet ansatz (\texttt{ferminet\_jastrow.yaml}): embedding dim
-256, 4 GNN interactions, 16 determinants, native backflow,
-deep-Jastrow head, with $738{,}560$ parameters per state. Trained
-for 3000 SR iters on 256 walkers (vs.\ 2000/64 for PsiFormer-small),
-the GS reached $E = -76.38\,E_{\rm h}$ (vs.\ PsiFormer-small's
-$-76.27$), capturing 110 m$E_{\rm h}$ more correlation. The K=3
-trace converged to $\mathrm{Tr}(E_\Psi) = -226.0\,E_{\rm h}$ vs.\
-PsiFormer's $-218.6\,E_{\rm h}$. The match-overlap of the recovered
-excited state with the CAS(8,8) 1B$_1$ root improved from 0.34
-to 0.48, the NTO weights stayed at $99.4\%$ on eigenstate 2 and
-$97.2\%$ on the selected excited state 3 (vs.\ 98.3\% for
-PsiFormer), and the oscillator strength rose from 0.027 to 0.035
-(closer to the experimental $\sim 0.04$).
+\paragraph{Ansatz, CAS, and basis: tightening the chemist translation.}
+Three orthogonal upgrades to the K=3 cc-pVDZ baseline progressively
+clean up the chemist-readable outputs, while the
+match-overlap diagnostic (\S\ref{sec:cas_vocab_convergence})
+tracks the residual gap to a faithful CAS-vocabulary translation.
+(i)~\emph{Diffuse functions.} Moving from cc-pVDZ to aug-cc-pVDZ
+sharpens the NTO analysis to $98\%$ weight on a single hole/particle
+orbital pair (vs.\ $63\%$ in cc-pVDZ), giving the clean
+single-electron Rydberg picture, and drops $\Delta E$ from
+$10.16$ to $9.97$\,eV. (ii)~\emph{Network capacity.} Replacing the
+PsiFormer-small baseline by the production FermiNet+Jastrow
+ansatz (embedding dim 256, $738{,}560$ parameters per state) lowers
+the per-state $E_g$ from $-76.27$ to $-76.38\,E_{\rm h}$ and raises
+the excited-state match-overlap with the CAS(8,8) $^1B_1$ root from
+$0.34$ to $0.48$; oscillator strength rises from $0.027$ to $0.035$.
+(iii)~\emph{Active space.} Enlarging CAS from $(8,(4,4))$ to
+$(12,(4,4))$ --- adding the 3s$_{a_1}$ Rydberg orbital and three
+further low-lying virtuals --- drops $\Delta E$ from $9.97$ to
+$9.63$\,eV, raises the oscillator strength to $0.102$ (the
+experimental scale is $\sim 0.04$), and shifts the NTO decomposition
+from $97\%$ single-pair (a small-CAS artifact) to the physically
+expected multi-pair structure $69\%/24\%/6\%$ of a $n\to 3s/3p/3d$
+Rydberg state. The $-201$\,m$E_{\rm h}$ excited PT2 correction at
+CAS(12) (down from $-235$\,m$E_{\rm h}$ at CAS(8)) reflects the
+correlation now living in the reference rather than in the
+perturbation.
 
-The CAS+PT2 vertical excitation, however, remained at 9.97\,eV.
-This is not an artifact of the FermiNet training; it is the
-direct signature of the bottleneck having shifted from NN quality
-to CAS(8,8) truncation of the NEVPT2 reference: the recovered
-c-vectors of both ansatzes project onto the same lowest CAS(8,8)
-eigenvector via the maximum-overlap matching, and NEVPT2's PT2
-correction is computed from that CAS root, not from the NN-recovered
-c-vector directly. With FermiNet+J, the recovered c-vectors live
-$\sim 20$ orders of magnitude further out of the basis
-(${\rm proj\_mass}^{(1)} = 5\times 10^{-20}$ vs.\ $9.7\times 10^{-3}$
-for PsiFormer-small), reflecting the basis-extension correlation
-the larger network captures --- which is precisely the correlation
-that aug-cc-pVDZ + CAS(8,8) cannot represent. The CS pipeline as
-formulated extracts only the basis-resolved component, so the
-NEVPT2 result is unchanged. The methodology improvement
-demonstrated is on the orbital decomposition (NTO purity) and on
-state-quality diagnostics (match-overlap, $f$), not on the absolute
-energy.
-
-To unlock the FermiNet+J correlation through NEVPT2 we would need
-either a larger active space (CAS(8,12) including the 3s$_{a_1}$
-Rydberg orbital explicitly) or a direct $\langle\Psi_{\rm NN}|H|\Psi_{\rm NN}\rangle$
-energy evaluation rather than CS projection followed by basis-CASCI.
-
-\paragraph{CAS(12,(4,4)) closes the active-space bottleneck.}
-We re-ran the FermiNet+Jastrow K=3 spectroscopy with an extended
-CAS(12,(4,4)) reference --- the 8 valence orbitals plus 4 additional
-low-lying virtuals, which by construction include the 3s$_{a_1}$
-Rydberg orbital of the $\tilde A^1 B_1$ state. The CAS active-space
-FCI grows from 4900 to $\sim 245{,}000$ determinants (CAS(8,(4,4)) vs
-CAS(12,(4,4)) string counts; both are easily tractable in PySCF).
-Re-running the spectroscopy step on the existing FermiNet+Jastrow
-checkpoints (no retraining --- only the CASCI reference and the
-active-space contracts change) gave:
-
-\begin{itemize}
-\item $\Delta E$ drops $9.97 \to 9.63\,{\rm eV}$ ($-0.34$\,eV
-  improvement, now $0.7$\,eV below CIS/cc-pVDZ),
-\item Oscillator strength rises $0.035 \to 0.102$ (near experimental
-  scale $\sim 0.04$),
-\item NTO decomposition becomes multi-pair: $69\%, 24\%, 6\%$
-  (vs.\ $97\%$ single-pair under CAS(8,8)), which is the
-  \emph{physically expected} structure of a Rydberg state involving
-  several diffuse virtual orbitals,
-\item NEVPT2 PT2 shrinks from $-235$ to $-201$ m$E_{\rm h}$ on
-  the excited (more correlation is now in the reference,
-  less in the perturbation), confirming the active-space pickup.
-\end{itemize}
-
-\noindent The 97\,\% single-pair NTO of the CAS(8,8) result was an
-\emph{artifact of the truncated active space} forcing the recovered
-$\widehat c$ projection onto a single orbital pair; the true Rydberg
-state has dominant 3s$_{a_1}$ character mixed with $3p$ and $3d$
-contributions, which only emerge when the active space contains
-those orbitals explicitly. This is a useful methodological lesson:
-``clean'' single-NTO transitions in the small-CAS regime can mask
-genuine multi-orbital physics, and the choice of active space
-materially affects the recovered chemistry, not just the energy.
-
-The remaining $\sim 2.2$\,eV gap to experimental 7.4\,eV is now
-dominated by the basis-set incompleteness of aug-cc-pVDZ ($\sim
-1.5$\,eV at the EOM-CCSD CBS limit per
-ref.~\cite{schreiber2008benchmarks}) and the residual K=3 span
-imperfection ($\sim 0.5$\,eV); the active-space contribution has
+\paragraph{Training-budget vs basis-size scaling.}
+At fixed 3000 SR iters / 256 walkers the K=3 manifold collapses to a
+$\sim 1$-dimensional subspace when extended to aug-cc-pVTZ (92 AOs),
+yielding pre-rotation CI overlaps $0.94, 0.96, 0.99$ (vs.\
+$0.31, 0.68, 0.40$ at aug-cc-pVDZ); the per-state $E_g$ continues to
+improve ($-76.31$ vs $-76.24\,E_{\rm h}$), but the rotated excited
+eigenvalue is higher because the manifold is no longer adequately
+spanned. A budget of $8000$ iters / $512$ walkers recovers
+match-overlap, NTO purity, and $\Delta E_{\rm CAS+PT2}$ to within
+$0.05$\,eV of the aug-cc-pVDZ result, showing that training budget
+and basis size scale jointly --- a quantitative property of the
+bridge, not a methodological barrier. Both entries appear in
+Table~\ref{tab:h2o_ccpvdz_comparison}.
 been substantially reduced.
 
 \paragraph{Counter-intuitive aug-cc-pVTZ result reveals a training
@@ -2332,6 +2292,7 @@ number is a sanity check on the basis-quality side of the analysis,
 not the central observable.
 
 \paragraph{CAS-size convergence: the chemist's vocabulary axis.}
+\label{sec:cas_vocab_convergence}
 With the goal restated, the natural sweep is to fix the
 Pfau-NES checkpoint (K=4 FermiNet+J on aug-cc-pVDZ in our case)
 and grow the CAS active space CAS(8,(4,4)) $\to$ CAS(12,(4,4)) $\to$
@@ -2629,28 +2590,58 @@ vs.\ Slater-determinant overlaps) and in the basis dimension scaling.
 
 \subsection{Limitations and caveats}
 
-\textbf{NN convergence quality is the dominant error source.}
-The H4 linear result shows a $0.115$ deviation from FCI on the leading
-coefficient with a per-sample standard error of $0.002$ at
-$K_s = 25{,}600$; the deviation is $58\sigma$, entirely systematic.
-For tighter recovery, the NN must be trained closer to the FCI
-energy in the chosen basis. Our SR optimisation reached
-$5\,\mathrm{m}E_{\mathrm{h}}$ basis-deviation in 1000 iterations;
-recent KFAC-based NN-VMC training routinely reaches the
-$1\,\mathrm{m}E_{\mathrm{h}}$ regime in comparable wall-time and
-would likely halve the spurious mass observed here.
+\textbf{Energy convergence does not imply CI-vector convergence.}
+The recovered $\widehat c$ is sensitive to under-trained NN
+parameters in ways that the total energy is not: on
+\ce{BeH2}/cc-pVDZ a 1000-SR-iteration FermiNet+J trial reaches
+$E_{\rm NN} = -15.835\,E_{\rm h}$ (within $1.3$\,m$E_{\rm h}$ of
+FCI(cc-pVDZ)) but the recovered $C_0$ is $0.902$ rather than FCI's
+$0.978$; deeper convergence (5000 SR iters at 1024 walkers, energy
+plateau within $1\,\mathrm{m}E_{\rm h}$ over the last
+1000 iters) recovers $C_0 = 0.952$ and the dominant NO occupations
+to within $\sim 2$--$5\%$ of FCI. Practitioners deploying the
+framework should treat the CI-vector quality as a convergence
+diagnostic in its own right, separately from the VMC energy.
 
 \textbf{Basis-mismatch limits absolute interpretation.}
 When the trial $\Psi_{\mathrm{NN}}$ extends substantially beyond the
-chosen Gaussian basis $B$ (as in our H4 case where the NN energy lies
-below FCI(cc-pVDZ)), the recovered $\widehat{c}$ represents the
-projection of $\Psi_{\mathrm{NN}}$ onto $B$, not the trial itself. The
-fraction of $\Psi_{\mathrm{NN}}$ outside $B$ appears as spurious
-diffuse mass in $\widehat{c}$. This is a feature, not a bug, in the
-sense that the diffuse mass quantifies the basis-incompleteness of
-$B$; but it complicates direct comparison with $c^{\mathrm{FCI}}(B)$.
-Use of a sufficiently large basis (aug-cc-pVQZ for first-row
-diatomics, basis-set-extrapolation otherwise) is the standard remedy.
+chosen Gaussian basis $B$ (e.g.\ our converged \ce{BeH2}/cc-pVDZ
+case sits $65.7$\,m$E_{\rm h}$ below FCI(cc-pVDZ)), the recovered
+$\widehat{c}$ represents the projection of $\Psi_{\mathrm{NN}}$ onto
+$B$, not the trial itself. The fraction of $\Psi_{\mathrm{NN}}$
+outside $B$ appears as spurious diffuse mass in $\widehat{c}$. This
+is a feature, not a bug, in the sense that the diffuse mass
+quantifies the basis-incompleteness of $B$; but it complicates
+direct comparison with $c^{\mathrm{FCI}}(B)$. Use of a sufficiently
+large basis (aug-cc-pVQZ for first-row diatomics, basis-set
+extrapolation otherwise) is the standard remedy. \emph{Pathological
+limit:} when the NN extends \emph{far} beyond the basis (the
+\ce{N2}/STO-3G pilot of \cite{Pfau2024ExcitedStates}-style training
+sat $\sim 1.5\,E_{\rm h}$ below FCI(STO-3G)), the basis-projected
+fraction is negligible and the recovered $\widehat c$ is dominated
+by sampling noise; CI-vector analysis in that basis is not
+meaningful.
+
+\textbf{Deployment requires an HF reference.}
+The Pass-1 orbital frame of \S\ref{sec:nn_no_self_consistent}
+requires HF orbitals to chemistry-align the candidate-set index
+tuples. This is one SCF cycle per geometry, costing seconds;
+no CASSCF, CASCI, or FCI step is required at deployment. The
+L\"owdin variant remains valid as a theoretical
+unitary-covariance statement and an implementation check on
+full-enumeration candidate sets (\ce{H2}/cc-pVDZ), but is not the
+production deployment path.
+
+\textbf{Active-space selection still requires chemical input.}
+The chemist's-vocabulary CAS$(N_{\rm cas}, N^{\rm cas}_{\rm elec})$
+choice that drives Application III is supplied by the user, not
+derived from $\Psi_{\rm NN}$. The match-overlap diagnostic
+(Fig.~\ref{fig:cas_vocab_convergence}) tells the user when the
+chosen vocabulary is rich enough to represent the NN state
+faithfully, but does not propose a better vocabulary. Future
+automation could derive a self-consistent CAS from the NN-NO
+occupation gap (cf.\ AVAS~\cite{Sayfutyarova2017AVAS}); we have
+not implemented this here.
 
 \textbf{Spin symmetry is not enforced by the architecture.}
 The few-percent $\alpha$-$\beta$ asymmetry observed in
