@@ -806,16 +806,24 @@ $1\%$--$3\%$, e.g.\ $\widehat{c}_{((1,2),(0,3))} - \widehat{c}_{((0,3),(1,2))}
 symmetry breaking in the trained NN, surfaced by the recovery
 pipeline and not visible from the VMC energy alone.
 
-\subsection{Self-consistent NN-NO frame (CASCI-free deployment)}
+\subsection{Self-consistent NN-NO frame (CASSCF/CASCI-free deployment)}
 \label{sec:nn_no_self_consistent}
 
 The Source-2 path of \S\ref{sec:nn_no_source} relies on a one-time
 CASCI calculation to supply the natural-orbital frame and the candidate
-determinant set. That dependency can be removed by deriving the
-natural orbitals from the NN-VMC 1-RDM itself and supplying the
-candidate set as a vocabulary-choice combinatorial object. Three
-candidate-set strategies are admissible (CAS index structure on the
-top-occupation NN-NOs; HF-rank cutoff with all $S{+}D$ excitations;
+determinant set. That CI-level dependency can be removed by deriving
+the natural orbitals from the NN-VMC 1-RDM itself and supplying the
+candidate set as a vocabulary-choice combinatorial object. The
+framework as deployed requires exactly one mean-field input:
+a single Hartree--Fock (RHF) SCF cycle to anchor the Pass-1 orbital
+frame, costing seconds for any first- or second-row system and
+introducing no CASSCF, CASCI, or FCI machinery. The Pass-1 c-vector
+in the HF frame is then used to build the trial 1-RDM, whose
+eigenvectors are the NN-NOs; Pass 2 in NN-NO basis yields the
+self-consistent CI vector.
+
+Three candidate-set strategies are admissible (CAS index structure on
+the top-occupation NN-NOs; HF-rank cutoff with all $S{+}D$ excitations;
 NN-guided selected-CI sweep). The CAS-index strategy is the cleanest
 in math and the most robust in practice because the only failure mode
 --- vocabulary too small --- is directly diagnosed by the
@@ -887,54 +895,42 @@ Requires FCI / CASCI?         & yes & \textbf{no} & --- \\
 \end{tabular}
 \end{table}
 
-\paragraph{Eliminating the HF step.} The Pass-1 frame above used HF
-orbitals only as one convenient orthonormal basis; HF itself plays
-no physical role in the bootstrap. Replacing the RHF call with
-L\"owdin orthogonalisation of the raw AOs --- $\eta_{\rm L\ddot{o}wdin} =
-S^{-1/2} \chi$ where $S$ is the AO overlap matrix --- removes the
-SCF iteration entirely. The empirical test on the same \ce{H2} cell
-confirms unitary covariance: Pass-1 $\widehat c$ in L\"owdin basis is
-spread across many AOs (the $((0),(0))$ amplitude is only $0.137$
-because the L\"owdin $(0,0)$ determinant has both electrons on the
-first H atom rather than one per atom), but the eigenvalues of the
-resulting 1-RDM and the Pass-2 $\widehat c$ in the NN-NO frame are
-\emph{identical to the HF-bootstrap result to printed precision}:
-NN-NO occupations $\{1.8914, 0.0905, 0.0057, 0.0045\}$, Pass-2 HF
-amplitude $+0.97035$, NN-NO/FCI-NO orbital alignment
-$0.9997$ / $0.9950$ on the dominant pair (cf.\
-Tab.~\ref{tab:h2_nn_no} and
-\texttt{papers/cs\_recovery/data/h2\_nn\_no\_demo\_lowdin.json}).
-The framework is therefore literally free of HF, CASSCF, CASCI, and
-FCI on systems where the candidate set spans the full $(n_\alpha,
-n_\beta)$ enumeration, as for \ce{H2}/cc-pVDZ.
-
-\paragraph{Larger systems: candidate-set vs Pass-1-basis compatibility.}
-On systems where the candidate set must be filtered (e.g.\ a fixed
-amplitude threshold $|c_I| > \eta$ or a CAS truncation), the
-choice of Pass-1 basis matters: the index tuples
-$(\mathrm{occ}^\alpha, \mathrm{occ}^\beta)$ that the candidate set
-records refer to "the $I$-th orbital of the current basis," so a
-candidate set defined by amplitude in basis $A$ does not pick out
-the dominant determinants in basis $B$. We verified this on a
-fully-converged \ce{BeH2}/cc-pVDZ NN trial (FermiNet+J, 5000 SR
-iterations at 1024 walkers, $E_{\rm NN} = -15.9021\,E_{\rm h}$;
-\textbf{65.7\,m$E_{\rm h}$ below FCI(cc-pVDZ)}; see
-\S\ref{sec:beh2_convergence}). With the filtered candidate set
-($|c^{\rm FCI}_I| > 10^{-4}$, 2076 determinants),
-HF Pass-1 produces a clean bootstrap (NN-NO occupations
-$\{1.997, 1.876, 1.873, 0.030, 0.023, 0.020\}$, Pass-2 reference
+\paragraph{Why HF, not a cheaper orthogonalisation.}
+The Pass-1 frame's role is to define what each candidate index tuple
+$(\mathrm{occ}^\alpha, \mathrm{occ}^\beta)$ refers to as a physical
+Slater determinant: $D_I$ is built from the $I$-th orbital of the
+chosen Pass-1 basis. Because $\widehat\gamma$ is a frame-independent
+property of the trial wavefunction, in principle any orthonormal
+one-particle basis works for Pass 1 and Pass 2's NN-NOs come out
+identical (cf.\ Tab.~\ref{tab:h2_nn_no}). In practice the
+\emph{candidate set} is a filtered list of physically-relevant
+determinants --- either an amplitude-threshold subset of FCI (small
+basis), a CAS index restriction (large basis), or a CI/HCI selected
+set --- and the filter implicitly assumes orbitals close to a
+chemistry-aligned mean-field reference. Using HF orbitals for Pass 1
+keeps the filter sensible: the index tuples in the candidate set
+correspond to "HF reference + small excitations," which are exactly
+where the NN trial's amplitude lives for closed-shell ground
+states. Replacing HF by L\"owdin-orthogonalised AOs reinterprets the
+same tuples as atom-localised configurations --- physically
+meaningful only for the full $C(n_{\rm orb}, n_\sigma)^2$ enumeration
+(\ce{H2}/cc-pVDZ, where Pass-1 c-vector is spread but Pass-2 reproduces
+the HF-bootstrap result to printed precision, cf.\
+\texttt{h2\_nn\_no\_demo\_lowdin.json}) and breaks down as soon as a
+filter is applied. On the converged \ce{BeH2}/cc-pVDZ trial of
+\S\ref{sec:beh2_convergence}, L\"owdin Pass-1 with the filtered
+$2076$-determinant set gives NN-NO occupations
+$\{1.97, 0.78, 0.75, 0.60, 0.57, 0.22\}$ (Pass-2 reference amplitude
+$+0.142$), whereas HF Pass-1 with the same set produces
+$\{1.997, 1.876, 1.873, 0.030, 0.023, 0.020\}$ (Pass-2 reference
 amplitude $+0.952$ vs FCI's $+0.978$, orbital alignment $0.9998$ on
-$1\sigma_g$), whereas L\"owdin Pass-1 fails (NN-NO occupations
-$\{1.97, 0.78, 0.75, 0.60, 0.57, 0.22\}$, Pass-2 reference
-amplitude $+0.142$) --- the L\"owdin basis's atom-localised
-"reference" determinant is physically meaningless for \ce{BeH2}'s
-delocalised valence, so the candidate set does not span the
-trial's dominant content in that basis. Empirically: \emph{use
-L\"owdin Pass-1 only with full-enumeration candidate sets; use HF
-Pass-1 for filtered candidate sets that derive from a CI calculation
-or from CAS-vocabulary indices in HF orbital ordering.} HF in this
-deployment costs one SCF cycle ($\sim$~seconds for any first- or
-second-row system) and does not introduce CASSCF or CI machinery.
+$1\sigma_g$). The framework as deployed therefore requires HF as the
+only mean-field input; this is the same one-shot SCF cycle used to
+seed any post-HF method, costing seconds, with no CASSCF, CASCI,
+or FCI step. The L\"owdin equivalence on \ce{H2} stays useful as a
+theoretical statement of unitary covariance and as a verification
+that HF itself contributes no physics beyond providing a
+chemistry-aligned label for the index tuples.
 
 \subsection{Converged-NN validation on \ce{BeH2}/cc-pVDZ}
 \label{sec:beh2_convergence}
