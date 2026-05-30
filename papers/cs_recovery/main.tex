@@ -88,12 +88,16 @@ Head--Gordon $T_1$/$N_{\rm unp}$ diagnostics at near-FCI accuracy.
 (ii)~\emph{Post-Hartree--Fock methods across three orthogonal
 families}: the recovered $\widehat c$ feeds NEVPT2 and MC-PDFT
 (multi-reference); CCSD and CCSD(T) on the NN-derived natural-
-orbital frame (single-reference); and selected-CI warm-start. On
-converged \ce{BeH2}/cc-pVDZ, NEVPT2 driven from $\widehat c$
-obtains energies $0.4$--$4.0$\,m$E_{\rm h}$ \emph{below}
-CASSCF+NEVPT2 at matched CAS sizes, with no orbital optimisation
-step; the NN-NO orbital frame additionally lowers the CCSD and
-CCSD(T) total energies vs the standard HF reference. (iii)~\emph{Excited-state spectroscopy from NES-VMC
+orbital frame (single-reference); and selected-CI warm-start. On a
+four-system valence-CAS benchmark spanning multireference
+(\ce{H4} square at $R=1.5$~\AA) and single-reference-dominated
+systems (\ce{BeH2}, \ce{H6} linear, \ce{H2O}/aug-cc-pVDZ),
+$\widehat c$-NEVPT2 ties or beats CASSCF+NEVPT2 on three of four
+($\Delta = -3.08, -0.12, -0.56$\,m$E_{\rm h}$ for \ce{BeH2}, \ce{H4}
+square, \ce{H6}) with no orbital optimisation step; \ce{H2O} is the
+exception ($\Delta = +27.7$\,m$E_{\rm h}$ at CAS$(12,(4,4))$,
+attributable to recovery-projection loss across a 245k-determinant
+active space). (iii)~\emph{Excited-state spectroscopy from NES-VMC
 in chemists' language}: combining Pfau \emph{et al.}'s determinantal
 $K$-state ansatz with CS recovery, subspace rotation, and overlap-
 matched NEVPT2, we extract orthogonal CI vectors, transition density
@@ -2781,7 +2785,6 @@ CAS(8,(4,4))    & 256  & $0.48$ & $0.48$       & $-235$ & $9.97$ \\
 CAS(12,(4,4))   & 256  & $0.48$ & $0.48$       & $-201$ & $9.63$ \\
 CAS(12,(4,4))   & 1024 & $\mathbf{0.90}$ & $0.46$ & $-201$ & $9.95$ \\
 CAS(16,(4,4))   & 256  & $\mathbf{0.90}$ & $0.23$ & $-183$ & $9.70$ \\
-CAS(20,(4,4))   & 256  & TBD       & TBD    & TBD    & TBD    \\
 \hline
 \end{tabular}
 \end{table}
@@ -3113,13 +3116,26 @@ overlap against PySCF FCI, reproducing the sign and order of magnitude
 of every leading amplitude
 (Fig.~\ref{fig:h4_recovery}) and exposing both the residual NN-FCI gap
 and the basis-incompleteness in the recovered coefficient pattern.
-(\textbf{II}) On \ce{BeH2}/cc-pVDZ (single-reference) and
-\ce{C2}/cc-pVDZ (strongly multireference, $|c_{\rm HF}|^{2} \approx
-0.7$), NEVPT2 driven from a recovered $\widehat c$ reference reaches
-energies at or below CASSCF+NEVPT2 at matched active spaces, with no
-orbital optimisation step --- the recipe directly attacks the CASSCF
+(\textbf{II}) On a four-system valence-CAS benchmark
+(\ce{BeH2}/cc-pVDZ, \ce{H4} square/cc-pVDZ, \ce{H6} linear/cc-pVDZ,
+\ce{H2O}/aug-cc-pVDZ), NEVPT2 driven from a recovered $\widehat c$
+reference ties or beats CASSCF+NEVPT2 on three of four systems
+($\Delta = -0.12$ to $-3.08$\,m$E_{\rm h}$) with no orbital
+optimisation step --- the recipe directly attacks the CASSCF
 bottleneck that has limited multi-reference perturbation theory on
-transition-metal and strongly-correlated systems for decades.
+transition-metal and strongly-correlated systems for decades. The
+\ce{H2O} exception, where the recovery error projects onto a
+245k-determinant active space and CASSCF wins by $+27.7$\,m$E_{\rm
+h}$, identifies the regime where the framework's recovery quality
+becomes the limiting factor (\S\ref{sec:caspt2_replacement_mr}).
+MC-PDFT on the same $\widehat c$-derived RDMs gives a consistent
+$-2$ to $-300$\,m$E_{\rm h}$ tPBE bias across the four systems,
+characteristic of the translated functional rather than the
+recovery. CCSD and CCSD(T) on the NN-NO orbital frame match the HF
+reference to within m$E_{\rm h}$ for SR-dominated systems where HF
+is already near-optimal; the NN-NO frame's value is structural ---
+the recovered $\widehat c$ defines the active space without orbital
+optimisation --- rather than energetic on these systems.
 (\textbf{III}) On the $\tilde A\,^1B_1$ Rydberg band of \ce{H2O}, the
 combination Pfau-NES + CS + overlap-matched NEVPT2 produces orthogonal
 CI vectors, natural transition orbitals, oscillator strengths, and
