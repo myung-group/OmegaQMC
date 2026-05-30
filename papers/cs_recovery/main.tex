@@ -687,23 +687,44 @@ current residual $r = y - A_S \widehat c_S$ is added to the support,
 the coefficients are re-fit by least squares, and the residual is
 updated until $\|r\|$ falls below a relative tolerance.
 
-On the same \ce{H2}/cc-pVDZ cell, OMP starting from the HF seed
-$(0,)(0,)$ with $m=20$ random-rotation measurements and relative
-tolerance $10^{-3}$ produces an 18-determinant support; the residual
-falls by five orders of magnitude (from $9.6\!\times\!10^{-3}$ to
-$1.9\!\times\!10^{-5}$) over 18 OMP iterations. The vector overlap
-with the FCI reference is $0.993$, comparable to the Lasso-CS
-($0.995$) and the identity baseline ($0.991$). The methodological
-distinction is in the support: \emph{the first ten determinants
-selected by OMP, in order, are exactly the ten dominant FCI
-configurations} (HF + nine $\sigma_u^2$-class double excitations);
-further iterations pick up spurious cross-pairs past the noise
-floor. With a tighter relative tolerance ($10^{-2}$) OMP stops at
-the ten-determinant true support exactly. This is genuinely
-candidate-set-free deployment: starting from one HF seed, the OMP
-decoder discovers the determinant support inherent to $\Psi_{\rm
-NN}$ without any pre-enumeration. Reproducibility:
-\texttt{OmegaQMC.cs.compressed.omp\_decode}.
+OMP succeeds on \ce{H2}/cc-pVDZ: starting from a single HF seed
+with $m=80$ random-rotation measurements and relative tolerance
+$5\!\times\!10^{-2}$, the recovered 12-determinant support contains
+the ten dominant FCI configurations (HF + nine $\sigma_u^2$-class
+doubles) and gives vector overlap $0.996$ with FCI, comparable to
+Lasso-CS ($0.997$). The discovered support is found from the seed,
+without pre-enumeration.
+
+\paragraph{OMP scaling limit on larger active spaces.}
+On the converged \ce{BeH2}/cc-pVDZ ($N_{\rm det}=2092$,
+$K_{\rm eff} \approx 45$) and \ce{H4}/cc-pVDZ ($N_{\rm det}=1569$,
+$K_{\rm eff} \approx 51$) cells, OMP fails to recover the FCI
+support and overshoots into noise-correlated determinants
+(typical recovered overlap with FCI $\sim 0.2$--$0.6$). The
+underlying problem is column-to-noise SNR: a single column of $A$
+has entries
+$A_{j,I} = \det U_j[{\rm occ}_I^\alpha,:n_\alpha]\,
+\det U_j[{\rm occ}_I^\beta,:n_\beta]$
+that scale as $\mathcal{O}((1/\sqrt{n_{\rm orb}})^{N})$ --- of
+order $10^{-3}$ for the dominant FCI determinant in \ce{BeH2}
+($n_{\rm orb}=24$, $N=6$). The residual noise from finite walker
+sampling is of order $1/\sqrt{K_s} \approx 4\!\times\!10^{-3}$, so
+the per-column signal sits at or below the noise floor, and OMP
+greedily picks noise-aligned columns instead of the true support.
+Lasso-CS sidesteps this because the L1 step uses the joint
+information across all columns simultaneously; OMP's
+column-by-column greedy requires per-column SNR $>1$ to make
+correct selections.
+
+The practical take-away: OMP is a viable candidate-set-free decoder
+only when per-column SNR is comfortable ($\sim 1$ or better) ---
+typically small systems ($N \le 4$ electrons) or large walker banks
+($K_s \gtrsim 10^5$ on first-row atoms). For larger active spaces
+the Lasso-CS variant with a pre-specified pool is the workable
+production decoder; the candidate-pool definition is the cost paid
+to keep the support discovery noise-robust. Reproducibility data:
+\texttt{papers/cs\_recovery/data/omp\_decoder\_sweep.json};
+sweep script \texttt{examples/run\_cs\_decoder\_sweep.py}.
 
 %==========================================================================
 \section{Implementation in OmegaQMC}
