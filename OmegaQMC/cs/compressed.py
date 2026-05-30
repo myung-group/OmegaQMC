@@ -333,6 +333,120 @@ def evaluate_rotated_hf_on_walkers(
     return D
 
 
+def hybrid_omp_decode(
+    mol,
+    walkers: np.ndarray,
+    psi_vals: np.ndarray,
+    orbital_coeff_ao: np.ndarray,
+    candidate_pool: Sequence[Tuple[Tuple[int, ...], Tuple[int, ...]]],
+    n_alpha: int,
+    n_beta: int,
+    seed_top_k: int = None,
+    seed_threshold: float = 1e-2,
+    m: int = None,
+    rel_residual_tol: float = 1e-3,
+    max_support: int = None,
+    seed: int = 0,
+    walker_convention: str = "interleaved",
+    return_diagnostics: bool = False,
+):
+    """Hybrid identity-warm-start OMP.
+
+    Overcomes the per-column SNR limit of pure random-rotation OMP by
+    using the identity-design estimator's robust per-coefficient
+    estimates to identify likely support. Then OMP refines the
+    support and coefficients using the random-rotation measurements.
+
+    Workflow:
+      1. Run identity-design CS recovery to get ĉ_id (one estimator
+         per candidate).
+      2. Identify "seed support" = candidates with |ĉ_id_I| above
+         seed_threshold (or top-K if seed_top_k is given).
+      3. Switch to random-rotation measurements (y, A) from m rotations.
+      4. Run OMP starting from seed_support; iterate until residual
+         tolerance.
+
+    The result is the support OMP would have found IF it had
+    correct seed information, with coefficients computed from
+    CS-style projections (which are noise-averaged across all
+    candidates simultaneously).
+
+    Args:
+      seed_top_k: take the top-K identity-design coefficients as seed.
+                  Default None → use seed_threshold instead.
+      seed_threshold: |ĉ_id| > threshold for seed support.
+      All other args as for omp_decode.
+    """
+    from .estimators import evaluate_orbitals_on_walkers, f_I_matrix
+    n_pool = len(candidate_pool)
+
+    # Step 1: identity-design recovery
+    orb_vals = evaluate_orbitals_on_walkers(
+        mol, walkers, orbital_coeff_ao,
+        convention=walker_convention, n_alpha=n_alpha, n_beta=n_beta,
+    )
+    f_I = f_I_matrix(orb_vals, candidate_pool, psi_vals, n_alpha, n_beta)
+    c_id = np.asarray(f_I).mean(axis=1)
+    nrm = float(np.linalg.norm(c_id))
+    if nrm > 0:
+        c_id_normed = c_id / nrm
+    else:
+        c_id_normed = c_id.copy()
+
+    # Step 2: pick seed support from identity-design magnitudes
+    abs_c = np.abs(c_id_normed)
+    if seed_top_k is not None:
+        seed_idx = np.argsort(-abs_c)[:seed_top_k]
+    else:
+        seed_idx = np.where(abs_c > seed_threshold)[0]
+        if seed_idx.size == 0:
+            seed_idx = np.array([int(np.argmax(abs_c))])
+    seed_support = [tuple((tuple(candidate_pool[k][0]),
+                            tuple(candidate_pool[k][1])))
+                    for k in seed_idx]
+
+    # Step 3-4: OMP on random-rotation measurements seeded with above
+    if m is None:
+        m = min(n_pool, max(2 * len(seed_support), 50))
+    if max_support is None:
+        max_support = min(n_pool, max(len(seed_support) + m // 4,
+                                       2 * len(seed_support)))
+
+    rng = np.random.default_rng(seed)
+    n_orb = int(orbital_coeff_ao.shape[1])
+    U_stack = sample_rotations(n_orb, m, rng)
+    D = evaluate_rotated_hf_on_walkers(
+        mol, walkers, orbital_coeff_ao, U_stack,
+        n_alpha, n_beta, walker_convention=walker_convention,
+    )
+    f = D / psi_vals[None, :]
+    y = f.mean(axis=1)
+
+    support, coeffs, history = omp_recover(
+        y, U_stack, candidate_pool, n_alpha, n_beta,
+        initial_support=seed_support,
+        max_support=max_support,
+        rel_residual_tol=rel_residual_tol,
+        return_history=True,
+    )
+
+    nrm = float(np.linalg.norm(coeffs))
+    if nrm > 0:
+        coeffs = coeffs / nrm
+
+    if return_diagnostics:
+        diag = dict(
+            m=m, support_size=len(support),
+            seed_support_size=len(seed_support),
+            initial_residual_norm=float(np.linalg.norm(y)),
+            final_residual_norm=history[-1]["residual_norm"],
+            iterations=len(history) - 1,
+            history=history,
+        )
+        return support, coeffs, diag
+    return support, coeffs
+
+
 def omp_decode(
     mol,
     walkers: np.ndarray,

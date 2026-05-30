@@ -722,7 +722,38 @@ typically small systems ($N \le 4$ electrons) or large walker banks
 ($K_s \gtrsim 10^5$ on first-row atoms). For larger active spaces
 the Lasso-CS variant with a pre-specified pool is the workable
 production decoder; the candidate-pool definition is the cost paid
-to keep the support discovery noise-robust. Reproducibility data:
+to keep the support discovery noise-robust.
+
+\paragraph{Hybrid identity-warm-start OMP does not rescue scaling.}
+A natural attempt to overcome the column-SNR limit is to seed OMP
+with the support from the identity-design recovery: run
+\S\ref{sec:theory}'s identity-design CS first, identify the top-$K$
+candidates by $|\widehat c_I^{\rm id}|$, then iterate OMP on the
+random-rotation measurements starting from that support. We
+implemented this as
+\texttt{OmegaQMC.cs.compressed.hybrid\_omp\_decode}. On the same
+\ce{BeH2}/cc-pVDZ cell the hybrid scheme is no better than pure
+OMP: at $K=10$--$100$ seed candidates and $m=100$--$300$
+measurements, the recovered overlap remains $\le 0.36$ versus the
+identity-design baseline of $0.96$. The OMP iterations
+\emph{overwrite} the good seed coefficients via least-squares refit
+on the low-SNR random-rotation measurements, propagating noise into
+the refined vector. The least-squares step is where the SNR limit
+binds; OMP-specific support discovery cannot bypass it.
+
+The proper fix is structured measurements: replacing the random
+orthogonal rotations $U_j$ with Givens-style occupied$\to$virtual
+mixings that preferentially probe specific excitation classes, so
+that per-column design-matrix entries scale as $\mathcal{O}(1)$ on
+the targeted class rather than as
+$\mathcal{O}\bigl((1/\sqrt{n_{\rm orb}})^N\bigr)$ uniformly. We
+treat this as an interesting follow-up direction; the present
+work establishes that for $N_{\rm det} \lesssim 10^3$ the
+random-rotation Lasso variant works as canonical CS, while for
+larger active spaces the identity-design pipeline of
+\S\ref{sec:theory} remains the working production decoder.
+
+Reproducibility data:
 \texttt{papers/cs\_recovery/data/omp\_decoder\_sweep.json};
 sweep script \texttt{examples/run\_cs\_decoder\_sweep.py}.
 
