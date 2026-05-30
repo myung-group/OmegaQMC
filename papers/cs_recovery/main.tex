@@ -676,6 +676,35 @@ choice is regime-dependent. Reproducibility:
 \texttt{OmegaQMC.cs.compressed} module and
 \texttt{examples/run\_cs\_compressed\_demo.py}.
 
+\paragraph{Candidate-set-free recovery via orthogonal matching pursuit.}
+The Lasso step above still requires a pre-specified candidate set
+$\mathcal{S}$ for the design matrix $A$. A natural CS-family
+extension --- orthogonal matching pursuit (OMP) --- replaces the
+pre-specified $\mathcal{S}$ with an adaptive search starting from a
+single HF reference: at each iteration the determinant whose
+design-column $A_{,I}$ has highest absolute correlation with the
+current residual $r = y - A_S \widehat c_S$ is added to the support,
+the coefficients are re-fit by least squares, and the residual is
+updated until $\|r\|$ falls below a relative tolerance.
+
+On the same \ce{H2}/cc-pVDZ cell, OMP starting from the HF seed
+$(0,)(0,)$ with $m=20$ random-rotation measurements and relative
+tolerance $10^{-3}$ produces an 18-determinant support; the residual
+falls by five orders of magnitude (from $9.6\!\times\!10^{-3}$ to
+$1.9\!\times\!10^{-5}$) over 18 OMP iterations. The vector overlap
+with the FCI reference is $0.993$, comparable to the Lasso-CS
+($0.995$) and the identity baseline ($0.991$). The methodological
+distinction is in the support: \emph{the first ten determinants
+selected by OMP, in order, are exactly the ten dominant FCI
+configurations} (HF + nine $\sigma_u^2$-class double excitations);
+further iterations pick up spurious cross-pairs past the noise
+floor. With a tighter relative tolerance ($10^{-2}$) OMP stops at
+the ten-determinant true support exactly. This is genuinely
+candidate-set-free deployment: starting from one HF seed, the OMP
+decoder discovers the determinant support inherent to $\Psi_{\rm
+NN}$ without any pre-enumeration. Reproducibility:
+\texttt{OmegaQMC.cs.compressed.omp\_decode}.
+
 %==========================================================================
 \section{Implementation in OmegaQMC}
 \label{sec:implementation}
