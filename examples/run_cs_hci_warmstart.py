@@ -77,6 +77,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cell-dir", required=True)
     ap.add_argument("--molecule", required=True)
+    ap.add_argument("--geometry-tag", default="")
     ap.add_argument("--R", type=float, default=1.0)
     ap.add_argument("--basis", default="cc-pvdz")
     ap.add_argument("--unit", default="Angstrom")
@@ -90,7 +91,8 @@ def main():
     prefix = cell_dir.name
     print(f"=== HCI warm-start study: {prefix} ===")
 
-    mol = build_mol(args.molecule, args.R, args.basis, args.unit)
+    mol = build_mol(args.molecule, args.R, args.basis, args.unit,
+                    args.geometry_tag)
     fci_ref = compute_fci_reference(mol, n_alpha=args.n_alpha,
                                     n_beta=args.n_beta, candidate_tol=1e-4)
     print(f"  E_FCI = {fci_ref['E_FCI']:.6f} Ha; "
