@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from OmegaQMC.utils import Mole_custom
 from OmegaQMC.cs.reference import compute_fci_reference, compute_casci_reference
 from OmegaQMC.cs.walkers import load_walker_bank
-from OmegaQMC.cs.estimators import normalize_and_align
+from OmegaQMC.cs.estimators import normalize_and_align, lasso_recover_auto
 from OmegaQMC.cs.scaling import precompute_means
 from OmegaQMC.cs.properties import (
     reshape_chat_to_pyscf_matrix, compute_1rdm,
@@ -64,6 +64,8 @@ def main():
                     help="CASCI nelecas as 'a,b' (required with --ref-ncas).")
     ap.add_argument("--ref-ncore", type=int, default=None,
                     help="frozen-core count for CASCI ref; auto if omitted.")
+    ap.add_argument("--lam-mult", type=float, default=0.5,
+                    help="Lasso threshold multiplier (0.0 = raw sample-mean)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -103,14 +105,42 @@ def main():
     psi_vals = evaluate_signed_psi(walkers, np.asarray(mol.atom_coords()),
                                     drv.params, log_psi, batch_size=2048)
     K_s = walkers.shape[0]
-    means, _ = precompute_means(mol, fci_ref, walkers, psi_vals,
-                                 K_s_sweep=[K_s], n_seeds=1,
-                                 walker_convention="interleaved",
-                                 return_second_moments=True)
+    means, m2s = precompute_means(mol, fci_ref, walkers, psi_vals,
+                                    K_s_sweep=[K_s], n_seeds=1,
+                                    walker_convention="interleaved",
+                                    return_second_moments=True)
     c_raw = means[(K_s, 0)]
+    m2 = m2s[(K_s, 0)]
     c_true = np.array([fci_ref["ci_dict"][k]
                        for k in fci_ref["candidate_set"]])
-    c_hat, proj_mass = normalize_and_align(c_raw, float(np.sign(c_true[0])))
+    n_det = len(c_true)
+    ref_sign = float(np.sign(c_true[0]))
+    if args.lam_mult > 0.0:
+        c_hat, rec_info = lasso_recover_auto(
+            c_raw, m2, K_s, n_det, ref_sign, lam_mult=args.lam_mult,
+        )
+        proj_mass = rec_info["proj_mass_naive"]
+        c_true_norm = c_true / np.linalg.norm(c_true)
+        err_l2 = float(np.linalg.norm(c_hat - c_true_norm))
+        print(f"  Lasso (lam_mult={args.lam_mult}): support="
+              f"{rec_info['support']}/{n_det}, max|c_hat|="
+              f"{rec_info['max_abs']:.4f} "
+              f"(true max|c|={float(np.max(np.abs(c_true_norm))):.4f})")
+        print(f"  proj_mass: naive={rec_info['proj_mass_naive']:.3e}, "
+              f"corr={rec_info['proj_mass_bias_corrected']:.3e}; "
+              f"||c_hat - c_true||₂ = {err_l2:.4f}")
+    else:
+        c_hat, proj_mass = normalize_and_align(c_raw, ref_sign)
+        rec_info = dict(lam_mult=0.0, support=int(np.sum(np.abs(c_hat) > 1e-12)),
+                        max_abs=float(np.max(np.abs(c_hat))),
+                        proj_mass_naive=float(proj_mass),
+                        proj_mass_bias_corrected=float("nan"),
+                        sigma_median=float("nan"),
+                        lam_universal=0.0, lam_used=0.0)
+        c_true_norm = c_true / np.linalg.norm(c_true)
+        err_l2 = float(np.linalg.norm(c_hat - c_true_norm))
+        print(f"  raw sample-mean (no Lasso): max|c_hat|="
+              f"{rec_info['max_abs']:.4f}  ||c_hat - c_true||₂={err_l2:.4f}")
     n_orb = int(fci_ref["n_orb"])
     print(f"  CS recovered: C0={float(c_hat[np.argmax(np.abs(c_hat))]):+.4f}")
 
@@ -128,6 +158,19 @@ def main():
                E_HF=float(fci_ref["E_HF"]),
                E_FCI=float(fci_ref["E_FCI"]),
                C0_chat=float(np.max(np.abs(c_hat))),
+               recovery=dict(
+                   lam_mult=float(rec_info["lam_mult"]),
+                   support=int(rec_info["support"]),
+                   n_det=int(n_det),
+                   max_abs_chat=float(rec_info["max_abs"]),
+                   max_abs_ctrue=float(np.max(np.abs(c_true_norm))),
+                   err_l2=float(err_l2),
+                   proj_mass_naive=float(rec_info["proj_mass_naive"]),
+                   proj_mass_bias_corrected=float(rec_info["proj_mass_bias_corrected"]),
+                   sigma_median=float(rec_info.get("sigma_median", float("nan"))),
+                   lam_universal=float(rec_info.get("lam_universal", 0.0)),
+                   lam_used=float(rec_info.get("lam_used", 0.0)),
+               ),
                nn_no_occupations=occs.tolist())
 
     # ── (2) CCSD on HF reference (baseline) ──
@@ -195,43 +238,38 @@ def main():
         print(f"    CCSD on NN-NO FAILED: {ex}")
         out["ccsd_nn"] = dict(error=str(ex))
 
-    # ── (1) MC-PDFT on ĉ-derived RDMs ──
-    print(f"\n  [MC-PDFT on ĉ-derived multireference state]")
+    # ── (1) MC-PDFT on NN-NO active space ──
+    # Strategy: variational CASCI on the NN-NO orbital frame, then
+    # MC-PDFT on top. The NN-NO contribution is the active-space
+    # orbital basis derived from the ĉ 1-RDM.
+    print(f"\n  [MC-PDFT on NN-NO active space]")
     try:
         from pyscf import mcpdft, mcscf
-        # Build a CASCI object that holds the recovered c-vector
         ncas = args.ncas
         nelecas = (args.nelecas_alpha, args.nelecas_beta)
         ncore = (args.n_alpha + args.n_beta - sum(nelecas)) // 2
         print(f"    CAS({ncas},{nelecas}) ncore={ncore}")
 
-        mc = mcscf.CASCI(scf.RHF(mol).run(verbose=0), ncas, nelecas)
-        mc.mo_coeff = no_coeff_ao
+        mf_for_mc = scf.RHF(mol).run(verbose=0)
+        mc = mcscf.CASCI(mf_for_mc, ncas, nelecas)
+        mc.ncore = ncore
+        mc.mo_coeff = no_coeff_ao   # NN-NO basis
         mc.verbose = 0
-        # Project the recovered c_hat into the CAS subspace via PySCF's
-        # candidate-set machinery -- this gives us the CASCI CI matrix
-        # corresponding to a (ncas, nelecas) restriction of ĉ.
-        # For BeH2 at CAS(8,(3,3)) the active-space size is C(8,3)^2 = 3136
-        from OmegaQMC.cs.mrpt import build_casci_root_matched
-        mc, ci_active = build_casci_root_matched(
-            mol, no_coeff_ao, c_hat, fci_ref["candidate_set"],
-            ncas, nelecas, ncore,
-        )
-        mc.ci = ci_active
-        mc.e_cas, _ = mc.kernel()
-        # Run MC-PDFT
+        mc.kernel(mo_coeff=no_coeff_ao)
+        e_cas = float(mc.e_tot)
+        print(f"    E_CASCI (NN-NO) = {e_cas:.6f}")
+
         pdft = mcpdft.CASCI(mc, args.mcpdft_functional, ncas, nelecas)
-        pdft.fcisolver = mc.fcisolver
-        pdft.ci = ci_active
-        pdft.mo_coeff = no_coeff_ao
-        pdft.kernel(ci_active)
+        pdft.verbose = 0
+        pdft.kernel()
         print(f"    E_MC-PDFT ({args.mcpdft_functional}) = "
-              f"{pdft.e_tot:.6f}  (vs E_CASCI = {mc.e_cas:.6f})")
+              f"{pdft.e_tot:.6f}  (vs E_CASCI = {e_cas:.6f})")
         out["mcpdft"] = dict(
             functional=args.mcpdft_functional,
-            e_casci=float(mc.e_cas),
+            e_casci=e_cas,
             e_mcpdft=float(pdft.e_tot),
             ncas=int(ncas), nelecas=list(nelecas),
+            orbital_basis="NN-NO",
         )
     except Exception as ex:
         import traceback

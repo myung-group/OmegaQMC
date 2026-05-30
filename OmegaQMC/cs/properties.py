@@ -58,24 +58,126 @@ def reshape_chat_to_pyscf_matrix(
     return ci_matrix
 
 
+def _excite_sign(occ: Tuple[int, ...], p: int, q: int) -> int:
+    """Sign of <occ - {p} + {q} | a^dag_q a_p | occ>.
+
+    Standard Slater-Condon: equals (-1)^(number of orbitals between p and
+    q's *sorted* positions in the two strings), with PySCF's bitstring
+    sign convention (low orbitals = least significant bit). For
+    occ_a sorted ascending, the sign is (-1)^(|{r in occ : min(p,q) < r
+    < max(p,q)}|) — counts occupied orbitals strictly between p and q.
+    """
+    lo, hi = (p, q) if p < q else (q, p)
+    n_between = sum(1 for r in occ if lo < r < hi)
+    return 1 if n_between % 2 == 0 else -1
+
+
 def compute_1rdm(
     c_hat: np.ndarray,
     candidate_set: Sequence,
     n_orb: int,
     nelec: Tuple[int, int],
+    dense_threshold: int = 50_000,
 ) -> np.ndarray:
     """One-particle reduced density matrix in the NO basis.
 
     ``gamma_pq = <Psi | a_p^dagger a_q | Psi>`` (spin-summed). Shape
     ``(n_orb, n_orb)``.
+
+    For full-FCI determinant counts below ``dense_threshold`` per spin,
+    builds the dense ``(n_strings_a, n_strings_b)`` matrix and calls
+    PySCF's ``direct_spin1.make_rdm1``. Otherwise computes γ directly
+    from the sparse ``candidate_set`` representation — essential for
+    larger systems (H8/cc-pVDZ ~91k strings, H2O/aug-cc-pVDZ ~750k
+    strings) where the dense matrix would be tens of GB to multiple TB.
     """
-    from pyscf import fci as pyscf_fci
-    ci_matrix = reshape_chat_to_pyscf_matrix(
-        c_hat, candidate_set, n_orb, nelec[0], nelec[1],
-    )
-    return pyscf_fci.direct_spin1.make_rdm1(
-        ci_matrix, n_orb, nelec,
-    )
+    from math import comb
+    n_alpha, n_beta = int(nelec[0]), int(nelec[1])
+    n_str_a = comb(n_orb, n_alpha)
+    n_str_b = comb(n_orb, n_beta)
+    if max(n_str_a, n_str_b) <= dense_threshold:
+        from pyscf import fci as pyscf_fci
+        ci_matrix = reshape_chat_to_pyscf_matrix(
+            c_hat, candidate_set, n_orb, n_alpha, n_beta,
+        )
+        return pyscf_fci.direct_spin1.make_rdm1(
+            ci_matrix, n_orb, nelec,
+        )
+    return _compute_1rdm_sparse(c_hat, candidate_set, n_orb, nelec)
+
+
+def _compute_1rdm_sparse(
+    c_hat: np.ndarray,
+    candidate_set: Sequence,
+    n_orb: int,
+    nelec: Tuple[int, int],
+) -> np.ndarray:
+    """Sparse spin-summed 1-RDM from a candidate-set representation.
+
+    Iterates over the candidate set only, computing diagonal
+    contributions ``|c_I|^2`` and off-diagonal contributions from
+    single-excitation pairs (alpha and beta separately). Two determinants
+    differing by a single alpha (resp. beta) excitation contribute
+    ``sign * c_I * c_J`` to ``gamma_{pq}``; the spin-summed γ adds alpha
+    and beta channels.
+
+    Cost: O(|candidate_set| · N_e · (n_orb - N_e)). Memory: ``n_orb^2``.
+    Independent of the full FCI string count.
+    """
+    n_alpha, n_beta = int(nelec[0]), int(nelec[1])
+    c = np.asarray(c_hat, dtype=float)
+    gamma = np.zeros((n_orb, n_orb), dtype=float)
+
+    cand = [(tuple(int(x) for x in occ_a), tuple(int(x) for x in occ_b))
+            for occ_a, occ_b in candidate_set]
+    idx_of = {key: i for i, key in enumerate(cand)}
+
+    for I, (occ_a, occ_b) in enumerate(cand):
+        c_I = c[I]
+        if c_I == 0.0:
+            continue
+        # Diagonal contributions
+        for p in occ_a:
+            gamma[p, p] += c_I * c_I
+        for p in occ_b:
+            gamma[p, p] += c_I * c_I
+        # Alpha single excitations
+        occ_a_set = set(occ_a)
+        for p in occ_a:
+            for q in range(n_orb):
+                if q in occ_a_set:
+                    continue
+                new_occ_a = tuple(sorted(
+                    [orb for orb in occ_a if orb != p] + [q]
+                ))
+                key = (new_occ_a, occ_b)
+                J = idx_of.get(key)
+                if J is None:
+                    continue
+                c_J = c[J]
+                if c_J == 0.0:
+                    continue
+                sign = _excite_sign(occ_a, p, q)
+                gamma[p, q] += sign * c_I * c_J
+        # Beta single excitations
+        occ_b_set = set(occ_b)
+        for p in occ_b:
+            for q in range(n_orb):
+                if q in occ_b_set:
+                    continue
+                new_occ_b = tuple(sorted(
+                    [orb for orb in occ_b if orb != p] + [q]
+                ))
+                key = (occ_a, new_occ_b)
+                J = idx_of.get(key)
+                if J is None:
+                    continue
+                c_J = c[J]
+                if c_J == 0.0:
+                    continue
+                sign = _excite_sign(occ_b, p, q)
+                gamma[p, q] += sign * c_I * c_J
+    return gamma
 
 
 def natural_occupations_from_rdm(gamma: np.ndarray) -> np.ndarray:

@@ -57,6 +57,7 @@ from OmegaQMC.cs.estimators import (
     estimate_ci,
     lambda_cv,
     recovery_metrics,
+    lasso_recover_auto,
 )
 
 from OmegaQMC.cs.scaling import (

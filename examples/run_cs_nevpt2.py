@@ -35,6 +35,7 @@ from OmegaQMC.cs.walkers import load_walker_bank
 from OmegaQMC.cs.estimators import (
     evaluate_orbitals_on_walkers, f_I_matrix,
     normalize_and_align, normalize_and_align_bias_corrected,
+    lasso_recover_auto,
 )
 from OmegaQMC.cs.scaling import precompute_means
 from OmegaQMC.cs.mrpt import compare_nevpt2
@@ -86,6 +87,11 @@ def main():
     p.add_argument("--det-chunk", type=int, default=200)
     p.add_argument("--candidate-tol", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--lam-mult", type=float, default=0.5,
+                   help="Lasso threshold multiplier: lam = lam_mult * "
+                        "sigma_median * sqrt(2 log n_det). 0.0 disables "
+                        "thresholding (raw sample-mean recovery). "
+                        "Default 0.5 (empirically optimal for MR systems).")
     p.add_argument("--out-json", default=None)
     args = p.parse_args()
 
@@ -142,12 +148,43 @@ def main():
     c_raw = means[(K_s_max, 0)]
     m2 = m2s[(K_s_max, 0)]
     c_true = np.array([fci_ref["ci_dict"][k] for k in fci_ref["candidate_set"]])
-    from OmegaQMC.cs.estimators import bias_corrected_proj_mass
-    c_hat, proj_mass = normalize_and_align(c_raw, float(np.sign(c_true[0])))
-    proj_mass_corrected = bias_corrected_proj_mass(c_raw, m2, K_s_max)
-    print(f"  K_s = {K_s_max}")
-    print(f"  proj_mass (naive)          = {proj_mass:.3e}")
-    print(f"  proj_mass (bias-corrected) = {proj_mass_corrected:.3e}")
+    n_det = len(c_true)
+    ref_sign = float(np.sign(c_true[0]))
+    if args.lam_mult > 0.0:
+        c_hat, rec_info = lasso_recover_auto(
+            c_raw, m2, K_s_max, n_det, ref_sign,
+            lam_mult=args.lam_mult,
+        )
+        print(f"  K_s = {K_s_max},  n_det = {n_det}")
+        print(f"  proj_mass: naive={rec_info['proj_mass_naive']:.3e}, "
+              f"bias-corrected={rec_info['proj_mass_bias_corrected']:.3e}")
+        print(f"  Lasso: sigma_median={rec_info['sigma_median']:.3e}, "
+              f"lam_universal={rec_info['lam_universal']:.3e}, "
+              f"lam_used={rec_info['lam_used']:.3e} "
+              f"(mult={rec_info['lam_mult']:.2f})")
+        print(f"  recovered support = {rec_info['support']}/{n_det}, "
+              f"max|c_hat|={rec_info['max_abs']:.4f}")
+        # c_true diagnostics for comparison
+        c_true_norm = c_true / np.linalg.norm(c_true)
+        err_l2 = float(np.linalg.norm(c_hat - c_true_norm))
+        print(f"  c_true: max|c|={np.max(np.abs(c_true_norm)):.4f}, "
+              f"support(>1e-4)={int(np.sum(np.abs(c_true_norm) > 1e-4))}")
+        print(f"  recovery error ||c_hat - c_true||_2 = {err_l2:.4f}")
+    else:
+        c_hat, proj_mass = normalize_and_align(c_raw, ref_sign)
+        rec_info = dict(proj_mass_naive=float(proj_mass),
+                        proj_mass_bias_corrected=float("nan"),
+                        sigma_median=float("nan"),
+                        lam_universal=0.0, lam_used=0.0, lam_mult=0.0,
+                        support=int(np.sum(np.abs(c_hat) > 1e-12)),
+                        max_abs=float(np.max(np.abs(c_hat))),
+                        renorm_after_threshold=1.0)
+        c_true_norm = c_true / np.linalg.norm(c_true)
+        err_l2 = float(np.linalg.norm(c_hat - c_true_norm))
+        print(f"  K_s = {K_s_max} (raw sample-mean, no Lasso)")
+        print(f"  proj_mass = {proj_mass:.3e}, max|c_hat| = {rec_info['max_abs']:.4f}")
+        print(f"  recovery error ||c_hat - c_true||_2 = {err_l2:.4f}")
+    proj_mass = rec_info["proj_mass_naive"]
 
     print(f"\n[NEVPT2 comparison]")
     cmp = compare_nevpt2(
@@ -177,6 +214,19 @@ def main():
             prefix=prefix, molecule=args.molecule,
             geometry_tag=args.geometry_tag, R=args.R, basis=args.basis,
             K_s=int(K_s_max), proj_mass=float(proj_mass),
+            recovery=dict(
+                lam_mult=float(rec_info["lam_mult"]),
+                lam_universal=float(rec_info["lam_universal"]),
+                lam_used=float(rec_info["lam_used"]),
+                sigma_median=float(rec_info["sigma_median"]),
+                support=int(rec_info["support"]),
+                n_det=int(n_det),
+                max_abs_chat=float(rec_info["max_abs"]),
+                max_abs_ctrue=float(np.max(np.abs(c_true_norm))),
+                err_l2=float(err_l2),
+                proj_mass_naive=float(rec_info["proj_mass_naive"]),
+                proj_mass_bias_corrected=float(rec_info["proj_mass_bias_corrected"]),
+            ),
             E_HF=float(fci_ref["E_HF"]),
             E_FCI=float(fci_ref["E_FCI"]),
             ncas=int(ch["ncas"]), nelecas=list(ch["nelecas"]),

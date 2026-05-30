@@ -20,7 +20,7 @@ minimizer is the soft-thresholded sample mean (reference excluded).
 """
 
 import math
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Optional
 
 import numpy as np
 import jax
@@ -235,6 +235,72 @@ def normalize_and_align(
     if reference_sign != 0.0 and c_norm[0] * reference_sign < 0:
         c_norm = -c_norm
     return c_norm, proj_mass
+
+
+def lasso_recover_auto(
+    c_raw: np.ndarray,
+    m2: np.ndarray,
+    K_s: int,
+    n_det: int,
+    reference_sign: float,
+    lam_mult: float = 0.5,
+) -> Tuple[np.ndarray, dict]:
+    """End-to-end identity-design Lasso recovery with auto-λ.
+
+    Pipeline: normalize_and_align → universal-threshold soft-threshold
+    (Donoho–Johnstone, scaled by ``lam_mult``) with reference coefficient
+    preserved un-thresholded → renormalize to unit L₂ → sign re-align.
+
+    The threshold uses per-coefficient noise estimated from the second
+    moments: σ_per = √((m2 - c_raw²)/K_s) in the raw (sample-mean) scale,
+    rescaled to the normalized (unit L₂) scale by /√proj_mass_naive.
+    The universal threshold is λ_u = median(σ_norm) · √(2 log n_det); we
+    use λ = ``lam_mult`` · λ_u (empirically ``lam_mult ≈ 0.5`` balances
+    support recovery vs noise for multireference systems).
+
+    Returns ``(c_hat, info)`` where ``info`` carries diagnostics for
+    downstream reporting (proj_mass naive/bias-corrected, σ_median,
+    λ used, support, max|c|).
+    """
+    proj_mass_naive = float(np.sum(np.asarray(c_raw) ** 2))
+    proj_mass_corr = bias_corrected_proj_mass(c_raw, m2, K_s)
+    if proj_mass_naive < 1e-30:
+        return np.asarray(c_raw).copy(), dict(
+            proj_mass_naive=proj_mass_naive,
+            proj_mass_bias_corrected=proj_mass_corr,
+            sigma_median=float("nan"), lam_universal=0.0, lam_used=0.0,
+            lam_mult=float(lam_mult), support=0, max_abs=0.0,
+            renorm_after_threshold=0.0,
+        )
+    c_norm, _ = normalize_and_align(c_raw, reference_sign)
+
+    sample_var_raw = np.maximum(np.asarray(m2) - np.asarray(c_raw) ** 2, 0.0)
+    sigma_per_raw = np.sqrt(sample_var_raw / max(K_s, 1))
+    sigma_norm = sigma_per_raw / np.sqrt(proj_mass_naive)
+    sigma_med = float(np.median(sigma_norm))
+    lam_universal = sigma_med * np.sqrt(2.0 * np.log(max(int(n_det), 2)))
+    lam = float(lam_mult) * lam_universal
+
+    c_hat = soft_threshold(c_norm, lam)
+    c_hat[0] = c_norm[0]
+    pre_norm = float(np.linalg.norm(c_hat))
+    if pre_norm > 0:
+        c_hat = c_hat / pre_norm
+    if reference_sign != 0.0 and c_hat[0] * reference_sign < 0:
+        c_hat = -c_hat
+
+    info = dict(
+        proj_mass_naive=float(proj_mass_naive),
+        proj_mass_bias_corrected=float(proj_mass_corr),
+        sigma_median=sigma_med,
+        lam_universal=float(lam_universal),
+        lam_used=float(lam),
+        lam_mult=float(lam_mult),
+        support=int(np.sum(np.abs(c_hat) > 1e-12)),
+        max_abs=float(np.max(np.abs(c_hat))) if c_hat.size else 0.0,
+        renorm_after_threshold=pre_norm,
+    )
+    return c_hat, info
 
 
 def estimate_ci(

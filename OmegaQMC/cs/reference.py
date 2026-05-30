@@ -40,16 +40,42 @@ def run_rhf(mol):
     return float(mf.e_tot), np.asarray(mf.mo_coeff)
 
 
-def run_fci(mol, mo_coeff):
+def run_fci(mol, mo_coeff, force_singlet: bool = True):
     """FCI in the basis spanned by ``mo_coeff``.
 
     Returns ``(E_FCI, ci_matrix, cisolver)``. The CI matrix is indexed by
     (alpha-string-index, beta-string-index).
+
+    For closed-shell molecules (equal alpha/beta count) PySCF's auto
+    ``fci.FCI`` can dispatch to ``direct_spin1`` whose Ms=0 sector
+    contains BOTH singlets and triplets. Davidson then converges to the
+    Ms=0 lowest root regardless of S², which for near-degenerate systems
+    (e.g. H4 square at stretched geometry) may be the wrong root and
+    differs between orbital bases. With ``force_singlet=True`` (default)
+    we explicitly use ``direct_spin0`` which spans only singlet wave
+    functions — guarantees a stable, basis-independent singlet root.
     """
-    cisolver = fci.FCI(mol, mo_coeff)
+    if force_singlet and mol.spin == 0:
+        from pyscf.fci import direct_spin0
+        cisolver = direct_spin0.FCI(mol)
+        cisolver.mo_coeff = mo_coeff
+    else:
+        cisolver = fci.FCI(mol, mo_coeff)
     cisolver.verbose = 0
-    E, ci = cisolver.kernel()
-    return float(E), np.asarray(ci), cisolver
+    if force_singlet and mol.spin == 0:
+        from pyscf import ao2mo
+        h1 = mo_coeff.T @ scf.hf.get_hcore(mol) @ mo_coeff
+        norb = mo_coeff.shape[1]
+        eri = ao2mo.kernel(mol, mo_coeff, compact=False).reshape(
+            norb, norb, norb, norb,
+        )
+        nelec = mol.nelec
+        E_elec, ci = cisolver.kernel(h1, eri, norb, nelec)
+        E = float(E_elec + mol.energy_nuc())
+    else:
+        E, ci = cisolver.kernel()
+        E = float(E)
+    return E, np.asarray(ci), cisolver
 
 
 def natural_orbitals(cisolver, ci, mo_coeff, nelec):
