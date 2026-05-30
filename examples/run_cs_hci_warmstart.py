@@ -39,38 +39,46 @@ from run_cs_h4_scaling import evaluate_signed_psi
 
 def hci_iter_to_converge(mol, mo_coeff, n_alpha, n_beta, initial_ci=None,
                          tol=1e-8, max_iter=200):
-    """Run selected_ci and count iterations to convergence.
+    """Run selected-CI and count iterations to convergence.
 
-    Uses PySCF's selected_ci.SelectedCI. Returns dict with E, n_iter, time.
+    Uses PySCF's selected_ci.SCI with proper MO-transformed integrals
+    obtained via the mcscf utilities. Returns E, n_iter, time.
     """
-    from pyscf.fci import selected_ci, direct_spin1
+    from pyscf import ao2mo, scf
+    from pyscf.fci import selected_ci
+    n_orb = mo_coeff.shape[1]
+    nelec = (n_alpha, n_beta)
+
+    # Transform AO integrals to the MO basis defined by mo_coeff.
+    # h1: one-electron core Hamiltonian, h2: two-electron MO integrals.
+    h1_ao = mol.intor("int1e_kin") + mol.intor("int1e_nuc")
+    h1 = mo_coeff.T @ h1_ao @ mo_coeff
+    h2 = ao2mo.kernel(mol, mo_coeff, compact=False).reshape(
+        n_orb, n_orb, n_orb, n_orb
+    )
+    e_nuc = mol.energy_nuc()
+
     sci = selected_ci.SCI(mol)
     sci.conv_tol = tol
     sci.max_cycle = max_iter
-    n_orb = mo_coeff.shape[1]
-    nelec = (n_alpha, n_beta)
+    sci.verbose = 0
+
     t0 = time.time()
     try:
         if initial_ci is not None:
-            e, c = sci.kernel(
-                mol.intor("int1e_kin") + mol.intor("int1e_nuc"),
-                mol.intor("int2e", aosym="s4"),
-                n_orb, nelec, ci0=initial_ci,
-            )
+            e_elec, c = sci.kernel(h1, h2, n_orb, nelec, ci0=initial_ci)
         else:
-            e, c = sci.kernel(
-                mol.intor("int1e_kin") + mol.intor("int1e_nuc"),
-                mol.intor("int2e", aosym="s4"),
-                n_orb, nelec,
-            )
+            e_elec, c = sci.kernel(h1, h2, n_orb, nelec)
         t = time.time() - t0
-        n_iter = getattr(sci, "converged_iter", -1)
+        e_total = float(e_elec) + float(e_nuc)
+        n_iter = getattr(sci, "converged_iter",
+                          getattr(sci, "niter", -1))
+        n_dets = int(c.size if hasattr(c, "size") else 0)
     except Exception as ex:
         return dict(E=float("nan"), n_iter=-1, time=time.time() - t0,
                     error=str(ex))
-    return dict(E=float(e), n_iter=int(n_iter) if n_iter > 0 else -1,
-                time=float(t),
-                n_dets_final=int(c.size if hasattr(c, "size") else 0))
+    return dict(E=e_total, n_iter=int(n_iter) if n_iter else -1,
+                time=float(t), n_dets_final=n_dets)
 
 
 def main():
