@@ -1,0 +1,20 @@
+{
+  "prefix": "beh2_ferminet_jastrow_R1p330_cc-pvdz",
+  "molecule": "beh2",
+  "R": 1.33,
+  "basis": "cc-pvdz",
+  "E_FCI": -15.836403823256541,
+  "hf_init": {
+    "E": -15.836329733527352,
+    "n_iter": -1,
+    "time": 3.0645413398742676,
+    "n_dets_final": 82944
+  },
+  "chat_init": {
+    "E": -15.836329733527352,
+    "n_iter": -1,
+    "time": 2.9142234325408936,
+    "n_dets_final": 82944
+  },
+  "C0_chat": 0.9364072167748296
+}

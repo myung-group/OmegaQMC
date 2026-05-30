@@ -617,6 +617,65 @@ concentrating on the chemically meaningful determinants.}
 \label{fig:h2o_lambda_sweep}
 \end{figure}
 
+\subsection{Beyond identity design: random-rotation compressed sensing}
+\label{sec:cs_random_rotation}
+
+The sample-mean + Lasso scheme above has an identity design matrix
+(one estimator per coefficient) and is therefore the simplest case of
+the CS family. A genuine compressed-sensing variant replaces the
+$N_{\rm det}$ per-coefficient estimators with $m \ll N_{\rm det}$
+``compressed'' measurements drawn from random orbital rotations.
+
+For $m$ random orthogonal matrices $\{U_j\}_{j=1}^m$ (sampled from
+the Haar measure on $O(n_{\rm orb})$), the rotated HF determinant
+$D_{\rm HF}^{(U_j)}(R) = \det[\eta_p^{(U_j)}(r_i)]$ is a single
+Slater determinant in the rotated basis
+$\eta_p^{(U_j)} = \sum_q (U_j)_{qp}\eta_q$, and its overlap with each
+candidate determinant is
+\begin{equation}
+A_{j,I} \;=\; \langle D_{\rm HF}^{(U_j)} | D_I \rangle
+       \;=\; \det\bigl(U_j[{\rm occ}_I^\alpha,:n_\alpha]\bigr)\,
+            \det\bigl(U_j[{\rm occ}_I^\beta,:n_\beta]\bigr).
+\end{equation}
+The walker-bank measurement is the sample mean
+$y_j = \langle D_{\rm HF}^{(U_j)}/\Psi_{\rm NN}\rangle = (Ac)_j/\sqrt{Z}$,
+and recovery follows the canonical CS prescription
+\begin{equation}
+\widehat c \;=\; \arg\min_{c}\;
+   \tfrac{1}{2}\bigl\|y - Ac\bigr\|_2^2 \;+\; \lambda\|c\|_1.
+\end{equation}
+This is no longer reducible to coordinate-wise soft-thresholding ---
+$A$ is dense with rows drawn from a random orthogonal projection ---
+and requires a proper Lasso solver (FISTA / coordinate descent).
+Walker--determinant evaluations drop from $\mathcal{O}(K_s\,N_{\rm
+det})$ for the identity-design scheme to $\mathcal{O}(K_s\,m)$, and
+the sample complexity becomes the Candès--Tao
+$m \gtrsim C\,K_{\rm eff}\log(N_{\rm det}/K_{\rm eff})$.
+
+\paragraph{Empirical regime dependence.}
+On \ce{H2}/cc-pVDZ ($N_{\rm det}=100$, $K_s = 12{,}800$) the random-
+rotation CS variant achieves $\|\widehat c - c^{\rm FCI}\|_2 = 0.091$
+using only $m=20$ measurements (20\% of $N_{\rm det}$), compared
+with the identity-design baseline of $0.135$ at full $N_{\rm det}$
+measurements --- a $32\%$ recovery-error reduction with a $5\times$
+measurement budget reduction. On the converged \ce{BeH2}/cc-pVDZ
+cell ($N_{\rm det}=2158$, $K_s = 51{,}200$), however, the random-
+rotation scheme does not outperform the identity-design baseline at
+any $(m, \lambda)$ tested in our sweep: the best CS recovery error
+was $\sim 0.33$ at $m=200$ vs the baseline $0.30$. The regime
+distinction is the walkers-per-coefficient ratio: when $K_s \gg
+N_{\rm det}$ (BeH$_2$, $K_s/N_{\rm det} \approx 24$), each per-
+coefficient sample mean is already low-noise and the identity design
+suffices; when $K_s \lesssim N_{\rm det}$ (a system with millions of
+candidate determinants but only thousands of walkers, such as
+\ce{H2O}/aug-cc-pVDZ at CAS(16) where $N_{\rm det} \approx 3.3\times
+10^6$), the random-rotation scheme's $\mathcal{O}(m \log N_{\rm
+det})$ scaling becomes the only tractable route to CI-vector
+extraction at all. The framework supports both deployments; the
+choice is regime-dependent. Reproducibility:
+\texttt{OmegaQMC.cs.compressed} module and
+\texttt{examples/run\_cs\_compressed\_demo.py}.
+
 %==========================================================================
 \section{Implementation in OmegaQMC}
 \label{sec:implementation}
@@ -978,6 +1037,25 @@ $1\%$--$3\%$, e.g.\ $\widehat{c}_{((1,2),(0,3))} - \widehat{c}_{((0,3),(1,2))}
 symmetry breaking in the trained NN, surfaced by the recovery
 pipeline and not visible from the VMC energy alone.
 
+\paragraph{Quantitative spin-contamination diagnostic.}
+The spin contamination of the recovered $\widehat c$ is computable
+via the standard CI-vector contraction
+$\langle S^2\rangle = \sum_{IJ} \widehat c_I \widehat c_J
+\langle D_I | \hat S^2 | D_J\rangle$ (\texttt{pyscf.fci.spin\_op.spin\_square0}).
+On the converged \ce{BeH2}/cc-pVDZ cell (5000 SR iters,
+\S\ref{sec:beh2_convergence}) the recovered
+$\langle S^2\rangle^{\widehat c} = 0.137$ vs the FCI value
+$\langle S^2\rangle^{\rm FCI} \approx 0$; on \ce{H4}/cc-pVDZ
+the recovered value is $0.096$ vs FCI $\approx 0$. Both are
+small-but-finite deviations from the singlet target, quantifying the
+$\alpha$--$\beta$ asymmetry that the FermiNet separate-spin path
+architecture introduces. The corresponding spin multiplicities
+($1.24$ for \ce{BeH2} and $1.18$ for \ce{H4}, vs the singlet target
+$1.00$) translate the contamination into the familiar chemist's-
+language unit. These numbers are reproducible via
+\texttt{examples/run\_cs\_s2\_2rdm.py}; JSON outputs in
+\texttt{data/beh2\_s2\_2rdm.json} and \texttt{data/h4\_s2\_2rdm.json}.
+
 \subsection{Self-consistent NN-NO frame (CASSCF/CASCI-free deployment)}
 \label{sec:nn_no_self_consistent}
 
@@ -1337,6 +1415,26 @@ quality. A direct comparison of (a) CASPT2 on a NN-VMC + CS
 reference vs.\ (b) CASPT2 on a converged CASSCF reference, both at
 matched active-space sizes, would directly quantify the elimination
 of CASSCF-related systematic error.
+
+\subsection{Selected-CI warm-start with $\widehat c$}
+\label{sec:hci_warmstart}
+
+A second test of the framework's post-Hartree--Fock value is
+\emph{providing a high-quality initial CI vector to standard selected-CI
+solvers}. We use PySCF's \texttt{selected\_ci.SCI} on
+\ce{BeH2}/cc-pVDZ initialised both from the HF reference (the default)
+and from the CS-recovered $\widehat c$ of the converged
+FermiNet+Jastrow trial; both runs converge to the same selected-CI
+energy $-15.83633\,E_{\rm h}$ (within $0.07\,{\rm m}E_{\rm h}$ of FCI
+$-15.83640\,E_{\rm h}$), retaining 82{,}944 determinants in the final
+support. Wall time: $3.06\,{\rm s}$ (HF init) vs $2.91\,{\rm s}$
+($\widehat c$ warm-start) on a single GH200, $\sim 5\%$ difference.
+The warm-start advantage at this CAS size is therefore at the level
+of system noise; the value of $\widehat c$ as a selected-CI initial
+state is expected to grow with system size, where Davidson iterations
+dominate runtime. Reproducibility:
+\texttt{examples/run\_cs\_hci\_warmstart.py};
+JSON output \texttt{data/beh2\_hci\_warmstart.json}.
 
 %==========================================================================
 \section{Application III: NES-VMC Excited States as Interpretable CI Vectors}
