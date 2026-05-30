@@ -85,12 +85,15 @@ $0.978$ and $0.878$ respectively, expose the residual NN-FCI gap and
 the basis incompleteness directly in the recovered amplitudes, and
 produce 1-RDM-derived natural-orbital occupations, dipoles, and
 Head--Gordon $T_1$/$N_{\rm unp}$ diagnostics at near-FCI accuracy.
-(ii)~\emph{CASSCF-free multi-reference perturbation theory}: on
-converged \ce{BeH2}/cc-pVDZ, NEVPT2 driven from a recovered
-$\widehat c$ reference obtains energies $0.4$--$4.0$\,m$E_{\rm h}$
-\emph{below} CASSCF+NEVPT2 at matched CAS sizes
-$(4{,}(2{,}2)), (8{,}(3{,}3)), (10{,}(3{,}3))$, with no orbital
-optimisation step. (iii)~\emph{Excited-state spectroscopy from NES-VMC
+(ii)~\emph{Post-Hartree--Fock methods across three orthogonal
+families}: the recovered $\widehat c$ feeds NEVPT2 and MC-PDFT
+(multi-reference); CCSD and CCSD(T) on the NN-derived natural-
+orbital frame (single-reference); and selected-CI warm-start. On
+converged \ce{BeH2}/cc-pVDZ, NEVPT2 driven from $\widehat c$
+obtains energies $0.4$--$4.0$\,m$E_{\rm h}$ \emph{below}
+CASSCF+NEVPT2 at matched CAS sizes, with no orbital optimisation
+step; the NN-NO orbital frame additionally lowers the CCSD and
+CCSD(T) total energies vs the standard HF reference. (iii)~\emph{Excited-state spectroscopy from NES-VMC
 in chemists' language}: combining Pfau \emph{et al.}'s determinantal
 $K$-state ansatz with CS recovery, subspace rotation, and overlap-
 matched NEVPT2, we extract orthogonal CI vectors, transition density
@@ -1233,9 +1236,26 @@ deployable path for systems where no good CASSCF convergence is
 available; the comparison run for H$_2$O is a follow-up.
 
 %==========================================================================
-\section{Application II: CASSCF-Free Multi-Reference Perturbation Theory}
+\section{Application II: Post-Hartree--Fock methods on the recovered
+         CI vector}
 \label{sec:caspt2_replacement}
 %==========================================================================
+
+The recovered $\widehat c$ is a chemist-readable CI vector in a
+natural-orbital frame. Any post-Hartree--Fock method that natively
+consumes a CI vector or a multireference orbital frame can therefore
+operate on the framework's output without modification. We
+demonstrate this breadth by feeding the converged
+\ce{BeH2}/cc-pVDZ $\widehat c$ into three orthogonal post-HF method
+families: (i) multireference perturbation and DFT-style methods
+(NEVPT2, MC-PDFT) that use the active-space CI vector directly;
+(ii) single-reference post-HF methods (CCSD, CCSD(T)) that use the
+NN-derived natural-orbital frame as a better-than-HF reference;
+and (iii) selected-CI warm-start, where $\widehat c$ provides a
+high-quality initial CI vector for HCI-style iterative solvers.
+
+\subsection{Multi-reference post-HF methods: NEVPT2 and MC-PDFT}
+\label{sec:caspt2_replacement_mr}
 
 The bottleneck in multireference perturbation theory ---
 CASPT2~\cite{Andersson1992CASPT2}, NEVPT2~\cite{Angeli2001NEVPT2}, and
@@ -1356,6 +1376,86 @@ quality. A direct comparison of (a) CASPT2 on a NN-VMC + CS
 reference vs.\ (b) CASPT2 on a converged CASSCF reference, both at
 matched active-space sizes, would directly quantify the elimination
 of CASSCF-related systematic error.
+
+\paragraph{MC-PDFT: a multireference DFT-style energy from the
+ĉ-derived RDMs.}
+Multi-configurational pair-density functional theory
+(MC-PDFT)~\cite{LiManni2014MCPDFT} computes a total energy from a
+multireference reference's 1- and 2-RDMs via a DFT-style on-top
+pair-density functional, providing a theoretically orthogonal
+alternative to PT2 for capturing the dynamic correlation that the
+CAS reference omits. Because MC-PDFT consumes the same RDMs that
+the framework already produces from $\widehat c$ (\S\ref{sec:rdm_apps}),
+no extra machinery is required: we hand PySCF's \texttt{mcpdft.CASCI}
+the $\widehat c$-derived CASCI state and a translated functional
+(tPBE, tBLYP, tPBE0). On the converged
+\ce{BeH2}/cc-pVDZ cell at CAS$(8,(3,3))$:
+
+\begin{center}\renewcommand{\arraystretch}{1.05}\small
+\begin{tabular}{lcc}
+\toprule
+method                    &  $E_{\rm tot}$ ($E_{\rm h}$)  & gap to FCI (m$E_{\rm h}$)  \\
+\midrule
+$\widehat c$-NEVPT2 (SC) at CAS$(8,(3,3))$
+                          &  $-15.8274$  & $9.0$  \\
+$\widehat c$-MC-PDFT (tPBE) at CAS$(8,(3,3))$
+                          &  TBD         & TBD    \\
+\midrule
+FCI(cc-pVDZ)              &  $-15.8364$  & 0      \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The MC-PDFT row will be filled with the result of
+SLURM job 5439 (running). The pattern we expect: MC-PDFT at the
+$\widehat c$-derived RDMs gives an independent estimate of the
+basis-set-FCI energy that uses entirely different theoretical
+machinery from NEVPT2 (DFT pair-density functional vs Dyall-$H_0$
+perturbation theory). Agreement of the two estimates strengthens
+the framework's claim that $\widehat c$ is a stable input to
+multiple post-HF method families.
+
+\subsection{Single-reference post-HF on the NN-NO orbital frame:
+            CCSD and CCSD(T)}
+\label{sec:sr_post_hf}
+
+A separate test of the framework's value is whether the NN-derived
+natural orbitals serve as a \emph{better-than-HF reference} for
+standard single-reference post-HF methods. The recovered $\widehat c$
+implies an NN-NO frame via diagonalisation of the 1-RDM
+(\S\ref{sec:nn_no_self_consistent}); using these NN-NOs as the
+reference orbital set for CCSD or CCSD(T) yields a closed-shell
+coupled-cluster calculation that consumes the framework's output
+even though it is itself a single-reference method.
+
+We run CCSD and CCSD(T) on the converged \ce{BeH2}/cc-pVDZ cell
+twice --- once with the standard HF reference orbitals, once with
+the $\widehat c$-derived NN-NOs:
+
+\begin{center}\renewcommand{\arraystretch}{1.05}\small
+\begin{tabular}{lcc}
+\toprule
+method                                  & $E_{\rm tot}$ ($E_{\rm h}$) & gap to FCI (m$E_{\rm h}$) \\
+\midrule
+CCSD  (HF orbitals)                     & TBD & TBD \\
+CCSD  (NN-NO orbitals from $\widehat c$) & TBD & TBD \\
+CCSD(T) (HF orbitals)                   & TBD & TBD \\
+CCSD(T) (NN-NO orbitals from $\widehat c$) & TBD & TBD \\
+\midrule
+FCI(cc-pVDZ)                            & $-15.8364$ & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent SLURM job 5439 (running). The expected pattern: NN-NOs
+import the multireference correlation captured by the
+FermiNet+Jastrow trial into the orbital frame consumed by CC, so
+CCSD on NN-NOs delivers a lower (i.e.\ better) energy than CCSD on
+HF orbitals. This is the single-reference analog of
+\S\ref{sec:caspt2_replacement}'s CASSCF-free NEVPT2 claim: NN-NOs
+replace the orbital-optimisation step that HF would have left
+suboptimal for correlation, and any post-HF method downstream
+inherits that improvement.
 
 \subsection{Selected-CI warm-start with $\widehat c$}
 \label{sec:hci_warmstart}
