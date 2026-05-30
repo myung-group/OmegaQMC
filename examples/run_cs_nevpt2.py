@@ -57,7 +57,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cell-dir", required=True)
     p.add_argument("--molecule", required=True,
-                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2"])
+                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2",
+                            "h6", "h8"])
     p.add_argument("--geometry-tag", default="")
     p.add_argument("--R", type=float, default=1.0)
     p.add_argument("--basis", default="cc-pvdz")

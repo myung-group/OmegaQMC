@@ -28,7 +28,7 @@ import jax
 sys.path.insert(0, str(Path(__file__).parent))
 
 from OmegaQMC.utils import Mole_custom
-from OmegaQMC.cs.reference import compute_fci_reference
+from OmegaQMC.cs.reference import compute_fci_reference, compute_casci_reference
 from OmegaQMC.cs.walkers import load_walker_bank
 from OmegaQMC.cs.estimators import normalize_and_align
 from OmegaQMC.cs.scaling import precompute_means
@@ -58,6 +58,12 @@ def main():
     ap.add_argument("--nelecas-beta", type=int, default=3)
     ap.add_argument("--mcpdft-functional", default="tPBE",
                     help="MC-PDFT translated functional (tPBE, tBLYP, etc.)")
+    ap.add_argument("--ref-ncas", type=int, default=None,
+                    help="If set, use CASCI reference instead of full FCI.")
+    ap.add_argument("--ref-nelecas", type=str, default=None,
+                    help="CASCI nelecas as 'a,b' (required with --ref-ncas).")
+    ap.add_argument("--ref-ncore", type=int, default=None,
+                    help="frozen-core count for CASCI ref; auto if omitted.")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -69,10 +75,25 @@ def main():
     mol = build_mol(args.molecule, args.R, args.basis, args.unit,
                     args.geometry_tag)
     nelec = (args.n_alpha, args.n_beta)
-    fci_ref = compute_fci_reference(mol, n_alpha=args.n_alpha,
-                                    n_beta=args.n_beta, candidate_tol=1e-4)
-    print(f"  E_HF = {fci_ref['E_HF']:.6f}, "
-          f"E_FCI = {fci_ref['E_FCI']:.6f}")
+    if args.ref_ncas is not None:
+        if args.ref_nelecas is None:
+            sys.exit("--ref-ncas requires --ref-nelecas")
+        ref_nele = tuple(int(x) for x in args.ref_nelecas.split(","))
+        ref_ncore = args.ref_ncore
+        if ref_ncore is None:
+            ref_ncore = (args.n_alpha + args.n_beta - sum(ref_nele)) // 2
+        print(f"  using CASCI({args.ref_ncas},{ref_nele}) ncore={ref_ncore}")
+        fci_ref = compute_casci_reference(
+            mol, ncas=args.ref_ncas, nelecas=ref_nele,
+            ncore=ref_ncore, candidate_tol=1e-4,
+        )
+        print(f"  E_HF = {fci_ref['E_HF']:.6f}, "
+              f"E_CASCI = {fci_ref['E_FCI']:.6f} (CASCI used as reference)")
+    else:
+        fci_ref = compute_fci_reference(mol, n_alpha=args.n_alpha,
+                                        n_beta=args.n_beta, candidate_tol=1e-4)
+        print(f"  E_HF = {fci_ref['E_HF']:.6f}, "
+              f"E_FCI = {fci_ref['E_FCI']:.6f}")
 
     walkers, _, _ = load_walker_bank(str(cell_dir / f"{prefix}_walkers.h5"))
     key = jax.random.split(jax.random.key(42), 4)[1]

@@ -59,6 +59,11 @@ def build_mol(geometry: str, R: float, basis: str, unit: str,
             ("H", [R, R, 0]),
             ("H", [0, R, 0]),
         ]
+    elif geometry == "h6":
+        # Default geometry_tag = "linear" if empty
+        atoms = [("H", [0, 0, k * R]) for k in range(6)]
+    elif geometry == "h8":
+        atoms = [("H", [0, 0, k * R]) for k in range(8)]
     elif geometry == "lih":
         atoms = [("Li", [0, 0, 0]), ("H", [0, 0, R])]
     elif geometry == "beh2":
@@ -85,7 +90,8 @@ def main():
     p.add_argument("--cell-dir", required=True,
                    help="Cell directory containing the checkpoint + walker bank")
     p.add_argument("--geometry", required=True,
-                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2"])
+                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2",
+                            "h6", "h8"])
     p.add_argument("--geometry-tag", default="",
                    help="extra geometry qualifier (e.g. 'linear' or 'square' for H4)")
     p.add_argument("--R", type=float, default=1.0)

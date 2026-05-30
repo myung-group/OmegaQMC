@@ -49,7 +49,8 @@ def molecule_prefix(args) -> str:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--molecule", required=True,
-                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2"])
+                   choices=["h2", "h4", "lih", "beh2", "h2o", "n2", "c2",
+                            "h6", "h8"])
     p.add_argument("--geometry-tag", default="",
                    help="for h4: 'linear' or 'square'")
     p.add_argument("--R", type=float, default=1.0,
@@ -86,7 +87,7 @@ def main():
     defaults = {
         "h2": (1, 1), "h4": (2, 2), "lih": (2, 2),
         "beh2": (3, 3), "h2o": (5, 5), "n2": (7, 7),
-        "c2": (6, 6),
+        "c2": (6, 6), "h6": (3, 3), "h8": (4, 4),
     }
     if args.n_alpha is None or args.n_beta is None:
         args.n_alpha, args.n_beta = defaults[args.molecule]
