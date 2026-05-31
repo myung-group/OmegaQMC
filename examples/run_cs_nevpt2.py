@@ -38,7 +38,7 @@ from OmegaQMC.cs.estimators import (
     lasso_recover_auto,
 )
 from OmegaQMC.cs.scaling import precompute_means
-from OmegaQMC.cs.mrpt import compare_nevpt2
+from OmegaQMC.cs.mrpt import compare_nevpt2, chat_only_nevpt2
 from OmegaQMC.psi.nn.adapter import make_nn_log_psi
 from OmegaQMC.vmc_nn import get_vmc_nn_func
 
@@ -87,6 +87,11 @@ def main():
     p.add_argument("--det-chunk", type=int, default=200)
     p.add_argument("--candidate-tol", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--skip-casscf-baseline", action="store_true",
+                   help="Skip the CASSCF reference computation; only "
+                        "compute ĉ-NEVPT2. Use when PySCF's CASSCF "
+                        "is unstable at the target active space "
+                        "(e.g. H8/cc-pVDZ).")
     p.add_argument("--lam-mult", type=float, default=0.5,
                    help="Lasso threshold multiplier: lam = lam_mult * "
                         "sigma_median * sqrt(2 log n_det). 0.0 disables "
@@ -186,28 +191,48 @@ def main():
         print(f"  recovery error ||c_hat - c_true||_2 = {err_l2:.4f}")
     proj_mass = rec_info["proj_mass_naive"]
 
-    print(f"\n[NEVPT2 comparison]")
-    cmp = compare_nevpt2(
-        mol, c_hat, fci_ref,
-        ncas=args.ncas, nelecas=args.nelecas,
-        occ_threshold=args.occ_threshold, max_ncas=args.max_ncas,
-    )
-    ch, cs = cmp["chat"], cmp["casscf"]
-    print(f"\n  active space: CAS({ch['ncas']}, {ch['nelecas']})  "
-          f"core orbitals = {ch['ncore']}")
-    print(f"  determinants of c_hat kept in active space: {ch['n_det_kept_in_active']}")
+    if args.skip_casscf_baseline:
+        print(f"\n[NEVPT2 — ĉ only, CASSCF baseline skipped]")
+        cmp = chat_only_nevpt2(
+            mol, c_hat, fci_ref,
+            ncas=args.ncas, nelecas=args.nelecas,
+            occ_threshold=args.occ_threshold, max_ncas=args.max_ncas,
+        )
+        ch = cmp["chat"]
+        cs = None
+        print(f"\n  active space: CAS({ch['ncas']}, {ch['nelecas']})  "
+              f"core orbitals = {ch['ncore']}")
+        print(f"  determinants of c_hat kept in active space: "
+              f"{ch['n_det_kept_in_active']}")
+        print(f"\n  E (chat CASCI reference)   = {ch['e_casci']:+.6f}")
+        print(f"  E_NEVPT2 (correction)      = {ch['e_pt2']:+.6f}")
+        print(f"  E_total                    = {ch['e_total']:+.6f}")
+        print(f"\n  E_FCI(reference)           = {fci_ref['E_FCI']:.6f} Ha")
+        print(f"  Gap (chat NEVPT2 vs FCI)   = "
+              f"{(ch['e_total'] - fci_ref['E_FCI'])*1000:+.3f} mE_h")
+    else:
+        print(f"\n[NEVPT2 comparison]")
+        cmp = compare_nevpt2(
+            mol, c_hat, fci_ref,
+            ncas=args.ncas, nelecas=args.nelecas,
+            occ_threshold=args.occ_threshold, max_ncas=args.max_ncas,
+        )
+        ch, cs = cmp["chat"], cmp["casscf"]
+        print(f"\n  active space: CAS({ch['ncas']}, {ch['nelecas']})  "
+              f"core orbitals = {ch['ncore']}")
+        print(f"  determinants of c_hat kept in active space: {ch['n_det_kept_in_active']}")
 
-    print(f"\n  {'quantity':<25} {'chat reference':>16} {'CASSCF reference':>18} {'diff':>14}")
-    print("-" * 75)
-    print(f"  {'E (reference)':<25} {ch['e_casci']:>16.6f} {cs['e_casscf']:>18.6f}"
-          f" {cmp['delta_reference']:>+14.6f}")
-    print(f"  {'E_NEVPT2 (correction)':<25} {ch['e_pt2']:>16.6f} {cs['e_pt2']:>18.6f}"
-          f" {cmp['delta_pt2']:>+14.6f}")
-    print(f"  {'E_total':<25} {ch['e_total']:>16.6f} {cs['e_total']:>18.6f}"
-          f" {cmp['delta_total']:>+14.6f}")
-    print(f"\n  E_FCI(full basis) = {fci_ref['E_FCI']:.6f} Ha")
-    print(f"  Gap (chat NEVPT2  vs FCI) = {(ch['e_total'] - fci_ref['E_FCI'])*1000:+.3f} mE_h")
-    print(f"  Gap (CASSCF NEVPT2 vs FCI) = {(cs['e_total'] - fci_ref['E_FCI'])*1000:+.3f} mE_h")
+        print(f"\n  {'quantity':<25} {'chat reference':>16} {'CASSCF reference':>18} {'diff':>14}")
+        print("-" * 75)
+        print(f"  {'E (reference)':<25} {ch['e_casci']:>16.6f} {cs['e_casscf']:>18.6f}"
+              f" {cmp['delta_reference']:>+14.6f}")
+        print(f"  {'E_NEVPT2 (correction)':<25} {ch['e_pt2']:>16.6f} {cs['e_pt2']:>18.6f}"
+              f" {cmp['delta_pt2']:>+14.6f}")
+        print(f"  {'E_total':<25} {ch['e_total']:>16.6f} {cs['e_total']:>18.6f}"
+              f" {cmp['delta_total']:>+14.6f}")
+        print(f"\n  E_FCI(full basis) = {fci_ref['E_FCI']:.6f} Ha")
+        print(f"  Gap (chat NEVPT2  vs FCI) = {(ch['e_total'] - fci_ref['E_FCI'])*1000:+.3f} mE_h")
+        print(f"  Gap (CASSCF NEVPT2 vs FCI) = {(cs['e_total'] - fci_ref['E_FCI'])*1000:+.3f} mE_h")
 
     if args.out_json:
         out = dict(
@@ -236,14 +261,15 @@ def main():
                   else v
                   for k, v in ch.items()
                   if k not in ("nelecas",)},
-            casscf={k: float(v) if isinstance(v, (int, float, np.floating))
-                    else v
-                    for k, v in cs.items()
-                    if k not in ("nelecas",)},
-            delta_total=float(cmp["delta_total"]),
-            delta_pt2=float(cmp["delta_pt2"]),
-            delta_reference=float(cmp["delta_reference"]),
         )
+        if cs is not None:
+            out["casscf"] = {
+                k: float(v) if isinstance(v, (int, float, np.floating)) else v
+                for k, v in cs.items() if k not in ("nelecas",)
+            }
+            out["delta_total"] = float(cmp["delta_total"])
+            out["delta_pt2"] = float(cmp["delta_pt2"])
+            out["delta_reference"] = float(cmp["delta_reference"])
         with open(args.out_json, "w") as f:
             json.dump(out, f, indent=2)
         print(f"\nJSON -> {args.out_json}")

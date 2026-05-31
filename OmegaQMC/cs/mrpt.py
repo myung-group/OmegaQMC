@@ -479,6 +479,42 @@ def casscf_nevpt2_reference(
     )
 
 
+def chat_only_nevpt2(
+    mol,
+    c_hat: np.ndarray,
+    fci_ref: Mapping,
+    ncas: int = None,
+    nelecas: Tuple[int, int] = None,
+    occ_threshold: float = 0.02,
+    max_ncas: int = None,
+) -> dict:
+    """ĉ-derived CASCI + NEVPT2 without the CASSCF baseline.
+
+    Same first two steps as :func:`compare_nevpt2` (build CASCI from
+    ĉ in the NN-NO frame; run NEVPT2 on it) but skips the matched
+    CASSCF reference computation. Used when PySCF's CASSCF kernel is
+    unstable or expensive at the target active space (e.g. H8/cc-pVDZ
+    at n_orb=40, where the CASSCF baseline segfaults on the GH200
+    build).
+
+    Returns the same ``chat`` sub-dict shape as ``compare_nevpt2`` so
+    downstream consumers can branch on key presence.
+    """
+    mc_chat = build_casci_from_chat(
+        mol, c_hat, fci_ref,
+        ncas=ncas, nelecas=nelecas,
+        occ_threshold=occ_threshold, max_ncas=max_ncas,
+    )
+    chat_run = run_nevpt2(mc_chat)
+    return dict(
+        chat=dict(
+            **chat_run,
+            ncore=mc_chat.ncore, ncas=mc_chat.ncas, nelecas=mc_chat.nelecas,
+            n_det_kept_in_active=mc_chat._cs_meta["n_det_kept_in_active"],
+        ),
+    )
+
+
 def compare_nevpt2(
     mol,
     c_hat: np.ndarray,
