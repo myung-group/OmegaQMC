@@ -1511,13 +1511,13 @@ reference used to build the candidate set.} \\
 
 \noindent Three points stand out. (i) The $\widehat c$ recovered by
 the identity-Lasso estimator is faithful: $\|\widehat c - c_{\rm
-FCI}\|_2 \in [0.115, 0.186]$ across multireference and
+FCI}\|_2 \in [0.06, 0.19]$ across multireference and
 single-reference systems, with the leading amplitude matching the
 true FCI leading amplitude to within $0.01$--$0.05$.
 (ii) $\widehat c$-NEVPT2 ties or beats CASSCF-NEVPT2 on the three
 small-active-space systems ($-3.08$, $-0.12$, $-0.56$\,m$E_{\rm h}$
 for \ce{BeH2}, \ce{H4} square, \ce{H6}). \ce{H2O} is the exception:
-the recovery error ($0.16$) projects significantly onto the
+the recovery error ($0.09$) projects significantly onto the
 CAS$(12,(4,4))$ active space (245{,}025 alpha-beta determinants)
 beyond the 753-determinant candidate set, costing $27.7$\,m$E_{\rm h}$
 of dynamic correlation that the full CASSCF orbital optimisation
@@ -1526,13 +1526,60 @@ $-300$\,m$E_{\rm h}$ bias past the reference energy across all
 systems, characteristic of the translated PBE functional rather than
 of the $\widehat c$ recovery itself.
 
-The full \ce{H8}/cc-pVDZ row required omitting NEVPT2: PySCF's
-\texttt{compare\_nevpt2} (which constructs a CASSCF baseline)
-segfaults at $n_{\rm orb}=40$, CAS$(8,(4,4))$ on the GH200 build we
-used; the post-HF subset (CCSD/CCSD(T)/MC-PDFT, all driven by the
-recovered $\widehat c$ and its NN-NO frame) ran to completion and
-the recovery error matched the other three systems
-($\|c_{\widehat c}-c_{\rm FCI}\|_2 = 0.160$).
+The \ce{H8}/cc-pVDZ NEVPT2 row uses the $\widehat c$-only path
+(no matched CASSCF baseline): PySCF's CASSCF kernel segfaults at
+$n_{\rm orb}=40$, CAS$(8,(4,4))$ on the GH200 build we used, so the
+fair CASSCF reference is unavailable. The $\widehat c$-NEVPT2 number
+itself is stable and matches between baseline and tight-convergence
+runs.
+
+\paragraph{Convergence validation: tight runs reproduce baseline
+NEVPT2 numbers.} To verify that the four-system table is converged
+in NN training and walker-bank size, every row was re-run with
+training iterations increased $\sim 2\times$ to $5000$--$6000$
+(vs.\ the baseline $3000$), training-walker bank doubled to $2048$
+(vs.\ $1024$), and post-training sample bank quadrupled to
+$400 \times 512 = 204{,}800$ walkers (vs.\ $51{,}200$). The
+$\widehat c$-NEVPT2 and CASSCF-NEVPT2 gaps to FCI reproduce to
+m$E_{\rm h}$ accuracy across all four systems
+($\widehat c$-NEVPT2 gap differences $|\Delta| \le 0.01$\,m$E_{\rm
+h}$), confirming that the tabulated numbers are not artefacts of
+under-converged training or undersampled walker statistics. The
+recovery error $\|\widehat c - c_{\rm FCI}\|_2$ shrinks by
+$\sim 40\%$ in tighter sampling (BeH$_2$: $0.147 \to 0.088$;
+H$_4$sq: $0.115 \to 0.062$; H$_6$: $0.186 \to 0.113$; H$_2$O:
+$0.160 \to 0.086$) — consistent with the $1/\sqrt{K_s}$ scaling of
+the sample-mean estimator at fixed reference.
+
+\paragraph{NN-NO orbitals rescue CCSD on \ce{H4} square (HF
+non-uniqueness).} The tighter \ce{H4} square run surfaced an
+additional positive finding for the NN-NO orbital frame.
+\ce{H4} square at $R=1.5$~\AA\ in $D_{4h}$ has a near-degenerate
+HOMO/HOMO+1 pair, leaving HF SCF with multiple local minima of
+similar energy. Different initial guesses lead the SCF to different
+broken-symmetry solutions; CCSD downstream is then a strong function
+of which HF root was reached. Concretely:
+\begin{center}\renewcommand{\arraystretch}{1.05}\small
+\begin{tabular}{lcc}
+\toprule
+reference & $E_{\rm CCSD}$ ($E_{\rm h}$) & gap to FCI (m$E_{\rm h}$) \\
+\midrule
+HF orbitals (baseline SCF init)   & $-2.0801$  & $-8.6$   \\
+HF orbitals (alternative SCF init) & $-1.9755$ & $+105.0$ \\
+NN-NO orbitals (from $\widehat c$) & $-2.0811$ & $-0.67$  \\
+\midrule
+FCI(cc-pVDZ)                       & $-2.0804$ & 0        \\
+\bottomrule
+\end{tabular}
+\end{center}
+The HF reference is non-unique by $\sim\!100$\,m$E_{\rm h}$ at the
+CCSD level. The NN-NO orbital frame, derived from the
+$\widehat c$ 1-RDM (an SCF-independent object), gives a CCSD energy
+within $0.67$\,m$E_{\rm h}$ of FCI regardless of how HF converged.
+On multireference systems with HF non-uniqueness, the NN-NO frame
+is therefore not merely structurally interesting but actively
+rescues single-reference coupled-cluster from a pathology of the HF
+starting point.
 
 \subsection{Selected-CI warm-start with $\widehat c$}
 \label{sec:hci_warmstart}
