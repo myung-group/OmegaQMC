@@ -522,15 +522,28 @@ soft-threshold result~\cite{Tibshirani1996lasso} gives
 \label{eq:soft}
 \end{equation}
 with the reference coefficient $\widehat{c}_{I_{\text{ref}}}$ excluded
-from thresholding to preserve the dominant configuration. The
-threshold $\lambda$ is set proportionally to the support-recovery
-tolerance $\eta$ via $\lambda = c_\lambda\,\eta$ (we take
-$c_\lambda = 0.5$ throughout, balancing Type-I and Type-II
+from thresholding to preserve the dominant configuration. After
+soft-thresholding the vector is renormalised to unit $L_2$ norm and
+sign-realigned against the reference. We set the threshold from the
+per-coefficient noise estimated on the same walker bank via the
+universal Donoho--Johnstone formula
+\begin{equation}
+\lambda \;=\; c_\lambda\; \sigma_{\rm med}\,\sqrt{2 \log N_{\rm det}},
+\qquad
+\sigma_I^2 \;=\;
+\frac{1}{K_s}\!\left(\widehat{m}_{2,I} - \bigl(\widehat{c}_I^{\rm raw}\bigr)^{2}\right),
+\label{eq:lambda_universal}
+\end{equation}
+where $\widehat{m}_{2,I} = K_s^{-1}\sum_k f_I(\mathbf{R}_k)^2$ is the
+second-moment estimator, $\sigma_I$ is mapped to the normalised
+($L_2$-unit) scale by dividing by $\sqrt{\text{proj}\_\text{mass}_{\rm
+naive}}$ before taking $\sigma_{\rm med}$, and $c_\lambda = 0.5$ is
+the multiplier we use throughout (balancing Type-I and Type-II
 support-recovery errors). The role of \eqref{eq:soft} is support
 recovery in the presence of Monte Carlo noise; in the limit of large
 $K_s$ where every $|\widehat{c}_I|$ converges to its expectation,
 soft-thresholding sets to zero exactly the coefficients with
-$|c_I| < \lambda / \sqrt{\zeta}$ --- a behaviour that supplies the
+$|c_I| < \lambda / \sqrt{\zeta}$ --- the behaviour that supplies the
 formal connection to compressed-sensing sample-complexity bounds.
 
 \subsection{Connection to compressed sensing}

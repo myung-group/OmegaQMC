@@ -35,7 +35,17 @@ def _interleaved_to_grouped_indices(n_alpha: int, n_beta: int) -> np.ndarray:
     """Permutation that maps OmegaQMC interleaved walker layout (alpha at
     even positions, beta at odd) into grouped layout (all alpha first,
     then all beta). Use as ``walkers[:, perm, :]`` or ``orb[:, perm, :]``.
+
+    Assumes ``n_alpha >= n_beta`` (the closed-shell or high-spin-alpha
+    convention used by OmegaQMC's NN adapter ``r_up = elec_crds[::2]``).
+    Raises ValueError otherwise to surface ambiguous spin assignments
+    before they corrupt the orbital evaluation.
     """
+    if n_alpha < n_beta:
+        raise ValueError(
+            f"interleaved->grouped permutation expects n_alpha >= n_beta; "
+            f"got ({n_alpha}, {n_beta})"
+        )
     n_total = n_alpha + n_beta
     a_idx = np.arange(0, n_total, 2)[:n_alpha]
     b_idx = np.arange(1, n_total, 2)[:n_beta]

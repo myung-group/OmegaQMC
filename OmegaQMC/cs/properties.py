@@ -59,13 +59,15 @@ def reshape_chat_to_pyscf_matrix(
 
 
 def _excite_sign(occ: Tuple[int, ...], p: int, q: int) -> int:
-    """Sign of <occ - {p} + {q} | a^dag_q a_p | occ>.
+    """Fermion sign for the single-excitation matrix element connecting
+    ``|occ>`` to ``|occ - {p} + {q}>``.
 
-    Standard Slater-Condon: equals (-1)^(number of orbitals between p and
-    q's *sorted* positions in the two strings), with PySCF's bitstring
-    sign convention (low orbitals = least significant bit). For
-    occ_a sorted ascending, the sign is (-1)^(|{r in occ : min(p,q) < r
-    < max(p,q)}|) — counts occupied orbitals strictly between p and q.
+    Standard Slater-Condon: equals ``(-1)^(number of orbitals strictly
+    between p and q in occ)`` with PySCF's bitstring sign convention
+    (low orbitals = least significant bit). For real CI vectors the two
+    candidate matrix elements ``<D_I| a†_p a_q |D_J>`` and
+    ``<D_J| a†_q a_p |D_I>`` (which are conjugates) agree, so the same
+    sign serves both call patterns.
     """
     lo, hi = (p, q) if p < q else (q, p)
     n_between = sum(1 for r in occ if lo < r < hi)

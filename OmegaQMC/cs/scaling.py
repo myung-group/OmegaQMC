@@ -138,13 +138,21 @@ def _build_cells(
 ) -> list:
     """Build per-(K_s, eta, seed) cell records.
 
-    For each cell the raw sample mean is normalized via
-    :func:`OmegaQMC.cs.estimators.normalize_and_align` (essential when the
-    trial Psi is unnormalized in L^2, as in NN-VMC) and the resulting
-    vector is soft-thresholded with ``lam = lambda_coef * eta``. The
-    reference determinant (index 0) is preserved un-thresholded. The
-    diagnostic ``proj_mass = sum(c_raw**2)`` is stored on each cell
-    alongside the required schema fields.
+    Sweep-mode (eta-parameterised) Lasso recovery: for each cell the
+    raw sample mean is normalized via
+    :func:`OmegaQMC.cs.estimators.normalize_and_align`, soft-thresholded
+    with ``lam = lambda_coef * eta`` (a sweep-specific λ tied to the
+    target support-recovery tolerance rather than the universal
+    Donoho-Johnstone threshold of the production
+    :func:`OmegaQMC.cs.estimators.lasso_recover_auto`), reference-
+    preserved at index 0, renormalised to unit L₂, and sign-realigned --
+    matching the recovery pipeline exactly through the renormalisation
+    step. The diagnostic ``proj_mass = sum(c_raw**2)`` is the basis-
+    projection mass and is stored alongside the required schema fields.
+
+    Use this code path only for the K_s-scaling sweep (Fig.\\
+    h4_Ks_scaling). For NEVPT2 / post-HF, see
+    :func:`OmegaQMC.cs.estimators.lasso_recover_auto`.
     """
     ref_sign = float(np.sign(c_true[0])) if c_true[0] != 0 else 0.0
     cells = []
@@ -162,6 +170,11 @@ def _build_cells(
                 c_norm, proj_mass = normalize_and_align(mean_vec, ref_sign)
                 c_hat = soft_threshold(c_norm, lam)
                 c_hat[0] = c_norm[0]
+                norm_after = float(np.linalg.norm(c_hat))
+                if norm_after > 0:
+                    c_hat = c_hat / norm_after
+                if ref_sign != 0.0 and c_hat[0] * ref_sign < 0:
+                    c_hat = -c_hat
                 metrics = recovery_metrics(c_hat, c_true, eta)
                 cells.append(dict(
                     R=float(R), basis=str(basis), eta=eta,
