@@ -1579,7 +1579,44 @@ within $0.67$\,m$E_{\rm h}$ of FCI regardless of how HF converged.
 On multireference systems with HF non-uniqueness, the NN-NO frame
 is therefore not merely structurally interesting but actively
 rescues single-reference coupled-cluster from a pathology of the HF
-starting point.
+starting point. The pathology is basis-dependent: at cc-pVTZ the
+HOMO/HOMO+1 near-degeneracy is broken cleanly enough that SCF
+converges to a unique closed-shell solution, and the rescue is no
+longer needed (CCSD$(\text{NN-NO}) - $CCSD$(\text{HF}) =
++1.5\,\mu E_{\rm h}$ at cc-pVTZ, vs.\ $+106$\,m$E_{\rm h}$ at
+cc-pVDZ, see the basis-consistency paragraph below).
+
+\paragraph{Basis-set consistency: cc-pVTZ validation on \ce{BeH2}
+and \ce{H4} square.} As a basis-independence check, the two
+single-system §VI rows representative of single-reference and
+multireference behavior were re-run in cc-pVTZ
+(\ce{BeH2}: $n_{\rm orb}=58$ vs.\ $24$ at cc-pVDZ;
+\ce{H4} square: $n_{\rm orb}=60$ vs.\ $20$ at cc-pVDZ).
+The NN-VMC energies match cc-pVDZ to sub-m$E_{\rm h}$
+($E_{\rm NN}^{\rm BeH_2}=-15.9026$ Ha at cc-pVTZ vs.\ $-15.9022$
+Ha at cc-pVDZ; $E_{\rm NN}^{\rm H_4} = -2.0955$ Ha at both bases),
+confirming the NN trial wave function is basis-independent (it
+samples real space; the basis enters only through the post-hoc
+projection). The recovery error
+$\|\widehat c - c_{\rm CASCI~ref}\|_2$ shrinks at cc-pVTZ
+($0.031$ for \ce{BeH2}, $0.069$ for \ce{H4} square) because the
+$(8,(3,3))$ and $(4,(2,2))$ active spaces are tiny fractions of the
+larger one-particle Hilbert space, so the candidate-set
+amplitude distribution is more sharply peaked. The
+CCSD$(T)(\text{NN-NO})$ and CCSD$(T)(\text{HF})$ energies agree to
+sub-m$E_{\rm h}$ at cc-pVTZ for both systems, demonstrating
+that the post-HF stack consumes the NN-NO frame consistently as
+the basis is grown. The CASSCF-NEVPT2 advantage over
+$\widehat c$-NEVPT2 grows from $-3$ to $+14$~m$E_{\rm h}$
+(\ce{BeH2}) and from $-0.1$ to $+17$ (\ce{H4} sq) as the basis
+expands cc-pVDZ$\to$cc-pVTZ; the larger one-particle Hilbert space
+makes CASSCF orbital optimisation increasingly impactful for a
+fixed-size active space, and the $\widehat c$ recovery
+(restricted to the candidate set of CASCI-ref dets) loses
+proportionally more dynamic correlation through the projection.
+This is a quantitative diagnosis of the H$_2$O exception in the
+cc-pVDZ table: as the basis grows beyond the candidate set's
+span, CASSCF gains structural advantage.
 
 \subsection{Selected-CI warm-start with $\widehat c$}
 \label{sec:hci_warmstart}
