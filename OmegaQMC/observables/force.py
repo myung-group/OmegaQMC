@@ -1505,8 +1505,18 @@ nuclear forces using PGCS.
         grd_ee_en_sum = {s: 0.0 for s in states}
         grd_ke_sum = {s: 0.0 for s in states}
         grd_pulay_sum = {s: 0.0 for s in states}
-        grd_tot_list = {s: [] for s in states}
-        grd_err_list = {s: [] for s in states}
+        # Per-block walker-averaged force series, feeding
+        # both the final mean and the BLUE block series.
+        # Each entry is reduced to (num_nuc, 3) per block so
+        # peak RAM stays O(num_nuc) rather than growing as
+        # O(num_blocks * num_walkers).
+        grd_blockmean_list = {s: [] for s in states}
+        # Running sum of per-walker squared standard errors,
+        # already reduced over walkers each block: (num_nuc,
+        # 3).  Paired with the walker count below to form the
+        # combined error sqrt(sum_{b,w} serr^2) / (B * W).
+        grd_err_sq_sum = {s: 0.0 for s in states}
+        grd_err_w_count = {s: 0 for s in states}
 
         for block_cnt in block_nums:
             bcs = f'{block_cnt}'
@@ -1590,19 +1600,17 @@ nuclear forces using PGCS.
                     d_enr, grd_logpsi,
                 )
 
-                grd_nn_sw = jnp.broadcast_to(
-                    grd_nn[jnp.newaxis, jnp.newaxis, :, :],
-                    (num_steps_per_block, num_walkers,
-                     num_nuc, 3),
+                # Sum the gradient contributions directly
+                # instead of ``jnp.stack(...).sum(axis=0)``,
+                # which would materialize a 4x ``(s, w, n, 3)``
+                # tensor only to immediately reduce it away.
+                # ``grd_nn`` broadcasts over the leading
+                # step/walker axes on its own, so the explicit
+                # ``broadcast_to`` is unnecessary too.
+                grd_tot_sw = (
+                    grd_nn[jnp.newaxis, jnp.newaxis, :, :]
+                    + grd_ee_en + grd_ke + grd_pulay
                 )
-                grd_arrays = [
-                    grd_nn_sw,
-                    grd_ee_en, grd_ke,
-                    grd_pulay,
-                ]
-                grd_tot_sw = jnp.stack(
-                    grd_arrays, axis=0,
-                ).sum(axis=0)
 
                 # Parameter-response correction
                 if (
@@ -1642,11 +1650,21 @@ nuclear forces using PGCS.
                         weights=frag_w,
                     )
                 )
-                grd_tot_list[state_label].append(
-                    xbar[None, :, :, :]
+                # Reduce this block immediately: store only
+                # the walker mean (force-series term) and
+                # fold the squared standard error over
+                # walkers into the running accumulator,
+                # instead of retaining the full (W, num_nuc,
+                # 3) arrays for every block.
+                grd_blockmean_list[state_label].append(
+                    xbar.mean(axis=0)
                 )
-                grd_err_list[state_label].append(
-                    serr[None, :, :, :]
+                grd_err_sq_sum[state_label] = (
+                    grd_err_sq_sum[state_label]
+                    + (serr ** 2).sum(axis=0)
+                )
+                grd_err_w_count[state_label] += (
+                    serr.shape[0]
                 )
 
                 grd_ee_en_sum[state_label] = (
@@ -1682,26 +1700,23 @@ nuclear forces using PGCS.
                     grd_pulay_sum[state_label] / vsc
                 )
 
-                grd_tot_bw = jnp.concatenate(
-                    grd_tot_list[state_label], axis=0,
+                # Per-block walker-averaged force series,
+                # (num_blocks, num_nuc, 3); ``grd_tot`` is
+                # its mean over blocks.  Both follow directly
+                # from the per-block reductions accumulated in
+                # the streaming loop above.
+                grd_block_series = jnp.stack(
+                    grd_blockmean_list[state_label], axis=0,
                 )
-                grd_err_bw = jnp.concatenate(
-                    grd_err_list[state_label], axis=0,
-                )
+                grd_tot = grd_block_series.mean(axis=0)
 
-                # mean over blocks, then walkers
-                grd_tot = grd_tot_bw.mean(axis=0).squeeze()
-                grd_tot = grd_tot.mean(axis=0)
-
+                # Combined standard error, identical to the
+                # previous nested-norm reduction:
+                # sqrt(sum_{b,w} serr^2) / (B * W), with
+                # ``grd_err_w_count`` == B * W.
                 grd_err = (
-                    jnp.linalg.norm(
-                        grd_err_bw, axis=0,
-                    ).squeeze()
-                    / grd_err_bw.shape[0]
-                )
-                grd_err = (
-                    jnp.linalg.norm(grd_err, axis=0)
-                    / grd_err.shape[0]
+                    jnp.sqrt(grd_err_sq_sum[state_label])
+                    / grd_err_w_count[state_label]
                 )
 
                 torque, dtau = (
@@ -1715,7 +1730,7 @@ nuclear forces using PGCS.
                 grd_pulay = jnp.mean(grd_pulay, axis=0)
 
                 grd_block_series = np.asarray(
-                    grd_tot_bw.mean(axis=1)
+                    grd_block_series
                 )
             else:
                 grd_ee_en = jnp.zeros_like(grd_nn)
