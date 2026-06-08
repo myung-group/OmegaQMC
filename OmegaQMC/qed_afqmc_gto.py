@@ -4,7 +4,7 @@ Phaseless QED-AFQMC (Quantum Electrodynamics Auxiliary-Field QMC).
 Extends the standard AFQMC to include coupling to a quantized cavity
 photon mode via the Pauli-Fierz Hamiltonian in the dipole gauge.
 
-Reference: arXiv:2410.18838 (Bauer et al., 2024)
+Reference: arXiv:2410.18838 (Weber et al., 2025)
 
 The integral preparation routine has moved to its canonical location:
 
