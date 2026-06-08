@@ -261,14 +261,18 @@ def greens_function_multidet(
         _gf_spin_single_det, in_axes=(None, 0),
     )(phib, trials_dn)
 
-    # Sanitize NaN in Ghalf (from singular overlaps where
-    # det has zero overlap with walker — the weight w_I is
-    # also zero so contribution vanishes, but NaN * 0 = NaN)
+    # Sanitize non-finite Ghalf (from singular overlaps where a det has
+    # zero overlap with the walker — e.g. a walker still equal to the
+    # dominant determinant is orthogonal to every excited determinant).
+    # The det's weight w_I is also zero, so its contribution vanishes; but
+    # 1/0 = inf and 0 * inf = NaN would otherwise poison the sum. Catch
+    # both NaN and inf (inv of a 1x1 zero overlap returns inf, of a larger
+    # singular block returns NaN).
     Ghalfa_all = jnp.where(
-        jnp.isnan(Ghalfa_all), 0.0, Ghalfa_all,
+        jnp.isfinite(Ghalfa_all), Ghalfa_all, 0.0,
     )
     Ghalfb_all = jnp.where(
-        jnp.isnan(Ghalfb_all), 0.0, Ghalfb_all,
+        jnp.isfinite(Ghalfb_all), Ghalfb_all, 0.0,
     )
 
     # Per-det weight: w_I = c_I* x O_I^a x O_I^b
@@ -344,11 +348,13 @@ def greens_function_multidet_force_bias(
         _gf_spin_single_det, in_axes=(None, 0),
     )(phib, trials_dn)
 
+    # Sanitize non-finite Ghalf (singular zero-weight dets); see
+    # ``greens_function_multidet`` for the rationale.
     Ghalfa_all = jnp.where(
-        jnp.isnan(Ghalfa_all), 0.0, Ghalfa_all,
+        jnp.isfinite(Ghalfa_all), Ghalfa_all, 0.0,
     )
     Ghalfb_all = jnp.where(
-        jnp.isnan(Ghalfb_all), 0.0, Ghalfb_all,
+        jnp.isfinite(Ghalfb_all), Ghalfb_all, 0.0,
     )
 
     w_I = (
