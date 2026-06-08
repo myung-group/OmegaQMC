@@ -16,11 +16,18 @@ self-mapping, which collapsed the PGCS effective sample size
 from ~100% to ~0.1% for *any* non-exactly-symmetric
 fragment (i.e. every realistic, H-bonded, or relaxed water).
 
-``build_frag_transform_data`` now builds the axis geometrically
-(continuously in the distortion).  These tests pin that
-behaviour so the axis bug cannot silently return -- note it
-was invisible at exact symmetry, hence the deliberately
-*distorted* geometries below.
+The same flaw affects every frame-dependent operation, not
+just ``Rz180``: ``Rz90`` / ``Rz270`` / ``S4`` / ``S4_3`` need
+local-z on the C_n / S_n axis, and the reflections / secondary
+C2 rotations need local-x / y on the sigma_v / C2' elements.
+``build_frag_transform_data`` now builds the whole frame
+geometrically (continuously in the distortion) for all
+supported groups (C2v / C2h / Cs / D2h / C4v / D4h, including
+the linear Coov/Dooh mappings).
+
+These tests pin that behaviour so the axis bug cannot silently
+return -- note it was invisible at exact symmetry, hence the
+deliberately *distorted* / multi-axis geometries below.
 """
 import tempfile
 
@@ -35,8 +42,17 @@ import pyscf.gto as _pgto
 if not hasattr(_pgto, "bse_predefined_ecp"):
     _pgto.bse_predefined_ecp = lambda *a, **k: ([], [])
 
+import jax.numpy as jnp
+
 from OmegaQMC import generate_molecular_orbitals
-from OmegaQMC.symm.fragments import build_frag_transform_data
+from OmegaQMC.symm.fragments import (
+    build_frag_transform_data,
+    _geometric_symmetry_frame,
+)
+from OmegaQMC.symm.operations import (
+    symmetry_operations_map,
+    POINT_GROUP_OPS,
+)
 
 BOHR_TO_ANG = 0.52917721
 REQ = 0.9572                          # equilibrium O-H (Angstrom)
@@ -178,6 +194,97 @@ def test_rz180_ess_high_for_distorted_water():
     )
 
 
+# ---------------------------------------------------------------
+# Multi-axis groups (C4v / D4h / D2h, incl. linear mappings).
+# These exercise ``_geometric_symmetry_frame`` directly (pure
+# geometry, no SCF), checking that *every* requested operation
+# self-maps the nuclei -- i.e. local-z lands on the true C_n/S_n
+# axis (long axis for linear, plane normal for square-planar)
+# and local-x/y align with the sigma_v / C2' elements.
+# ---------------------------------------------------------------
+
+def _op_matrix(op):
+    """Local 3x3 matrix of ``op`` (op(v) = M @ v)."""
+    return np.asarray(symmetry_operations_map[op](jnp.eye(3))).T
+
+
+def _worst_op_selfmap(nuc, charges, frame_ops, check_ops):
+    """Build the frame from ``frame_ops``; return the largest
+    self-map displacement over ``check_ops`` and the frame."""
+    nuc = np.asarray(nuc, dtype=float)
+    charges = np.asarray(charges)
+    centroid = np.average(nuc, axis=0, weights=charges)
+    Vh = np.asarray(
+        _geometric_symmetry_frame(
+            nuc, charges, centroid, frame_ops,
+        )
+    )
+    Xc = nuc - centroid
+    worst = 0.0
+    for op in check_ops:
+        if op in ("E", "i"):
+            continue
+        m_lab = Vh.T @ _op_matrix(op) @ Vh
+        Xr = Xc @ m_lab.T
+        for i in range(len(Xc)):
+            same = [j for j in range(len(Xc))
+                    if charges[j] == charges[i]]
+            worst = max(
+                worst,
+                min(np.linalg.norm(Xr[i] - Xc[j])
+                    for j in same),
+            )
+    return worst, Vh
+
+
+def test_d4h_linear_all_ops_selfmap():
+    """Linear CO2 (Dooh→D4h): all ops self-map; z = mol axis."""
+    nuc = [[0, 0, 0], [0, 0, 1.16], [0, 0, -1.16]]
+    q = [6, 8, 8]
+    ops = POINT_GROUP_OPS["D4h"]
+    worst, Vh = _worst_op_selfmap(nuc, q, ops, ops)
+    assert worst < 0.02, f"worst D4h self-map {worst:.4f} A"
+    assert abs(float(Vh[2] @ np.array([0.0, 0.0, 1.0]))) > 0.99
+
+
+def test_d4h_square_planar_all_ops_selfmap():
+    """Square-planar D4h: all ops self-map; z = plane normal."""
+    a = 1.5
+    nuc = [[a, 0, 0], [-a, 0, 0], [0, a, 0], [0, -a, 0]]
+    q = [1, 1, 1, 1]
+    ops = POINT_GROUP_OPS["D4h"]
+    worst, Vh = _worst_op_selfmap(nuc, q, ops, ops)
+    assert worst < 0.02, f"worst D4h self-map {worst:.4f} A"
+    # C4 axis is the plane normal, not an in-plane axis.
+    assert abs(float(Vh[2] @ np.array([0.0, 0.0, 1.0]))) > 0.99
+
+
+def test_d2h_rectangle_all_ops_selfmap():
+    """Rectangular D2h: all three C2 axes / mirrors self-map."""
+    a, b = 1.6, 1.0
+    nuc = [[a, b, 0], [a, -b, 0], [-a, b, 0], [-a, -b, 0]]
+    q = [1, 1, 1, 1]
+    ops = POINT_GROUP_OPS["D2h"]
+    worst, _ = _worst_op_selfmap(nuc, q, ops, ops)
+    assert worst < 0.02, f"worst D2h self-map {worst:.4f} A"
+
+
+@pytest.mark.parametrize("bend", [0.06, 0.12])
+def test_bent_linear_rz90_not_catastrophic(bend):
+    """A near-linear (bent) CO2 keeps z on the molecular axis,
+    so Rz90 stays continuous in the bend (~0.1 A) instead of
+    the ~1.6 A wrong-axis (plane-normal) bug."""
+    nuc = [[0, 0, 0], [bend, 0, 1.16], [bend, 0, -1.16]]
+    q = [6, 8, 8]
+    ops = POINT_GROUP_OPS["D4h"]
+    worst, Vh = _worst_op_selfmap(nuc, q, ops, ["Rz90"])
+    assert worst < 0.25, f"Rz90 self-map {worst:.4f} A"
+    long_axis = np.linalg.svd(
+        np.asarray(nuc, float) - np.mean(nuc, axis=0)
+    )[2][0]
+    assert abs(float(Vh[2] @ long_axis)) > 0.95
+
+
 if __name__ == "__main__":
     for s in (1.000, 0.999, 0.995, 0.990, 1.005, 1.010):
         nuc, c, Vh, q = _rz180_frame(s)
@@ -191,6 +298,26 @@ if __name__ == "__main__":
         print(f"stretch={s:.3f}  self-map displacement="
               f"{d:.4f} A  (must be < 0.20)")
         assert d < 0.20
+    print("--- multi-axis (C4v / D4h / D2h) ---")
+    _d4h = POINT_GROUP_OPS["D4h"]
+    _d2h = POINT_GROUP_OPS["D2h"]
+    cases = [
+        ("D4h linear", [[0, 0, 0], [0, 0, 1.16], [0, 0, -1.16]],
+         [6, 8, 8], _d4h, _d4h, 0.02),
+        ("D4h sq-planar",
+         [[1.5, 0, 0], [-1.5, 0, 0], [0, 1.5, 0], [0, -1.5, 0]],
+         [1, 1, 1, 1], _d4h, _d4h, 0.02),
+        ("D2h rectangle",
+         [[1.6, 1, 0], [1.6, -1, 0], [-1.6, 1, 0], [-1.6, -1, 0]],
+         [1, 1, 1, 1], _d2h, _d2h, 0.02),
+        ("bent CO2 Rz90",
+         [[0, 0, 0], [0.12, 0, 1.16], [0.12, 0, -1.16]],
+         [6, 8, 8], _d4h, ["Rz90"], 0.25),
+    ]
+    for name, nuc, q, fops, cops, tol in cases:
+        w, _ = _worst_op_selfmap(nuc, q, fops, cops)
+        print(f"{name:16s} worst self-map={w:.4f} A  (< {tol})")
+        assert w < tol
     print("deterministic axis checks passed; running VMC ESS...")
     ess = _frag_weight_ess(0.990)
     print(f"ESS/n at 1% distortion = {ess:.4f}  (must be > 0.5)")

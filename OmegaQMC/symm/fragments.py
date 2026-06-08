@@ -19,6 +19,7 @@ import numpy as np
 from .operations import (
     POINT_GROUP_OP_ALIASES,
     POINT_GROUP_OPS,
+    symmetry_operations_map,
 )
 
 # Union of all canonical ops across supported point
@@ -28,73 +29,126 @@ _ALL_PG_OPS = frozenset(
     op for ops in POINT_GROUP_OPS.values() for op in ops
 )
 
-# Operations that, if requested, mean the fragment has a
-# principal axis higher than C2 or more than one C2 axis
-# (C4v / D4h / D2h).  For those the single-C2 geometric
-# frame below is not sufficient, so we leave the existing
-# ``detect_symm`` / SVD frame in place.
-_MULTI_AXIS_OPS = frozenset(
-    {'Rz90', 'Rz270', 'Rx180', 'Ry180'}
-)
 
+def _op_matrix_local(op):
+    """3x3 lab-action matrix of ``op`` in the local frame.
 
-def _geometric_c2_frame(frag_nuc, charges, centroid):
-    """Local frame whose z-axis is the fragment's C2 axis.
-
-    The axis is derived directly from the geometry so that it
-    varies *continuously* with distortion.  This is the fix
-    for the ``detect_symm``-based frame, which switches local-z
-    discontinuously from the true C2 axis to the molecular-plane
-    normal the instant a fragment falls below PySCF's exact
-    point-group tolerance — turning ``Rz180`` into a rotation
-    about the wrong axis (a ~1 A electron displacement instead
-    of a self-mapping).
-
-    Local-z is the charge-weighted principal direction whose
-    180-degree rotation best maps the nuclei onto themselves
-    (the true C2; the plane normal and the in-plane
-    perpendicular both fail this test).  Local-x is the
-    molecular-plane normal and local-y completes a right-handed
-    frame.  Rows of the returned matrix are the local axes in
-    the lab frame, matching the ``centered @ Vh.T`` convention
-    of the reflection kernels.
+    ``symmetry_operations_map[op]`` transforms each row of its
+    input, so applying it to the identity returns the images
+    of the basis vectors as rows, i.e. the transpose of the
+    matrix ``M`` with ``op(v) = M @ v``.
     """
-    X = np.asarray(frag_nuc, dtype=float) - np.asarray(
+    return np.asarray(
+        symmetry_operations_map[op](jnp.eye(3))
+    ).T
+
+
+def _selfmap_error(Xc, M, Z):
+    """Max charge-matched nuclear displacement under op ``M``.
+
+    ``Xc`` are centroid-centred coordinates; ``M`` is a 3x3
+    lab-frame operation matrix.  Returns the largest distance
+    from each transformed nucleus to the nearest original
+    nucleus of equal charge — zero iff ``M`` is an exact
+    self-symmetry of the fragment.
+    """
+    Xr = Xc @ M.T
+    err = 0.0
+    for i in range(len(Xc)):
+        same = [j for j in range(len(Xc)) if Z[j] == Z[i]]
+        err = max(
+            err,
+            min(np.linalg.norm(Xr[i] - Xc[j]) for j in same),
+        )
+    return err
+
+
+def _geometric_symmetry_frame(frag_nuc, charges, centroid,
+                              frag_ops):
+    """Local frame aligned to a fragment's symmetry elements.
+
+    Generalises the C2 fix to every supported point group
+    (C2v / C2h / Cs / D2h / C4v / D4h and the linear
+    Coov/Dooh mappings).  The frame is found purely from the
+    geometry — independent of PySCF ``detect_symm`` — so the
+    rotation / reflection / improper axes vary *continuously*
+    with distortion and never flip to the wrong axis when a
+    fragment falls below the exact point-group tolerance.
+
+    The principal axis (local-z) and the in-plane orientation
+    are chosen together to minimise the total residual of
+    *every* requested operation applied in the frame.  Because
+    a C_n / S_n rotation self-maps the nuclei only about its
+    true axis, this lands local-z on that axis (the long axis
+    for a linear fragment, the plane normal for a square-planar
+    one) and aligns local-x / y with the sigma_v / C2' elements
+    that the reflections and secondary rotations require.
+
+    Rows of the returned matrix are the local axes in the lab
+    frame, matching the ``centered @ Vh.T`` convention of the
+    transform kernels.
+    """
+    Xc = np.asarray(frag_nuc, dtype=float) - np.asarray(
         centroid, dtype=float,
     )
-    Z = np.asarray(charges, dtype=float)
+    Z = np.asarray(charges)
+    ops = [
+        o for o in frag_ops
+        if o in symmetry_operations_map and o not in ('E', 'i')
+    ]
+    if not ops:
+        return jnp.eye(3)
+    mats = {o: _op_matrix_local(o) for o in ops}
+
+    # Charge-weighted principal directions are the candidate
+    # symmetry axes (true for any symmetric top).
     _, _, Vt = np.linalg.svd(
-        np.sqrt(Z)[:, None] * X, full_matrices=True,
+        np.sqrt(Z.astype(float))[:, None] * Xc,
+        full_matrices=True,
     )
-    eye3 = np.eye(3)
 
-    best_u, best_err = Vt[0], np.inf
-    for u in Vt:
-        # Householder-style 180-degree rotation about ``u``.
-        R = 2.0 * np.outer(u, u) - eye3
-        Xr = X @ R.T
-        err = 0.0
-        for i in range(len(X)):
-            same = [j for j in range(len(X)) if Z[j] == Z[i]]
-            err = max(
-                err,
-                min(np.linalg.norm(Xr[i] - X[j]) for j in same),
-            )
-        if err < best_err:
-            best_err, best_u = err, u
-    z = best_u / np.linalg.norm(best_u)
+    def total_error(V):
+        return sum(
+            _selfmap_error(Xc, V.T @ mats[o] @ V, Z)
+            for o in ops
+        )
 
-    # Plane normal = least-spread principal direction, made
-    # orthogonal to z (defines the C2v sigma_v frame).
-    pn = Vt[2] - np.dot(Vt[2], z) * z
-    if np.linalg.norm(pn) < 1e-8:
-        pn = np.cross(z, Vt[0])
-    x = pn / np.linalg.norm(pn)
-    y = np.cross(z, x)
-    Vh = np.stack([x, y, z])
-    if np.linalg.det(Vh) < 0:
-        Vh[0] = -Vh[0]
-    return jnp.asarray(Vh)
+    def inplane_basis(z):
+        seed = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(seed, z)) > 0.9:
+            seed = np.array([0.0, 1.0, 0.0])
+        e1 = seed - np.dot(seed, z) * z
+        e1 = e1 / np.linalg.norm(e1)
+        return e1, np.cross(z, e1)
+
+    best_V, best_err = jnp.eye(3), np.inf
+    for zc in Vt:
+        z = zc / np.linalg.norm(zc)
+        e1, e2 = inplane_basis(z)
+        # Coarse 1-degree sweep, then refine the in-plane angle
+        # that aligns x with a sigma_v / C2' element.
+        thetas = np.linspace(0.0, np.pi, 181)
+        for _ in range(2):
+            errs = [
+                total_error(
+                    np.stack([
+                        np.cos(t) * e1 + np.sin(t) * e2,
+                        np.cross(
+                            z, np.cos(t) * e1 + np.sin(t) * e2,
+                        ),
+                        z,
+                    ])
+                )
+                for t in thetas
+            ]
+            k = int(np.argmin(errs))
+            t0, dt = thetas[k], thetas[1] - thetas[0]
+            if errs[k] < best_err:
+                x = np.cos(t0) * e1 + np.sin(t0) * e2
+                best_V = np.stack([x, np.cross(z, x), z])
+                best_err = errs[k]
+            thetas = np.linspace(t0 - dt, t0 + dt, 41)
+    return jnp.asarray(best_V)
 
 
 def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
@@ -162,35 +216,26 @@ def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
             centroids_list.append(centroid)
             inradii_list.append(mol.inradii[fid])
 
-            # Prefer PySCF's standard-orientation axes
-            # (populate_fragment_symmops stashes them on
-            # ``mol.map_frag_axes``) so operations like
-            # ``Rz180`` rotate about the fragment's actual
-            # principal C_n axis.  SVD's principal-moments
-            # frame is only a fallback — for C2v / C2h /
-            # D2h fragments it puts the plane normal
-            # along local-z and turns ``Rz180`` into an
-            # axis-misaligned rotation that is *not* a
-            # self-symmetry of the fragment.
-            # For a single-C2 (C2v / C2h / Cs) fragment that
-            # requests ``Rz180``, derive the C2 axis straight
-            # from the geometry.  This is correct for *any*
-            # distortion, unlike the ``detect_symm`` axes
-            # (``map_frag_axes``) and the SVD principal-moments
-            # frame, both of which place the molecular-plane
-            # normal — not the C2 axis — along local-z once the
-            # fragment is no longer exactly C2v.
-            wants_c2_frame = (
-                is_planar
-                and 'Rz180' in frag_ops
-                and not (_MULTI_AXIS_OPS & set(frag_ops))
-            )
-
+            # Build the operation frame geometrically for any
+            # multi-atom fragment that applies symmetry ops.
+            # ``_geometric_symmetry_frame`` aligns local-z with
+            # the true C_n / S_n axis and local-x / y with the
+            # sigma_v / C2' elements, continuously in the
+            # distortion.  This replaces the ``detect_symm``
+            # axes (``map_frag_axes``) and the SVD
+            # principal-moments frame, which both put the
+            # molecular-plane normal along local-z once a
+            # fragment drops below its exact point-group
+            # tolerance — silently rotating about the wrong
+            # axis (see ``operations.populate_fragment_symmops``).
+            # Diatomics / single atoms (not ``is_planar``) are
+            # collinear, so their detected axes are robust and
+            # are kept as-is.
             frag_Vh = None
             if frag_axes_map is not None and fid in frag_axes_map:
                 frag_Vh = jnp.asarray(frag_axes_map[fid])
 
-            if wants_c2_frame:
+            if is_planar:
                 frag_nuc = nuc_crds[
                     jnp.array(frag_atom_indices)
                 ]
@@ -198,21 +243,12 @@ def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
                     np.asarray(frag_atom_indices)
                 ]
                 Vh_list.append(
-                    _geometric_c2_frame(
-                        frag_nuc, charges, centroid,
+                    _geometric_symmetry_frame(
+                        frag_nuc, charges, centroid, frag_ops,
                     )
                 )
             elif frag_Vh is not None:
                 Vh_list.append(frag_Vh)
-            elif is_planar:
-                frag_nuc = nuc_crds[
-                    jnp.array(frag_atom_indices)
-                ]
-                centered = frag_nuc - centroid
-                _, _, Vh = jnp.linalg.svd(
-                    centered, full_matrices=True,
-                )
-                Vh_list.append(Vh)
             else:
                 Vh_list.append(jnp.eye(3))
             is_planar_list.append(is_planar)
