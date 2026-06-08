@@ -24,7 +24,7 @@ from .utils import (parse_molecular_inspheres,
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import populate_fragment_symmops
 from .symm.fragments import (
-    build_frag_reflect_data,
+    build_frag_transform_data,
     build_frag_symmops,
     build_single_frag_combos,
     make_apply_single_frag_symmop,
@@ -384,7 +384,7 @@ class _VMCDriverGTO:
     and runs the simulation."""
 
     def __init__(self, mf, params_corr, params_cusp, mo_relax,
-                 nuc_crds, frag_reflect_data, single_frag_combos,
+                 nuc_crds, frag_transform_data, single_frag_combos,
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
                  gr_scheme='scheme1',
@@ -405,9 +405,9 @@ class _VMCDriverGTO:
         self.ofname_grd = ofname_grd
         self.timestamp_init = timestamp_init
 
-        # Unpack frag_reflect_data
+        # Unpack frag_transform_data
         frag_centroids, frag_inradii, frag_Vh, frag_is_planar \
-            = frag_reflect_data
+            = frag_transform_data
         self.frag_centroids = frag_centroids
         self.frag_inradii = frag_inradii
         self.frag_Vh = frag_Vh
@@ -1098,13 +1098,15 @@ def get_vmc_gto_func(mf,
     params_cusp = _build_cusp_params(mf, cusp_scheme, mf.mol.natm)
 
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
-    frag_reflect_data = build_frag_reflect_data(mf.mol, nuc_crds)
+    frag_transform_data = build_frag_transform_data(
+        mf.mol, nuc_crds, frag_symmops=frag_symmops,
+    )
 
     timestamp_init = datetime.now()
     print("Begin time: {}".format(timestamp_init))
 
     return _VMCDriverGTO(mf, params_corr, params_cusp, mo_relax,
-                         nuc_crds, frag_reflect_data,
+                         nuc_crds, frag_transform_data,
                          single_frag_combos,
                          frag_symmops, frag_ops_sets, frag_ids,
                          ofname_chkpt, ofname_grd,

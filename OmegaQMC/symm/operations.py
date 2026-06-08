@@ -255,7 +255,7 @@ def populate_fragment_symmops(mol: gto.Mole):
     mol.map_frag_symmops = {}
     # Per-fragment axes from PySCF's detect_symm: rows
     # are the standard-orientation axes expressed in the
-    # lab frame.  Used by build_frag_reflect_data so that
+    # lab frame.  Used by build_frag_transform_data so that
     # ``Rz180``, ``sx`` etc. are interpreted relative to
     # the fragment's actual symmetry axes (PySCF puts the
     # principal C_n along local-z), instead of the SVD
