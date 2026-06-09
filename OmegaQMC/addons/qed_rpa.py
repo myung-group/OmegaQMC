@@ -49,6 +49,18 @@ The QED-RPA correlation energy (Eq. 16) is then
 QED-dRPA is obtained by dropping the exchange contributions everywhere:
 ⟨pq||rs⟩ → ⟨pq|rs⟩ and Δ = Δ' = d_{ai} d_{bj}.
 
+Origin dependence: the QED-dRPA correlation energy is *not* invariant
+under rigid translations of the molecule — the direct channel keeps
+only the d_{ai} d_{bj} DSE product and drops the −d_{ab} d_{ij}
+counterpart that restores translational invariance in the full QED-RPA
+(the QED-HF energy and the full QED-RPA correlation energy are both
+origin-invariant; verified numerically to <1e-7 Ha). To reproduce
+Table I of arXiv:2602.09968 to all printed digits, the molecule must
+be re-centred at its nuclear centre of mass, the default orientation
+of the Psi4 backend used there; with the oxygen at the coordinate
+origin instead, the dRPA correlation energy carries an ~λ²-scaling
+offset (2×10⁻⁴ Ha at λ = 0.2 for water/cc-pVDZ).
+
 The implementation works in spin orbitals, so the formulas above are
 applied verbatim for either a restricted QED-HF reference
 (:mod:`OmegaQMC.addons.qed_hf`) or a spin-unrestricted QED-UHF
@@ -348,17 +360,23 @@ def run_qed_rpa(qedhf, direct=True, verbose=True):
 
 if __name__ == '__main__':
     # Water / cc-pVDZ, geometry from Table I of arXiv:2602.09968:
-    # R(O-H) = 1 Å, ∠HOH = 104.5°, C₂ axis along z.
+    # R(O-H) = 1 Å, ∠HOH = 104.5°, C₂ axis along z. The molecule is
+    # re-centred at its nuclear centre of mass (the Psi4 default
+    # orientation of the reference) — required to reproduce the
+    # published QED-dRPA values to all digits, since dRPA is not
+    # origin-invariant (see module docstring).
+    import numpy as _np
     half_angle = math.radians(104.5 / 2.0)
     rOH = 1.0
     hx = rOH * math.sin(half_angle)
     hz = -rOH * math.cos(half_angle)
+    coords = _np.array([[0.0, 0.0, 0.0], [+hx, 0.0, hz], [-hx, 0.0, hz]])
+    masses = _np.array([15.99491461957, 1.00782503224, 1.00782503224])
+    coords -= (masses @ coords) / masses.sum()
     mol = gto.M(
-        atom=[
-            ['O', (0.0, 0.0, 0.0)],
-            ['H', (+hx, 0.0, hz)],
-            ['H', (-hx, 0.0, hz)],
-        ],
+        atom=[['O', tuple(coords[0])],
+              ['H', tuple(coords[1])],
+              ['H', tuple(coords[2])]],
         basis='cc-pVDZ',
         unit='Angstrom',
         symmetry=False,
@@ -374,7 +392,7 @@ if __name__ == '__main__':
     print(f"omega  = {omega:.6f} Ha")
     print(f"lambda = {lambda_cav}")
 
-    qedhf = run_qed_hf(mol, omega, lambda_cav, verbose=False)
+    qedhf = run_qed_hf(mol, omega, lambda_cav, verbose=False, tol=1e-12)
     print(f"\nE_QED_HF = {qedhf['E_qed_hf']:.15f}")
     print(f"E_RHF    = {qedhf['E_rhf']:.15f}  (pyscf, no cavity)")
 

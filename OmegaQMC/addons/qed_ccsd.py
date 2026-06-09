@@ -1340,7 +1340,8 @@ def _build_ccsd_so(qedhf):
 
 def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
                  do_t2_02=False, do_t2_12=False, do_t2_22=False,
-                 max_iter=50, tol=1e-8, max_diis=20, verbose=True):
+                 max_iter=50, tol=1e-8, tol_amp=1e-7, max_diis=20,
+                 verbose=True):
     """DIIS-accelerated QED-CCSD on a QED-HF reference.
 
     The set of active photonic amplitudes selects the flavour:
@@ -1350,17 +1351,27 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
     * do_t1_01, do_t2_11, do_t2_02, do_t2_12 → QED-CCSD-12 / White
     * all flags True → QED-CCSD-22 (full)
 
+    Convergence requires *both* the energy change between iterations to
+    drop below ``tol`` and the amplitude-step norm (the 2-norm of the
+    change of all active amplitudes, the same vector DIIS extrapolates
+    on) to drop below ``tol_amp``. The energy-change criterion alone is
+    unreliable: DIIS trajectories can stall on plateaus where successive
+    energies agree to ~1e-10 while the energy is still ~1e-7 from the
+    fixed point.
+
     Args:
         qedhf: dict returned by :func:`run_qed_hf`.
         do_*: enable individual photonic excitation classes.
         max_iter: max CCSD iterations.
         tol: energy convergence threshold.
+        tol_amp: amplitude-step-norm convergence threshold.
         max_diis: DIIS history depth.
         verbose: print per-iteration progress.
 
     Returns:
         dict with the correlation and total QED-CCSD energy, the
-        converged amplitudes, and the QED-HF reference energy.
+        converged amplitudes, the QED-HF reference energy, and a
+        ``'converged'`` flag.
     """
     omega = qedhf['omega']
     lambda_x, lambda_y, lambda_z = qedhf['lambda_cav']
@@ -1417,16 +1428,19 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
     E_CCSD_old = 0.0
     E_CCSD_new = 0.0
     time_total = 0.0
+    converged = False
 
     if verbose:
         print('\nStarting QED-CCSD iteration:')
-        print('Iter   E(QED-CCSD corr)        |dE|         time (s)')
+        print('Iter   E(QED-CCSD corr)        |dE|         |dT|        time (s)')
 
     for ccsd_iter in range(1, max_iter + 1):
         t_start = time.time()
 
         old_t1_10 = _np.asarray(t1_10)
         old_t2_20 = _np.asarray(t2_20)
+        old_t1_01 = float(t1_01)
+        old_t2_02 = float(t2_02)
         old_t2_11 = _np.asarray(t2_11) if do_t2_11 else None
         old_t2_21 = _np.asarray(t2_21) if do_t2_21 else None
         old_t2_12 = _np.asarray(t2_12) if do_t2_12 else None
@@ -1485,14 +1499,35 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
 
         E_CCSD_new = float(E_CCSD_new)
 
+        # Amplitude-step (Jacobi residual) vector. The array pieces double
+        # as the DIIS error vector below; the scalar photonic amplitudes
+        # (t1_01, t2_02) are not DIIS-extrapolated but do count towards
+        # the convergence norm.
+        err_pieces = [(_np.asarray(t1_10) - old_t1_10).ravel(),
+                      (_np.asarray(t2_20) - old_t2_20).ravel()]
+        if do_t2_11:
+            err_pieces.append((_np.asarray(t2_11) - old_t2_11).ravel())
+        if do_t2_21:
+            err_pieces.append((_np.asarray(t2_21) - old_t2_21).ravel())
+        if do_t2_12:
+            err_pieces.append((_np.asarray(t2_12) - old_t2_12).ravel())
+        if do_t2_22:
+            err_pieces.append((_np.asarray(t2_22) - old_t2_22).ravel())
+        err_vec = _np.concatenate(err_pieces)
+        amp_norm = float(_np.sqrt(
+            _np.dot(err_vec, err_vec)
+            + (float(t1_01) - old_t1_01) ** 2
+            + (float(t2_02) - old_t2_02) ** 2))
+
         t_total = time.time() - t_start
         time_total += t_total
         if verbose:
-            print('%3d:  %20.12f  %1.5E   %.3f'
+            print('%3d:  %20.12f  %1.5E  %1.5E   %.3f'
                   % (ccsd_iter, E_CCSD_new,
-                     abs(E_CCSD_new - E_CCSD_old), t_total))
+                     abs(E_CCSD_new - E_CCSD_old), amp_norm, t_total))
 
-        if abs(E_CCSD_new - E_CCSD_old) < tol:
+        if abs(E_CCSD_new - E_CCSD_old) < tol and amp_norm < tol_amp:
+            converged = True
             break
 
         # --- DIIS ---
@@ -1506,18 +1541,7 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
             diis_vals_t2_12.append(_np.asarray(t2_12))
         if do_t2_22:
             diis_vals_t2_22.append(_np.asarray(t2_22))
-
-        err_pieces = [(_np.asarray(t1_10) - old_t1_10).ravel(),
-                      (_np.asarray(t2_20) - old_t2_20).ravel()]
-        if do_t2_11:
-            err_pieces.append((_np.asarray(t2_11) - old_t2_11).ravel())
-        if do_t2_21:
-            err_pieces.append((_np.asarray(t2_21) - old_t2_21).ravel())
-        if do_t2_12:
-            err_pieces.append((_np.asarray(t2_12) - old_t2_12).ravel())
-        if do_t2_22:
-            err_pieces.append((_np.asarray(t2_22) - old_t2_22).ravel())
-        diis_errors.append(_np.concatenate(err_pieces))
+        diis_errors.append(err_vec)
 
         E_CCSD_old = E_CCSD_new
 
@@ -1578,6 +1602,7 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
                   % max_iter)
 
     return {
+        'converged': bool(converged),
         'E_qed_ccsd_corr': float(E_CCSD_new),
         'E_qed_ccsd_total': float(E_CCSD_new) + E_qed_hf_ref,
         'E_qed_hf': E_qed_hf_ref,

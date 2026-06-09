@@ -61,10 +61,17 @@ def test_ccsd_uhf_reference_matches_rhf_closed_shell():
     mol = _h2()
     rhf = run_qed_hf(mol, OMEGA, LAM)
     uhf = run_qed_uhf(mol, OMEGA, LAM)
+    # Default tolerances: the amplitude-step-norm criterion (tol_amp)
+    # guarantees both reference paths (interleaved vs occ-first spin
+    # ordering) leave the DIIS plateau where |dE| alone would stop
+    # ~1e-7 short of the fixed point — this doubles as a regression
+    # test for the dual energy/amplitude convergence check.
     flags = dict(do_t1_01=True, do_t2_11=True, do_t2_21=True, verbose=False)
-    er = run_qed_ccsd(rhf, **flags)['E_qed_ccsd_corr']
-    eu = run_qed_ccsd(uhf, **flags)['E_qed_ccsd_corr']
-    assert eu == pytest.approx(er, abs=1e-8)
+    rr = run_qed_ccsd(rhf, **flags)
+    ru = run_qed_ccsd(uhf, **flags)
+    assert rr['converged'] and ru['converged']
+    assert ru['E_qed_ccsd_corr'] == pytest.approx(rr['E_qed_ccsd_corr'],
+                                                  abs=1e-8)
 
 
 def test_ccsd_open_shell_zero_coupling_matches_uccsd():

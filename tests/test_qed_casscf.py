@@ -16,7 +16,8 @@ Validates:
    polaritonic CI from the same QED-HF orbitals).
 5. Coherent-state convergence: the CS-QED-CASSCF energy is invariant to
    the photon truncation ``nph_max`` (it is an exact unitary transform).
-6. Open-shell molecules raise NotImplementedError (restricted-only).
+6. Open-shell molecules dispatch to the spin-unrestricted QED-UCASSCF
+   (see tests/test_qed_ucasscf.py for its dedicated validation).
 
 All comparisons use small bases (STO-6G / 6-31G) and small active spaces
 so the dense polaritonic diagonalisations and orbital macro-iterations
@@ -24,7 +25,6 @@ stay fast enough for the pytest suite.
 """
 
 import numpy as np
-import pytest
 from pyscf import gto, scf, mcscf
 
 from OmegaQMC.addons.qed_fci import run_qed_fci
@@ -185,15 +185,25 @@ def test_coherent_state_invariant_to_nph_max():
         f"CS-QED-CASSCF not converged in nph_max: {energies}")
 
 
-def test_open_shell_raises():
-    """Open-shell molecules are not supported (restricted QED-CASSCF only)."""
+def test_open_shell_dispatches_to_ucasscf():
+    """Open-shell molecules dispatch to the spin-unrestricted QED-UCASSCF
+    path and return the analogous result dict."""
     mol = gto.M(atom='Li 0 0 0; H 0 0 3.0', basis='sto-3g', spin=2,
                 unit='Angstrom', verbose=0)
     mf = scf.RHF(mol)
     mf.kernel()
-    with pytest.raises(NotImplementedError):
-        run_qed_casscf(mf, ncas=2, nelecas=(2, 0), omega=0.1,
+    r = run_qed_casscf(mf, ncas=2, nelecas=(2, 0), omega=0.1,
                        coupling_vec=[0.0, 0.0, 0.05], nph_max=2)
+    print("\n" + "=" * 70)
+    print("Open-shell dispatch: LiH (triplet)/STO-3G CAS(2,(2,0))")
+    print("=" * 70)
+    print(f"  reference = {r['reference']}  E = {r['e_qed_casscf']:.10f}  "
+          f"converged = {r['converged']}")
+    assert r['reference'] == 'QED-UHF'
+    assert r['ncore'] == (1, 1)
+    assert isinstance(r['mo_coeff'], tuple) and len(r['mo_coeff']) == 2
+    assert r['e_qed_casscf'] <= r['e_qed_casci'] + 1e-10
+    assert r['converged']
 
 
 if __name__ == '__main__':
@@ -202,7 +212,7 @@ if __name__ == '__main__':
     test_orbital_relaxation_lowers_energy()
     test_ci_build_matches_qed_casci()
     test_coherent_state_invariant_to_nph_max()
-    test_open_shell_raises()
+    test_open_shell_dispatches_to_ucasscf()
     print("\n" + "=" * 70)
     print("All QED-CASSCF tests passed.")
     print("=" * 70)
