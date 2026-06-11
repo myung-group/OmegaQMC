@@ -77,7 +77,8 @@ def _spin_square(Ca, Cb, nocc_a, nocc_b, S):
     return float(ss), float(mult)
 
 
-def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
+def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
+                damping=0.0, verbose=False):
     """Self-consistent QED-Unrestricted-Hartree-Fock in the dipole gauge.
 
     Args:
@@ -86,6 +87,12 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
         lambda_cav: 3-vector of coupling λ = (λx, λy, λz).
         max_iter: SCF iteration cap.
         tol: energy convergence threshold (on total energy).
+        damping: linear density mixing, D ← (1−damping)·D_new +
+            damping·D_old. 0 (default) is the plain fixed-point
+            iteration; values around 0.2–0.5 stabilise oscillating
+            cases (e.g. orbitally degenerate open-shell cations such as
+            CH4+, whose t2 hole makes the undamped iteration cycle
+            between symmetry-broken solutions).
         verbose: print per-iteration energies.
 
     Returns:
@@ -210,8 +217,10 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
         mo_energy_b, Cb_t = np.linalg.eigh(X @ Fb @ X)
         Ca = X @ Ca_t
         Cb = X @ Cb_t
-        Da = Ca[:, :nocc_a] @ Ca[:, :nocc_a].T
-        Db = Cb[:, :nocc_b] @ Cb[:, :nocc_b].T
+        Da_new = Ca[:, :nocc_a] @ Ca[:, :nocc_a].T
+        Db_new = Cb[:, :nocc_b] @ Cb[:, :nocc_b].T
+        Da = (1.0 - damping) * Da_new + damping * Da
+        Db = (1.0 - damping) * Db_new + damping * Db
     else:
         raise RuntimeError("QED-UHF did not converge in %d iterations" % max_iter)
 

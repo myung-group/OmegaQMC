@@ -391,6 +391,197 @@ def run_qed_gw(qedhf, orbs=None, direct=True, mode='linG0W0', eta=1e-3,
     }
 
 
+# ---------------------------------------------------------------------------
+# Statically screened QED-SOSEX self-energy (vertex correction to G0W0)
+# ---------------------------------------------------------------------------
+
+def _sosex_static_pieces(static, Omega, M_full, eps_so, p_so,
+                         screened=True):
+    """ω-independent numerators / pole positions of the statically
+    screened SOSEX diagonal self-energy for spin orbital ``p_so``.
+
+    The SOSEX self-energy is the second-order exchange diagram with one
+    interaction line replaced by the statically screened QED interaction
+
+        W^stat_{pq,rs} = v̄_{pq,rs} − 2 Σ_m M_{pq,m} M_{rs,m} / Ω_m ,
+        v̄_{pq,rs}     = (pq|rs) + d_pq d_rs              (chemist),
+
+    and the other line kept bare (v̄). Because the QED-dRPA transition
+    densities M carry the photon-pole channel, the polaritonic screening
+    enters the screened line automatically. Screening the first or the
+    second line is equivalent by relabelling, so the scheme is
+    well-defined. With ``screened=False`` the screened line is replaced
+    by v̄ and the routine returns the bare second-order exchange (2OX)
+    self-energy — used as an internal consistency check.
+
+    Diagonal terms (spin orbitals, real):
+
+        Σ^SOSEX_pp(ω) = − Σ_{iab} W^stat_{pa,ib} v̄_{pb,ia}
+                            / (ω + ε_i − ε_a − ε_b)
+                        − Σ_{ija} W^stat_{ip,ja} v̄_{jp,ia}
+                            / (ω + ε_a − ε_i − ε_j).
+    """
+    so = static['so']
+    nocc = so['nocc']
+    g_phys = so['g_phys_d']
+    d_so = so['d_so']
+    eps_occ = eps_so[:nocc]
+    eps_vir = eps_so[nocc:]
+    invOm = 1.0 / Omega
+
+    # v̄_p[q,r,s] = (pq|rs) + d_pq d_rs ;  (pq|rs) = ⟨pr|qs⟩ = g_phys[p,r,q,s]
+    vbar_p = (g_phys[p_so].transpose(1, 0, 2)
+              + np.einsum('q,rs->qrs', d_so[p_so], d_so))
+    if screened:
+        Wstat_p = vbar_p - 2.0 * np.einsum(
+            'qm,rsm->qrs', M_full[p_so] * invOm[None, :], M_full)
+    else:
+        Wstat_p = vbar_p
+
+    # Term 1 (2p1h):  W^stat[p,a,i,b] · v̄[p,b,i,a]
+    W1 = Wstat_p[nocc:, :nocc, nocc:]                     # [a,i,b]
+    v1 = vbar_p[nocc:, :nocc, nocc:].transpose(2, 1, 0)   # v̄[p,b,i,a] → [a,i,b]
+    num1 = (W1 * v1).ravel()
+    den1 = (eps_occ[None, :, None] - eps_vir[:, None, None]
+            - eps_vir[None, None, :]).ravel()             # ε_i − ε_a − ε_b
+
+    # Term 2 (2h1p):  W^stat[i,p,j,a] · v̄[j,p,i,a]
+    # (ip|ja) = ⟨ij|pa⟩ = g_phys[i,j,p,a];  DSE part d_ip d_ja.
+    vbar2 = (g_phys[:nocc, :nocc, p_so, nocc:]
+             + np.einsum('i,ja->ija', d_so[:nocc, p_so],
+                         d_so[:nocc, nocc:]))             # [i,j,a]
+    if screened:
+        Wstat2 = vbar2 - 2.0 * np.einsum(
+            'im,jam->ija', M_full[:nocc, p_so, :] * invOm[None, :],
+            M_full[:nocc, nocc:, :])
+    else:
+        Wstat2 = vbar2
+    v2 = vbar2.transpose(1, 0, 2)                         # v̄[j,p,i,a] → [i,j,a]
+    num2 = (Wstat2 * v2).ravel()
+    den2 = (eps_vir[None, None, :] - eps_occ[:, None, None]
+            - eps_occ[None, :, None]).ravel()             # ε_a − ε_i − ε_j
+
+    return num1, den1, num2, den2
+
+
+def _eval_sosex(omega_val, pieces, eta):
+    """Σ^SOSEX_pp(ω) and its analytic ω-derivative from precomputed
+    pieces. Pole regularisation mirrors :func:`_eval_sigma`: 2p1h poles
+    sit on the affinity side (+iη), 2h1p poles on the ionization side
+    (−iη)."""
+    num1, den1, num2, den2 = pieces
+    d1 = omega_val + den1 + 1j * eta
+    d2 = omega_val + den2 - 1j * eta
+    sigma = -(np.sum(num1 / d1) + np.sum(num2 / d2))
+    dsigma = +(np.sum(num1 / d1 ** 2) + np.sum(num2 / d2 ** 2))
+    return complex(sigma), complex(dsigma)
+
+
+def run_qed_gw_sosex(qedhf, orbs=None, eta=1e-3, screened=True,
+                     inner_max=50, inner_tol=1e-9, verbose=True):
+    """One-shot G0W0 + SOSEX-type vertex quasiparticle energies.
+
+    Solves the non-linear quasiparticle equation with the vertex-
+    corrected self-energy
+
+        ω = ε^HF_p + Re Σ^GW_c,pp(ω) + Re Σ^x_pp(ω),
+
+    where Σ^GW_c is the standard QED-dRPA-screened correlation
+    self-energy (Eq. 33-type spectral form) and Σ^x is the second-order
+    exchange diagram (see :func:`_sosex_static_pieces`):
+
+    * ``screened=True`` — statically screened SOSEX: one line is the
+      ω→0 limit of the photon-augmented W (carrying the polariton
+      pole), the other the bare QED interaction v̄ = v + d⊗d.
+    * ``screened=False`` — bare, *fully dynamical* second-order
+      exchange (2OX): both lines are v̄, and the frequency dependence
+      of Σ^x(ω) is exact at this order. Because v̄ contains the d⊗d
+      DSE, this variant injects the DSE-exchange contractions with
+      their full dynamics — it is the leading (bare-vertex) member of
+      the QED-GWΓ family, G0W0+2OX = G0W0Γ^(1). The electron–photon
+      *crossed* (non-Migdal) diagrams, which are third order
+      (g·v̄·g topology), remain outside both variants.
+
+    Either way the vertex term enters once, at the self-energy level,
+    with no double counting of the static exchange already inside
+    ε^HF_p (GW contains no exchange-topology diagrams).
+
+    Args / returns mirror :func:`run_qed_gw` (mode is implicitly the
+    non-linear one-shot G0W0). The result dict additionally reports
+    ``Sigma_sosex`` at the QP point and the GW-only QP energies for
+    comparison.
+    """
+    static = _build_static_quantities(qedhf, direct=True)
+    eps_HF = static['eps_HF']
+    nocc, nso = static['so']['nocc'], static['so']['nso']
+    nocc_spatial = qedhf['nocc_spatial']
+
+    if orbs is None:
+        orbs = [nocc_spatial - 1, nocc_spatial]
+    orbs = list(orbs)
+    orbs_so = [2 * p for p in orbs]
+    if any(p_so >= nso for p_so in orbs_so):
+        raise ValueError("requested orbital index out of range")
+
+    if verbose:
+        print(f"\nG0W0+SOSEX(static)@QED-dRPA@QED-HF")
+        print(f"  nocc(SO)={nocc}, nso={nso},"
+              f"  ω_cav={static['omega_cav']:.6f} Ha,  η={eta:.1e}")
+
+    Omega, M_full = _rpa_at_eps(static, eps_HF)
+
+    qp_energies, qp_gw_only, sigma_c_vals, sigma_x2_vals = {}, {}, {}, {}
+    if verbose:
+        print("\n  spatial orb   ε_HF (Ha)        ε_QP (Ha)       "
+              "Re Σ_c (Ha)   Re Σ_SOSEX (Ha)")
+    for p_spatial, p_so in zip(orbs, orbs_so):
+        M_ms = M_full[p_so]
+        eps_p = float(eps_HF[p_so])
+        pieces = _sosex_static_pieces(static, Omega, M_full, eps_HF, p_so,
+                                      screened=screened)
+
+        # GW-only QP (for the vertex-shift diagnostic).
+        eps_gw, _, _ = _solve_qp_newton(
+            eps_p, M_ms, Omega, eps_HF, nocc, eta,
+            omega_start=eps_p, max_iter=inner_max, tol=inner_tol)
+        qp_gw_only[p_spatial] = float(eps_gw)
+
+        # Newton on the vertex-corrected QP equation.
+        omega = eps_p
+        sigma_c = sigma_x2 = 0j
+        for _ in range(inner_max):
+            sigma_c, dsig_c = _eval_sigma(omega, M_ms, Omega, eps_HF,
+                                          nocc, eta)
+            sigma_x2, dsig_x2 = _eval_sosex(omega, pieces, eta)
+            f = omega - eps_p - sigma_c.real - sigma_x2.real
+            fp = 1.0 - dsig_c.real - dsig_x2.real
+            delta = -f / fp
+            omega += delta
+            if abs(delta) < inner_tol:
+                break
+        qp_energies[p_spatial] = float(omega)
+        sigma_c_vals[p_spatial] = complex(sigma_c)
+        sigma_x2_vals[p_spatial] = complex(sigma_x2)
+        if verbose:
+            print(f"  {p_spatial:3d}            {eps_p:+13.8f}   "
+                  f"{omega:+13.8f}   {sigma_c.real:+10.6f}   "
+                  f"{sigma_x2.real:+10.6f}")
+
+    return {
+        'method': ('G0W0+SOSEX(static)' if screened
+                   else 'G0W0+2OX(dynamic)'),
+        'direct': True,
+        'orbs': orbs,
+        'eps_HF': {p: float(eps_HF[2 * p]) for p in orbs},
+        'eps_QP': qp_energies,
+        'eps_QP_GW': qp_gw_only,
+        'Sigma_c': sigma_c_vals,
+        'Sigma_sosex': sigma_x2_vals,
+        'Omega_RPA': Omega,
+        'eta': float(eta),
+    }
+
+
 if __name__ == '__main__':
     HARTREE_TO_EV = 27.211386245988
 
