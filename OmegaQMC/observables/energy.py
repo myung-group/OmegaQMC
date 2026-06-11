@@ -392,6 +392,7 @@ def local_energy_multidet_streamed(
 def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
+        equil_cutoff: int = 0,
         ) -> tuple[float, float]:
     """Post-process VMC sample data to obtain \
 correlated-sample-averaged VMC energy.
@@ -456,6 +457,12 @@ correlated-sample-averaged VMC energy.
         ``<prefix>.log``.  A string is used as the log
         file path directly (a ``.log`` extension is
         appended if absent).
+    equil_cutoff : int, optional
+        Number of leading blocks to discard as
+        equilibration before the time-series analysis;
+        equivalently the block index (in sorted order) at
+        which the analysis starts.  Applied uniformly to
+        every state.  Default is ``0`` (use all blocks).
 
     Returns
     -------
@@ -486,6 +493,18 @@ correlated-sample-averaged VMC energy.
             int(k) for k in f['local_energies']
             if k.isdigit()
         )
+        if equil_cutoff < 0:
+            raise ValueError(
+                "equil_cutoff must be non-negative,"
+                f" got {equil_cutoff}"
+            )
+        if equil_cutoff >= len(block_nums):
+            raise ValueError(
+                f"equil_cutoff ({equil_cutoff}) discards"
+                f" all {len(block_nums)} blocks"
+            )
+        # Drop equilibration blocks before the analysis.
+        block_nums = block_nums[equil_cutoff:]
 
         # Combo labels: sub-groups under fragment_weights.
         combo_labels = []
