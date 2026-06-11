@@ -6,41 +6,59 @@ Static BSE in the spin-orbital basis (see, e.g., Onida-Reining-Rubio
 Rev. Mod. Phys. 2002 Eq. 224, and Bruneval & Gonze PRB 2008):
 
     A^BSE_{ia,jb} = (ε^QP_a − ε^QP_i) δ_{ij}δ_{ab}
-                    + ⟨aj‖ib⟩_phys                 (bare e-h exchange,
-                                                    NB antisymmetric)
-                    − W^stat_{ij,ab}               (screened e-h direct,
-                                                    dRPA-W only — no
-                                                    double counting of K_x)
+                    + ⟨aj|ib⟩_phys + d_ai d_bj     (bare e-h exchange of
+                                                    v̄ = v + d⊗d,
+                                                    unantisymmetrized)
+                    − W^stat_{ij,ab}               (screened e-h direct;
+                                                    its bare part is the
+                                                    chemist (ij|ab) +
+                                                    d_ij d_ab, once)
 
-    B^BSE_{ia,jb} = ⟨ab‖ij⟩_phys − W^stat_{ib,aj}
+    B^BSE_{ia,jb} = ⟨ab|ij⟩_phys + d_ai d_bj − W^stat_{ib,aj}
+
+The direct e-h attraction lives only inside W^stat (screened); the e-h
+exchange of the QED interaction v̄ appears once, bare. In the W → v̄
+limit the TDA-BSE therefore reduces exactly to CIS on the QED-RPA
+kernel, and the spin-adapted structure is the textbook one: singlets
+feel 2(ia|jb) + 2 d_ia d_jb − W, triplets −W only.
 
 TDA-BSE keeps only the A block and gives a Hermitian eigenvalue
 problem. Full BSE solves the non-Hermitian Casida-like form
 ``[[A, B], [−B, −A]]·[X; Y] = Ω·[X; Y]``.
 
-W^stat is the static (ω = 0) limit of the QED-dRPA screened interaction:
+W^stat is the static (ω = 0) limit of the QED-dRPA screened interaction
+(chemist density pairing, matching the M_{pq,m} transition densities):
 
-    W^stat_{pq,rs} = ⟨pq|rs⟩ + d_{pq} d_{rs}
+    W^stat_{pq,rs} = (pq|rs)_chem + d_{pq} d_{rs}
                      − 2 Σ_m M_{pq,m} M_{rs,m} / Ω_m
 
 where (Ω_m, M_{pq,m}) are the QED-RPA eigenvalues and
 matrix-elements produced by :mod:`qed_gw` (which already absorb the
 photon channel through the augmented A,B blocks of arXiv:2602.09968
-Eq. 6). The bare-exchange kernel includes the antisymmetric DSE
-contribution Δ^x_{aj,ib} = d_{aj}d_{ib} − d_{ab}d_{ij} (paper Eq. 13).
+Eq. 6).
 
 The cavity enters in three places:
 
 1. ε^QP_p from QED-GW (cavity-dressed quasiparticle energies),
-2. v_{pq,rs} = ⟨pq|rs⟩ + d_{pq} d_{rs} (DSE direct in the bare W),
+2. v̄_{pq,rs} = (pq|rs) + d_{pq} d_{rs} (DSE direct in the bare W and
+   in the e-h exchange kernel),
 3. M_{pq,m} carries the photon-mediated piece via the (M+N)_m
-   amplitudes of every QED-RPA mode.
+   amplitudes of every QED-RPA mode (polaritonic poles of W).
 
 Scope / caveats
 ---------------
 * Spin-orbital implementation; for closed-shell molecules the
   spectrum contains both singlet and triplet roots (and triplet
-  instabilities show up as small / imaginary roots).
+  instabilities show up as small / imaginary roots). In TDA mode the
+  roots are spin-classified via the singlet projection
+  w_S = ½ Σ_AI (X_αα + X_ββ)² and electronic oscillator strengths are
+  computed from the BSE eigenvectors, so the optical gap Ω_S1, the
+  lowest triplet Ω_T1, and the exciton binding energy
+  E_b = E_gap(QP) − Ω_S1 are returned directly.
+* The two cavity channels of the kernel can be toggled independently
+  (``include_dse``, ``include_photon``) and the QP energies can be
+  overridden (``eps_QP=...``), enabling a channel decomposition of
+  cavity-induced exciton shifts.
 * "Full" BSE (``tda=False``) inherits the standard BSE caveat that the
   resonant–antiresonant coupling can introduce spurious instabilities;
   TDA-BSE (default) is usually more stable.
@@ -63,7 +81,9 @@ def _W_static(static, Omega, M_full, channel):
 
     Args:
         static, Omega, M_full: outputs of qed_gw._build_static_quantities
-            and _rpa_at_eps.
+            and _rpa_at_eps. The DSE-direct d⊗d term follows the
+            ``include_dse`` flag stored in ``static`` (the photon
+            channel is controlled inside M_full itself).
         channel: one of 'ij,ab' or 'ib,aj' selecting which orbital
             ranges go into which slot of W_{pq,rs}.
 
@@ -76,13 +96,19 @@ def _W_static(static, Omega, M_full, channel):
     nocc = so['nocc']
     g_phys_d = so['g_phys_d']
     d_so = so['d_so']
+    include_dse = static.get('include_dse', True)
     inv_Omega = 1.0 / Omega
 
     if channel == 'ij,ab':
-        # v^dir_{ij,ab} = ⟨ij|ab⟩ + d_{ij} d_{ab}
-        v_dir = (g_phys_d[:nocc, :nocc, nocc:, nocc:].copy()
-                 + np.einsum('ij,ab->ijab',
-                             d_so[:nocc, :nocc], d_so[nocc:, nocc:]))
+        # v̄_{ij,ab} = (ij|ab)_chem + d_{ij} d_{ab}. The chemist direct
+        # (ij|ab) couples the densities (i j) and (a b) — the same
+        # pairing as the M_{ij,m} M_{ab,m} correlation term — and equals
+        # the physicist ⟨ia|jb⟩, i.e. g_phys[i,a,j,b].
+        v_dir = (g_phys_d[:nocc, nocc:, :nocc, nocc:]
+                 .transpose(0, 2, 1, 3).copy())
+        if include_dse:
+            v_dir += np.einsum('ij,ab->ijab',
+                               d_so[:nocc, :nocc], d_so[nocc:, nocc:])
         # W_c_{ij,ab} = −2 Σ_m M_{ij,m} M_{ab,m} / Ω_m
         M_oo = M_full[:nocc, :nocc, :]
         M_vv = M_full[nocc:, nocc:, :]
@@ -90,9 +116,13 @@ def _W_static(static, Omega, M_full, channel):
         return v_dir + W_c
 
     if channel == 'ib,aj':
-        v_dir = (g_phys_d[:nocc, nocc:, nocc:, :nocc].copy()
-                 + np.einsum('ib,aj->ibaj',
-                             d_so[:nocc, nocc:], d_so[nocc:, :nocc]))
+        # v̄_{ib,aj} = (ib|aj)_chem + d_{ib} d_{aj} = ⟨ia|bj⟩_phys + DSE,
+        # i.e. g_phys[i,a,b,j] reordered to (i, b, a, j).
+        v_dir = (g_phys_d[:nocc, nocc:, nocc:, :nocc]
+                 .transpose(0, 2, 1, 3).copy())
+        if include_dse:
+            v_dir += np.einsum('ib,aj->ibaj',
+                               d_so[:nocc, nocc:], d_so[nocc:, :nocc])
         M_ov = M_full[:nocc, nocc:, :]
         M_vo = M_full[nocc:, :nocc, :]
         W_c = -2.0 * np.einsum('ibm,ajm,m->ibaj', M_ov, M_vo, inv_Omega)
@@ -101,43 +131,88 @@ def _W_static(static, Omega, M_full, channel):
     raise ValueError(f"unknown channel {channel!r}")
 
 
-def _bare_exchange_kernel(static, channel):
-    """Antisymmetric bare e-h kernel ⟨··‖··⟩ + Δ^x in one of two
-    channels:
+def _eh_exchange_kernel(static, channel):
+    """Bare electron-hole exchange kernel of the QED interaction
+    v̄ = v + d⊗d, in one of two channels:
 
-        'aj,ib' → returns (a, i, b, j) tensor for the A block
-        'ab,ij' → returns (a, i, b, j) tensor for the B block
+        'aj,ib' → returns (a, i, b, j) tensor for the A block,
+                   ⟨aj|ib⟩_phys + d_ai d_bj
+        'ab,ij' → returns (a, i, b, j) tensor for the B block,
+                   ⟨ab|ij⟩_phys + d_ai d_bj
+
+    NB: *unantisymmetrized*. The screened direct e-h attraction enters
+    the BSE once, through −W^stat (whose bare part is the chemist
+    (ij|ab) + d_ij d_ab); antisymmetrizing here would double-count it.
+    This kernel is exactly the e-h exchange of the QED-dRPA blocks that
+    generate W, so the W→v̄ limit of the TDA-BSE recovers CIS. The DSE
+    part d_ai d_bj follows the ``include_dse`` flag in ``static``.
     """
     so = static['so']
     nocc = so['nocc']
-    g_phys_a = so['g_phys_a']
+    g_phys_d = so['g_phys_d']
     d_so = so['d_so']
+    include_dse = static.get('include_dse', True)
     d_vo = d_so[nocc:, :nocc]
-    d_ov = d_so[:nocc, nocc:]
-    d_vv = d_so[nocc:, nocc:]
-    d_oo = d_so[:nocc, :nocc]
 
     if channel == 'aj,ib':
-        # ⟨aj||ib⟩ in (a, j, i, b) → transpose to (a, i, b, j) via (0,2,3,1)
-        K_x = g_phys_a[nocc:, :nocc, :nocc, nocc:].transpose(0, 2, 3, 1)
-        # Δ^x_{aj,ib} = d_{aj} d_{ib} − d_{ab} d_{ij}, indexed (a, i, b, j)
-        delta_x = (np.einsum('aj,ib->aibj', d_vo, d_ov)
-                   - np.einsum('ab,ij->aibj', d_vv, d_oo))
-        return K_x + delta_x
+        # ⟨aj|ib⟩ in (a, j, i, b) → transpose to (a, i, b, j) via (0,2,3,1)
+        K_x = g_phys_d[nocc:, :nocc, :nocc, nocc:].transpose(0, 2, 3, 1)
+    elif channel == 'ab,ij':
+        # ⟨ab|ij⟩ in (a, b, i, j) → transpose to (a, i, b, j) via (0,2,1,3)
+        K_x = g_phys_d[nocc:, nocc:, :nocc, :nocc].transpose(0, 2, 1, 3)
+    else:
+        raise ValueError(f"unknown channel {channel!r}")
 
-    if channel == 'ab,ij':
-        # ⟨ab||ij⟩ in (a, b, i, j) → transpose to (a, i, b, j) via (0,2,1,3)
-        K_x = g_phys_a[nocc:, nocc:, :nocc, :nocc].transpose(0, 2, 1, 3)
-        # Δ^x_{ab,ij} = d_{ab} d_{ij} − d_{aj} d_{ib}, indexed (a, i, b, j)
-        delta_x = (np.einsum('ab,ij->aibj', d_vv, d_oo)
-                   - np.einsum('aj,ib->aibj', d_vo, d_ov))
-        return K_x + delta_x
+    if not include_dse:
+        return K_x.copy()
+    # DSE e-h exchange d_ai d_bj (the d⊗d analogue of the direct
+    # integral above; same in both channels since d is symmetric).
+    return K_x + np.einsum('ai,bj->aibj', d_vo, d_vo)
 
-    raise ValueError(f"unknown channel {channel!r}")
+
+def _classify_and_brightness(qedhf, X_4d, Omega, nocc):
+    """Spin-classify TDA-BSE roots and compute oscillator strengths.
+
+    Args:
+        qedhf: QED-HF dict (for MO coefficients and AO dipole matrices).
+        X_4d: TDA eigenvectors reshaped to (nvir, nocc, nroots),
+            normalized to Σ|X|² = 1, spin-orbital (even=α, odd=β,
+            closed-shell interleaved ordering).
+        Omega: excitation energies (Ha).
+        nocc: number of occupied spin orbitals (even).
+
+    Returns:
+        (labels, w_singlet, f_osc): labels is an array of 'S'/'T'
+        characters, w_singlet the singlet projection weight per root,
+        f_osc the electronic oscillator strengths (length gauge).
+    """
+    nvir = X_4d.shape[0]
+    nso = nocc + nvir
+
+    # Singlet projection weight: w_S = ½ Σ_AI (X_αα + X_ββ)².
+    # Pure singlet → 1; triplet (any M_S) → 0.
+    X_aa = X_4d[0::2, 0::2, :]
+    X_bb = X_4d[1::2, 1::2, :]
+    w_singlet = 0.5 * np.sum((X_aa + X_bb) ** 2, axis=(0, 1))
+    labels = np.where(w_singlet > 0.5, 'S', 'T')
+
+    # Oscillator strengths f_n = (2/3) Ω_n Σ_κ |Σ_ai μ^κ_ai X_ai,n|².
+    C = np.asarray(qedhf['C'])
+    idx = np.arange(nso)
+    same = (idx[:, None] % 2) == (idx[None, :] % 2)
+    f_osc = np.zeros_like(Omega)
+    for key in ('mu_x_ao', 'mu_y_ao', 'mu_z_ao'):
+        mu_sf = C.T @ np.asarray(qedhf[key]) @ C
+        mu_so = same * mu_sf[idx[:, None] // 2, idx[None, :] // 2]
+        mu_vo = mu_so[nocc:, :nocc]
+        mu_n = np.einsum('ai,ain->n', mu_vo, X_4d)
+        f_osc += (2.0 / 3.0) * Omega * mu_n ** 2
+    return labels, w_singlet, f_osc
 
 
 def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
-                eta=1e-3, verbose=True):
+                eta=1e-3, include_dse=True, include_photon=True,
+                eps_QP=None, verbose=True):
     """BSE@QED-GW for cavity-modified neutral excitation energies.
 
     Args:
@@ -151,14 +226,37 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
             (non-Hermitian Casida-like problem).
         n_print: number of low-lying excitations to print in verbose mode.
         eta: imaginary regulariser used by the GW step (Ha).
+        include_dse: keep the DSE channel in the *BSE kernel* — the
+            d⊗d term of the bare W, the DSE-exchange Δ^x of the bare
+            e-h kernel, and the DSE blocks of the screening RPA. The
+            QP energies are NOT affected (channel decomposition of the
+            kernel, not of the GW step).
+        include_photon: keep the bilinear electron–photon coupling in
+            the *BSE kernel* screening (photon-augmented RPA poles and
+            photon kernel inside W). QP energies are NOT affected.
+        eps_QP: optional spin-orbital QP energies (length nso). When
+            given, the GW step is skipped and these energies are used
+            for the BSE diagonal and the screening — e.g. to feed λ=0
+            quasiparticles into a finite-λ kernel for the channel
+            decomposition of the exciton binding energy.
         verbose: print progress.
 
     Returns:
-        dict with 'Omega_BSE' (sorted excitation energies, Ha),
-        'tda', 'gw_mode', and the underlying 'eps_QP', 'Omega_RPA'.
+        dict with 'Omega_BSE' (sorted excitation energies, Ha), 'tda',
+        'gw_mode', the underlying 'eps_QP', 'Omega_RPA', the
+        fundamental QP gap 'E_gap', and — in TDA mode — per-root spin
+        labels 'spin' ('S'/'T'), singlet weights 'w_singlet',
+        oscillator strengths 'f_osc', the lowest singlet/triplet
+        energies 'Omega_S1' / 'Omega_T1', and the exciton binding
+        energy 'E_b' = E_gap − Omega_S1 (all Ha).
     """
-    # 1) QP energies from QED-GW.
-    if gw_mode == 'evGW':
+    # 1) QP energies from QED-GW (or caller-supplied override).
+    if eps_QP is not None:
+        eps_QP = np.asarray(eps_QP, dtype=float).copy()
+        if verbose:
+            print("\nQED-BSE: using caller-supplied QP energies "
+                  "(GW step skipped).")
+    elif gw_mode == 'evGW':
         if verbose:
             print(f"\nQED-BSE: running underlying QED-evGW...")
         gw = run_qed_gw(qedhf, mode='evGW', eta=eta, verbose=False)
@@ -177,8 +275,11 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
             eps_QP[2 * p + 1] = gw['eps_QP'][p]
 
     # 2) Build static W from the QED-dRPA spectrum evaluated at the
-    #    same orbital energies (matches evGW philosophy).
-    static = _build_static_quantities(qedhf, direct=True)
+    #    same orbital energies (matches evGW philosophy). The kernel
+    #    channel flags enter here (and only here).
+    static = _build_static_quantities(qedhf, direct=True,
+                                      include_dse=include_dse,
+                                      include_photon=include_photon)
     Omega_RPA, M_full = _rpa_at_eps(static, eps_QP)
 
     so = static['so']
@@ -187,8 +288,10 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
     nvir = nso - nocc
     nov = nvir * nocc
 
+    E_gap = float(eps_QP[nocc] - eps_QP[nocc - 1])
+
     # 3) Build A^BSE.
-    K_x_A = _bare_exchange_kernel(static, 'aj,ib')
+    K_x_A = _eh_exchange_kernel(static, 'aj,ib')
     W_ijab = _W_static(static, Omega_RPA, M_full, 'ij,ab')
     # − W^stat_{ij,ab} sits in A_{a,i,b,j}: transpose (i,j,a,b) → (a,i,b,j)
     W_A_aibj = W_ijab.transpose(2, 0, 3, 1)
@@ -200,11 +303,22 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
     # Symmetrise (it should already be symmetric; tighten numerical noise).
     A_BSE = 0.5 * (A_BSE + A_BSE.T)
 
+    spin = w_singlet = f_osc = None
+    Omega_S1 = Omega_T1 = E_b = None
     if tda:
-        Omega_BSE = la.eigvalsh(A_BSE)
+        Omega_BSE, X_vec = la.eigh(A_BSE)
+        X_4d = X_vec.reshape(nvir, nocc, -1)
+        spin, w_singlet, f_osc = _classify_and_brightness(
+            qedhf, X_4d, Omega_BSE, nocc)
+        singlets = Omega_BSE[spin == 'S']
+        triplets = Omega_BSE[spin == 'T']
+        Omega_S1 = float(singlets[0]) if len(singlets) else None
+        Omega_T1 = float(triplets[0]) if len(triplets) else None
+        if Omega_S1 is not None:
+            E_b = E_gap - Omega_S1
         method = 'TDA-BSE'
     else:
-        K_x_B = _bare_exchange_kernel(static, 'ab,ij')
+        K_x_B = _eh_exchange_kernel(static, 'ab,ij')
         W_ibaj = _W_static(static, Omega_RPA, M_full, 'ib,aj')
         # − W^stat_{ib,aj} into B_{a,i,b,j}: (i,b,a,j) → (a,i,b,j) is (2,0,1,3)
         W_B_aibj = W_ibaj.transpose(2, 0, 1, 3)
@@ -227,23 +341,43 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
         Omega_BSE = np.sort(re[re > 1e-10])
         method = 'BSE'
 
+    EV = 27.211386245988
     if verbose:
-        print(f"\n{method}@QED-{gw_mode}@QED-HF")
+        print(f"\n{method}@QED-{gw_mode}@QED-HF  "
+              f"(include_dse={include_dse}, include_photon={include_photon})")
         print(f"  nocc(SO)={nocc}, nso={nso}, "
               f"BSE matrix dim={nov}, n_modes_W={len(Omega_RPA)}")
+        print(f"  E_gap(QP) = {E_gap:.6f} Ha = {E_gap * EV:8.4f} eV")
         n_show = min(n_print, len(Omega_BSE))
         print(f"  Lowest {n_show} {method} excitation energies:")
         for i in range(n_show):
+            tag = ''
+            if spin is not None:
+                tag = (f"  [{spin[i]}]  w_S={w_singlet[i]:.3f}  "
+                       f"f={f_osc[i]:.4f}")
             print(f"    Ω_{i+1:<2d} = {Omega_BSE[i]:.6f} Ha "
-                  f"= {Omega_BSE[i] * 27.211386245988:8.4f} eV")
+                  f"= {Omega_BSE[i] * EV:8.4f} eV{tag}")
+        if E_b is not None:
+            print(f"  Ω_S1 = {Omega_S1 * EV:.4f} eV,  "
+                  f"Ω_T1 = {Omega_T1 * EV:.4f} eV,  "
+                  f"E_b = E_gap − Ω_S1 = {E_b * EV:.4f} eV")
 
     return {
         'method': method,
         'tda': bool(tda),
         'gw_mode': gw_mode,
+        'include_dse': bool(include_dse),
+        'include_photon': bool(include_photon),
         'Omega_BSE': Omega_BSE,
         'eps_QP': eps_QP,
         'Omega_RPA': Omega_RPA,
+        'E_gap': E_gap,
+        'spin': spin,
+        'w_singlet': w_singlet,
+        'f_osc': f_osc,
+        'Omega_S1': Omega_S1,
+        'Omega_T1': Omega_T1,
+        'E_b': E_b,
     }
 
 

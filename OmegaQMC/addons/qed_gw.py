@@ -105,10 +105,27 @@ def _solve_qed_rpa_eigensystem(A_big, B_big):
     return Omega, U_block / norm, V_block / norm
 
 
-def _build_static_quantities(qedhf, direct=True):
+def _build_static_quantities(qedhf, direct=True, include_dse=True,
+                             include_photon=True):
     """Quantities that don't change between evGW iterations: the AO→MO
     integrals, the bare K interaction in the photon-augmented basis,
-    and the HF reference energies."""
+    and the HF reference energies.
+
+    The two cavity channels of the screening can be switched off
+    individually for diagnostics / channel decompositions:
+
+    * ``include_dse=False`` removes the direct DSE product d⊗d from the
+      bare interaction K (and, via :func:`_rpa_at_eps`, from the RPA
+      blocks), i.e. the d_{pq} d_{rs} augmentation of W.
+    * ``include_photon=False`` removes the bilinear electron–photon
+      coupling: the photon row/column of the RPA matrix and the photon
+      kernel K_pmphot are zeroed, so the photon mode decouples and
+      carries no screening weight.
+
+    With both flags off (and λ-independent orbital energies) the purely
+    electronic dRPA screening is recovered. Defaults reproduce the full
+    QED screening.
+    """
     omega_cav = qedhf['omega']
     so = _build_spin_orbital_quantities(qedhf)
     d_so = so['d_so']
@@ -119,10 +136,14 @@ def _build_static_quantities(qedhf, direct=True):
     # g_phys[:, nocc:, :, :nocc] has axes (p, a, m, i); transpose to (p, m, a, i).
     d_vo = d_so[nocc:, :nocc]
     K_pmai = g_phys[:, nocc:, :, :nocc].transpose(0, 2, 1, 3).copy()
-    K_pmai += np.einsum('pm,ai->pmai', d_so, d_vo)
-    if not direct:
-        K_pmai -= np.einsum('pi,am->pmai', d_so[:, :nocc], d_so[nocc:, :])
-    K_pmphot = -math.sqrt(omega_cav / 2.0) * d_so
+    if include_dse:
+        K_pmai += np.einsum('pm,ai->pmai', d_so, d_vo)
+        if not direct:
+            K_pmai -= np.einsum('pi,am->pmai', d_so[:, :nocc], d_so[nocc:, :])
+    if include_photon:
+        K_pmphot = -math.sqrt(omega_cav / 2.0) * d_so
+    else:
+        K_pmphot = np.zeros_like(d_so)
 
     return {
         'so': so,
@@ -131,16 +152,24 @@ def _build_static_quantities(qedhf, direct=True):
         'eps_HF': np.diag(so['F_so']),
         'omega_cav': omega_cav,
         'direct': bool(direct),
+        'include_dse': bool(include_dse),
+        'include_photon': bool(include_photon),
     }
 
 
-def _rpa_at_eps(static, eps_so):
+def _rpa_at_eps(static, eps_so, full_output=False):
     """Build A_big, B_big from the given orbital energies, diagonalise,
     and return (Ω, M_full) where M_full[p, m, s] is the full screening
-    matrix-element tensor used by the self-energy."""
+    matrix-element tensor used by the self-energy.
+
+    With ``full_output=True`` additionally returns the photonic
+    amplitude (M+N)_s of every RPA mode (its square is the photon
+    weight of the polariton)."""
     so = static['so']
     omega_cav = static['omega_cav']
     direct = static['direct']
+    include_dse = static.get('include_dse', True)
+    include_photon = static.get('include_photon', True)
     d_so = so['d_so']
     g_phys = so['g_phys_d'] if direct else so['g_phys_a']
     nocc, nso = so['nocc'], so['nso']
@@ -159,7 +188,9 @@ def _rpa_at_eps(static, eps_so):
 
     # DSE blocks (QED extension).
     d_vo = d_so[nocc:, :nocc]
-    if direct:
+    if not include_dse:
+        Delta = Delta_prime = np.zeros((nov, nov))
+    elif direct:
         Delta = np.einsum('ai,bj->aibj', d_vo, d_vo).reshape(nov, nov)
         Delta_prime = Delta
     else:
@@ -171,7 +202,10 @@ def _rpa_at_eps(static, eps_so):
         Delta_prime = (np.einsum('ai,bj->aibj', d_vo, d_vo)
                        - np.einsum('aj,ib->aibj', d_vo, d_ov)).reshape(nov, nov)
 
-    g_vec = -math.sqrt(omega_cav / 2.0) * d_vo.reshape(nov)
+    if include_photon:
+        g_vec = -math.sqrt(omega_cav / 2.0) * d_vo.reshape(nov)
+    else:
+        g_vec = np.zeros(nov)
     dim = nov + 1
     A_big = np.zeros((dim, dim))
     B_big = np.zeros((dim, dim))
@@ -191,6 +225,8 @@ def _rpa_at_eps(static, eps_so):
     # M_{p,m,s} for the full p, m range (Eq. 29 + QED additions).
     M_full = (np.einsum('pmai,ais->pms', static['K_pmai'], XplusY_e_4d)
               + np.einsum('pm,s->pms', static['K_pmphot'], XplusY_p))
+    if full_output:
+        return Omega, M_full, XplusY_p
     return Omega, M_full
 
 
