@@ -15,6 +15,73 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 # from jax import lax
 
 
+def equilibration_length(x, tail=0.5, bounces=2):
+    """Deterministic estimate of a time series' equilibration length.
+
+    A robust band ``median ± ~1 sigma`` is estimated from the last
+    ``tail`` fraction of the series (assumed equilibrated), then the
+    series is scanned from the start, counting how many times it
+    crosses into that band.  The returned cutoff is the midpoint of
+    the final bounce interval — i.e. the block index at which the
+    series has settled.
+
+    This is a deterministic adaptation of the common
+    ``equilibration_length`` heuristic: the optional random placement
+    within the bounce interval (useful only when the detector is
+    applied across an ensemble, so the choice averages out) is dropped
+    in favour of the midpoint, since a post-processing routine emits a
+    single cutoff and must be reproducible.
+
+    Parameters
+    ----------
+    x : array_like, shape (N,)
+        One-dimensional series (e.g. per-block mean local energies).
+    tail : float, optional
+        Fraction of the series, taken from the end, used to estimate
+        the equilibrated band.  Default ``0.5``.
+    bounces : int, optional
+        Number of band re-entries to require before declaring
+        equilibration.  Default ``2``.
+
+    Returns
+    -------
+    int
+        Estimated equilibration length (number of leading samples to
+        discard).  ``0`` if the series is too short (< 10 tail
+        samples) or already starts inside the band.
+    """
+    x = np.asarray(x)
+    bounces = max(1, bounces)
+    eqlen = 0
+    nx = len(x)
+    xt = x[int((1.0 - tail) * nx + 0.5):]
+    nxt = len(xt)
+    if nxt < 10:
+        return eqlen
+    xs = np.sort(xt)
+    mean = xs[int(0.5 * (nxt - 1) + 0.5)]
+    sigma = (
+        np.abs(xs[int((0.5 - 0.341) * nxt + 0.5)] - mean)
+        + np.abs(xs[int((0.5 + 0.341) * nxt + 0.5)] - mean)
+    ) / 2
+    crossings = bounces * [0, 0]
+    if np.abs(x[0] - mean) > sigma:
+        s = -np.sign(x[0] - mean)
+        ncrossings = 0
+        for i in range(nx):
+            dist = s * (x[i] - mean)
+            if dist > sigma and dist < 5 * sigma:
+                crossings[ncrossings] = i
+                s *= -1
+                ncrossings += 1
+                if ncrossings == 2 * bounces:
+                    break
+        bounce = crossings[-2:]
+        bounce[1] = max(bounce[1], bounce[0])
+        eqlen = (bounce[0] + bounce[1]) // 2
+    return int(eqlen)
+
+
 @jax.jit
 def do_binning_analysis(a):
     """Compute mean, standard error, standard deviation, and autocorrelation length.

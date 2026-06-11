@@ -28,6 +28,7 @@ from ..utils import (
     batched_binning_analysis_grds,
     blue_combine_states,
     compute_torque_with_error,
+    equilibration_length,
 )
 
 PSI2_RATIO_THRESHOLD = 1e-4
@@ -1442,7 +1443,7 @@ def postproc_h5_pgcs(
         logfile: bool | str = False,
         walker_based_batch_size: int = 10,
         project_states: bool = False,
-        equil_cutoff: int = 0,
+        equil_cutoff: int | str = 0,
         ) -> jnp.ndarray:
     """Post-process VMC gradient data to obtain \
 nuclear forces using PGCS.
@@ -1488,14 +1489,17 @@ nuclear forces using PGCS.
         per-(atom, component) BLUE recombination re-breaks
         the sum rules regardless, so the averaged vector is
         projected on its own).  Default is ``False``.
-    equil_cutoff : int, optional
+    equil_cutoff : int or str, optional
         Number of leading blocks to discard as
         equilibration before the time-series analysis;
         equivalently the block index (in sorted order) at
         which the analysis starts.  Applied uniformly to
         the energy mean, parameter-response solve, and the
-        per-state force series.  Default is ``0`` (use all
-        blocks).
+        per-state force series.  Pass the string ``"auto"``
+        to detect the cutoff from the reference per-block
+        energy series via
+        :func:`OmegaQMC.utils.equilibration_length`.
+        Default is ``0`` (use all blocks).
 
     Returns
     -------
@@ -1561,7 +1565,44 @@ nuclear forces using PGCS.
             int(k) for k in f['local_energies'].keys()
             if k.isdigit()
         )
-        if equil_cutoff < 0:
+
+        # Streaming pass over blocks — read only one block
+        # of ``local_energies`` at a time, keeping the
+        # per-block sum/size so the energy mean can be
+        # formed after the equilibration cutoff is applied
+        # (and, for ``"auto"``, the per-block mean series
+        # the cutoff is detected from).
+        block_sums = []
+        block_sizes = []
+        for block_cnt in block_nums:
+            le_block = f['local_energies'][f'{block_cnt}']
+            block_sums.append(
+                float(np.asarray(le_block[()]).sum(
+                    dtype=np.float64,
+                ))
+            )
+            block_sizes.append(le_block.size)
+
+        # Resolve the equilibration cutoff (auto or int);
+        # the single slice below feeds the energy mean, the
+        # parameter-response solve, and the force series.
+        auto_msg = None
+        if equil_cutoff == "auto":
+            ref_series = [
+                s / n for s, n in zip(block_sums, block_sizes)
+            ]
+            equil_cutoff = equilibration_length(ref_series)
+            auto_msg = (
+                "Auto-detected equilibration at block"
+                f" index {equil_cutoff}"
+            )
+        elif isinstance(equil_cutoff, bool) \
+                or not isinstance(equil_cutoff, int):
+            raise ValueError(
+                "equil_cutoff must be a non-negative int"
+                f" or 'auto', got {equil_cutoff!r}"
+            )
+        elif equil_cutoff < 0:
             raise ValueError(
                 "equil_cutoff must be non-negative,"
                 f" got {equil_cutoff}"
@@ -1571,24 +1612,11 @@ nuclear forces using PGCS.
                 f"equil_cutoff ({equil_cutoff}) discards"
                 f" all {len(block_nums)} blocks"
             )
-        # Drop equilibration blocks before any analysis;
-        # this single slice feeds the energy mean, the
-        # parameter-response solve, and the force series.
         block_nums = block_nums[equil_cutoff:]
-
-        # Streaming mean over blocks — read only one
-        # block of ``local_energies`` at a time.
-        _sum = 0.0
-        _cnt = 0
-        for block_cnt in block_nums:
-            le_block = f['local_energies'][f'{block_cnt}']
-            _sum += float(
-                np.asarray(le_block[()]).sum(
-                    dtype=np.float64,
-                )
-            )
-            _cnt += le_block.size
-        enr_mean = _sum / _cnt
+        enr_mean = (
+            sum(block_sums[equil_cutoff:])
+            / sum(block_sizes[equil_cutoff:])
+        )
 
         grd_nn = jnp.asarray(f['grd_nn'][()])
 
@@ -1616,6 +1644,9 @@ nuclear forces using PGCS.
             fout = sys.stdout
         else:
             fout = open(ofname_log, 'w', 1)
+
+        if auto_msg is not None:
+            print(auto_msg, file=fout)
 
         ref_grd_tot = None
         ref_grd_err = None
