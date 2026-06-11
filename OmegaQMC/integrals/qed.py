@@ -76,8 +76,7 @@ def prepare_qed_integrals(
         dict with keys:
             'h1e': shape (nbasis, nbasis)
             'h1e_mod_0': shape (nbasis, nbasis)
-            'chol_qed': shape (naux+1, nbasis, nbasis); jnp array
-                        (default) or :class:`DiskChol` if path set
+            'chol_qed': shape (naux+1, nbasis, nbasis); jnp array (default) or :class:`DiskChol` if path set
             'dip_mo': shape (nbasis, nbasis)
             'enuc': float
             'nbasis', 'nup', 'ndown': int

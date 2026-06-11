@@ -284,13 +284,12 @@ def prepare_afqmc_integrals(
 
     Returns:
         dict with keys:
-            'h1e': shape (nbasis, nbasis)
-            'h1e_mod': shape (nbasis, nbasis)
-            'chol': shape (naux, nbasis, nbasis); either jnp.ndarray
-                    (default) or :class:`DiskChol` if ``chol_h5_path`` set
-            'enuc': float
-            'nbasis', 'nup', 'ndown': int
-            'mo_coeff': jnp.array
+            'h1e' : shape (nbasis, nbasis)
+            'h1e_mod' : shape (nbasis, nbasis)
+            'chol' : shape (naux, nbasis, nbasis); either jnp.ndarray (default) or :class:`DiskChol` if ``chol_h5_path`` set
+            'enuc' : float
+            'nbasis', 'nup', 'ndown' : int
+            'mo_coeff' : jnp.array
     """
     mol = mf.mol
     nbasis = mol.nao_nr()

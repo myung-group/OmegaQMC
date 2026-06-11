@@ -683,11 +683,9 @@ def save_nn_gradients(
         JIT-compiled ``(walkers) -> (grd_ee_en,
         grd_ke, grd_logpsi)`` with each output shape
         ``(batch, natom, 3)``.
-    log_psi_batch, local_energy_batch,
-    apply_single_frag_symmop : callable, optional
-        Required only when *single_frag_combos* is
-        non-empty (combo screening + secondary
-        evaluation).
+    log_psi_batch, local_energy_batch, apply_single_frag_symmop :
+        callable, optional Required only when *single_frag_combos* is
+        non-empty (combo screening + secondary evaluation).
 
     Returns
     -------

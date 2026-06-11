@@ -32,14 +32,15 @@ from .psi.nn.heg_wf import (
     HEGConfig,
     make_heg_log_psi_any as make_heg_log_psi,
     make_heg_log_psi_complex,
-    transfer_jastrow_params,
     transfer_trained_params,
 )
+#     transfer_jastrow_params,
 from .psi.nn.periodic import wrap_to_cell, make_cubic_lattice
 from .psi.nn.physics import laplacian
 from .observables.ewald import (
-    EwaldTables, build_ewald_tables, ewald_pair_energy,
+    build_ewald_tables, ewald_pair_energy,
 )
+# EwaldTables,
 from .utils import do_binning_analysis, _make_sharding
 
 
@@ -48,10 +49,7 @@ STEP_SIZE_ADAPTATION_RATE = 0.05
 
 
 def _adapt_step_size(step_size, acceptance_rate):
-    return step_size * (
-        1.0 + STEP_SIZE_ADAPTATION_RATE
-        * (acceptance_rate - TARGET_ACCEPTANCE_RATE)
-    )
+    return step_size * (1.0 + STEP_SIZE_ADAPTATION_RATE * (acceptance_rate - TARGET_ACCEPTANCE_RATE))
 
 
 class _VMCDriverNNHEG:
@@ -164,11 +162,10 @@ class _VMCDriverNNHEG:
         """Sample electron positions inside the cell.
 
         Dispatch order:
-        1. Explicit ``config.walker_init`` (``'uniform'`` or
-           ``'crystal_perturbed'``) wins.
+        1. Explicit ``config.walker_init``
+        (``'uniform'`` or ``'crystal_perturbed'``) wins.
         2. Otherwise fall back to envelope-based default
-           (``crystal_gaussian`` → ``crystal_perturbed``, else
-           ``uniform``).
+        (``crystal_gaussian`` → ``crystal_perturbed``, else ``uniform``).
         """
         walker_init = str(getattr(
             self.config, 'walker_init', 'auto',
@@ -237,15 +234,14 @@ class _VMCDriverNNHEG:
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
-        if (fname_log is None
-                or (isinstance(fname_log, str) and fname_log == "")):
+        if (fname_log is None or (isinstance(fname_log, str) and fname_log == "")):
             fout = sys.stdout
         else:
             fout = open(fname_log, 'w', 1)
 
         params = self.params
         metropolis_move_allw = self._metropolis_move_allw
-        energy_potential = self.energy_potential
+        # energy_potential = self.energy_potential
         energy_kinetic = self.energy_kinetic
 
         timestamp_init = datetime.now()
@@ -366,8 +362,7 @@ class _VMCDriverNNHEG:
                 )
             timestamp_prev = now
 
-        if not (fname_log is None
-                or (isinstance(fname_log, str) and fname_log == "")):
+        if not (fname_log is None or (isinstance(fname_log, str) and fname_log == "")):
             fout.close()
 
         E_arr = jnp.array(E_blocks)
@@ -521,11 +516,7 @@ class _VMCDriverNNHEG_Twist:
             r_flat = r.reshape(-1)
             lap_u, grad_u = laplacian(u_flat)(r_flat)
             lap_v, grad_v = laplacian(v_flat)(r_flat)
-            return -0.5 * (
-                lap_u
-                + jnp.dot(grad_u, grad_u)
-                - jnp.dot(grad_v, grad_v)
-            )
+            return -0.5 * (lap_u + jnp.dot(grad_u, grad_u) - jnp.dot(grad_v, grad_v))
 
         def local_energy(r, params):
             return energy_potential(r) + energy_kinetic(r, params)
@@ -601,15 +592,14 @@ class _VMCDriverNNHEG_Twist:
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
-        if (fname_log is None
-                or (isinstance(fname_log, str) and fname_log == "")):
+        if (fname_log is None or (isinstance(fname_log, str) and fname_log == "")):
             fout = sys.stdout
         else:
             fout = open(fname_log, 'w', 1)
 
         params = self.params
         metropolis_move_allw = self._metropolis_move_allw
-        energy_potential = self.energy_potential
+        # energy_potential = self.energy_potential
         energy_kinetic = self.energy_kinetic
 
         timestamp_init = datetime.now()
@@ -699,8 +689,7 @@ class _VMCDriverNNHEG_Twist:
                 )
             timestamp_prev = now
 
-        if not (fname_log is None
-                or (isinstance(fname_log, str) and fname_log == "")):
+        if not (fname_log is None or (isinstance(fname_log, str) and fname_log == "")):
             fout.close()
 
         E_arr = jnp.array(E_blocks)
@@ -808,10 +797,10 @@ def run_twist_averaged_heg(
             is given.
         twists: Explicit ``(N_tw, 3)`` array of twist angles in
             fractional coordinates (overrides the Halton sampling).
-        num_walkers, num_steps_per_block, num_blocks, num_blocks_equil,
-        mc_timestep, ewald_*: Passed to each per-twist VMC run.
-        eval_seed: Seed for the MCMC run at each twist (a distinct
-            key is derived per twist from this seed).
+        num_walkers, num_steps_per_block, num_blocks, num_blocks_equil, mc_timestep, ewald_*:
+            Passed to each per-twist VMC run.
+        eval_seed: Seed for the MCMC run at each twist (a distinct key
+            is derived per twist from this seed).
         fname_log: Per-twist log path prefix; ``None`` → stdout.
         verbose: 0 silent, 1 per-twist progress, 2 per-block detail.
 

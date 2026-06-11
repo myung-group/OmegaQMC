@@ -178,7 +178,7 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
                 use_qed_hf_reference=True, coherent_state=True):
     """QED-FCI: exact diagonalization of the Pauli-Fierz Hamiltonian.
 
-    Builds the full Hamiltonian in the product basis |FCI⟩ ⊗ |n_ph⟩
+    Builds the full Hamiltonian in the product basis `|FCI⟩ ⊗ |n_ph⟩`
     and finds the ground state energy.
 
     Dipole gauge:
@@ -188,7 +188,7 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
 
     The reference orbitals used to build the integrals are taken from a
     dipole-gauge QED-HF run on ``(mol, omega, coupling_vec)`` whenever
-    ``use_qed_hf_reference=True`` (default): a restricted QED-HF for
+    ``use_qed_hf_reference=True`` (default) -- a restricted QED-HF for
     closed-shell molecules and a spin-unrestricted QED-UHF for
     open-shell molecules (with pyscf's ``direct_uhf`` solver and
     spin-resolved integrals). The QED-FCI eigenvalue is
@@ -226,13 +226,12 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
             for polar systems.
 
     Returns:
-        dict with:
+        dict with keys:
             'e_qed_fci': QED-FCI ground state energy.
             'e_fci': standard FCI energy (no cavity).
             'e_qed_hf': QED-HF reference energy (None if not used).
             'e_hf': bare HF energy of the supplied ``mf`` (``mf.e_tot``).
-            'e_corr_qed': QED correlation energy
-                e_qed_fci − e_qed_hf (None if QED-HF was not run).
+            'e_corr_qed': QED correlation energy e_qed_fci − e_qed_hf (None if QED-HF was not run).
             'e_corr': bare correlation energy e_fci − e_hf.
             'reference': 'QED-HF' if QED-HF orbitals were used, else 'HF'.
             'eigenvalues': all eigenvalues of the product Hamiltonian.
@@ -240,19 +239,11 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
             'nph_max': photon truncation used.
             'ndim_elec': electronic FCI dimension.
             'ndim_total': total product space dimension.
-            'n_photon': expectation value of the photon number in the
-                ground state. With ``coherent_state=True`` this is the
-                displaced-frame number ⟨b†b⟩ (the photon fluctuation
-                about the coherent mean), not the bare ⟨a†a⟩.
-            'coherent_state': whether the coherent-state photon basis
-                was used.
-            'cs_displacement': the coherent-state displacement z =
-                ⟨D̂⟩/√(2Ω) (0.0 when ``coherent_state=False`` or λ=0).
-            'proper_dse': whether the proper-DSE 1-body correction was
-                applied.
-            'dse_correction_norm': Frobenius norm of the 1-body correction
-                (Ha) — non-zero only in incomplete bases; gauges the
-                basis-set residual.
+            'n_photon': expectation value of the photon number in the ground state. With ``coherent_state=True`` this is the displaced-frame number ⟨b†b⟩ (the photon fluctuation about the coherent mean), not the bare ⟨a†a⟩.
+            'coherent_state': whether the coherent-state photon basis was used.
+            'cs_displacement': the coherent-state displacement z = ⟨D̂⟩/√(2Ω) (0.0 when ``coherent_state=False`` or λ=0).
+            'proper_dse': whether the proper-DSE 1-body correction was applied.
+            'dse_correction_norm': Frobenius norm of the 1-body correction (Ha) — non-zero only in incomplete bases; gauges the basis-set residual.
     """
     mol = mf.mol
     norb = mol.nao_nr()
@@ -334,8 +325,7 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
         cs_displacement = 0.0
         if coherent_state and lam > 0:
             na_ref, nb_ref = nelec
-            d0 = (sum(dip_mo[i, i] for i in range(na_ref))
-                  + sum(dip_mo[i, i] for i in range(nb_ref)))
+            d0 = (sum(dip_mo[i, i] for i in range(na_ref)) + sum(dip_mo[i, i] for i in range(nb_ref)))
             eye = np.eye(ndim_elec)
             H_elec = H_elec - d0 * D_elec + 0.5 * d0 ** 2 * eye
             D_elec = D_elec - d0 * eye
@@ -399,8 +389,7 @@ def run_qed_fci(mf, omega, coupling_vec, nph_max=10, proper_dse=True,
         cs_displacement = 0.0
         if coherent_state and lam > 0:
             na_ref, nb_ref = nelec
-            d0 = (sum(dipa[i, i] for i in range(na_ref))
-                  + sum(dipb[i, i] for i in range(nb_ref)))
+            d0 = (sum(dipa[i, i] for i in range(na_ref)) + sum(dipb[i, i] for i in range(nb_ref)))
             eye = np.eye(ndim_elec)
             H_elec = H_elec - d0 * D_elec + 0.5 * d0 ** 2 * eye
             D_elec = D_elec - d0 * eye
