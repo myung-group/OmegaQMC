@@ -200,7 +200,10 @@ def blue_combine_states(
     matched block index.  The Best Linear Unbiased
     Estimator under the unit-sum linear constraint is
     then ``w = Σ⁻¹ 1 / (1ᵀ Σ⁻¹ 1)``, ``μ = wᵀ Ê``,
-    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.
+    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.  When Σ is not positive
+    definite (too few bins, or (near-)degenerate series such
+    as a symmetry-fixed component with ~zero variance) the
+    BLUE is undefined; an equal-weight average is returned.
 
     Parameters
     ----------
@@ -269,22 +272,45 @@ def blue_combine_states(
         N_b, bin_size, K,
     ).mean(axis=1)  # (N_b, K)
 
+    state_means = E.mean(axis=0)
+    ones = np.ones(K)
+
+    if N_b < 2:
+        # Fewer than two bins: no covariance can be formed.
+        # Combine with equal weights; no usable error bar.
+        w = ones / K
+        mean = float(w @ state_means)
+        return mean, float('inf'), 0.0, w, bin_size
+
     centered = bin_means - bin_means.mean(
         axis=0, keepdims=True,
     )
     S = centered.T @ centered / (N_b - 1)  # (K, K)
     Sigma = S / N_b  # covariance of the means
 
-    ones = np.ones(K)
+    # Minimum-variance (BLUE) weights solve ``Σ w ∝ 1``, which
+    # is only well defined when Σ is positive definite.  With
+    # too few bins or (near-)perfectly correlated series — e.g.
+    # a symmetry-fixed component whose variance is ~0 — Σ turns
+    # singular or indefinite (``1ᵀ Σ⁻¹ 1 ≤ 0``), which would
+    # divide by zero.  In that degenerate case fall back to an
+    # equal-weight average, whose variance ``1ᵀ Σ 1 / K²`` is
+    # still well defined.
     try:
+        np.linalg.cholesky(Sigma)  # succeeds iff Σ is PD
         sol = np.linalg.solve(Sigma, ones)
+        inv_sum = float(ones @ sol)
+        is_pd = np.isfinite(inv_sum) and inv_sum > 0.0
     except np.linalg.LinAlgError:
-        sol = np.linalg.pinv(Sigma) @ ones
-    inv_sum = float(ones @ sol)
-    w = sol / inv_sum
-    var_mu = 1.0 / inv_sum
+        is_pd = False
 
-    state_means = E.mean(axis=0)
+    if is_pd:
+        w = sol / inv_sum
+        var_mu = 1.0 / inv_sum
+    else:
+        w = ones / K
+        var_mu = max(float(w @ Sigma @ w), 0.0)
+
     mean = float(w @ state_means)
     err = float(np.sqrt(max(var_mu, 0.0)))
 
