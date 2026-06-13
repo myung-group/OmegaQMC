@@ -61,7 +61,19 @@ def _initialize_walkers(rng_key: jax.Array,
                         Z_charges: jnp.ndarray,
                         nuc_crds: jnp.ndarray,
                         mol_charge: int) -> jnp.ndarray:
-    """Initialize walker positions near nuclear centers."""
+    """Initialize walker positions near nuclear centers.
+
+    Electrons are assigned to atoms by nuclear charge, then
+    scattered about their centers with a spread scaled to the
+    molecular geometry, following QMCPACK's
+    ``InitMolecularSystem``: a uniform ball of radius 40% of the
+    shortest internuclear distance for a molecule, or a Gaussian
+    of width ``0.5 * sqrt(nelec)`` for a single atom.  The
+    distance-scaled spread keeps the starting cloud broad at
+    stretched geometries instead of gluing every electron to a
+    nucleus, giving the basin thermalization a well-spread
+    initial ensemble.
+    """
     # Assign electrons to atoms based on atomic number
     idx_cnt = []
     for ia, iz in enumerate(Z_charges):
@@ -76,9 +88,26 @@ def _initialize_walkers(rng_key: jax.Array,
     idx_cnt = jnp.array(idx_cnt)
     centers = nuc_crds[idx_cnt]
 
-    # Initialize with small Gaussian noise around centers
-    noise = jax.random.normal(rng_key, (num_walkers, nelec, 3))
-    walkers = centers[jnp.newaxis, :, :] + 0.05 * noise
+    # Distance-scaled spread about the assigned centers.
+    num_nuc = nuc_crds.shape[0]
+    key_dir, key_rad = jax.random.split(rng_key)
+    if num_nuc > 1:
+        # Uniform ball of radius 40% of the shortest bond.
+        iu, ju = jnp.triu_indices(num_nuc, k=1)
+        bonds = jnp.linalg.norm(nuc_crds[iu] - nuc_crds[ju], axis=-1)
+        sep = 0.4 * jnp.min(bonds)
+        dirs = jax.random.normal(key_dir, (num_walkers, nelec, 3))
+        dirs = dirs / jnp.linalg.norm(dirs, axis=-1, keepdims=True)
+        radii = sep * jax.random.uniform(
+            key_rad, (num_walkers, nelec, 1)) ** (1.0 / 3.0)
+        offsets = dirs * radii
+    else:
+        # Single atom: Gaussian of width 0.5 * sqrt(nelec).
+        sep = 0.5 * jnp.sqrt(float(nelec))
+        offsets = sep * jax.random.normal(
+            key_dir, (num_walkers, nelec, 3))
+
+    walkers = centers[jnp.newaxis, :, :] + offsets
 
     return walkers
 
