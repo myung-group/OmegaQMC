@@ -210,6 +210,67 @@ def _classify_and_brightness(qedhf, X_4d, Omega, nocc):
     return labels, w_singlet, f_osc
 
 
+def _resolve_eps_QP(qedhf, gw_mode, eta, eps_QP, verbose):
+    """Spin-orbital quasiparticle energies for the BSE diagonal/screening.
+
+    Either uses the caller-supplied ``eps_QP`` verbatim, or runs the
+    underlying QED-GW: 'evGW' corrects every orbital, the cheaper
+    one-shot modes correct HOMO/LUMO (spatial) and leave the rest at
+    ε^HF. Shared by the static (:func:`run_qed_bse`) and dynamical
+    (:func:`OmegaQMC.addons.qed_bse_dynamical.run_qed_bse_dynamical`)
+    drivers so both rest on an identical QP set.
+    """
+    if eps_QP is not None:
+        eps_QP = np.asarray(eps_QP, dtype=float).copy()
+        if verbose:
+            print("\nQED-BSE: using caller-supplied QP energies "
+                  "(GW step skipped).")
+        return eps_QP
+    if gw_mode == 'evGW':
+        if verbose:
+            print("\nQED-BSE: running underlying QED-evGW...")
+        gw = run_qed_gw(qedhf, mode='evGW', eta=eta, verbose=False)
+        return np.asarray(gw['eps_GW_all'])
+    static_init = _build_static_quantities(qedhf, direct=True)
+    n_spat = static_init['so']['nso'] // 2
+    if verbose:
+        print(f"\nQED-BSE: running underlying QED-{gw_mode} "
+              f"for {n_spat} spatial orbitals...")
+    gw = run_qed_gw(qedhf, mode=gw_mode, orbs=list(range(n_spat)),
+                    eta=eta, verbose=False)
+    eps_QP = static_init['eps_HF'].copy()
+    for p in range(n_spat):
+        eps_QP[2 * p] = gw['eps_QP'][p]
+        eps_QP[2 * p + 1] = gw['eps_QP'][p]
+    return eps_QP
+
+
+def _assemble_A_static(static, Omega_RPA, M_full, eps_QP):
+    """Static TDA-BSE A block A^(0)_{ai,bj} as an (nov, nov) matrix.
+
+    A^(0)_{ai,bj} = (ε^QP_a − ε^QP_i) δ_ij δ_ab
+                    + [⟨aj|ib⟩ + d_ai d_bj]            (bare e-h exchange)
+                    − W^stat_{ij,ab}.                  (screened e-h direct)
+
+    This is the ω → ∞ (equivalently ω = 0) limit of the dynamical A
+    block; the dynamical correction is added on top of it. Returns a
+    symmetrised matrix.
+    """
+    so = static['so']
+    nocc = so['nocc']
+    nvir = so['nso'] - nocc
+    nov = nvir * nocc
+    K_x_A = _eh_exchange_kernel(static, 'aj,ib')
+    W_ijab = _W_static(static, Omega_RPA, M_full, 'ij,ab')
+    # − W^stat_{ij,ab} sits in A_{a,i,b,j}: transpose (i,j,a,b) → (a,i,b,j)
+    W_A_aibj = W_ijab.transpose(2, 0, 3, 1)
+    A_BSE = (K_x_A - W_A_aibj).reshape(nov, nov)
+    A_diag = (eps_QP[nocc:, None] - eps_QP[None, :nocc]).reshape(-1)
+    A_BSE = A_BSE + np.diag(A_diag)
+    # Symmetrise (it should already be symmetric; tighten numerical noise).
+    return 0.5 * (A_BSE + A_BSE.T)
+
+
 def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
                 eta=1e-3, include_dse=True, include_photon=True,
                 eps_QP=None, verbose=True):
@@ -251,28 +312,7 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
         energy 'E_b' = E_gap − Omega_S1 (all Ha).
     """
     # 1) QP energies from QED-GW (or caller-supplied override).
-    if eps_QP is not None:
-        eps_QP = np.asarray(eps_QP, dtype=float).copy()
-        if verbose:
-            print("\nQED-BSE: using caller-supplied QP energies "
-                  "(GW step skipped).")
-    elif gw_mode == 'evGW':
-        if verbose:
-            print(f"\nQED-BSE: running underlying QED-evGW...")
-        gw = run_qed_gw(qedhf, mode='evGW', eta=eta, verbose=False)
-        eps_QP = np.asarray(gw['eps_GW_all'])
-    else:
-        static_init = _build_static_quantities(qedhf, direct=True)
-        n_spat = static_init['so']['nso'] // 2
-        if verbose:
-            print(f"\nQED-BSE: running underlying QED-{gw_mode} "
-                  f"for {n_spat} spatial orbitals...")
-        gw = run_qed_gw(qedhf, mode=gw_mode, orbs=list(range(n_spat)),
-                        eta=eta, verbose=False)
-        eps_QP = static_init['eps_HF'].copy()
-        for p in range(n_spat):
-            eps_QP[2 * p] = gw['eps_QP'][p]
-            eps_QP[2 * p + 1] = gw['eps_QP'][p]
+    eps_QP = _resolve_eps_QP(qedhf, gw_mode, eta, eps_QP, verbose)
 
     # 2) Build static W from the QED-dRPA spectrum evaluated at the
     #    same orbital energies (matches evGW philosophy). The kernel
@@ -290,18 +330,8 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
 
     E_gap = float(eps_QP[nocc] - eps_QP[nocc - 1])
 
-    # 3) Build A^BSE.
-    K_x_A = _eh_exchange_kernel(static, 'aj,ib')
-    W_ijab = _W_static(static, Omega_RPA, M_full, 'ij,ab')
-    # − W^stat_{ij,ab} sits in A_{a,i,b,j}: transpose (i,j,a,b) → (a,i,b,j)
-    W_A_aibj = W_ijab.transpose(2, 0, 3, 1)
-
-    A_BSE_4d = K_x_A - W_A_aibj
-    A_BSE = A_BSE_4d.reshape(nov, nov)
-    A_diag = (eps_QP[nocc:, None] - eps_QP[None, :nocc]).reshape(-1)
-    A_BSE = A_BSE + np.diag(A_diag)
-    # Symmetrise (it should already be symmetric; tighten numerical noise).
-    A_BSE = 0.5 * (A_BSE + A_BSE.T)
+    # 3) Build A^BSE (static TDA A block).
+    A_BSE = _assemble_A_static(static, Omega_RPA, M_full, eps_QP)
 
     spin = w_singlet = f_osc = None
     Omega_S1 = Omega_T1 = E_b = None
