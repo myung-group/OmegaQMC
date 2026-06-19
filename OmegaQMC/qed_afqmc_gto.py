@@ -39,6 +39,19 @@ from OmegaQMC.observables.greens import (
     greens_function_overlap,
     greens_function_multidet,
 )
+# th5: chunked variants for the multi-det QED path. These pull the
+# per-det Green's functions in det_chunk_size slices to keep peak
+# einsum intermediates bounded (~ chunk * nwalkers * nbasis^2)
+# instead of the full ndet * nwalkers * nbasis^2.
+from OmegaQMC.observables.greens_th4 import (
+    greens_function_multidet as greens_function_multidet_chunked,
+    greens_function_multidet_overlap_only,
+    greens_function_multidet_chunked_full,
+)
+from OmegaQMC.observables.energy_th4 import (
+    local_energy_multidet_shnew_chunked,
+    qed_local_energy_multidet_walker_chunked,
+)
 from OmegaQMC.integrals.cholesky import (
     chunked_cholesky,
     half_rotate_cholesky,
@@ -423,7 +436,8 @@ def propagate_qed_walkers(phia, phib, q, weights, overlap, e_hybrid,
 def qed_local_energy_multidet(h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
                               rchols_a, rchols_b, ci_coeffs,
                               ovlp_a_all, ovlp_b_all, enuc,
-                              q, dip_mo, omega, s, q0):
+                              q, dip_mo, omega, s, q0,
+                              det_chunk_size=None):
     """QED-AFQMC local energy for a multi-determinant trial.
 
     Multi-determinant analogue of :func:`qed_local_energy`. The electronic
@@ -436,9 +450,17 @@ def qed_local_energy_multidet(h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
     Returns:
         e_tot, e_1b, e_2b, e_ph: per walker, shape (nwalkers,).
     """
-    e_elec, e_1b_elec, e_2b = local_energy_multidet(
-        h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
-        rchols_a, rchols_b, ci_coeffs, ovlp_a_all, ovlp_b_all, enuc)
+    if det_chunk_size is not None:
+        e_elec, e_1b_elec, e_2b = local_energy_multidet_shnew_chunked(
+            h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+            rchols_a, rchols_b, ci_coeffs,
+            ovlp_a_all, ovlp_b_all, enuc,
+            det_chunk_size=det_chunk_size)
+    else:
+        e_elec, e_1b_elec, e_2b = local_energy_multidet(
+            h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+            rchols_a, rchols_b, ci_coeffs,
+            ovlp_a_all, ovlp_b_all, enuc)
 
     # Electron-photon coupling: √Ω * q * Tr(d @ (Ga + Gb)) (aggregate GF)
     tr_dip_a = jnp.einsum('pq,wqp->w', dip_mo, Ga)
@@ -458,7 +480,8 @@ def propagate_qed_walkers_multidet(phia, phib, q, weights, overlap, e_hybrid,
                                    trials_up, trials_dn, ci_coeffs,
                                    eshift, rng_key, dip_mo, omega, s, q0,
                                    fbbound=None, exp_nmax=6,
-                                   walker_chunk_size=None, chol_chunk_g=None):
+                                   walker_chunk_size=None, chol_chunk_g=None,
+                                   det_chunk_size=5):
     """Propagate QED-AFQMC walkers one step with a multi-determinant trial.
 
     Multi-determinant analogue of :func:`propagate_qed_walkers`. The photon
@@ -482,8 +505,11 @@ def propagate_qed_walkers_multidet(phia, phib, q, weights, overlap, e_hybrid,
         fbbound = FBBOUND_DEFAULT
 
     # 0. Multi-det Green's function (aggregate G for force bias; overlap)
-    Ga, Gb, _, _, ovlp, _, _ = greens_function_multidet(
-        phia, phib, trials_up, trials_dn, ci_coeffs)
+    #    th5: chunked variant — peak working set scales with
+    #    det_chunk_size, not ndet.
+    Ga, Gb, ovlp = greens_function_multidet_chunked(
+        phia, phib, trials_up, trials_dn, ci_coeffs,
+        det_chunk_size=det_chunk_size)
 
     # 1. First photon half-step
     q, log_wt_ph1, rng_key = propagate_photon(q, omega, dt, s, q0, rng_key)
@@ -533,8 +559,11 @@ def propagate_qed_walkers_multidet(phia, phib, q, weights, overlap, e_hybrid,
     q, log_wt_ph2, rng_key = propagate_photon(q, omega, dt, s, q0, rng_key)
 
     # 6. Weight update (electronic phaseless + photon importance weight)
-    _, _, _, _, ovlp_new, _, _ = greens_function_multidet(
-        phia, phib, trials_up, trials_dn, ci_coeffs)
+    #    th5: only the new overlap is needed here — use the
+    #    th4 overlap-only kernel.
+    ovlp_new = greens_function_multidet_overlap_only(
+        phia, phib, trials_up, trials_dn, ci_coeffs,
+        det_chunk_size=det_chunk_size)
     weights_new, e_hybrid_new = _update_weights_phaseless(
         weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
     ph_weight = jnp.exp(jnp.clip(log_wt_ph1 + log_wt_ph2, -10.0, 10.0))
@@ -557,7 +586,8 @@ class _QEDAFQMCDriverGTO:
     def __init__(self, mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
                  s=1.0, q0='auto', verbose=True,
                  chol_h5_path=None, chol_chunk_g=128,
-                 use_qed_hf=True, proper_dse=True, trial=None):
+                 use_qed_hf=True, proper_dse=True, trial=None,
+                 det_chunk_size=5):
         """Prepare QED integrals and build the propagator.
 
         The trial wavefunction is a product ``|Φ_el⟩ ⊗ f(q)`` (Eq. 19 of
@@ -614,6 +644,7 @@ class _QEDAFQMCDriverGTO:
         self.verbose = verbose
         self.chol_chunk_g = chol_chunk_g
         self.multidet = trial is not None
+        self.det_chunk_size = int(det_chunk_size)
 
         # A QED-AFQMC trial must be cavity-aware: built from QED-CASSCF
         # (DSE-relaxed orbitals + cavity-dressed CI + coherent-state photon
@@ -868,7 +899,8 @@ class _QEDAFQMCDriverGTO:
                             eshift, step_key,
                             self.dip_mo, self.omega, self.s, self.q0,
                             walker_chunk_size=walker_chunk_size,
-                            chol_chunk_g=self.chol_chunk_g)
+                            chol_chunk_g=self.chol_chunk_g,
+                            det_chunk_size=self.det_chunk_size)
                 else:
                     phia, phib, q, weights, overlap, e_hybrid, _ = \
                         propagate_qed_walkers(
@@ -907,14 +939,19 @@ class _QEDAFQMCDriverGTO:
             # End of block: compute energy
             if self.multidet:
                 Ga, Gb, Ghalfa_all, Ghalfb_all, _, ovlp_a_all, ovlp_b_all = \
-                    greens_function_multidet(
+                    greens_function_multidet_chunked_full(
                         phia, phib, self.trials_up, self.trials_dn,
-                        self.ci_coeffs)
-                e_tot, e_1b, e_2b, e_ph = qed_local_energy_multidet(
-                    self.h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
-                    self.rchols_a, self.rchols_b, self.ci_coeffs,
-                    ovlp_a_all, ovlp_b_all, self.enuc,
-                    q, self.dip_mo, self.omega, self.s, self.q0)
+                        self.ci_coeffs,
+                        det_chunk_size=self.det_chunk_size)
+                e_tot, e_1b, e_2b, e_ph = \
+                    qed_local_energy_multidet_walker_chunked(
+                        qed_local_energy_multidet,
+                        self.h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+                        self.rchols_a, self.rchols_b, self.ci_coeffs,
+                        ovlp_a_all, ovlp_b_all, self.enuc,
+                        q, self.dip_mo, self.omega, self.s, self.q0,
+                        det_chunk_size=self.det_chunk_size,
+                        walker_chunk_size=walker_chunk_size)
             else:
                 Ga, Gb, Ghalfa, Ghalfb, _ = greens_function(
                     phia, phib, self.trial_up, self.trial_dn)
@@ -1005,7 +1042,8 @@ class _QEDAFQMCDriverGTO:
 def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
                        s=1.0, q0='auto', verbose=True,
                        chol_h5_path=None, chol_chunk_g=128,
-                       use_qed_hf=True, proper_dse=True, trial=None):
+                       use_qed_hf=True, proper_dse=True, trial=None,
+                       det_chunk_size=5):
     """Create a reusable QED-AFQMC driver.
 
     By default the driver uses the cavity-relaxed QED-Hartree-Fock
@@ -1044,4 +1082,4 @@ def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
                            chol_h5_path=chol_h5_path,
                            chol_chunk_g=chol_chunk_g,
                            use_qed_hf=use_qed_hf, proper_dse=proper_dse,
-                           trial=trial)
+                           trial=trial, det_chunk_size=det_chunk_size)
