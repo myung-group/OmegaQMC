@@ -287,14 +287,114 @@ from OmegaQMC.observables.greens import (       # noqa: E402
     greens_function_force_bias,
     greens_function_overlap,
     _gf_spin_single_det,
+)
+# th5: chunked multidet variants live in greens_th4 to avoid
+# clashing with sh-new's unchunked greens_function_multidet.
+from OmegaQMC.observables.greens_th4 import (   # noqa: E402
     greens_function_multidet,
+    greens_function_multidet_overlap_only,
 )
 from OmegaQMC.observables.energy import (        # noqa: E402
     local_energy_1body,
     local_energy_2body,
     local_energy,
+)
+# th5: chunked variant lives in energy_th4 (sh-new's
+# local_energy_multidet has an incompatible signature).
+from OmegaQMC.observables.energy_th4 import (    # noqa: E402
     local_energy_multidet,
 )
+
+
+def _local_energy_walker_chunked(
+    h1e, Ga, Gb, Ghalfa, Ghalfb,
+    rchol_a, rchol_b, enuc, walker_chunk_size,
+):
+    """Walker-chunked wrapper around :func:`local_energy`.
+
+    The exchange tensor ``Ta[g,w,i,j]`` materialized inside
+    ``local_energy_2body`` scales as ``naux * nwalkers * nocc**2``
+    and dominates peak memory at large walker counts (e.g.
+    65 GB for naux=927, nwalkers=5000, nocc=21 in complex128).
+    Slabbing the walker axis bounds this working set without
+    changing the result.
+
+    Args:
+        walker_chunk_size: Walkers per chunk. None or >= nwalkers
+            calls the jitted ``local_energy`` once on all walkers.
+
+    Returns:
+        (e_tot, e_1b, e_2b): each shape (nwalkers,).
+    """
+    nw = Ga.shape[0]
+    if walker_chunk_size is None or walker_chunk_size >= nw:
+        return local_energy(
+            h1e, Ga, Gb, Ghalfa, Ghalfb,
+            rchol_a, rchol_b, enuc,
+        )
+    e_tot_parts, e_1b_parts, e_2b_parts = [], [], []
+    for s in range(0, nw, walker_chunk_size):
+        e = s + walker_chunk_size
+        et, e1, e2 = local_energy(
+            h1e,
+            Ga[s:e], Gb[s:e], Ghalfa[s:e], Ghalfb[s:e],
+            rchol_a, rchol_b, enuc,
+        )
+        e_tot_parts.append(et)
+        e_1b_parts.append(e1)
+        e_2b_parts.append(e2)
+    return (
+        jnp.concatenate(e_tot_parts, axis=0),
+        jnp.concatenate(e_1b_parts, axis=0),
+        jnp.concatenate(e_2b_parts, axis=0),
+    )
+
+
+def _local_energy_multidet_walker_chunked(
+    h1e, chol, phia, phib,
+    trials_up, trials_dn, ci_coeffs, enuc,
+    det_chunk_size, walker_chunk_size,
+):
+    """Walker-chunked wrapper around :func:`local_energy_multidet`.
+
+    Inside the jitted multi-det scan, ``_e2b_one`` is vmapped over the
+    det chunk; the inner exchange tensor has shape
+    ``(det_chunk_size, naux, nwalkers, nocc, nocc)`` and is the
+    dominant memory consumer (e.g. ~65 GB for chunk=5, naux=927,
+    nwalkers=1000, nocc=21 in complex128). Slabbing the walker axis
+    outside the jit boundary bounds this working set without changing
+    the result.
+
+    Args:
+        walker_chunk_size: Walkers per chunk. None or >= nwalkers
+            calls the jitted estimator once on all walkers.
+
+    Returns:
+        (e_tot, e_1b, e_2b): each shape (nwalkers,).
+    """
+    nw = phia.shape[0]
+    if walker_chunk_size is None or walker_chunk_size >= nw:
+        return local_energy_multidet(
+            h1e, chol, phia, phib,
+            trials_up, trials_dn, ci_coeffs, enuc,
+            det_chunk_size=det_chunk_size,
+        )
+    e_tot_parts, e_1b_parts, e_2b_parts = [], [], []
+    for s in range(0, nw, walker_chunk_size):
+        e = s + walker_chunk_size
+        et, e1, e2 = local_energy_multidet(
+            h1e, chol, phia[s:e], phib[s:e],
+            trials_up, trials_dn, ci_coeffs, enuc,
+            det_chunk_size=det_chunk_size,
+        )
+        e_tot_parts.append(et)
+        e_1b_parts.append(e1)
+        e_2b_parts.append(e2)
+    return (
+        jnp.concatenate(e_tot_parts, axis=0),
+        jnp.concatenate(e_1b_parts, axis=0),
+        jnp.concatenate(e_2b_parts, axis=0),
+    )
 
 
 # ===================================================================
@@ -579,16 +679,22 @@ def propagate_walkers(phia, phib, weights, overlap, e_hybrid,
 
 
 def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
-                               propagator, chol, rchols_a, rchols_b,
+                               propagator, chol,
                                trials_up, trials_dn, ci_coeffs,
                                eshift, rng_key,
                                fbbound=None, exp_nmax=6,
                                walker_chunk_size=None,
-                               chol_chunk_g=None):
+                               chol_chunk_g=None,
+                               det_chunk_size=5):
     """Propagate all walkers by one time step using multi-det trial.
 
-    Same structure as single-det propagate_walkers but uses
-    greens_function_multidet and per-det force bias.
+    Uses :func:`greens_function_multidet` (chunked scan, returns
+    only the aggregate ``(Ga, Gb, overlap)``) for the force bias
+    step and :func:`greens_function_multidet_overlap_only` for
+    the weight-update step. Per-det half-rotated Cholesky vectors
+    are never materialized — the
+    ``(ndet, naux, nocc, nbasis)`` storage that overwhelms memory
+    on naphthalene-scale CAS expansions is avoided entirely.
 
     Args:
         phia: shape (nwalkers, nbasis, nup).
@@ -598,8 +704,7 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
         e_hybrid: Hybrid energy from previous step, shape (nwalkers,).
         propagator: dict from build_propagator().
         chol: Cholesky vectors, shape (naux, nbasis, nbasis).
-        rchols_a: Per-det half-rotated Cholesky (alpha), shape (ndet, naux, nup, nbasis).
-        rchols_b: Per-det half-rotated Cholesky (beta), shape (ndet, naux, ndn, nbasis).
+            May be a :class:`DiskChol`.
         trials_up: Trial alpha orbitals, shape (ndet, nbasis, nup).
         trials_dn: Trial beta orbitals, shape (ndet, nbasis, ndown).
         ci_coeffs: CI coefficients, shape (ndet,).
@@ -607,6 +712,11 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
         rng_key: JAX random key.
         fbbound: Force bias magnitude bound (default: 1.0).
         exp_nmax: Taylor expansion order for matrix exponential.
+        walker_chunk_size: Walkers per VHS chunk. None = no walker
+            chunking for VHS apply.
+        chol_chunk_g: g-axis slab size for VHS / force-bias streaming.
+        det_chunk_size: Dets per scan step (static) for the
+            multi-det Green's function.
 
     Returns:
         phia_new, phib_new, weights_new, overlap_new, e_hybrid_new, rng_key.
@@ -620,9 +730,10 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
     if fbbound is None:
         fbbound = FBBOUND_DEFAULT
 
-    # 1. Compute multi-det Green's function
-    Ga, Gb, Ghalfa_all, Ghalfb_all, ovlp, _, _ = greens_function_multidet(
-        phia, phib, trials_up, trials_dn, ci_coeffs)
+    # 1. Compute multi-det Green's function (chunked scan over dets)
+    Ga, Gb, ovlp = greens_function_multidet(
+        phia, phib, trials_up, trials_dn, ci_coeffs,
+        det_chunk_size=det_chunk_size)
 
     # 2. Apply first half of one-body propagator
     phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
@@ -670,9 +781,10 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
     phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
     phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
 
-    # 7. Compute new overlap and update weights
-    _, _, _, _, ovlp_new, _, _ = greens_function_multidet(
-        phia, phib, trials_up, trials_dn, ci_coeffs)
+    # 7. Compute new overlap (lightweight: no Ghalf, no G)
+    ovlp_new = greens_function_multidet_overlap_only(
+        phia, phib, trials_up, trials_dn, ci_coeffs,
+        det_chunk_size=det_chunk_size)
 
     weights_new, e_hybrid_new = _update_weights_phaseless(
         weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
@@ -736,10 +848,10 @@ def _autotune_afqmc_walkers(driver, free_mb, mem_frac=0.75, k=4):
                 return propagate_walkers_multidet(
                     phia, phib, weights, overlap, e_hybrid,
                     driver.propagator, driver.chol,
-                    driver.rchols_a, driver.rchols_b,
                     driver.trials_up, driver.trials_dn,
                     driver.ci_coeffs,
-                    jnp.float64(0.0), jax.random.key(0))
+                    jnp.float64(0.0), jax.random.key(0),
+                    det_chunk_size=driver.det_chunk_size)
         else:
             def _call(phia, phib, weights, overlap, e_hybrid):
                 return propagate_walkers(
@@ -777,7 +889,8 @@ class _AFQMCDriverGTO:
     """
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
-                 trial=None, chol_h5_path=None, chol_chunk_g=128):
+                 trial=None, chol_h5_path=None, chol_chunk_g=128,
+                 det_chunk_size=5):
         """Prepare integrals and build the propagator.
 
         Args:
@@ -794,12 +907,16 @@ class _AFQMCDriverGTO:
                 in device memory. Default None keeps ``chol`` in RAM.
             chol_chunk_g: Slab size along the auxiliary axis used when
                 ``chol`` is disk‑backed. Default 128.
+            det_chunk_size: Dets per scan step for the chunked-scan
+                multi-det Green's function and local energy
+                (lower = less memory, default 5).
         """
         self.mf = mf
         self.dt = dt
         self.verbose = verbose
         self.multidet = trial is not None
         self.chol_chunk_g = chol_chunk_g
+        self.det_chunk_size = det_chunk_size
 
         if verbose:
             print("Preparing integrals (Cholesky decomposition)...")
@@ -843,15 +960,15 @@ class _AFQMCDriverGTO:
             self.trial_up = self.trials_up[0]
             self.trial_dn = self.trials_dn[0]
 
-            # Half-rotate Cholesky vectors for all determinants
-            self.rchols_a, self.rchols_b = half_rotate_cholesky_multidet(
-                self.chol, self.trials_up, self.trials_dn,
-                chunk_g=chol_chunk_g)
+            # Per-det half-rotated Cholesky is NOT pre-computed —
+            # the chunked-scan multi-det estimator builds half-
+            # rotation on-the-fly inside the scan, avoiding the
+            # (ndet, naux, nocc, nbasis) tensor that would dominate
+            # memory for large CAS expansions.
 
             if verbose:
-                print(f"  Multi-det trial: {ndet} determinants")
-                print(f"  rchols_a shape: {self.rchols_a.shape}, "
-                      f"rchols_b shape: {self.rchols_b.shape}")
+                print(f"  Multi-det trial: {ndet} determinants "
+                      f"(det_chunk_size={det_chunk_size})")
 
             # Compute weighted G_charge for propagator
             ci_abs2 = jnp.abs(self.ci_coeffs) ** 2
@@ -1019,11 +1136,11 @@ class _AFQMCDriverGTO:
                         propagate_walkers_multidet(
                             phia, phib, weights, overlap, e_hybrid,
                             self.propagator, self.chol,
-                            self.rchols_a, self.rchols_b,
                             self.trials_up, self.trials_dn,
                             self.ci_coeffs, eshift, step_key,
                             walker_chunk_size=walker_chunk_size,
-                            chol_chunk_g=self.chol_chunk_g)
+                            chol_chunk_g=self.chol_chunk_g,
+                            det_chunk_size=self.det_chunk_size)
                 else:
                     phia, phib, weights, overlap, e_hybrid, _ = \
                         propagate_walkers(
@@ -1061,23 +1178,20 @@ class _AFQMCDriverGTO:
 
             # End of block: compute energy via mixed estimator
             if self.multidet:
-                Ga, Gb, Ghalfa_all, Ghalfb_all, ovlp_block, \
-                    ovlp_a_all, ovlp_b_all = \
-                    greens_function_multidet(
-                        phia, phib, self.trials_up, self.trials_dn,
-                        self.ci_coeffs)
-
-                e_tot, e_1b, e_2b = local_energy_multidet(
-                    self.h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
-                    self.rchols_a, self.rchols_b, self.ci_coeffs,
-                    ovlp_a_all, ovlp_b_all, self.enuc)
+                e_tot, e_1b, e_2b = _local_energy_multidet_walker_chunked(
+                    self.h1e, self.chol, phia, phib,
+                    self.trials_up, self.trials_dn,
+                    self.ci_coeffs, self.enuc,
+                    det_chunk_size=self.det_chunk_size,
+                    walker_chunk_size=walker_chunk_size)
             else:
                 Ga, Gb, Ghalfa, Ghalfb, ovlp_block = greens_function(
                     phia, phib, self.trial_up, self.trial_dn)
 
-                e_tot, e_1b, e_2b = local_energy(
+                e_tot, e_1b, e_2b = _local_energy_walker_chunked(
                     self.h1e, Ga, Gb, Ghalfa, Ghalfb,
-                    self.rchol_a, self.rchol_b, self.enuc)
+                    self.rchol_a, self.rchol_b, self.enuc,
+                    walker_chunk_size)
 
             # Weighted average over walkers
             w = jnp.abs(weights)
@@ -1141,7 +1255,8 @@ class _AFQMCDriverGTO:
 
 
 def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
-                   trial=None, chol_h5_path=None, chol_chunk_g=128):
+                   trial=None, chol_h5_path=None, chol_chunk_g=128,
+                   det_chunk_size=5):
     """Create a reusable AFQMC driver.
 
     Args:
@@ -1154,10 +1269,13 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
         chol_h5_path: If set, MO‑basis Cholesky tensor lives in this
             HDF5 file and is streamed in g‑chunks during the run.
         chol_chunk_g: Slab size along the auxiliary axis for disk reads.
+        det_chunk_size: Dets per scan step for the chunked-scan
+            multi-det estimator (lower = less memory).
 
     Returns:
         _AFQMCDriverGTO instance (callable).
     """
     return _AFQMCDriverGTO(mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
                         trial=trial, chol_h5_path=chol_h5_path,
-                        chol_chunk_g=chol_chunk_g)
+                        chol_chunk_g=chol_chunk_g,
+                        det_chunk_size=det_chunk_size)
