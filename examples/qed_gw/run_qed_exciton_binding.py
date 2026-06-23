@@ -13,13 +13,19 @@ Three computations:
    gap.
 2. Water lambda-scan (fig_exciton_h2o.pdf): cavity-induced shifts of
    E_gap, Omega_S1, Omega_T1 and E_b versus lambda.
-3. Channel decomposition of the water shifts at lambda = 0.05 and 0.10:
-   the cavity enters the BSE through the QP energies (reference
-   channel), the DSE d(x)d kernel terms, and the photon-pole channel of
-   W; the three increments are resolved by toggling the kernel channels
-   at fixed cavity QP energies (cumulative ladder QP -> +DSE -> +photon).
+3. Per-lambda channel decomposition of the water shifts: the cavity
+   enters the BSE through the QP energies (reference channel), the DSE
+   d(x)d kernel terms, and the photon-pole channel of W; the three
+   increments are resolved at every scan point by toggling the kernel
+   channels at fixed cavity QP energies (cumulative ladder
+   QP -> +DSE -> +photon), so delta X = QP + DSE + photon for X in
+   {E_gap, Omega_S1, E_b}. E_gap depends only on the QP energies, so its
+   DSE and photon channels vanish identically (a built-in check).
 
-Results are printed and dumped to qed_exciton_results.json.
+Results are printed and dumped to qed_exciton_results.json. Two figures
+go into OmegaQMC/paper/: fig_exciton_h2o.pdf (the cavity-induced shifts
+vs lambda) and fig_exciton_binding_h2o.pdf (the delta E_b QP/DSE/photon
+channel breakdown vs lambda).
 """
 import json
 import math
@@ -117,57 +123,62 @@ results['table'] = {n: {str(l): v for l, v in table[n].items()
                     for n in table}
 
 # ----------------------------------------------------------------------
-# 2. Water lambda-scan
+# 2. Water lambda-scan + per-lambda QP/DSE/photon decomposition.
+#    Each lambda is solved once; the kernel ladder QP -> +DSE -> +photon
+#    reuses the same cavity QP energies (no extra GW).
 # ----------------------------------------------------------------------
 lams = [0.0, 0.0125, 0.025, 0.0375, 0.05, 0.075, 0.10]
+KEYS = ('E_gap', 'Omega_S1', 'E_b')
+
 scan = {}
+channels = {key: {} for key in KEYS}     # channels[key][lam] = QP/DSE/photon
+ref0 = None
 print("\nH2O lambda-scan (eV):")
-print(header.replace('system', 'H2O').replace('lam', 'lam'))
+print(header.replace('system', 'H2O'))
 for lam in lams:
-    b = bse_full('H2O', lam)
-    scan[lam] = summarize(b)
-    s = scan[lam]
+    b_full = bse_full('H2O', lam)
+    s = summarize(b_full)
+    scan[lam] = s
     print(f"{'':8s} {lam:5.3f} {s['E_gap']:9.4f} {s['Omega_S1']:9.4f} "
           f"{s['Omega_T1']:9.4f} {s['E_b']:9.4f} {s['Delta_ST']:9.4f}")
-results['scan_H2O'] = {str(l): v for l, v in scan.items()}
-
-# ----------------------------------------------------------------------
-# 3. Channel decomposition for water (kernel ladder at fixed QP)
-# ----------------------------------------------------------------------
-print("\nChannel decomposition of the water cavity shifts (eV):")
-results['decomposition_H2O'] = {}
-ref0 = scan[0.0]
-for lam in (0.05, 0.10):
-    b_full = bse_full('H2O', lam)
+    if lam == 0.0:
+        ref0 = s
+        for key in KEYS:
+            channels[key][0.0] = {'total': 0.0, 'QP': 0.0,
+                                  'DSE': 0.0, 'photon': 0.0}
+        continue
     qedhf = b_full['qedhf']
     eps_qp = b_full['eps_QP']
     b_qp = run_qed_bse(qedhf, tda=True, eps_QP=eps_qp,
-                       include_dse=False, include_photon=False,
-                       verbose=False)
+                       include_dse=False, include_photon=False, verbose=False)
     b_dse = run_qed_bse(qedhf, tda=True, eps_QP=eps_qp,
-                        include_dse=True, include_photon=False,
-                        verbose=False)
-    rows = {}
-    for key in ('E_gap', 'Omega_S1', 'E_b'):
-        full = summarize(b_full)[key]
-        qp = {'E_gap': b_qp['E_gap'], 'Omega_S1': b_qp['Omega_S1'],
-              'E_b': b_qp['E_b']}[key] * EV
-        dse = {'E_gap': b_dse['E_gap'], 'Omega_S1': b_dse['Omega_S1'],
-               'E_b': b_dse['E_b']}[key] * EV
-        rows[key] = {
-            'total_shift': full - ref0[key],
-            'QP': qp - ref0[key],
-            'DSE': dse - qp,
-            'photon': full - dse,
+                        include_dse=True, include_photon=False, verbose=False)
+    qp_eV = {k: b_qp[k] * EV for k in KEYS}
+    dse_eV = {k: b_dse[k] * EV for k in KEYS}
+    for key in KEYS:
+        channels[key][lam] = {
+            'total': s[key] - ref0[key],
+            'QP': qp_eV[key] - ref0[key],
+            'DSE': dse_eV[key] - qp_eV[key],
+            'photon': s[key] - dse_eV[key],
         }
-        r = rows[key]
-        print(f"  lam={lam:5.3f}  {key:9s}: total {r['total_shift']:+8.4f} "
-              f"= QP {r['QP']:+8.4f} + DSE {r['DSE']:+8.4f} "
-              f"+ photon {r['photon']:+8.4f}")
-    results['decomposition_H2O'][str(lam)] = rows
+results['scan_H2O'] = {str(l): v for l, v in scan.items()}
+results['decomposition_H2O'] = {key: {str(l): channels[key][l] for l in lams}
+                                for key in KEYS}
 
 # ----------------------------------------------------------------------
-# Figure: cavity-induced shifts vs lambda (water)
+# 3. Channel decomposition table at lambda = 0.05 and 0.10
+# ----------------------------------------------------------------------
+print("\nChannel decomposition of the water cavity shifts (eV):")
+for lam in (0.05, 0.10):
+    for key in KEYS:
+        r = channels[key][lam]
+        print(f"  lam={lam:5.3f}  {key:9s}: total {r['total']:+8.4f} "
+              f"= QP {r['QP']:+8.4f} + DSE {r['DSE']:+8.4f} "
+              f"+ photon {r['photon']:+8.4f}")
+
+# ----------------------------------------------------------------------
+# Figure 1 (unchanged): cavity-induced shifts vs lambda (water)
 # ----------------------------------------------------------------------
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(3.4, 4.4), dpi=300,
                                sharex=True)
@@ -197,6 +208,42 @@ out = os.path.join(os.path.dirname(__file__), '..', 'OmegaQMC', 'paper',
                    'fig_exciton_h2o.pdf')
 fig.savefig(os.path.abspath(out))
 print(f"\nwrote {os.path.abspath(out)}")
+
+# ----------------------------------------------------------------------
+# Figure 2 (new): delta E_b QP/DSE/photon channel breakdown (water)
+# ----------------------------------------------------------------------
+fig2, (bx1, bx2) = plt.subplots(2, 1, figsize=(3.6, 4.6), dpi=300,
+                                sharex=True)
+for key, lab, col, mk in (('E_gap', r'$\delta E_\mathrm{gap}$',
+                           '#1b9e77', 'o'),
+                          ('Omega_S1', r'$\delta\Omega_{S_1}$',
+                           '#d95f02', 's'),
+                          ('E_b', r'$\delta E_b$', '#e7298a', 'D')):
+    shift = np.array([scan[l][key] - ref0[key] for l in lams])
+    bx1.plot(lam_arr, shift, marker=mk, ms=3.5, lw=1.0, color=col, label=lab)
+bx1.axhline(0.0, color='k', lw=0.5)
+bx1.set_ylabel('shift (eV)')
+bx1.legend(fontsize=7, frameon=False)
+bx1.set_title(rf'H$_2$O, $\omega_\mathrm{{cav}}={OMEGA * EV:.2f}$ eV '
+              r'(default)', fontsize=8)
+
+for ch, lab, col, mk in (('total', 'total', '#e7298a', 'D'),
+                         ('QP', 'QP', '#1b9e77', 'o'),
+                         ('DSE', 'DSE', '#d95f02', 's'),
+                         ('photon', 'photon', '#7570b3', '^')):
+    y = np.array([channels['E_b'][l][ch] for l in lams])
+    lw = 1.4 if ch == 'total' else 1.0
+    bx2.plot(lam_arr, y, marker=mk, ms=3.5, lw=lw, color=col, label=lab)
+bx2.axhline(0.0, color='k', lw=0.5)
+bx2.set_xlabel(r'$\lambda$ (a.u.)')
+bx2.set_ylabel(r'$\delta E_b$ channels (eV)')
+bx2.legend(fontsize=7, frameon=False, ncol=2)
+fig2.tight_layout()
+out2 = os.path.join(os.path.dirname(__file__), '..', 'OmegaQMC', 'paper',
+                    'fig_exciton_binding_h2o.pdf')
+fig2.savefig(os.path.abspath(out2))
+fig2.savefig(os.path.abspath(out2)[:-4] + '.png')
+print(f"wrote {os.path.abspath(out2)}")
 
 with open(os.path.join(os.path.dirname(__file__),
                        'qed_exciton_results.json'), 'w') as f:
