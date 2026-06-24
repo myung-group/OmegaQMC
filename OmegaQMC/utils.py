@@ -15,6 +15,73 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 # from jax import lax
 
 
+def equilibration_length(x, tail=0.5, bounces=2):
+    """Deterministic estimate of a time series' equilibration length.
+
+    A robust band ``median ± ~1 sigma`` is estimated from the last
+    ``tail`` fraction of the series (assumed equilibrated), then the
+    series is scanned from the start, counting how many times it
+    crosses into that band.  The returned cutoff is the midpoint of
+    the final bounce interval — i.e. the block index at which the
+    series has settled.
+
+    This is a deterministic adaptation of the common
+    ``equilibration_length`` heuristic: the optional random placement
+    within the bounce interval (useful only when the detector is
+    applied across an ensemble, so the choice averages out) is dropped
+    in favour of the midpoint, since a post-processing routine emits a
+    single cutoff and must be reproducible.
+
+    Parameters
+    ----------
+    x : array_like, shape (N,)
+        One-dimensional series (e.g. per-block mean local energies).
+    tail : float, optional
+        Fraction of the series, taken from the end, used to estimate
+        the equilibrated band.  Default ``0.5``.
+    bounces : int, optional
+        Number of band re-entries to require before declaring
+        equilibration.  Default ``2``.
+
+    Returns
+    -------
+    int
+        Estimated equilibration length (number of leading samples to
+        discard).  ``0`` if the series is too short (< 10 tail
+        samples) or already starts inside the band.
+    """
+    x = np.asarray(x)
+    bounces = max(1, bounces)
+    eqlen = 0
+    nx = len(x)
+    xt = x[int((1.0 - tail) * nx + 0.5):]
+    nxt = len(xt)
+    if nxt < 10:
+        return eqlen
+    xs = np.sort(xt)
+    mean = xs[int(0.5 * (nxt - 1) + 0.5)]
+    sigma = (
+        np.abs(xs[int((0.5 - 0.341) * nxt + 0.5)] - mean)
+        + np.abs(xs[int((0.5 + 0.341) * nxt + 0.5)] - mean)
+    ) / 2
+    crossings = bounces * [0, 0]
+    if np.abs(x[0] - mean) > sigma:
+        s = -np.sign(x[0] - mean)
+        ncrossings = 0
+        for i in range(nx):
+            dist = s * (x[i] - mean)
+            if dist > sigma and dist < 5 * sigma:
+                crossings[ncrossings] = i
+                s *= -1
+                ncrossings += 1
+                if ncrossings == 2 * bounces:
+                    break
+        bounce = crossings[-2:]
+        bounce[1] = max(bounce[1], bounce[0])
+        eqlen = (bounce[0] + bounce[1]) // 2
+    return int(eqlen)
+
+
 @jax.jit
 def do_binning_analysis(a):
     """Compute mean, standard error, standard deviation, and autocorrelation length.
@@ -133,7 +200,10 @@ def blue_combine_states(
     matched block index.  The Best Linear Unbiased
     Estimator under the unit-sum linear constraint is
     then ``w = Σ⁻¹ 1 / (1ᵀ Σ⁻¹ 1)``, ``μ = wᵀ Ê``,
-    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.
+    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.  When Σ is not positive
+    definite (too few bins, or (near-)degenerate series such
+    as a symmetry-fixed component with ~zero variance) the
+    BLUE is undefined; an equal-weight average is returned.
 
     Parameters
     ----------
@@ -202,22 +272,45 @@ def blue_combine_states(
         N_b, bin_size, K,
     ).mean(axis=1)  # (N_b, K)
 
+    state_means = E.mean(axis=0)
+    ones = np.ones(K)
+
+    if N_b < 2:
+        # Fewer than two bins: no covariance can be formed.
+        # Combine with equal weights; no usable error bar.
+        w = ones / K
+        mean = float(w @ state_means)
+        return mean, float('inf'), 0.0, w, bin_size
+
     centered = bin_means - bin_means.mean(
         axis=0, keepdims=True,
     )
     S = centered.T @ centered / (N_b - 1)  # (K, K)
     Sigma = S / N_b  # covariance of the means
 
-    ones = np.ones(K)
+    # Minimum-variance (BLUE) weights solve ``Σ w ∝ 1``, which
+    # is only well defined when Σ is positive definite.  With
+    # too few bins or (near-)perfectly correlated series — e.g.
+    # a symmetry-fixed component whose variance is ~0 — Σ turns
+    # singular or indefinite (``1ᵀ Σ⁻¹ 1 ≤ 0``), which would
+    # divide by zero.  In that degenerate case fall back to an
+    # equal-weight average, whose variance ``1ᵀ Σ 1 / K²`` is
+    # still well defined.
     try:
+        np.linalg.cholesky(Sigma)  # succeeds iff Σ is PD
         sol = np.linalg.solve(Sigma, ones)
+        inv_sum = float(ones @ sol)
+        is_pd = np.isfinite(inv_sum) and inv_sum > 0.0
     except np.linalg.LinAlgError:
-        sol = np.linalg.pinv(Sigma) @ ones
-    inv_sum = float(ones @ sol)
-    w = sol / inv_sum
-    var_mu = 1.0 / inv_sum
+        is_pd = False
 
-    state_means = E.mean(axis=0)
+    if is_pd:
+        w = sol / inv_sum
+        var_mu = 1.0 / inv_sum
+    else:
+        w = ones / K
+        var_mu = max(float(w @ Sigma @ w), 0.0)
+
     mean = float(w @ state_means)
     err = float(np.sqrt(max(var_mu, 0.0)))
 

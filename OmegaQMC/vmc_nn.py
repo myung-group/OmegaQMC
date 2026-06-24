@@ -32,7 +32,7 @@ from .utils import (
 )
 from .symm.operations import populate_fragment_symmops
 from .symm.fragments import (
-    build_frag_reflect_data,
+    build_frag_transform_data,
     build_frag_symmops,
     build_single_frag_combos,
     make_apply_single_frag_symmop,
@@ -102,8 +102,8 @@ class _VMCDriverNN:
             )
         )
         (frag_centroids, frag_inradii,
-         frag_Vh, _is_planar) = build_frag_reflect_data(
-            mol_info, nuc_crds,
+         frag_Vh, _is_planar) = build_frag_transform_data(
+            mol_info, nuc_crds, frag_symmops=frag_symmops,
         )
         self._apply_single_frag_symmop = (
             make_apply_single_frag_symmop(

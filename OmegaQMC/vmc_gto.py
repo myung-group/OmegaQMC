@@ -24,7 +24,7 @@ from .utils import (parse_molecular_inspheres,
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import populate_fragment_symmops
 from .symm.fragments import (
-    build_frag_reflect_data,
+    build_frag_transform_data,
     build_frag_symmops,
     build_single_frag_combos,
     make_apply_single_frag_symmop,
@@ -43,6 +43,17 @@ from .constants import MIN_DIST_THRESHOLD
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
 
+# Initial basin-thermalization (charge-transfer ergodicity).
+# The local Gaussian move cannot carry an electron across the
+# low-density gap between well-separated fragments, so without
+# this step every walker is stuck in the electron-to-nucleus
+# partition it was initialized in.  A single-electron move that
+# relocates one electron to a Gaussian blob around a randomly
+# chosen nucleus restores ergodicity over charge-transfer
+# (ionic / covalent) basins; see ``_VMCDriverGTO`` __init__.
+BASIN_RELOC_SIGMA = 1.5          # bohr; nucleus-blob proposal width
+N_BASIN_THERMAL_STEPS = 800      # single-electron relocation steps
+
 
 def _initialize_walkers(rng_key: jax.Array,
                         num_walkers: int,
@@ -50,7 +61,19 @@ def _initialize_walkers(rng_key: jax.Array,
                         Z_charges: jnp.ndarray,
                         nuc_crds: jnp.ndarray,
                         mol_charge: int) -> jnp.ndarray:
-    """Initialize walker positions near nuclear centers."""
+    """Initialize walker positions near nuclear centers.
+
+    Electrons are assigned to atoms by nuclear charge, then
+    scattered about their centers with a spread scaled to the
+    molecular geometry, following QMCPACK's
+    ``InitMolecularSystem``: a uniform ball of radius 40% of the
+    shortest internuclear distance for a molecule, or a Gaussian
+    of width ``0.5 * sqrt(nelec)`` for a single atom.  The
+    distance-scaled spread keeps the starting cloud broad at
+    stretched geometries instead of gluing every electron to a
+    nucleus, giving the basin thermalization a well-spread
+    initial ensemble.
+    """
     # Assign electrons to atoms based on atomic number
     idx_cnt = []
     for ia, iz in enumerate(Z_charges):
@@ -65,9 +88,26 @@ def _initialize_walkers(rng_key: jax.Array,
     idx_cnt = jnp.array(idx_cnt)
     centers = nuc_crds[idx_cnt]
 
-    # Initialize with small Gaussian noise around centers
-    noise = jax.random.normal(rng_key, (num_walkers, nelec, 3))
-    walkers = centers[jnp.newaxis, :, :] + 0.05 * noise
+    # Distance-scaled spread about the assigned centers.
+    num_nuc = nuc_crds.shape[0]
+    key_dir, key_rad = jax.random.split(rng_key)
+    if num_nuc > 1:
+        # Uniform ball of radius 40% of the shortest bond.
+        iu, ju = jnp.triu_indices(num_nuc, k=1)
+        bonds = jnp.linalg.norm(nuc_crds[iu] - nuc_crds[ju], axis=-1)
+        sep = 0.4 * jnp.min(bonds)
+        dirs = jax.random.normal(key_dir, (num_walkers, nelec, 3))
+        dirs = dirs / jnp.linalg.norm(dirs, axis=-1, keepdims=True)
+        radii = sep * jax.random.uniform(
+            key_rad, (num_walkers, nelec, 1)) ** (1.0 / 3.0)
+        offsets = dirs * radii
+    else:
+        # Single atom: Gaussian of width 0.5 * sqrt(nelec).
+        sep = 0.5 * jnp.sqrt(float(nelec))
+        offsets = sep * jax.random.normal(
+            key_dir, (num_walkers, nelec, 3))
+
+    walkers = centers[jnp.newaxis, :, :] + offsets
 
     return walkers
 
@@ -384,7 +424,7 @@ class _VMCDriverGTO:
     and runs the simulation."""
 
     def __init__(self, mf, params_corr, params_cusp, mo_relax,
-                 nuc_crds, frag_reflect_data, single_frag_combos,
+                 nuc_crds, frag_transform_data, single_frag_combos,
                  frag_symmops, frag_ops_sets, frag_ids,
                  ofname_chkpt, ofname_grd, timestamp_init,
                  gr_scheme='scheme1',
@@ -405,9 +445,9 @@ class _VMCDriverGTO:
         self.ofname_grd = ofname_grd
         self.timestamp_init = timestamp_init
 
-        # Unpack frag_reflect_data
+        # Unpack frag_transform_data
         frag_centroids, frag_inradii, frag_Vh, frag_is_planar \
-            = frag_reflect_data
+            = frag_transform_data
         self.frag_centroids = frag_centroids
         self.frag_inradii = frag_inradii
         self.frag_Vh = frag_Vh
@@ -613,12 +653,92 @@ class _VMCDriverGTO:
         self.metropolis_move_allw = jax.vmap(metropolis_move_1w,
                                              in_axes=(0, 0, None, None))
 
+        # --- Basin-hopping move for initial thermalization ---
+        # Proposes relocating one randomly chosen electron to a
+        # Gaussian blob (width BASIN_RELOC_SIGMA) around a randomly
+        # chosen nucleus.  Accepted with the exact Metropolis-
+        # Hastings probability, including the asymmetric proposal
+        # ratio q(old)/q(new) with q(x) proportional to
+        # sum_J exp(-|x - R_J|^2 / (2 sigma^2)), so the stationary
+        # distribution is exactly |psi|^2.  Unlike the local move it
+        # can teleport an electron between far-apart nuclei, which is
+        # required to populate charge-transfer (ionic) basins at
+        # large fragment separations.  Used only to thermalize the
+        # initial ensemble; the production move set is unchanged.
+        _sigma = BASIN_RELOC_SIGMA
+        _inv2s2 = 1.0 / (2.0 * _sigma * _sigma)
+
+        def _basin_log_q(x):
+            d2 = ((x[jnp.newaxis, :] - nuc_crds) ** 2).sum(-1)
+            return jax.scipy.special.logsumexp(-d2 * _inv2s2)
+
+        @jax.jit
+        def basin_move_1w(rng_key, elec_crds):
+            key_e, key_j, key_pos, key_acc = jax.random.split(rng_key, 4)
+            k = jax.random.randint(key_e, (), 0, nelec)
+            j = jax.random.randint(key_j, (), 0, num_nuc)
+            rk_new = nuc_crds[j] \
+                + _sigma * jax.random.normal(key_pos, (3,))
+            proposed_crds = elec_crds.at[k].set(rk_new)
+
+            # Reject proposals that hit an electron-nucleus or
+            # electron-electron singularity.
+            diffs_ee = proposed_crds[i_e] - proposed_crds[j_e]
+            dists_ee = jnp.linalg.norm(diffs_ee, axis=-1)
+            diffs_en = proposed_crds[:, None, :] - nuc_crds[None, :, :]
+            dists_en = jnp.linalg.norm(diffs_en, axis=-1)
+            is_invalid = (dists_en.min() < MIN_DIST_THRESHOLD) \
+                | (dists_ee.min() < MIN_DIST_THRESHOLD)
+
+            log_qratio = _basin_log_q(elec_crds[k]) \
+                - _basin_log_q(rk_new)
+            log_psi_old = log_trial_wavefunction(elec_crds, nuc_crds,
+                                                 params_corr)
+            log_psi_new = log_trial_wavefunction(proposed_crds, nuc_crds,
+                                                 params_corr)
+            log_alpha = 2.0 * (log_psi_new - log_psi_old) + log_qratio
+            accept = (jnp.log(jax.random.uniform(key_acc)) < log_alpha) \
+                & (~is_invalid)
+            new_crds = jnp.where(accept, proposed_crds, elec_crds)
+            return new_crds, accept
+
+        self.basin_move_allw = jax.vmap(basin_move_1w, in_axes=(0, 0))
+
         # --- Per-fragment symmetry operation for gradient batches ---
         self._apply_single_frag_symmop = (
             make_apply_single_frag_symmop(
                 frag_centroids, frag_Vh, frag_inradii,
             )
         )
+
+    def _thermalize_basins(self, rng_key, walkers, num_walkers,
+                           walker_keys_sharding, n_steps):
+        """Thermalize charge-transfer basins of the initial ensemble.
+
+        Runs ``n_steps`` single-electron relocation moves (see
+        ``basin_move_allw``) so the walker ensemble populates the
+        electron-to-nucleus partitions in proportion to |psi|^2.
+        The local production move cannot do this across well-
+        separated fragments, so this is what makes the dissociation
+        limit (e.g. ionic configurations of a stretched bond) get
+        sampled at all.  Returns ``(rng_key, walkers, mean_accept)``.
+        """
+        basin_move_allw = self.basin_move_allw
+
+        @jax.jit
+        def basin_step(state, _):
+            rng_key, walkers = state
+            rng_key, key = jax.random.split(rng_key)
+            walker_keys = jax.random.split(key, num_walkers)
+            if walker_keys_sharding is not None:
+                walker_keys = jax.lax.with_sharding_constraint(
+                    walker_keys, walker_keys_sharding)
+            walkers, accepted = basin_move_allw(walker_keys, walkers)
+            return (rng_key, walkers), accepted.mean()
+
+        (rng_key, walkers), accepts = jax.lax.scan(
+            basin_step, (rng_key, walkers), None, length=n_steps)
+        return rng_key, walkers, accepts.mean()
 
     def __call__(self, rng_key: int | jnp.ndarray,
                  num_walkers: int = 1000,
@@ -627,6 +747,7 @@ class _VMCDriverGTO:
                  mc_timestep: float = 0.1,
                  fname_log: str = None,
                  mode_restart: bool = False,
+                 num_steps_basin: int = N_BASIN_THERMAL_STEPS,
                  compute_gradients: bool = False) -> None:
         """Execute a VMC run and write results to HDF5 checkpoint files.
 
@@ -663,6 +784,12 @@ class _VMCDriverGTO:
         mode_restart : bool, optional
             If ``True``, attempt to resume from an existing checkpoint file
             and continue accumulating blocks.  Default ``False``.
+        num_steps_basin : int, optional
+            Number of single-electron relocation moves used to thermalize
+            charge-transfer basins before equilibration.  Required for an
+            unbiased energy when fragments are well separated (e.g. a
+            stretched bond); harmless otherwise.  Set to ``0`` to disable.
+            Default :data:`N_BASIN_THERMAL_STEPS`.
         compute_gradients : bool, optional
             If ``True``, accumulate and save nuclear-force gradient data
             needed by :func:`~OmegaQMC.observables.force.postproc_h5_pgcs`.
@@ -721,6 +848,22 @@ class _VMCDriverGTO:
         walkers_sharding, walker_keys_sharding = _make_sharding(num_walkers)
         if walkers_sharding is not None:
             walkers = jax.device_put(walkers, walkers_sharding)
+
+        # Thermalize charge-transfer basins before equilibration so
+        # the initial ensemble populates electron-to-nucleus
+        # partitions per |psi|^2.  The local move alone cannot reach
+        # ionic configurations across well-separated fragments, which
+        # otherwise biases the energy below the trial-wavefunction
+        # value at large bond lengths.  Skipped on restart (the
+        # restored walkers are already thermalized).
+        if not mode_restart and num_steps_basin > 0:
+            rng_key, basin_key = jax.random.split(rng_key)
+            basin_key, walkers, basin_accept = self._thermalize_basins(
+                basin_key, walkers, num_walkers, walker_keys_sharding,
+                num_steps_basin)
+            print(f"ℹ️\tBasin thermalization: {num_steps_basin} "
+                  f"relocation steps, acceptance {basin_accept:.2f}")
+
         mc_stepsize = (3 * mc_timestep)**0.5
 
         # Equilibration phase
@@ -1098,13 +1241,15 @@ def get_vmc_gto_func(mf,
     params_cusp = _build_cusp_params(mf, cusp_scheme, mf.mol.natm)
 
     nuc_crds = jnp.array(mf.mol.atom_coords(unit='Bohr'))
-    frag_reflect_data = build_frag_reflect_data(mf.mol, nuc_crds)
+    frag_transform_data = build_frag_transform_data(
+        mf.mol, nuc_crds, frag_symmops=frag_symmops,
+    )
 
     timestamp_init = datetime.now()
     print("Begin time: {}".format(timestamp_init))
 
     return _VMCDriverGTO(mf, params_corr, params_cusp, mo_relax,
-                         nuc_crds, frag_reflect_data,
+                         nuc_crds, frag_transform_data,
                          single_frag_combos,
                          frag_symmops, frag_ops_sets, frag_ids,
                          ofname_chkpt, ofname_grd,

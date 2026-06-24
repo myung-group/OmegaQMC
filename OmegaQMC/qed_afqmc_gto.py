@@ -4,7 +4,7 @@ Phaseless QED-AFQMC (Quantum Electrodynamics Auxiliary-Field QMC).
 Extends the standard AFQMC to include coupling to a quantized cavity
 photon mode via the Pauli-Fierz Hamiltonian in the dipole gauge.
 
-Reference: arXiv:2410.18838 (Bauer et al., 2024)
+Reference: arXiv:2410.18838 (Weber et al., 2025)
 
 The integral preparation routine has moved to its canonical location:
 
@@ -31,15 +31,31 @@ from OmegaQMC.utils import do_binning_analysis
 from OmegaQMC.observables.energy import (
     local_energy_1body,
     local_energy_2body,
+    local_energy_multidet,
 )
 from OmegaQMC.observables.greens import (
     greens_function,
     greens_function_force_bias,
     greens_function_overlap,
+    greens_function_multidet,
+)
+# th5: chunked variants for the multi-det QED path. These pull the
+# per-det Green's functions in det_chunk_size slices to keep peak
+# einsum intermediates bounded (~ chunk * nwalkers * nbasis^2)
+# instead of the full ndet * nwalkers * nbasis^2.
+from OmegaQMC.observables.greens_th4 import (
+    greens_function_multidet as greens_function_multidet_chunked,
+    greens_function_multidet_overlap_only,
+    greens_function_multidet_chunked_full,
+)
+from OmegaQMC.observables.energy_th4 import (
+    local_energy_multidet_shnew_chunked,
+    qed_local_energy_multidet_walker_chunked,
 )
 from OmegaQMC.integrals.cholesky import (
     chunked_cholesky,
     half_rotate_cholesky,
+    half_rotate_cholesky_multidet,
     DiskChol,
     _iter_chol_g_chunks,
 )
@@ -179,7 +195,7 @@ def qed_local_energy(h1e, Ga, Gb, Ghalfa, Ghalfb,
 # ===================================================================
 
 def build_qed_propagator(h1e_mod_0, chol_qed, trial_up, trial_dn, dt,
-                         chol_chunk_g=None):
+                         chol_chunk_g=None, G_charge=None):
     """Build the q-independent part of the one-body propagator.
 
     The q-dependent contribution (√Ω * q * dip_mo) is applied dynamically
@@ -196,13 +212,18 @@ def build_qed_propagator(h1e_mod_0, chol_qed, trial_up, trial_dn, dt,
         dt: imaginary time step.
         chol_chunk_g: g‑axis slab size for streaming. None uses the
             DiskChol's own chunk_g, or no chunking for arrays.
+        G_charge: optional precomputed charge density (nbasis, nbasis) used
+            for the mean-field subtraction. Defaults to the single-trial
+            density ``trial_up trial_up† + trial_dn trial_dn†``; pass the
+            CI-weighted density for a multi-determinant trial.
 
     Returns:
         dict with 'expH1_0', 'mf_shift', 'dt'.
     """
-    G_trial_a = trial_up @ trial_up.T.conj()
-    G_trial_b = trial_dn @ trial_dn.T.conj()
-    G_charge = G_trial_a + G_trial_b
+    if G_charge is None:
+        G_trial_a = trial_up @ trial_up.T.conj()
+        G_trial_b = trial_dn @ trial_dn.T.conj()
+        G_charge = G_trial_a + G_trial_b
 
     naux = chol_qed.shape[0]
     nbasis = chol_qed.shape[1]
@@ -412,6 +433,145 @@ def propagate_qed_walkers(phia, phib, q, weights, overlap, e_hybrid,
     return phia, phib, q, weights_new, ovlp_new, e_hybrid_new, rng_key
 
 
+def qed_local_energy_multidet(h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+                              rchols_a, rchols_b, ci_coeffs,
+                              ovlp_a_all, ovlp_b_all, enuc,
+                              q, dip_mo, omega, s, q0,
+                              det_chunk_size=None):
+    """QED-AFQMC local energy for a multi-determinant trial.
+
+    Multi-determinant analogue of :func:`qed_local_energy`. The electronic
+    one- and two-body pieces use the CI-weighted mixed estimator
+    (:func:`OmegaQMC.observables.energy.local_energy_multidet`); the
+    electron-photon coupling uses the CI-aggregated Green's function; the
+    photon term is the Gaussian-trial expression, identical to the
+    single-determinant case.
+
+    Returns:
+        e_tot, e_1b, e_2b, e_ph: per walker, shape (nwalkers,).
+    """
+    if det_chunk_size is not None:
+        e_elec, e_1b_elec, e_2b = local_energy_multidet_shnew_chunked(
+            h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+            rchols_a, rchols_b, ci_coeffs,
+            ovlp_a_all, ovlp_b_all, enuc,
+            det_chunk_size=det_chunk_size)
+    else:
+        e_elec, e_1b_elec, e_2b = local_energy_multidet(
+            h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+            rchols_a, rchols_b, ci_coeffs,
+            ovlp_a_all, ovlp_b_all, enuc)
+
+    # Electron-photon coupling: √Ω * q * Tr(d @ (Ga + Gb)) (aggregate GF)
+    tr_dip_a = jnp.einsum('pq,wqp->w', dip_mo, Ga)
+    tr_dip_b = jnp.einsum('pq,wqp->w', dip_mo, Gb)
+    e_ep = jnp.sqrt(omega) * q * (tr_dip_a + tr_dip_b)
+
+    # Photon energy (Gaussian trial), same as single-determinant case.
+    e_ph = omega / 2.0 * (s - s**2 * (q - q0)**2 + q**2 - 1.0)
+
+    e_1b = e_1b_elec + e_ep
+    e_tot = e_elec + e_ep + e_ph
+    return e_tot, e_1b, e_2b, e_ph
+
+
+def propagate_qed_walkers_multidet(phia, phib, q, weights, overlap, e_hybrid,
+                                   propagator, chol_qed, rchols_a, rchols_b,
+                                   trials_up, trials_dn, ci_coeffs,
+                                   eshift, rng_key, dip_mo, omega, s, q0,
+                                   fbbound=None, exp_nmax=6,
+                                   walker_chunk_size=None, chol_chunk_g=None,
+                                   det_chunk_size=5):
+    """Propagate QED-AFQMC walkers one step with a multi-determinant trial.
+
+    Multi-determinant analogue of :func:`propagate_qed_walkers`. The photon
+    half-steps and the photon-coupling one-body exponential are identical
+    (walker-side, trial-independent); only the electronic force bias and the
+    overlaps use the multi-determinant Green's function. The force bias is
+    built from the CI-aggregated Green's function contracted with the
+    augmented Cholesky tensor (streamed over g), exactly as in the non-QED
+    multi-determinant propagator.
+
+    Returns:
+        phia, phib, q, weights, overlap, e_hybrid, rng_key.
+    """
+    dt = propagator['dt']
+    expH1_0 = propagator['expH1_0']
+    mf_shift = propagator['mf_shift']
+    nwalkers = phia.shape[0]
+    naux = chol_qed.shape[0]
+
+    if fbbound is None:
+        fbbound = FBBOUND_DEFAULT
+
+    # 0. Multi-det Green's function (aggregate G for force bias; overlap)
+    #    th5: chunked variant — peak working set scales with
+    #    det_chunk_size, not ndet.
+    Ga, Gb, ovlp = greens_function_multidet_chunked(
+        phia, phib, trials_up, trials_dn, ci_coeffs,
+        det_chunk_size=det_chunk_size)
+
+    # 1. First photon half-step
+    q, log_wt_ph1, rng_key = propagate_photon(q, omega, dt, s, q0, rng_key)
+
+    # 2. First half one-body: photon coupling (Taylor) + q-independent matrix
+    coeff_1 = -0.5 * dt * jnp.sqrt(omega) * q
+    phia, phib = _apply_exp_vhs_photon(
+        coeff_1, dip_mo, phia, phib, 4, walker_chunk_size)
+    phia = jnp.einsum('pq,wqn->wpn', expH1_0, phia)
+    phib = jnp.einsum('pq,wqn->wpn', expH1_0, phib)
+
+    # 3. Two-body propagation: force bias from aggregate multi-det GF
+    #    (streamed over the auxiliary axis g, like the non-QED multidet path).
+    vbias_a_chunks, vbias_b_chunks = [], []
+    for g0, g1, chunk in _iter_chol_g_chunks(chol_qed, chol_chunk_g):
+        chunk_j = jnp.asarray(chunk)
+        vbias_a_chunks.append(jnp.einsum('gpq,wqp->gw', chunk_j, Ga))
+        vbias_b_chunks.append(jnp.einsum('gpq,wqp->gw', chunk_j, Gb))
+    vbias = (jnp.concatenate(vbias_a_chunks, axis=0)
+             + jnp.concatenate(vbias_b_chunks, axis=0))
+
+    xbar = -jnp.sqrt(dt) * (1j * vbias - mf_shift[:, None])
+    xbar = xbar.T  # (nwalkers, naux+1)
+    xbar_abs = jnp.abs(xbar)
+    xbar = jnp.where(xbar_abs > fbbound, xbar * fbbound / xbar_abs, xbar)
+
+    rng_key, subkey = jax.random.split(rng_key)
+    xi = jax.random.normal(subkey, shape=(nwalkers, naux))
+    xshifted = xi - xbar
+
+    cmf = -jnp.sqrt(dt) * jnp.einsum('wg,g->w', xshifted, mf_shift)
+    cfb = (jnp.sum(xi * xbar, axis=1)
+           - 0.5 * jnp.sum(xbar * xbar, axis=1))
+
+    phia, phib = _apply_exp_vhs_from_chol(
+        xshifted, chol_qed, phia, phib, dt, exp_nmax,
+        walker_chunk_size, chol_chunk_g)
+
+    # 4. Second half one-body (reverse order for symmetric Trotter)
+    phia = jnp.einsum('pq,wqn->wpn', expH1_0, phia)
+    phib = jnp.einsum('pq,wqn->wpn', expH1_0, phib)
+    coeff_2 = -0.5 * dt * jnp.sqrt(omega) * q
+    phia, phib = _apply_exp_vhs_photon(
+        coeff_2, dip_mo, phia, phib, 4, walker_chunk_size)
+
+    # 5. Second photon half-step
+    q, log_wt_ph2, rng_key = propagate_photon(q, omega, dt, s, q0, rng_key)
+
+    # 6. Weight update (electronic phaseless + photon importance weight)
+    #    th5: only the new overlap is needed here — use the
+    #    th4 overlap-only kernel.
+    ovlp_new = greens_function_multidet_overlap_only(
+        phia, phib, trials_up, trials_dn, ci_coeffs,
+        det_chunk_size=det_chunk_size)
+    weights_new, e_hybrid_new = _update_weights_phaseless(
+        weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
+    ph_weight = jnp.exp(jnp.clip(log_wt_ph1 + log_wt_ph2, -10.0, 10.0))
+    weights_new = weights_new * ph_weight
+
+    return phia, phib, q, weights_new, ovlp_new, e_hybrid_new, rng_key
+
+
 # ===================================================================
 # Driver
 # ===================================================================
@@ -424,9 +584,24 @@ class _QEDAFQMCDriverGTO:
     """
 
     def __init__(self, mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
-                 s=1.0, q0=0.0, verbose=True,
-                 chol_h5_path=None, chol_chunk_g=128):
+                 s=1.0, q0='auto', verbose=True,
+                 chol_h5_path=None, chol_chunk_g=128,
+                 use_qed_hf=True, proper_dse=True, trial=None,
+                 det_chunk_size=5):
         """Prepare QED integrals and build the propagator.
+
+        The trial wavefunction is a product ``|Φ_el⟩ ⊗ f(q)`` (Eq. 19 of
+        arXiv:2410.18838), where ``f(q) = (s/π)^{1/4} exp(-s(q-q₀)²/2)`` is
+        the photon Gaussian.  Two choices make QED-AFQMC reproduce QED-FCI:
+
+        * the electronic reference ``|Φ_el⟩`` is the cavity-relaxed
+          **QED-Hartree-Fock** determinant (``use_qed_hf=True``) rather than
+          plain RHF, and
+        * the photon trial is the dipole-gauge coherent state, i.e. centred
+          at ``q₀ = -⟨D⟩/√Ω`` (``q0='auto'``) instead of the origin.
+
+        Together with the proper-DSE integrals (see ``proper_dse``), these
+        reduce the phaseless bias to the sub-mHa level reported in the paper.
 
         Args:
             mf: PySCF mean-field object (must have run kernel()).
@@ -436,7 +611,9 @@ class _QEDAFQMCDriverGTO:
             dt: Imaginary time step.
             chol_cut: Cholesky decomposition threshold.
             s: Photon trial squeeze parameter (default 1.0 for dipole gauge).
-            q0: Photon trial displacement (default 0.0).
+            q0: Photon trial displacement.  ``'auto'`` (default) sets the
+                dipole-gauge coherent-state value ``q₀ = -⟨D⟩/√Ω`` from the
+                reference determinant's dipole; pass a float to override.
             verbose: Print progress.
             chol_h5_path: If set, the augmented MO‑basis Cholesky tensor
                 is stored in this HDF5 file (dataset ``chol_mo``) and
@@ -444,22 +621,84 @@ class _QEDAFQMCDriverGTO:
                 ``chol_qed`` in RAM.
             chol_chunk_g: Slab size along the auxiliary axis for disk
                 reads. Default 128.
+            use_qed_hf: If True (default), run QED-Hartree-Fock and use its
+                cavity-relaxed orbitals for the electronic trial and the
+                integral MO basis.  Falls back to ``mf.mo_coeff`` for
+                open-shell systems or zero coupling.
+            proper_dse: If True (default), use the exact (quadrupole) form of
+                the dipole self-energy so the Hamiltonian matches QED-FCI in
+                any basis.  See :func:`prepare_qed_integrals`.
+            trial: Multi-determinant QED-CASSCF trial dict from
+                :func:`OmegaQMC.addons.qed_casscf.to_afqmc_trial`, or None
+                (default) for the single-determinant QED-HF trial.  When
+                given, the integral MO basis is taken from the trial's
+                cavity-relaxed CASSCF orbitals (``trial['mo_coeff']``), the
+                electronic trial is the CI expansion, and the photon trial
+                is the coherent state centred at ``trial['q0']`` (used when
+                ``q0='auto'``).
         """
         self.mf = mf
         self.dt = dt
         self.omega = float(omega)
         self.s = float(s)
-        self.q0 = float(q0)
         self.verbose = verbose
         self.chol_chunk_g = chol_chunk_g
+        self.multidet = trial is not None
+        self.det_chunk_size = int(det_chunk_size)
 
+        # A QED-AFQMC trial must be cavity-aware: built from QED-CASSCF
+        # (DSE-relaxed orbitals + cavity-dressed CI + coherent-state photon
+        # displacement). A bare HF/CASSCF trial omits the dipole self-energy
+        # orbital relaxation and the q0 = -<D>/sqrt(Omega) displacement, so it
+        # is unphysical for the Pauli-Fierz Hamiltonian — reject it.
+        if self.multidet and not trial.get('cavity', False):
+            raise ValueError(
+                "QED-AFQMC requires a cavity-aware trial. The supplied trial "
+                "is not marked 'cavity'; build it with "
+                "OmegaQMC.addons.qed_casscf.to_afqmc_trial(run_qed_casscf(...)). "
+                "A bare (non-QED) HF/CASSCF trial omits the dipole "
+                "self-energy orbital relaxation and the coherent-state photon "
+                "displacement, so it is unphysical for the Pauli-Fierz "
+                "Hamiltonian.")
+        
         if verbose:
             print("Preparing QED-AFQMC integrals...")
             t0 = time.time()
 
+        # Cavity-relaxed (QED-HF) reference orbitals, when requested and
+        # applicable.  For open-shell systems or zero coupling we keep the
+        # supplied mean-field orbitals (QED-HF reduces to RHF at λ=0).
+        mol = mf.mol
+        lam = float(jnp.linalg.norm(jnp.asarray(coupling_vec, dtype=float)))
+        mo_coeff = None
+        self.e_qed_hf = None
+        self.use_qed_hf = bool(use_qed_hf)
+        if (use_qed_hf and lam > 0.0
+                and mol.nelec[0] == mol.nelec[1]):
+            from OmegaQMC.addons.qed_hf import run_qed_hf
+            qedhf = run_qed_hf(mol, omega, tuple(float(c) for c in coupling_vec))
+            mo_coeff = np.asarray(qedhf['C'])
+            self.e_qed_hf = float(qedhf['E_qed_hf'])
+            if verbose:
+                print(f"  Using QED-HF reference: E_QED-HF = "
+                      f"{self.e_qed_hf:.10f}")
+        elif use_qed_hf and lam > 0.0 and verbose:
+            print("  QED-HF reference unavailable (open shell); "
+                  "using mf.mo_coeff")
+
+        # A multi-determinant trial supplies its own (cavity-relaxed CASSCF)
+        # orbitals; use them for the integral MO basis.  The QED-HF run above
+        # is still used only for the reported reference energy ``e_qed_hf``.
+        if self.multidet:
+            mo_coeff = np.asarray(trial['mo_coeff'])
+            if verbose:
+                print(f"  Multi-det QED-CASSCF trial: "
+                      f"{int(trial['ndet'])} determinants")
+
         integrals = prepare_qed_integrals(
             mf, omega, coupling_vec, chol_cut=chol_cut,
-            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g,
+            mo_coeff=mo_coeff, proper_dse=proper_dse)
         self.h1e = integrals['h1e']
         self.h1e_mod_0 = integrals['h1e_mod_0']
         self.chol_qed = integrals['chol_qed']
@@ -471,6 +710,25 @@ class _QEDAFQMCDriverGTO:
         self.mo_coeff = integrals['mo_coeff']
         self.naux = self.chol_qed.shape[0]  # naux_coulomb + 1 (DSE)
 
+        # Photon trial displacement.  In the dipole gauge the photon relaxes
+        # to the coherent state that minimises √Ω q ⟨D⟩ + (Ω/2) q², i.e.
+        # q₀ = -⟨D⟩/√Ω, where ⟨D⟩ = Tr[d (Ga+Gb)] is the reference dipole
+        # (sum of occupied diagonal dipole elements for the identity trial).
+        if isinstance(q0, str) and q0 == 'auto':
+            if self.multidet:
+                # Multi-det trial carries its own coherent-state displacement
+                # -⟨D̂⟩/√Ω computed from the full CASSCF electronic dipole.
+                self.q0 = float(trial['q0'])
+            else:
+                dip_diag = jnp.diag(self.dip_mo)
+                d_exp = float(jnp.sum(dip_diag[:self.nup])
+                              + jnp.sum(dip_diag[:self.ndown]))
+                self.q0 = (-d_exp / np.sqrt(self.omega)
+                           if self.omega > 0 else 0.0)
+        else:
+            self.q0 = float(q0)
+        q0 = self.q0
+
         if verbose:
             print(f"  nbasis={self.nbasis}, nup={self.nup}, "
                   f"ndown={self.ndown}, naux={self.naux} (incl. DSE)")
@@ -481,24 +739,64 @@ class _QEDAFQMCDriverGTO:
                 print(f"  chol_qed stored on disk: {self.chol_qed.path} "
                       f"(chunk_g={self.chol_chunk_g})")
 
-        # Trial wavefunction: HF determinant x Gaussian photon
-        self.trial_up = jnp.eye(self.nbasis, self.nup)
-        self.trial_dn = jnp.eye(self.nbasis, self.ndown)
+        # Trial wavefunction: (HF or multi-det CASSCF) electronic part
+        # tensored with the Gaussian photon trial f(q).
+        if self.multidet:
+            self.ci_coeffs = jnp.asarray(trial['ci_coeffs'])
 
-        # Half-rotate augmented Cholesky
-        self.rchol_a, self.rchol_b = half_rotate_cholesky(
-            self.chol_qed, self.trial_up, self.trial_dn,
-            chunk_g=chol_chunk_g)
+            # Build stacked trial matrices from occupation indices, in the
+            # CASSCF MO basis (= the integral MO basis here).
+            eye = jnp.eye(self.nbasis)
+            self.trials_up = eye[:, jnp.asarray(trial['occ_up'])].transpose(
+                1, 0, 2)
+            self.trials_dn = eye[:, jnp.asarray(trial['occ_dn'])].transpose(
+                1, 0, 2)
 
-        if verbose:
-            print(f"  rchol_a shape: {self.rchol_a.shape}, "
-                  f"rchol_b shape: {self.rchol_b.shape}")
+            # Dominant determinant seeds the walkers.
+            self.trial_up = self.trials_up[0]
+            self.trial_dn = self.trials_dn[0]
 
-        # Build propagator (q-independent part)
-        self.propagator = build_qed_propagator(
-            self.h1e_mod_0, self.chol_qed,
-            self.trial_up, self.trial_dn, dt,
-            chol_chunk_g=chol_chunk_g)
+            # Per-det half-rotated augmented Cholesky.
+            self.rchols_a, self.rchols_b = half_rotate_cholesky_multidet(
+                self.chol_qed, self.trials_up, self.trials_dn,
+                chunk_g=chol_chunk_g)
+
+            # CI-weighted charge density for the propagator mean-field shift.
+            ci_abs2 = jnp.abs(self.ci_coeffs) ** 2
+            ci_abs2 = ci_abs2 / jnp.sum(ci_abs2)
+            G_charge = jnp.einsum(
+                'd,dpi,dqi->pq', ci_abs2,
+                self.trials_up, self.trials_up.conj())
+            G_charge = G_charge + jnp.einsum(
+                'd,dpi,dqi->pq', ci_abs2,
+                self.trials_dn, self.trials_dn.conj())
+
+            if verbose:
+                print(f"  rchols_a shape: {self.rchols_a.shape}, "
+                      f"rchols_b shape: {self.rchols_b.shape}")
+
+            self.propagator = build_qed_propagator(
+                self.h1e_mod_0, self.chol_qed,
+                self.trial_up, self.trial_dn, dt,
+                chol_chunk_g=chol_chunk_g, G_charge=G_charge)
+        else:
+            self.trial_up = jnp.eye(self.nbasis, self.nup)
+            self.trial_dn = jnp.eye(self.nbasis, self.ndown)
+
+            # Half-rotate augmented Cholesky
+            self.rchol_a, self.rchol_b = half_rotate_cholesky(
+                self.chol_qed, self.trial_up, self.trial_dn,
+                chunk_g=chol_chunk_g)
+
+            if verbose:
+                print(f"  rchol_a shape: {self.rchol_a.shape}, "
+                      f"rchol_b shape: {self.rchol_b.shape}")
+
+            # Build propagator (q-independent part)
+            self.propagator = build_qed_propagator(
+                self.h1e_mod_0, self.chol_qed,
+                self.trial_up, self.trial_dn, dt,
+                chol_chunk_g=chol_chunk_g)
 
         if verbose:
             print(f"  E_HF = {float(mf.e_tot):.10f}")
@@ -591,15 +889,28 @@ class _QEDAFQMCDriverGTO:
 
                 # Propagate one step (QED)
                 rng_key, step_key = jax.random.split(rng_key)
-                phia, phib, q, weights, overlap, e_hybrid, _ = \
-                    propagate_qed_walkers(
-                        phia, phib, q, weights, overlap, e_hybrid,
-                        self.propagator, self.chol_qed,
-                        self.rchol_a, self.rchol_b,
-                        self.trial_up, self.trial_dn, eshift, step_key,
-                        self.dip_mo, self.omega, self.s, self.q0,
-                        walker_chunk_size=walker_chunk_size,
-                        chol_chunk_g=self.chol_chunk_g)
+                if self.multidet:
+                    phia, phib, q, weights, overlap, e_hybrid, _ = \
+                        propagate_qed_walkers_multidet(
+                            phia, phib, q, weights, overlap, e_hybrid,
+                            self.propagator, self.chol_qed,
+                            self.rchols_a, self.rchols_b,
+                            self.trials_up, self.trials_dn, self.ci_coeffs,
+                            eshift, step_key,
+                            self.dip_mo, self.omega, self.s, self.q0,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g,
+                            det_chunk_size=self.det_chunk_size)
+                else:
+                    phia, phib, q, weights, overlap, e_hybrid, _ = \
+                        propagate_qed_walkers(
+                            phia, phib, q, weights, overlap, e_hybrid,
+                            self.propagator, self.chol_qed,
+                            self.rchol_a, self.rchol_b,
+                            self.trial_up, self.trial_dn, eshift, step_key,
+                            self.dip_mo, self.omega, self.s, self.q0,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g)
 
                 # Clip weights (skip step 1)
                 if step_count > 1:
@@ -626,13 +937,29 @@ class _QEDAFQMCDriverGTO:
                     w_abs * e_hybrid.real)
 
             # End of block: compute energy
-            Ga, Gb, Ghalfa, Ghalfb, _ = greens_function(
-                phia, phib, self.trial_up, self.trial_dn)
+            if self.multidet:
+                Ga, Gb, Ghalfa_all, Ghalfb_all, _, ovlp_a_all, ovlp_b_all = \
+                    greens_function_multidet_chunked_full(
+                        phia, phib, self.trials_up, self.trials_dn,
+                        self.ci_coeffs,
+                        det_chunk_size=self.det_chunk_size)
+                e_tot, e_1b, e_2b, e_ph = \
+                    qed_local_energy_multidet_walker_chunked(
+                        qed_local_energy_multidet,
+                        self.h1e, Ga, Gb, Ghalfa_all, Ghalfb_all,
+                        self.rchols_a, self.rchols_b, self.ci_coeffs,
+                        ovlp_a_all, ovlp_b_all, self.enuc,
+                        q, self.dip_mo, self.omega, self.s, self.q0,
+                        det_chunk_size=self.det_chunk_size,
+                        walker_chunk_size=walker_chunk_size)
+            else:
+                Ga, Gb, Ghalfa, Ghalfb, _ = greens_function(
+                    phia, phib, self.trial_up, self.trial_dn)
 
-            e_tot, e_1b, e_2b, e_ph = qed_local_energy(
-                self.h1e, Ga, Gb, Ghalfa, Ghalfb,
-                self.rchol_a, self.rchol_b, self.enuc,
-                q, self.dip_mo, self.omega, self.s, self.q0)
+                e_tot, e_1b, e_2b, e_ph = qed_local_energy(
+                    self.h1e, Ga, Gb, Ghalfa, Ghalfb,
+                    self.rchol_a, self.rchol_b, self.enuc,
+                    q, self.dip_mo, self.omega, self.s, self.q0)
 
             w = jnp.abs(weights)
             w_sum = jnp.sum(w)
@@ -668,12 +995,19 @@ class _QEDAFQMCDriverGTO:
         q_mean_prod = np.array(q_mean_blocks[num_blocks_equil:])
         e_ph_prod = np.array(e_ph_blocks[num_blocks_equil:])
 
+        # Reference energy for the correlation energy: the QED-HF energy
+        # when a cavity-relaxed reference was used, else plain HF.
+        e_ref = self.e_qed_hf if self.e_qed_hf is not None \
+            else float(self.mf.e_tot)
+
         if verbose:
             print("-" * 80)
             print(f"E_HF       = {float(self.mf.e_tot):.10f}")
+            if self.e_qed_hf is not None:
+                print(f"E_QED-HF   = {float(self.e_qed_hf):.10f}")
             print(f"E_QED-AFQMC = {float(e_mean):.10f} +/- "
                   f"{float(e_err):.10f}")
-            print(f"E_corr     = {float(e_mean) - float(self.mf.e_tot):.10f}")
+            print(f"E_corr     = {float(e_mean) - e_ref:.10f}")
             print(f"<q>        = {float(np.mean(q_mean_prod)):.6f}")
             print(f"E_photon   = {float(np.mean(e_ph_prod)):.6f}")
             print(f"kappa      = {float(kappa):.2f}")
@@ -685,6 +1019,8 @@ class _QEDAFQMCDriverGTO:
             'energy_std': float(e_std),
             'kappa': float(kappa),
             'ehf': float(self.mf.e_tot),
+            'e_qed_hf': self.e_qed_hf,
+            'q0': float(self.q0),
             'q_mean': float(np.mean(q_mean_prod)),
             'e_photon_mean': float(np.mean(e_ph_prod)),
             'q_mean_blocks': np.array(q_mean_blocks),
@@ -704,9 +1040,17 @@ class _QEDAFQMCDriverGTO:
 
 
 def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
-                       s=1.0, q0=0.0, verbose=True,
-                       chol_h5_path=None, chol_chunk_g=128):
+                       s=1.0, q0='auto', verbose=True,
+                       chol_h5_path=None, chol_chunk_g=128,
+                       use_qed_hf=True, proper_dse=True, trial=None,
+                       det_chunk_size=5):
     """Create a reusable QED-AFQMC driver.
+
+    By default the driver uses the cavity-relaxed QED-Hartree-Fock
+    determinant as the electronic trial, the exact (quadrupole) dipole
+    self-energy, and the dipole-gauge coherent-state photon displacement
+    ``q₀ = -⟨D⟩/√Ω``.  With these defaults QED-AFQMC reproduces QED-FCI to
+    within the (sub-mHa) phaseless bias.
 
     Args:
         mf: PySCF mean-field object (must have run kernel()).
@@ -716,11 +1060,19 @@ def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
         dt: Imaginary time step (default 0.005).
         chol_cut: Cholesky decomposition threshold.
         s: Photon trial squeeze parameter (1.0 for dipole gauge).
-        q0: Photon trial displacement (0.0 for no displacement).
+        q0: Photon trial displacement.  ``'auto'`` (default) uses the
+            coherent-state value ``-⟨D⟩/√Ω``; pass a float to override.
         verbose: Print progress.
         chol_h5_path: If set, augmented MO‑basis Cholesky lives in this
             HDF5 file and is streamed in g‑chunks during the run.
         chol_chunk_g: Slab size along the auxiliary axis for disk reads.
+        use_qed_hf: If True (default), use QED-HF cavity-relaxed orbitals
+            for the electronic trial / integral basis.
+        proper_dse: If True (default), use the exact (quadrupole) DSE so the
+            Hamiltonian matches QED-FCI in any basis.
+        trial: Multi-determinant QED-CASSCF trial dict from
+            :func:`OmegaQMC.addons.qed_casscf.to_afqmc_trial`, or None
+            (default) for the single-determinant QED-HF trial.
 
     Returns:
         _QEDAFQMCDriverGTO instance (callable).
@@ -728,4 +1080,6 @@ def get_qed_afqmc_func(mf, omega, coupling_vec, dt=0.005, chol_cut=1e-5,
     return _QEDAFQMCDriverGTO(mf, omega, coupling_vec, dt=dt,
                            chol_cut=chol_cut, s=s, q0=q0, verbose=verbose,
                            chol_h5_path=chol_h5_path,
-                           chol_chunk_g=chol_chunk_g)
+                           chol_chunk_g=chol_chunk_g,
+                           use_qed_hf=use_qed_hf, proper_dse=proper_dse,
+                           trial=trial, det_chunk_size=det_chunk_size)

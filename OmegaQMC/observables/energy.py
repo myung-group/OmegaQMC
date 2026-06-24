@@ -19,7 +19,11 @@ import numpy as np
 import jax.numpy as jnp
 from functools import partial
 
-from ..utils import do_binning_analysis, blue_combine_states
+from ..utils import (
+    do_binning_analysis,
+    blue_combine_states,
+    equilibration_length,
+)
 
 
 def local_energy_1body(h1e, Ga, Gb, enuc):
@@ -392,6 +396,7 @@ def local_energy_multidet_streamed(
 def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
+        equil_cutoff: int | str = 0,
         ) -> tuple[float, float]:
     """Post-process VMC sample data to obtain \
 correlated-sample-averaged VMC energy.
@@ -456,6 +461,16 @@ correlated-sample-averaged VMC energy.
         ``<prefix>.log``.  A string is used as the log
         file path directly (a ``.log`` extension is
         appended if absent).
+    equil_cutoff : int or str, optional
+        Number of leading blocks to discard as
+        equilibration before the time-series analysis;
+        equivalently the block index (in sorted order) at
+        which the analysis starts.  Applied uniformly to
+        every state.  Pass the string ``"auto"`` to detect
+        the cutoff from the reference per-block energy
+        series via
+        :func:`OmegaQMC.utils.equilibration_length`.
+        Default is ``0`` (use all blocks).
 
     Returns
     -------
@@ -502,6 +517,41 @@ correlated-sample-averaged VMC energy.
             fout = sys.stdout
         else:
             fout = open(ofname_log, 'w', 1)
+
+        # Resolve the equilibration cutoff (auto or int)
+        # and drop the leading blocks before any analysis.
+        if equil_cutoff == "auto":
+            # Detect on the reference per-block mean-energy
+            # series (one scalar per block).
+            ref_series = [
+                float(np.asarray(
+                    f['local_energies'][f'{b}']
+                ).mean(dtype=np.float64))
+                for b in block_nums
+            ]
+            equil_cutoff = equilibration_length(ref_series)
+            print(
+                "Auto-detected equilibration at block"
+                f" index {equil_cutoff}",
+                file=fout,
+            )
+        elif isinstance(equil_cutoff, bool) \
+                or not isinstance(equil_cutoff, int):
+            raise ValueError(
+                "equil_cutoff must be a non-negative int"
+                f" or 'auto', got {equil_cutoff!r}"
+            )
+        elif equil_cutoff < 0:
+            raise ValueError(
+                "equil_cutoff must be non-negative,"
+                f" got {equil_cutoff}"
+            )
+        if equil_cutoff >= len(block_nums):
+            raise ValueError(
+                f"equil_cutoff ({equil_cutoff}) discards"
+                f" all {len(block_nums)} blocks"
+            )
+        block_nums = block_nums[equil_cutoff:]
 
         # Per-state per-block scalar energies.
         E_b_per_state = {s: [] for s in states}

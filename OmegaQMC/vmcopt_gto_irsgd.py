@@ -367,15 +367,12 @@ class _VMCOptDriverGTO_IRSGD:
         batch_size=1000,
         verbose=1,
     ):
-        """Run iterative VMC optimization for GTO
-        Jastrow parameters.
+        """Run iterative VMC optimization for GTO Jastrow parameters.
 
         Uses an outer loop that alternates between
-        (1) sampling fresh walker snapshots from the
-        current |ψ(params)|² and (2) running
-        ``num_epochs`` SGD/Adam passes over those
-        snapshots.  This avoids the stale-sample
-        problem of a single sample-then-optimize
+        (1) sampling fresh walker snapshots from the current `|ψ(params)|²`
+        and (2) running ``num_epochs`` SGD/Adam passes over those snapshots.
+        This avoids the stale-sample problem of a single sample-then-optimize
         cycle.
 
         Args:

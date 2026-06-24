@@ -49,11 +49,27 @@ The QED-RPA correlation energy (Eq. 16) is then
 QED-dRPA is obtained by dropping the exchange contributions everywhere:
 ⟨pq||rs⟩ → ⟨pq|rs⟩ and Δ = Δ' = d_{ai} d_{bj}.
 
-The implementation works in spin orbitals (closed-shell QED-HF
-reference) so the formulas above are applied verbatim. Validation at
-λ = 0 reduces to the standard direct RPA correlation energy because
-the bare photon block contributes the same ω to both Tr Ω and Tr Ω̄,
-which then cancels in the difference.
+Origin dependence: the QED-dRPA correlation energy is *not* invariant
+under rigid translations of the molecule — the direct channel keeps
+only the d_{ai} d_{bj} DSE product and drops the −d_{ab} d_{ij}
+counterpart that restores translational invariance in the full QED-RPA
+(the QED-HF energy and the full QED-RPA correlation energy are both
+origin-invariant; verified numerically to <1e-7 Ha). To reproduce
+Table I of arXiv:2602.09968 to all printed digits, the molecule must
+be re-centred at its nuclear centre of mass, the default orientation
+of the Psi4 backend used there; with the oxygen at the coordinate
+origin instead, the dRPA correlation energy carries an ~λ²-scaling
+offset (2×10⁻⁴ Ha at λ = 0.2 for water/cc-pVDZ).
+
+The implementation works in spin orbitals, so the formulas above are
+applied verbatim for either a restricted QED-HF reference
+(:mod:`OmegaQMC.addons.qed_hf`) or a spin-unrestricted QED-UHF
+reference (:mod:`OmegaQMC.addons.qed_uhf`) for open-shell systems —
+``run_qed_rpa`` detects which from the reference dict and builds the
+spin-orbital tensors accordingly. Validation at λ = 0 reduces to the
+standard direct RPA correlation energy because the bare photon block
+contributes the same ω to both Tr Ω and Tr Ω̄, which then cancels in
+the difference.
 """
 
 import math
@@ -65,6 +81,84 @@ from pyscf import gto
 from .qed_hf import run_qed_hf
 
 
+def _build_spin_orbital_quantities_uhf(qedhf):
+    """Spin-orbital QED-RPA tensors from a spin-unrestricted QED-UHF
+    reference.
+
+    Counterpart of :func:`_build_spin_orbital_quantities` for open-shell
+    systems: the α and β orbitals differ, so the spin-orbital ERIs are
+    assembled from the four spatial chemist blocks (αα/αβ/ββ/βα), and the
+    Fock and dipole are spin-block-diagonal. Spin orbitals are ordered
+    occupied-first, ``[α-occ, β-occ, α-vir, β-vir]``, matching the
+    ``[:nocc]`` / ``[nocc:]`` slicing in :func:`_assemble_AB`. Returns the
+    same dict as :func:`_build_spin_orbital_quantities`.
+    """
+    Ca = np.asarray(qedhf['Ca'])
+    Cb = np.asarray(qedhf['Cb'])
+    Fa = np.asarray(qedhf['Fa'])
+    Fb = np.asarray(qedhf['Fb'])
+    eri_ao = qedhf['eri_ao']                 # bare ERI (DSE enters via Δ, Δ')
+    dipole = qedhf['dipole_x_lambda_tot']    # λ·μ_AO
+    nocc_a = qedhf['nocc_a']
+    nocc_b = qedhf['nocc_b']
+    nmo = qedhf['nmo_spatial']
+
+    nocc = nocc_a + nocc_b
+    nso = 2 * nmo
+
+    def _trans(Cp, Cq, Cr, Cs):
+        return np.einsum('pi,qj,pqrs,rk,sl->ijkl',
+                         Cp, Cq, eri_ao, Cr, Cs, optimize=True)
+
+    # Gstack[s1, s2] = chemist (i j | k l), electron-1 spin s1, e-2 spin s2.
+    Gstack = np.zeros((2, 2, nmo, nmo, nmo, nmo))
+    Gstack[0, 0] = _trans(Ca, Ca, Ca, Ca)
+    Gstack[1, 1] = _trans(Cb, Cb, Cb, Cb)
+    Gstack[0, 1] = _trans(Ca, Ca, Cb, Cb)
+    Gstack[1, 0] = _trans(Cb, Cb, Ca, Ca)
+
+    order = ([(0, p) for p in range(nocc_a)]
+             + [(1, p) for p in range(nocc_b)]
+             + [(0, p) for p in range(nocc_a, nmo)]
+             + [(1, p) for p in range(nocc_b, nmo)])
+    spins = np.array([s for s, _ in order], dtype=int)
+    spat = np.array([p for _, p in order], dtype=int)
+
+    idx = np.arange(nso)
+    P = idx[:, None, None, None]
+    Q = idx[None, :, None, None]
+    R = idx[None, None, :, None]
+    S = idx[None, None, None, :]
+    sP, sQ, sR, sS = spins[P], spins[Q], spins[R], spins[S]
+    pP, pQ, pR, pS = spat[P], spat[Q], spat[R], spat[S]
+
+    direct_chem = Gstack[sP, sR, pP, pQ, pR, pS] * (sP == sQ) * (sR == sS)
+    exchange_chem = Gstack[sP, sR, pP, pS, pR, pQ] * (sP == sS) * (sR == sQ)
+    g_phys_d = direct_chem.transpose(0, 2, 1, 3)                    # ⟨pq|rs⟩
+    g_phys_a = (direct_chem - exchange_chem).transpose(0, 2, 1, 3)  # ⟨pq||rs⟩
+
+    fa = Ca.T @ Fa @ Ca
+    fb = Cb.T @ Fb @ Cb
+    da = -(Ca.T @ dipole @ Ca)
+    db = -(Cb.T @ dipole @ Cb)
+    Fstack = np.stack([fa, fb])
+    Dstack = np.stack([da, db])
+    P2 = idx[:, None]
+    Q2 = idx[None, :]
+    same = (spins[P2] == spins[Q2])
+    F_so = Fstack[spins[P2], spat[P2], spat[Q2]] * same
+    d_so = Dstack[spins[P2], spat[P2], spat[Q2]] * same
+
+    return {
+        'F_so': F_so,
+        'd_so': d_so,
+        'g_phys_a': g_phys_a,
+        'g_phys_d': g_phys_d,
+        'nocc': nocc,
+        'nso': nso,
+    }
+
+
 def _build_spin_orbital_quantities(qedhf):
     """Build the spin-orbital QED-HF Fock, dipole, and ERI tensors.
 
@@ -74,7 +168,13 @@ def _build_spin_orbital_quantities(qedhf):
         g_phys_a   (nso, nso, nso, nso)   — antisymmetrised ⟨pq||rs⟩
         g_phys_d   (nso, nso, nso, nso)   — direct ⟨pq|rs⟩ (no exchange)
         nocc, nso                          — sizes
+
+    Dispatches on the reference type: a restricted QED-HF dict (key
+    ``'C'``) or an unrestricted QED-UHF dict (key ``'Ca'``).
     """
+    if 'Ca' in qedhf:
+        return _build_spin_orbital_quantities_uhf(qedhf)
+
     C = qedhf['C']
     F_ao = qedhf['F']
     eri_ao = qedhf['eri_ao']
@@ -233,7 +333,7 @@ def run_qed_rpa(qedhf, direct=True, verbose=True):
         Omega_full = np.sort(real_vals)[-dim:]
 
     E_c = 0.5 * (np.sum(Omega_full) - np.sum(Omega_bar))
-    E_qedhf = qedhf['E_qed_hf']
+    E_qedhf = qedhf.get('E_qed_hf', qedhf.get('E_qed_uhf'))
 
     if verbose:
         flavour = 'QED-dRPA' if direct else 'QED-RPA'
@@ -260,17 +360,23 @@ def run_qed_rpa(qedhf, direct=True, verbose=True):
 
 if __name__ == '__main__':
     # Water / cc-pVDZ, geometry from Table I of arXiv:2602.09968:
-    # R(O-H) = 1 Å, ∠HOH = 104.5°, C₂ axis along z.
+    # R(O-H) = 1 Å, ∠HOH = 104.5°, C₂ axis along z. The molecule is
+    # re-centred at its nuclear centre of mass (the Psi4 default
+    # orientation of the reference) — required to reproduce the
+    # published QED-dRPA values to all digits, since dRPA is not
+    # origin-invariant (see module docstring).
+    import numpy as _np
     half_angle = math.radians(104.5 / 2.0)
     rOH = 1.0
     hx = rOH * math.sin(half_angle)
     hz = -rOH * math.cos(half_angle)
+    coords = _np.array([[0.0, 0.0, 0.0], [+hx, 0.0, hz], [-hx, 0.0, hz]])
+    masses = _np.array([15.99491461957, 1.00782503224, 1.00782503224])
+    coords -= (masses @ coords) / masses.sum()
     mol = gto.M(
-        atom=[
-            ['O', (0.0, 0.0, 0.0)],
-            ['H', (+hx, 0.0, hz)],
-            ['H', (-hx, 0.0, hz)],
-        ],
+        atom=[['O', tuple(coords[0])],
+              ['H', tuple(coords[1])],
+              ['H', tuple(coords[2])]],
         basis='cc-pVDZ',
         unit='Angstrom',
         symmetry=False,
@@ -286,7 +392,7 @@ if __name__ == '__main__':
     print(f"omega  = {omega:.6f} Ha")
     print(f"lambda = {lambda_cav}")
 
-    qedhf = run_qed_hf(mol, omega, lambda_cav, verbose=False)
+    qedhf = run_qed_hf(mol, omega, lambda_cav, verbose=False, tol=1e-12)
     print(f"\nE_QED_HF = {qedhf['E_qed_hf']:.15f}")
     print(f"E_RHF    = {qedhf['E_rhf']:.15f}  (pyscf, no cavity)")
 

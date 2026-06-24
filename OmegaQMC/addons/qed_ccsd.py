@@ -25,6 +25,13 @@ The module exposes:
     - QED-CCSD-12 / White     (do_t1_01, do_t2_11, do_t2_02, do_t2_12)
     - QED-CCSD-22 / full      (all do_* flags True)
 
+Because the residual equations are written in spin orbitals, they are
+agnostic to the reference: ``run_qed_ccsd`` accepts either a restricted
+QED-HF dict (:mod:`OmegaQMC.addons.qed_hf`) or a spin-unrestricted
+QED-UHF dict (:mod:`OmegaQMC.addons.qed_uhf`, for open-shell systems)
+and builds the spin-orbital tensors accordingly — only the integral
+build differs.
+
 Running the module directly reproduces the glycolaldehyde / STO-3G
 demo from the reference.
 """
@@ -1175,13 +1182,166 @@ def _block_diag_spin(M_sf):
     return _np.kron(_np.asarray(M_sf), _np.eye(2))
 
 
+def _dse_ao(qedhf, lambda_x, lambda_y, lambda_z):
+    """DSE-dressed two-electron AO tensor g_ao = eri_ao + Σ_X λ_X² μ_X⊗μ_X."""
+    mu_x_ao = qedhf['mu_x_ao']
+    mu_y_ao = qedhf['mu_y_ao']
+    mu_z_ao = qedhf['mu_z_ao']
+    dse_ao = (lambda_x * lambda_x * _np.einsum('pq,rs->pqrs',
+                                               mu_x_ao, mu_x_ao, optimize=True)
+              + lambda_y * lambda_y * _np.einsum('pq,rs->pqrs',
+                                                 mu_y_ao, mu_y_ao, optimize=True)
+              + lambda_z * lambda_z * _np.einsum('pq,rs->pqrs',
+                                                 mu_z_ao, mu_z_ao, optimize=True))
+    return qedhf['eri_ao'] + dse_ao
+
+
+def _build_rhf_so(qedhf):
+    """Spin-orbital QED-CCSD tensors from a restricted QED-HF reference.
+
+    This is the original closed-shell build: a single MO coefficient matrix
+    ``C``, ``nocc = 2·nocc_spatial`` and the interleaved (even=α/odd=β)
+    spin ordering produced by ``_sf_to_so`` / ``_block_diag_spin``.
+    """
+    omega = qedhf['omega']
+    lambda_x, lambda_y, lambda_z = qedhf['lambda_cav']
+    C = qedhf['C']
+    F_ao = qedhf['F']
+    H_core = qedhf['H_core']
+    oei = qedhf['oei']
+    mu_x_ao = qedhf['mu_x_ao']
+    mu_y_ao = qedhf['mu_y_ao']
+    mu_z_ao = qedhf['mu_z_ao']
+    nocc = 2 * qedhf['nocc_spatial']     # closed shell → 2×nα occupied spin orbs
+    nso = 2 * qedhf['nmo_spatial']
+
+    g_ao = _dse_ao(qedhf, lambda_x, lambda_y, lambda_z)
+    h_ao = H_core + oei
+    _, g_mo_sf = _ao_to_mo_transform_full(h_ao, g_ao, C)
+    g_so_chem = _sf_to_so(g_mo_sf)
+    g_so = g_so_chem.transpose(0, 2, 1, 3)
+
+    cf_x = lambda_x * math.sqrt(omega / 2.0)
+    cf_y = lambda_y * math.sqrt(omega / 2.0)
+    cf_z = lambda_z * math.sqrt(omega / 2.0)
+    dip_x_mo = C.T @ mu_x_ao @ C
+    dip_y_mo = C.T @ mu_y_ao @ C
+    dip_z_mo = C.T @ mu_z_ao @ C
+    dip_sf = cf_x * dip_x_mo + cf_y * dip_y_mo + cf_z * dip_z_mo
+    f_sf = C.T @ F_ao @ C
+    f_mo_np = _block_diag_spin(f_sf)
+    dip_np = _block_diag_spin(dip_sf)
+
+    return (np.asarray(f_mo_np), np.asarray(g_so), np.asarray(dip_np),
+            nocc, nso)
+
+
+def _build_uhf_so(qedhf):
+    """Spin-orbital QED-CCSD tensors from a spin-unrestricted QED-UHF
+    reference.
+
+    The α and β orbitals differ, so the antisymmetrised spin-orbital ERI is
+    assembled from the four spatial chemist blocks (αα/αβ/ββ/βα). The
+    Fock and dipole are spin-block-diagonal (α-block from ``Ca``/``Fa``,
+    β-block from ``Cb``/``Fb``). Spin orbitals are ordered occupied-first,
+    ``[α-occ, β-occ, α-vir, β-vir]``, which is exactly what the
+    reference-agnostic residual equations' ``[:nocc]`` / ``[nocc:]``
+    slicing expects. Reduces to :func:`_build_rhf_so` (up to a spin-orbital
+    relabelling, which leaves the CCSD energy invariant) when Ca = Cb.
+    """
+    omega = qedhf['omega']
+    lambda_x, lambda_y, lambda_z = qedhf['lambda_cav']
+    Ca = _np.asarray(qedhf['Ca'])
+    Cb = _np.asarray(qedhf['Cb'])
+    Fa = _np.asarray(qedhf['Fa'])
+    Fb = _np.asarray(qedhf['Fb'])
+    mu_x_ao = qedhf['mu_x_ao']
+    mu_y_ao = qedhf['mu_y_ao']
+    mu_z_ao = qedhf['mu_z_ao']
+    nocc_a = qedhf['nocc_a']
+    nocc_b = qedhf['nocc_b']
+    nmo = qedhf['nmo_spatial']
+
+    nocc = nocc_a + nocc_b
+    nso = 2 * nmo
+
+    # Four spatial chemist MO blocks of the DSE-dressed 2e tensor.
+    g_ao = _dse_ao(qedhf, lambda_x, lambda_y, lambda_z)
+
+    def _trans(Cp, Cq, Cr, Cs):
+        return _np.einsum('pi,qj,rk,sl,pqrs->ijkl',
+                          Cp, Cq, Cr, Cs, g_ao, optimize=True)
+
+    # Gstack[s1, s2] = chemist (i j | k l) with electron-1 spin s1, e-2 s2.
+    Gstack = _np.zeros((2, 2, nmo, nmo, nmo, nmo))
+    Gstack[0, 0] = _trans(Ca, Ca, Ca, Ca)
+    Gstack[1, 1] = _trans(Cb, Cb, Cb, Cb)
+    Gstack[0, 1] = _trans(Ca, Ca, Cb, Cb)   # (αα|ββ)
+    Gstack[1, 0] = _trans(Cb, Cb, Ca, Ca)   # (ββ|αα)
+
+    # Occupied-first spin-orbital → (spin, spatial) maps.
+    order = ([(0, p) for p in range(nocc_a)]
+             + [(1, p) for p in range(nocc_b)]
+             + [(0, p) for p in range(nocc_a, nmo)]
+             + [(1, p) for p in range(nocc_b, nmo)])
+    spins = _np.array([s for s, _ in order], dtype=int)
+    spat = _np.array([p for _, p in order], dtype=int)
+
+    idx = _np.arange(nso)
+    P = idx[:, None, None, None]
+    Q = idx[None, :, None, None]
+    R = idx[None, None, :, None]
+    S = idx[None, None, None, :]
+    sP, sQ, sR, sS = spins[P], spins[Q], spins[R], spins[S]
+    pP, pQ, pR, pS = spat[P], spat[Q], spat[R], spat[S]
+
+    # Antisymmetrised chemist tensor: direct (P Q | R S) − exchange (P S | R Q),
+    # with the spatial block selected by (electron-1 spin, electron-2 spin).
+    g1 = Gstack[sP, sR, pP, pQ, pR, pS] * (sP == sQ) * (sR == sS)
+    g2 = Gstack[sP, sR, pP, pS, pR, pQ] * (sP == sS) * (sR == sQ)
+    g_so = (g1 - g2).transpose(0, 2, 1, 3)   # chemist → physicist
+
+    # Spin-block-diagonal Fock and dipole.
+    fa = Ca.T @ Fa @ Ca
+    fb = Cb.T @ Fb @ Cb
+    cf_x = lambda_x * math.sqrt(omega / 2.0)
+    cf_y = lambda_y * math.sqrt(omega / 2.0)
+    cf_z = lambda_z * math.sqrt(omega / 2.0)
+    dipa = (cf_x * (Ca.T @ mu_x_ao @ Ca) + cf_y * (Ca.T @ mu_y_ao @ Ca)
+            + cf_z * (Ca.T @ mu_z_ao @ Ca))
+    dipb = (cf_x * (Cb.T @ mu_x_ao @ Cb) + cf_y * (Cb.T @ mu_y_ao @ Cb)
+            + cf_z * (Cb.T @ mu_z_ao @ Cb))
+    Fstack = _np.stack([fa, fb])
+    Dstack = _np.stack([dipa, dipb])
+
+    P2 = idx[:, None]
+    Q2 = idx[None, :]
+    same = (spins[P2] == spins[Q2])
+    f_mo = Fstack[spins[P2], spat[P2], spat[Q2]] * same
+    dip = Dstack[spins[P2], spat[P2], spat[Q2]] * same
+
+    return np.asarray(f_mo), np.asarray(g_so), np.asarray(dip), nocc, nso
+
+
+def _build_ccsd_so(qedhf):
+    """Build the spin-orbital QED-CCSD tensors, dispatching on the
+    reference type: a restricted QED-HF dict (key ``'C'``) or an
+    unrestricted QED-UHF dict (key ``'Ca'``). Returns
+    ``(f_mo, g_mo, dip, nocc, nso)``.
+    """
+    if 'Ca' in qedhf:
+        return _build_uhf_so(qedhf)
+    return _build_rhf_so(qedhf)
+
+
 # ---------------------------------------------------------------------------
 # QED-CCSD driver (the QED-HF reference comes from OmegaQMC.qed_hf.run_qed_hf).
 # ---------------------------------------------------------------------------
 
 def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
                  do_t2_02=False, do_t2_12=False, do_t2_22=False,
-                 max_iter=50, tol=1e-8, max_diis=20, verbose=True):
+                 max_iter=50, tol=1e-8, tol_amp=1e-7, max_diis=20,
+                 verbose=True):
     """DIIS-accelerated QED-CCSD on a QED-HF reference.
 
     The set of active photonic amplitudes selects the flavour:
@@ -1191,33 +1351,39 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
     * do_t1_01, do_t2_11, do_t2_02, do_t2_12 → QED-CCSD-12 / White
     * all flags True → QED-CCSD-22 (full)
 
+    Convergence requires *both* the energy change between iterations to
+    drop below ``tol`` and the amplitude-step norm (the 2-norm of the
+    change of all active amplitudes, the same vector DIIS extrapolates
+    on) to drop below ``tol_amp``. The energy-change criterion alone is
+    unreliable: DIIS trajectories can stall on plateaus where successive
+    energies agree to ~1e-10 while the energy is still ~1e-7 from the
+    fixed point.
+
     Args:
         qedhf: dict returned by :func:`run_qed_hf`.
         do_*: enable individual photonic excitation classes.
         max_iter: max CCSD iterations.
         tol: energy convergence threshold.
+        tol_amp: amplitude-step-norm convergence threshold.
         max_diis: DIIS history depth.
         verbose: print per-iteration progress.
 
     Returns:
         dict with the correlation and total QED-CCSD energy, the
-        converged amplitudes, and the QED-HF reference energy.
+        converged amplitudes, the QED-HF reference energy, and a
+        ``'converged'`` flag.
     """
     omega = qedhf['omega']
     lambda_x, lambda_y, lambda_z = qedhf['lambda_cav']
-    C = qedhf['C']
-    F_ao = qedhf['F']
-    H_core = qedhf['H_core']
-    oei = qedhf['oei']
-    eri_ao = qedhf['eri_ao']
-    mu_x_ao = qedhf['mu_x_ao']
-    mu_y_ao = qedhf['mu_y_ao']
-    mu_z_ao = qedhf['mu_z_ao']
-    nocc_spatial = qedhf['nocc_spatial']
-    nmo = qedhf['nmo_spatial']
+    # Reference energies — keys differ between QED-HF (restricted) and
+    # QED-UHF (unrestricted) reference dicts.
+    E_qed_hf_ref = qedhf.get('E_qed_hf', qedhf.get('E_qed_uhf'))
+    E_hf_ref = qedhf.get('E_rhf', qedhf.get('E_uhf'))
 
-    nocc = 2 * nocc_spatial          # closed shell → 2×nα occupied spin orbitals
-    nso = 2 * nmo
+    # Spin-orbital Fock, antisymmetrised ERI and dipole. The build differs
+    # for restricted (QED-HF) vs unrestricted (QED-UHF) references; the
+    # residual equations below are spin-orbital and reference-agnostic.
+    f_mo, g_mo, dip, nocc, nso = _build_ccsd_so(qedhf)
     nvir = nso - nocc
 
     if verbose:
@@ -1234,46 +1400,10 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
         elif (do_t1_01 and do_t2_11 and do_t2_21
               and do_t2_02 and do_t2_12 and do_t2_22):
             flavour = "QED-CCSD-Full (QED-CCSD-22)"
-        print(f"\nQED-CCSD: flavour = {flavour}")
+        ref_kind = "QED-UHF" if 'Ca' in qedhf else "QED-HF"
+        print(f"\nQED-CCSD: flavour = {flavour}  (reference = {ref_kind})")
         print(f"  nocc (spin) = {nocc}, nvir (spin) = {nvir},"
               f"  ω = {omega:.6f} Ha,  λ = ({lambda_x},{lambda_y},{lambda_z})")
-
-    # --- DSE-dressed two-electron AO tensor and core Hamiltonian ---
-    dse_ao = (lambda_x * lambda_x * _np.einsum('pq,rs->pqrs',
-                                               mu_x_ao, mu_x_ao, optimize=True)
-              + lambda_y * lambda_y * _np.einsum('pq,rs->pqrs',
-                                                 mu_y_ao, mu_y_ao, optimize=True)
-              + lambda_z * lambda_z * _np.einsum('pq,rs->pqrs',
-                                                 mu_z_ao, mu_z_ao, optimize=True))
-    g_ao = eri_ao + dse_ao
-    h_ao = H_core + oei
-
-    # AO → MO (spatial)
-    _, g_mo_sf = _ao_to_mo_transform_full(h_ao, g_ao, C)
-
-    # Spatial → antisymmetrised spin-orbital, chemist → physicist
-    g_so_chem = _sf_to_so(g_mo_sf)
-    g_so = g_so_chem.transpose(0, 2, 1, 3)
-    # Promote to JAX
-    g_mo = np.asarray(g_so)
-
-    # White's photon-electron coupling factors: g_pq^X = λ_X √(ω/2) <p|x|q>
-    cf_x = lambda_x * math.sqrt(omega / 2.0)
-    cf_y = lambda_y * math.sqrt(omega / 2.0)
-    cf_z = lambda_z * math.sqrt(omega / 2.0)
-
-    dip_x_mo = C.T @ mu_x_ao @ C
-    dip_y_mo = C.T @ mu_y_ao @ C
-    dip_z_mo = C.T @ mu_z_ao @ C
-    dip_sf = cf_x * dip_x_mo + cf_y * dip_y_mo + cf_z * dip_z_mo
-
-    f_sf = C.T @ F_ao @ C
-    f_mo_np = _block_diag_spin(f_sf)
-    dip_np = _block_diag_spin(dip_sf)
-
-    # Promote to JAX for the residual loop
-    f_mo = np.asarray(f_mo_np)
-    dip = np.asarray(dip_np)
 
     # --- Initial amplitudes ---
     G = 0.0  # the G-flag in the Wick-derived equations is always 0 for now
@@ -1298,16 +1428,19 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
     E_CCSD_old = 0.0
     E_CCSD_new = 0.0
     time_total = 0.0
+    converged = False
 
     if verbose:
         print('\nStarting QED-CCSD iteration:')
-        print('Iter   E(QED-CCSD corr)        |dE|         time (s)')
+        print('Iter   E(QED-CCSD corr)        |dE|         |dT|        time (s)')
 
     for ccsd_iter in range(1, max_iter + 1):
         t_start = time.time()
 
         old_t1_10 = _np.asarray(t1_10)
         old_t2_20 = _np.asarray(t2_20)
+        old_t1_01 = float(t1_01)
+        old_t2_02 = float(t2_02)
         old_t2_11 = _np.asarray(t2_11) if do_t2_11 else None
         old_t2_21 = _np.asarray(t2_21) if do_t2_21 else None
         old_t2_12 = _np.asarray(t2_12) if do_t2_12 else None
@@ -1366,14 +1499,35 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
 
         E_CCSD_new = float(E_CCSD_new)
 
+        # Amplitude-step (Jacobi residual) vector. The array pieces double
+        # as the DIIS error vector below; the scalar photonic amplitudes
+        # (t1_01, t2_02) are not DIIS-extrapolated but do count towards
+        # the convergence norm.
+        err_pieces = [(_np.asarray(t1_10) - old_t1_10).ravel(),
+                      (_np.asarray(t2_20) - old_t2_20).ravel()]
+        if do_t2_11:
+            err_pieces.append((_np.asarray(t2_11) - old_t2_11).ravel())
+        if do_t2_21:
+            err_pieces.append((_np.asarray(t2_21) - old_t2_21).ravel())
+        if do_t2_12:
+            err_pieces.append((_np.asarray(t2_12) - old_t2_12).ravel())
+        if do_t2_22:
+            err_pieces.append((_np.asarray(t2_22) - old_t2_22).ravel())
+        err_vec = _np.concatenate(err_pieces)
+        amp_norm = float(_np.sqrt(
+            _np.dot(err_vec, err_vec)
+            + (float(t1_01) - old_t1_01) ** 2
+            + (float(t2_02) - old_t2_02) ** 2))
+
         t_total = time.time() - t_start
         time_total += t_total
         if verbose:
-            print('%3d:  %20.12f  %1.5E   %.3f'
+            print('%3d:  %20.12f  %1.5E  %1.5E   %.3f'
                   % (ccsd_iter, E_CCSD_new,
-                     abs(E_CCSD_new - E_CCSD_old), t_total))
+                     abs(E_CCSD_new - E_CCSD_old), amp_norm, t_total))
 
-        if abs(E_CCSD_new - E_CCSD_old) < tol:
+        if abs(E_CCSD_new - E_CCSD_old) < tol and amp_norm < tol_amp:
+            converged = True
             break
 
         # --- DIIS ---
@@ -1387,18 +1541,7 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
             diis_vals_t2_12.append(_np.asarray(t2_12))
         if do_t2_22:
             diis_vals_t2_22.append(_np.asarray(t2_22))
-
-        err_pieces = [(_np.asarray(t1_10) - old_t1_10).ravel(),
-                      (_np.asarray(t2_20) - old_t2_20).ravel()]
-        if do_t2_11:
-            err_pieces.append((_np.asarray(t2_11) - old_t2_11).ravel())
-        if do_t2_21:
-            err_pieces.append((_np.asarray(t2_21) - old_t2_21).ravel())
-        if do_t2_12:
-            err_pieces.append((_np.asarray(t2_12) - old_t2_12).ravel())
-        if do_t2_22:
-            err_pieces.append((_np.asarray(t2_22) - old_t2_22).ravel())
-        diis_errors.append(_np.concatenate(err_pieces))
+        diis_errors.append(err_vec)
 
         E_CCSD_old = E_CCSD_new
 
@@ -1459,10 +1602,11 @@ def run_qed_ccsd(qedhf, do_t1_01=True, do_t2_11=True, do_t2_21=True,
                   % max_iter)
 
     return {
+        'converged': bool(converged),
         'E_qed_ccsd_corr': float(E_CCSD_new),
-        'E_qed_ccsd_total': float(E_CCSD_new) + qedhf['E_qed_hf'],
-        'E_qed_hf': qedhf['E_qed_hf'],
-        'E_rhf': qedhf['E_rhf'],
+        'E_qed_ccsd_total': float(E_CCSD_new) + E_qed_hf_ref,
+        'E_qed_hf': E_qed_hf_ref,
+        'E_rhf': E_hf_ref,
         't1_10': t1_10,
         't1_01': t1_01,
         't2_20': t2_20,

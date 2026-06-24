@@ -344,15 +344,12 @@ class _VMCOptDriverNN_IRAdam:
         verbose=1,
         prefix='nnopt',
     ):
-        """Run iterative VMC optimization for NN
-        wavefunctions.
+        """Run iterative VMC optimization for NN wavefunctions.
 
         Uses an outer loop that alternates between
-        (1) sampling fresh walker snapshots from the
-        current |ψ(params)|² and (2) running
-        ``num_epochs`` Adam passes over those
-        snapshots.  This avoids the stale-sample
-        problem of a single sample-then-optimize
+        (1) sampling fresh walker snapshots from the current `|ψ(params)|²`
+        and (2) running ``num_epochs`` Adam passes over those snapshots.
+        This avoids the stale-sample problem of a single sample-then-optimize
         cycle.
 
         After each iteration the current parameters

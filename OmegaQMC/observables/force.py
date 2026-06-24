@@ -28,6 +28,7 @@ from ..utils import (
     batched_binning_analysis_grds,
     blue_combine_states,
     compute_torque_with_error,
+    equilibration_length,
 )
 
 PSI2_RATIO_THRESHOLD = 1e-4
@@ -683,11 +684,9 @@ def save_nn_gradients(
         JIT-compiled ``(walkers) -> (grd_ee_en,
         grd_ke, grd_logpsi)`` with each output shape
         ``(batch, natom, 3)``.
-    log_psi_batch, local_energy_batch,
-    apply_single_frag_symmop : callable, optional
-        Required only when *single_frag_combos* is
-        non-empty (combo screening + secondary
-        evaluation).
+    log_psi_batch, local_energy_batch, apply_single_frag_symmop :
+        callable, optional Required only when *single_frag_combos* is
+        non-empty (combo screening + secondary evaluation).
 
     Returns
     -------
@@ -1351,10 +1350,100 @@ def _solve_param_response(
     return dp_dR
 
 
+def _project_force_sum_rules(grd, grd_err, coords, ref):
+    """Project a force/gradient estimate onto the translational and
+    rotational sum-rule subspace via constrained generalized least
+    squares (Lagrange multipliers).
+
+    For an isolated molecule at any geometry the exact forces obey six
+    exact linear constraints,
+
+        sum_i F_i = 0          (translational invariance of E)
+        sum_i r_i x F_i = 0    (rotational invariance of E)
+
+    which SWCT enforces per state but which the fragment-wise PGCS
+    average breaks (different atoms are averaged over different state
+    subsets).  Given the noisy averaged gradient ``grd`` with diagonal
+    covariance built from ``grd_err``, the minimum-chi-squared
+    correction satisfying ``C g = 0`` is the oblique projection
+
+        g_proj = (I - Sigma C^T (C Sigma C^T)^+ C) g ,
+
+    where ``C`` is the 6 x 3N constraint matrix (3 translational rows
+    plus 3 rows of the r_i-cross skew blocks about ``ref``) and
+    ``Sigma`` is ``diag(grd_err**2)``.  The residual is absorbed mostly
+    by the least well-determined components, the result satisfies both
+    sum rules exactly, and the propagated covariance
+    ``(I - P) Sigma (I - P)^T`` does not exceed the input variances.
+    A pseudo-inverse is used so degenerate constraints (e.g. the
+    torque about the axis of a linear molecule, whose constraint row
+    vanishes) are handled gracefully.
+
+    Parameters
+    ----------
+    grd, grd_err : array_like, shape (N, 3)
+        Averaged gradient estimate and its per-component 1-sigma error.
+    coords : array_like, shape (N, 3)
+        Nuclear coordinates.
+    ref : array_like, shape (3,)
+        Reference point for the rotational (torque) constraint.
+
+    Returns
+    -------
+    grd_proj : ndarray, shape (N, 3)
+        Sum-rule-consistent gradient.
+    grd_err_proj : ndarray, shape (N, 3)
+        Propagated 1-sigma error of ``grd_proj``.
+    """
+    grd = np.asarray(grd, dtype=float)
+    grd_err = np.asarray(grd_err, dtype=float)
+    coords = np.asarray(coords, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    n = grd.shape[0]
+    g = grd.reshape(-1)                       # (3N,)
+    sigma2 = (grd_err.reshape(-1)) ** 2        # (3N,)
+
+    # Build the 6 x 3N constraint matrix C.
+    rel = coords - ref                         # (N, 3)
+    C = np.zeros((6, 3 * n))
+    for i in range(n):
+        x, y, z = rel[i]
+        # Translational rows.
+        C[0, 3 * i + 0] = 1.0
+        C[1, 3 * i + 1] = 1.0
+        C[2, 3 * i + 2] = 1.0
+        # Rotational rows: tau = sum_i r_i x F_i.
+        # tau_x = sum (y F_z - z F_y)
+        C[3, 3 * i + 2] += y
+        C[3, 3 * i + 1] += -z
+        # tau_y = sum (z F_x - x F_z)
+        C[4, 3 * i + 0] += z
+        C[4, 3 * i + 2] += -x
+        # tau_z = sum (x F_y - y F_x)
+        C[5, 3 * i + 1] += x
+        C[5, 3 * i + 0] += -y
+
+    sc_t = sigma2[:, None] * C.T               # Sigma C^T, (3N, 6)
+    csct = C @ sc_t                            # C Sigma C^T, (6, 6)
+    csct_pinv = np.linalg.pinv(csct, rcond=1e-10)
+    p = sc_t @ csct_pinv @ C                   # P = Sigma C^T (..)^+ C
+    m = np.eye(3 * n) - p                       # I - P
+
+    g_proj = m @ g
+    cov_proj = (m * sigma2[None, :]) @ m.T      # (I-P) Sigma (I-P)^T
+    var_proj = np.clip(np.diag(cov_proj), 0.0, None)
+
+    grd_proj = g_proj.reshape(n, 3)
+    grd_err_proj = np.sqrt(var_proj).reshape(n, 3)
+    return grd_proj, grd_err_proj
+
+
 def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
-        walker_based_batch_size: int = 10
+        walker_based_batch_size: int = 10,
+        project_states: bool = False,
+        equil_cutoff: int | str = 0,
         ) -> jnp.ndarray:
     """Post-process VMC gradient data to obtain \
 nuclear forces using PGCS.
@@ -1385,6 +1474,32 @@ nuclear forces using PGCS.
         once when summing gradient contributions.
         Reduce this value if GPU memory is tight.
         Default is 10.
+    project_states : bool, optional
+        When ``True``, apply the translational +
+        rotational sum-rule projection
+        (:func:`_project_force_sum_rules`) to *each*
+        per-state force vector before it is printed.
+        SWCT already makes the translational sum exact
+        per state, but the rotational sum rule holds only
+        in expectation, so without projection a state's
+        ``Total torque`` is a noisy estimate of zero; this
+        flag cleans up the per-state torque rows.  It does
+        **not** change the fragment-wise averaged result,
+        which is always projected separately (the
+        per-(atom, component) BLUE recombination re-breaks
+        the sum rules regardless, so the averaged vector is
+        projected on its own).  Default is ``False``.
+    equil_cutoff : int or str, optional
+        Number of leading blocks to discard as
+        equilibration before the time-series analysis;
+        equivalently the block index (in sorted order) at
+        which the analysis starts.  Applied uniformly to
+        the energy mean, parameter-response solve, and the
+        per-state force series.  Pass the string ``"auto"``
+        to detect the cutoff from the reference per-block
+        energy series via
+        :func:`OmegaQMC.utils.equilibration_length`.
+        Default is ``0`` (use all blocks).
 
     Returns
     -------
@@ -1451,19 +1566,57 @@ nuclear forces using PGCS.
             if k.isdigit()
         )
 
-        # Streaming mean over blocks — read only one
-        # block of ``local_energies`` at a time.
-        _sum = 0.0
-        _cnt = 0
+        # Streaming pass over blocks — read only one block
+        # of ``local_energies`` at a time, keeping the
+        # per-block sum/size so the energy mean can be
+        # formed after the equilibration cutoff is applied
+        # (and, for ``"auto"``, the per-block mean series
+        # the cutoff is detected from).
+        block_sums = []
+        block_sizes = []
         for block_cnt in block_nums:
             le_block = f['local_energies'][f'{block_cnt}']
-            _sum += float(
-                np.asarray(le_block[()]).sum(
+            block_sums.append(
+                float(np.asarray(le_block[()]).sum(
                     dtype=np.float64,
-                )
+                ))
             )
-            _cnt += le_block.size
-        enr_mean = _sum / _cnt
+            block_sizes.append(le_block.size)
+
+        # Resolve the equilibration cutoff (auto or int);
+        # the single slice below feeds the energy mean, the
+        # parameter-response solve, and the force series.
+        auto_msg = None
+        if equil_cutoff == "auto":
+            ref_series = [
+                s / n for s, n in zip(block_sums, block_sizes)
+            ]
+            equil_cutoff = equilibration_length(ref_series)
+            auto_msg = (
+                "Auto-detected equilibration at block"
+                f" index {equil_cutoff}"
+            )
+        elif isinstance(equil_cutoff, bool) \
+                or not isinstance(equil_cutoff, int):
+            raise ValueError(
+                "equil_cutoff must be a non-negative int"
+                f" or 'auto', got {equil_cutoff!r}"
+            )
+        elif equil_cutoff < 0:
+            raise ValueError(
+                "equil_cutoff must be non-negative,"
+                f" got {equil_cutoff}"
+            )
+        if equil_cutoff >= len(block_nums):
+            raise ValueError(
+                f"equil_cutoff ({equil_cutoff}) discards"
+                f" all {len(block_nums)} blocks"
+            )
+        block_nums = block_nums[equil_cutoff:]
+        enr_mean = (
+            sum(block_sums[equil_cutoff:])
+            / sum(block_sizes[equil_cutoff:])
+        )
 
         grd_nn = jnp.asarray(f['grd_nn'][()])
 
@@ -1492,6 +1645,9 @@ nuclear forces using PGCS.
         else:
             fout = open(ofname_log, 'w', 1)
 
+        if auto_msg is not None:
+            print(auto_msg, file=fout)
+
         ref_grd_tot = None
         ref_grd_err = None
         all_state_results = {}
@@ -1505,8 +1661,18 @@ nuclear forces using PGCS.
         grd_ee_en_sum = {s: 0.0 for s in states}
         grd_ke_sum = {s: 0.0 for s in states}
         grd_pulay_sum = {s: 0.0 for s in states}
-        grd_tot_list = {s: [] for s in states}
-        grd_err_list = {s: [] for s in states}
+        # Per-block walker-averaged force series, feeding
+        # both the final mean and the BLUE block series.
+        # Each entry is reduced to (num_nuc, 3) per block so
+        # peak RAM stays O(num_nuc) rather than growing as
+        # O(num_blocks * num_walkers).
+        grd_blockmean_list = {s: [] for s in states}
+        # Running sum of per-walker squared standard errors,
+        # already reduced over walkers each block: (num_nuc,
+        # 3).  Paired with the walker count below to form the
+        # combined error sqrt(sum_{b,w} serr^2) / (B * W).
+        grd_err_sq_sum = {s: 0.0 for s in states}
+        grd_err_w_count = {s: 0 for s in states}
 
         for block_cnt in block_nums:
             bcs = f'{block_cnt}'
@@ -1590,19 +1756,17 @@ nuclear forces using PGCS.
                     d_enr, grd_logpsi,
                 )
 
-                grd_nn_sw = jnp.broadcast_to(
-                    grd_nn[jnp.newaxis, jnp.newaxis, :, :],
-                    (num_steps_per_block, num_walkers,
-                     num_nuc, 3),
+                # Sum the gradient contributions directly
+                # instead of ``jnp.stack(...).sum(axis=0)``,
+                # which would materialize a 4x ``(s, w, n, 3)``
+                # tensor only to immediately reduce it away.
+                # ``grd_nn`` broadcasts over the leading
+                # step/walker axes on its own, so the explicit
+                # ``broadcast_to`` is unnecessary too.
+                grd_tot_sw = (
+                    grd_nn[jnp.newaxis, jnp.newaxis, :, :]
+                    + grd_ee_en + grd_ke + grd_pulay
                 )
-                grd_arrays = [
-                    grd_nn_sw,
-                    grd_ee_en, grd_ke,
-                    grd_pulay,
-                ]
-                grd_tot_sw = jnp.stack(
-                    grd_arrays, axis=0,
-                ).sum(axis=0)
 
                 # Parameter-response correction
                 if (
@@ -1642,11 +1806,21 @@ nuclear forces using PGCS.
                         weights=frag_w,
                     )
                 )
-                grd_tot_list[state_label].append(
-                    xbar[None, :, :, :]
+                # Reduce this block immediately: store only
+                # the walker mean (force-series term) and
+                # fold the squared standard error over
+                # walkers into the running accumulator,
+                # instead of retaining the full (W, num_nuc,
+                # 3) arrays for every block.
+                grd_blockmean_list[state_label].append(
+                    xbar.mean(axis=0)
                 )
-                grd_err_list[state_label].append(
-                    serr[None, :, :, :]
+                grd_err_sq_sum[state_label] = (
+                    grd_err_sq_sum[state_label]
+                    + (serr ** 2).sum(axis=0)
+                )
+                grd_err_w_count[state_label] += (
+                    serr.shape[0]
                 )
 
                 grd_ee_en_sum[state_label] = (
@@ -1682,26 +1856,23 @@ nuclear forces using PGCS.
                     grd_pulay_sum[state_label] / vsc
                 )
 
-                grd_tot_bw = jnp.concatenate(
-                    grd_tot_list[state_label], axis=0,
+                # Per-block walker-averaged force series,
+                # (num_blocks, num_nuc, 3); ``grd_tot`` is
+                # its mean over blocks.  Both follow directly
+                # from the per-block reductions accumulated in
+                # the streaming loop above.
+                grd_block_series = jnp.stack(
+                    grd_blockmean_list[state_label], axis=0,
                 )
-                grd_err_bw = jnp.concatenate(
-                    grd_err_list[state_label], axis=0,
-                )
+                grd_tot = grd_block_series.mean(axis=0)
 
-                # mean over blocks, then walkers
-                grd_tot = grd_tot_bw.mean(axis=0).squeeze()
-                grd_tot = grd_tot.mean(axis=0)
-
+                # Combined standard error, identical to the
+                # previous nested-norm reduction:
+                # sqrt(sum_{b,w} serr^2) / (B * W), with
+                # ``grd_err_w_count`` == B * W.
                 grd_err = (
-                    jnp.linalg.norm(
-                        grd_err_bw, axis=0,
-                    ).squeeze()
-                    / grd_err_bw.shape[0]
-                )
-                grd_err = (
-                    jnp.linalg.norm(grd_err, axis=0)
-                    / grd_err.shape[0]
+                    jnp.sqrt(grd_err_sq_sum[state_label])
+                    / grd_err_w_count[state_label]
                 )
 
                 torque, dtau = (
@@ -1715,7 +1886,7 @@ nuclear forces using PGCS.
                 grd_pulay = jnp.mean(grd_pulay, axis=0)
 
                 grd_block_series = np.asarray(
-                    grd_tot_bw.mean(axis=1)
+                    grd_block_series
                 )
             else:
                 grd_ee_en = jnp.zeros_like(grd_nn)
@@ -1735,6 +1906,42 @@ nuclear forces using PGCS.
                 grd_tot, grd_err, grd_block_series,
             )
 
+            # Per-state printing optionally uses sum-rule-
+            # projected copies (``project_states``).  The
+            # values stored in ``all_state_results`` above
+            # and the returned reference force stay
+            # unprojected, so neither the fragment-wise
+            # average nor the return value is affected; this
+            # only cleans up the printed per-state rows
+            # (chiefly the rotational ``Total torque``, which
+            # SWCT does not enforce per state).
+            if project_states and grd_block_series is not None:
+                coords_state = np.asarray(myMol.atom_coords())
+                masses_state = np.asarray(
+                    myMol.atom_mass_list()
+                )
+                com_state = np.average(
+                    coords_state, axis=0, weights=masses_state,
+                )
+                grd_tot_p, grd_err_p = (
+                    _project_force_sum_rules(
+                        grd_tot, grd_err,
+                        coords_state, com_state,
+                    )
+                )
+                grd_tot_print = jnp.asarray(grd_tot_p)
+                grd_err_print = jnp.asarray(grd_err_p)
+                torque_print, dtau_print = (
+                    compute_torque_with_error(
+                        myMol, grd_tot_print, grd_err_print,
+                    )
+                )
+            else:
+                grd_tot_print = grd_tot
+                grd_err_print = grd_err
+                torque_print = torque
+                dtau_print = dtau
+
             with jnp.printoptions(
                 precision=12, suppress=True,
             ):
@@ -1752,7 +1959,7 @@ nuclear forces using PGCS.
                 print('KE gradients\n', grd_ke, file=fout)
                 print('Pulay gradients\n', grd_pulay,
                       file=fout)
-                print('Total gradients\n', grd_tot,
+                print('Total gradients\n', grd_tot_print,
                       file=fout)
 
                 fout.write("Total forces (-gradients)\n")
@@ -1764,12 +1971,60 @@ nuclear forces using PGCS.
                         "{:>16.6g} ± {:>12.6g}\n"
                         .format(
                             myMol.atom_symbol(i),
-                            -grd_tot[i, 0],
-                            grd_err[i, 0],
-                            -grd_tot[i, 1],
-                            grd_err[i, 1],
-                            -grd_tot[i, 2],
-                            grd_err[i, 2],
+                            -grd_tot_print[i, 0],
+                            grd_err_print[i, 0],
+                            -grd_tot_print[i, 1],
+                            grd_err_print[i, 1],
+                            -grd_tot_print[i, 2],
+                            grd_err_print[i, 2],
+                        )
+                    )
+                F_sys = -np.asarray(grd_tot_print).sum(axis=0)
+                dF_sys = np.sqrt(
+                    (np.asarray(grd_err_print) ** 2).sum(axis=0)
+                )
+                fout.write("Total force on system\n")
+                fout.write(
+                    "    {:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}\n"
+                    .format(
+                        F_sys[0], dF_sys[0],
+                        F_sys[1], dF_sys[1],
+                        F_sys[2], dF_sys[2],
+                    )
+                )
+                coords_np = np.asarray(myMol.atom_coords())
+                centroid = coords_np.mean(axis=0)
+                F_np = -np.asarray(grd_tot_print)
+                dF_np = np.asarray(grd_err_print)
+                fout.write(
+                    "Torque per atom (about centroid)\n"
+                )
+                for i in range(num_nuc):
+                    x, y, z = coords_np[i] - centroid
+                    Fx, Fy, Fz = F_np[i]
+                    dFx, dFy, dFz = dF_np[i]
+                    tau_i = np.array([
+                        y * Fz - z * Fy,
+                        z * Fx - x * Fz,
+                        x * Fy - y * Fx,
+                    ])
+                    dtau_i = np.sqrt(np.array([
+                        (y * dFz) ** 2 + (z * dFy) ** 2,
+                        (z * dFx) ** 2 + (x * dFz) ** 2,
+                        (x * dFy) ** 2 + (y * dFx) ** 2,
+                    ]))
+                    fout.write(
+                        "{:4s}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}\n"
+                        .format(
+                            myMol.atom_symbol(i),
+                            tau_i[0], dtau_i[0],
+                            tau_i[1], dtau_i[1],
+                            tau_i[2], dtau_i[2],
                         )
                     )
                 fout.write("Total torque\n")
@@ -1778,9 +2033,9 @@ nuclear forces using PGCS.
                     "{:>16.6g} ± {:>12.6g}"
                     "{:>16.6g} ± {:>12.6g}\n"
                     .format(
-                        torque[0], dtau[0],
-                        torque[1], dtau[1],
-                        torque[2], dtau[2],
+                        torque_print[0], dtau_print[0],
+                        torque_print[1], dtau_print[1],
+                        torque_print[2], dtau_print[2],
                     )
                 )
                 fout.write("\n")
@@ -1853,6 +2108,24 @@ nuclear forces using PGCS.
                     avg_grd_tot_np[i, k] = mean
                     avg_grd_err_np[i, k] = err
 
+            # Enforce the exact translational + rotational sum
+            # rules (sum F = 0, sum r x F = 0) that the
+            # fragment-wise averaging breaks, via constrained GLS
+            # projection weighted by the per-component errors. The
+            # rotational constraint is taken about the center of
+            # mass, matching ``compute_torque_with_error`` below, so
+            # the reported total force and total torque are both
+            # exactly zero and consistent with the per-atom values.
+            coords_for_proj = np.asarray(myMol.atom_coords())
+            masses_for_proj = np.asarray(myMol.atom_mass_list())
+            com_for_proj = np.average(
+                coords_for_proj, axis=0, weights=masses_for_proj,
+            )
+            avg_grd_tot_np, avg_grd_err_np = _project_force_sum_rules(
+                avg_grd_tot_np, avg_grd_err_np,
+                coords_for_proj, com_for_proj,
+            )
+
             avg_grd_tot = jnp.asarray(avg_grd_tot_np)
             avg_grd_err = jnp.asarray(avg_grd_err_np)
 
@@ -1889,6 +2162,57 @@ nuclear forces using PGCS.
                             -avg_grd_tot[i, 1], avg_grd_err[i, 1],
                             -avg_grd_tot[i, 2], avg_grd_err[i, 2],
                             fid, n_states,
+                        )
+                    )
+                F_sys = -np.asarray(avg_grd_tot).sum(axis=0)
+                dF_sys = np.sqrt(
+                    (np.asarray(avg_grd_err) ** 2).sum(axis=0)
+                )
+                fout.write(
+                    "Total force on system (averaged)\n"
+                )
+                fout.write(
+                    "    {:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}"
+                    "{:>16.6g} ± {:>12.6g}\n"
+                    .format(
+                        F_sys[0], dF_sys[0],
+                        F_sys[1], dF_sys[1],
+                        F_sys[2], dF_sys[2],
+                    )
+                )
+                coords_np = np.asarray(myMol.atom_coords())
+                centroid = coords_np.mean(axis=0)
+                F_np = -np.asarray(avg_grd_tot)
+                dF_np = np.asarray(avg_grd_err)
+                fout.write(
+                    "Torque per atom (about centroid,"
+                    " averaged)\n"
+                )
+                for i in range(num_nuc):
+                    x, y, z = coords_np[i] - centroid
+                    Fx, Fy, Fz = F_np[i]
+                    dFx, dFy, dFz = dF_np[i]
+                    tau_i = np.array([
+                        y * Fz - z * Fy,
+                        z * Fx - x * Fz,
+                        x * Fy - y * Fx,
+                    ])
+                    dtau_i = np.sqrt(np.array([
+                        (y * dFz) ** 2 + (z * dFy) ** 2,
+                        (z * dFx) ** 2 + (x * dFz) ** 2,
+                        (x * dFy) ** 2 + (y * dFx) ** 2,
+                    ]))
+                    fout.write(
+                        "{:4s}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}"
+                        "{:>16.6g} ± {:>12.6g}\n"
+                        .format(
+                            myMol.atom_symbol(i),
+                            tau_i[0], dtau_i[0],
+                            tau_i[1], dtau_i[1],
+                            tau_i[2], dtau_i[2],
                         )
                     )
                 fout.write(
