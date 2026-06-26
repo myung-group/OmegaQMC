@@ -275,6 +275,7 @@ class _VMCOptDriverGTO_IRSGD:
                 carry_out, acc_ratios \
                     = jax.lax.scan(equilibration_step, carry_in,
                                    jnp.arange(num_spb))
+                rng_key, walkers, step_size, _ = carry_out
 
             return carry_out, acc_ratios
 

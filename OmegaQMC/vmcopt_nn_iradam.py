@@ -237,11 +237,11 @@ class _VMCOptDriverNN_IRAdam:
                 ns = s * (0.6 + ar)
                 return (rk0, nw, ns, p), ar
 
+            carry = (
+                rng_key, walkers,
+                step_size, params,
+            )
             for _ in range(num_be):
-                carry = (
-                    rng_key, walkers,
-                    step_size, params,
-                )
                 carry, acc = jax.lax.scan(
                     eq_step, carry,
                     jnp.arange(num_spb),

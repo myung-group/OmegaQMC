@@ -303,11 +303,11 @@ class _VMCOptDriverNN_SR:
                 ns = _adapt_step_size(s, ar)
                 return (rk0, nw, ns, p), ar
 
+            carry = (
+                rng_key, walkers,
+                step_size, params,
+            )
             for _ in range(num_be):
-                carry = (
-                    rng_key, walkers,
-                    step_size, params,
-                )
                 carry, acc = jax.lax.scan(
                     eq_step, carry,
                     jnp.arange(num_spb),
