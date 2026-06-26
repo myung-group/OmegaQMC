@@ -30,6 +30,11 @@ class WalkerDumper:
     --------------
     - ``/walkers`` shape ``(num_blocks * num_walkers, nelec, 3)``, ``f4``
     - ``/log_psi`` shape ``(num_blocks * num_walkers,)``, ``f8``
+    - ``/jastrow`` shape ``(num_blocks * num_walkers,)``, ``f8`` -- optional;
+      the additive log-Jastrow ``J = jastrow_term`` per walker, streamed when
+      ``write_block`` is given a ``jastrow`` argument. Consumed by the TC
+      two-sided decode (:mod:`OmegaQMC.cs.transcorrelated`) so ``J`` need not
+      be re-evaluated from the trained ansatz.
     - root attrs: ``num_blocks``, ``num_walkers``, ``nelec``,
       ``mc_timestep``, ``num_steps_decorr`` (when supplied),
       ``schema_version``.
@@ -38,7 +43,7 @@ class WalkerDumper:
     ``num_blocks`` times; further calls raise.
     """
 
-    SCHEMA_VERSION = "1.0.0"
+    SCHEMA_VERSION = "1.1.0"
 
     def __init__(
         self,
@@ -68,6 +73,9 @@ class WalkerDumper:
             shape=(self.num_blocks * self.num_walkers,),
             dtype="f8",
         )
+        # Optional Jastrow dataset; created lazily on the first block that
+        # supplies a ``jastrow`` argument so legacy callers stay byte-clean.
+        self._ds_jastrow = None
         self._f.attrs["num_blocks"] = self.num_blocks
         self._f.attrs["num_walkers"] = self.num_walkers
         self._f.attrs["nelec"] = self.nelec
@@ -75,8 +83,14 @@ class WalkerDumper:
         self._f.attrs["num_steps_decorr"] = int(num_steps_decorr)
         self._f.attrs["schema_version"] = self.SCHEMA_VERSION
 
-    def write_block(self, walkers, log_psi) -> None:
-        """Append one block. ``walkers`` shape ``(num_walkers, nelec, 3)``."""
+    def write_block(self, walkers, log_psi, jastrow=None) -> None:
+        """Append one block. ``walkers`` shape ``(num_walkers, nelec, 3)``.
+
+        ``jastrow`` (optional) is the additive log-Jastrow ``J`` per walker,
+        shape ``(num_walkers,)``. If supplied on the first block, a
+        ``/jastrow`` dataset is created and must then be supplied on every
+        subsequent block; mixing is rejected to keep the dataset dense.
+        """
         if self._next_block >= self.num_blocks:
             raise RuntimeError(
                 f"WalkerDumper already wrote {self.num_blocks} blocks"
@@ -92,10 +106,30 @@ class WalkerDumper:
             raise ValueError(
                 f"log_psi shape {lp.shape} expected ({self.num_walkers},)"
             )
+        if jastrow is not None and self._ds_jastrow is None:
+            if self._next_block != 0:
+                raise ValueError(
+                    "jastrow supplied mid-stream; pass it from the first "
+                    "block or not at all"
+                )
+            self._ds_jastrow = self._f.create_dataset(
+                "jastrow",
+                shape=(self.num_blocks * self.num_walkers,),
+                dtype="f8",
+            )
+        if self._ds_jastrow is not None and jastrow is None:
+            raise ValueError("jastrow dataset open but no jastrow given")
         start = self._next_block * self.num_walkers
         end = start + self.num_walkers
         self._ds_walkers[start:end] = w
         self._ds_log_psi[start:end] = lp
+        if jastrow is not None:
+            jv = np.asarray(jastrow)
+            if jv.shape != (self.num_walkers,):
+                raise ValueError(
+                    f"jastrow shape {jv.shape} expected ({self.num_walkers},)"
+                )
+            self._ds_jastrow[start:end] = jv
         self._next_block += 1
 
     def close(self) -> None:
@@ -121,7 +155,9 @@ def load_walker_bank(
     """Read back a dump file.
 
     Returns ``(walkers, log_psi, metadata)``. If ``max_K_s`` is given the
-    first ``max_K_s`` rows are returned.
+    first ``max_K_s`` rows are returned. When the dump carries the optional
+    ``/jastrow`` dataset (schema >= 1.1.0), the per-walker log-Jastrow is
+    returned under ``metadata["jastrow"]`` for the TC decode.
     """
     import h5py
     with h5py.File(str(path), "r") as f:
@@ -130,4 +166,6 @@ def load_walker_bank(
         walkers = f["walkers"][:cap]
         log_psi = f["log_psi"][:cap]
         meta: dict = {k: v for k, v in f.attrs.items()}
+        if "jastrow" in f:
+            meta["jastrow"] = np.asarray(f["jastrow"][:cap])
     return np.asarray(walkers), np.asarray(log_psi), meta

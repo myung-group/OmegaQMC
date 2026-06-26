@@ -39,7 +39,31 @@ def test_dumper_roundtrip_shapes_and_attrs(tmp_path):
     assert int(meta["nelec"]) == ne
     assert int(meta["num_steps_decorr"]) == 3
     assert float(meta["mc_timestep"]) == pytest.approx(0.07)
-    assert str(meta["schema_version"]) == "1.0.0"
+    assert str(meta["schema_version"]) == "1.1.0"
+    assert "jastrow" not in meta  # legacy path writes no jastrow dataset
+
+
+def test_dumper_jastrow_roundtrip(tmp_path):
+    path = tmp_path / "walkers_j.h5"
+    nb, nw, ne = 3, 5, 4
+    rng = np.random.default_rng(1)
+    wb = [rng.normal(size=(nw, ne, 3)).astype("f4") for _ in range(nb)]
+    lpb = [rng.normal(size=(nw,)) for _ in range(nb)]
+    jb = [rng.normal(size=(nw,)) for _ in range(nb)]
+    with WalkerDumper(str(path), num_blocks=nb, num_walkers=nw, nelec=ne) as d:
+        for w, lp, j in zip(wb, lpb, jb):
+            d.write_block(w, lp, jastrow=j)
+    _, _, meta = load_walker_bank(str(path))
+    assert "jastrow" in meta
+    np.testing.assert_allclose(meta["jastrow"], np.concatenate(jb))
+
+
+def test_dumper_rejects_jastrow_midstream(tmp_path):
+    path = tmp_path / "w.h5"
+    with WalkerDumper(str(path), num_blocks=2, num_walkers=2, nelec=2) as d:
+        d.write_block(np.zeros((2, 2, 3)), np.zeros(2))  # no jastrow
+        with pytest.raises(ValueError, match="jastrow supplied mid-stream"):
+            d.write_block(np.zeros((2, 2, 3)), np.zeros(2), jastrow=np.zeros(2))
 
 
 def test_dumper_rejects_overshoot(tmp_path):
