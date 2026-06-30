@@ -1444,7 +1444,7 @@ def postproc_h5_pgcs(
         walker_based_batch_size: int = 10,
         project_states: bool = False,
         equil_cutoff: int | str = 0,
-        ) -> jnp.ndarray:
+) -> jnp.ndarray:
     """Post-process VMC gradient data to obtain \
 nuclear forces using PGCS.
 
@@ -1557,9 +1557,8 @@ nuclear forces using PGCS.
             atom_frag_map = None
 
         # Per-block arrays are read lazily from ``f``
-        # inside the streaming block loop below — peak
-        # host RAM stays O(per-block) instead of
-        # O(total file size).
+        # inside the streaming block loop below
+        # — peak host RAM stays O(per-block) instead of O(total file size).
 
         block_nums = sorted(
             int(k) for k in f['local_energies'].keys()

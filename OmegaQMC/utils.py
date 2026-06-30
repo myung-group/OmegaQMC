@@ -753,11 +753,24 @@ class Mole_custom(gto.Mole):
                 int(k): (np.inf if v is None else float(v))
                 for k, v in self.inradii.items()
             }
-        if hasattr(self, 'map_frag_symmops') and isinstance(self.map_frag_symmops, dict):
+        if hasattr(self, 'map_frag_symmops') \
+                and isinstance(self.map_frag_symmops, dict):
             self.map_frag_symmops = {
                 int(k): v for k, v in self.map_frag_symmops.items()
             }
         return self
+
+    # The base Mole binds the pickle/copy protocol to the
+    # module-level dumps/loads_ (``__getstate__ = dumps``), so
+    # copy/deepcopy/pickle bypass the dumps/loads_ overrides
+    # above and hit the base serializer, which warns "drops
+    # attribute ..." on the fragment dicts and fails to restore
+    # them.  Route the protocol through the overrides instead.
+    def __getstate__(self):
+        return self.dumps()
+
+    def __setstate__(self, molstr):
+        self.loads_(molstr)
 
     # ----- NN-compatible properties -----
 

@@ -48,8 +48,8 @@ def _flatten_params(params_corr):
     leaves, treedef = jax.tree_util.tree_flatten(
         params_corr
     )
-    shapes = [l.shape for l in leaves]
-    flat = jnp.concatenate([l.ravel() for l in leaves])
+    shapes = [leaf.shape for leaf in leaves]
+    flat = jnp.concatenate([leaf.ravel() for leaf in leaves])
     return flat, treedef, shapes
 
 
@@ -76,7 +76,7 @@ def _build_flat_mask(params_corr, frozen_keys):
         flat, _, _ = _flatten_params(params_corr)
         return jnp.ones(flat.shape[0], dtype=bool)
     leaves, _ = jax.tree_util.tree_flatten(mask_tree)
-    return jnp.concatenate([l.ravel() for l in leaves])
+    return jnp.concatenate([leaf.ravel() for leaf in leaves])
 
 
 # -----------------------------------------------------------
@@ -163,10 +163,7 @@ def _nonlinear_rescale(dP, S_block):
     """
     xi = 0.5
     D = dP @ S_block @ dP
-    rescale = (
-        (1 - xi) * D
-        / ((1 - xi) + xi * jnp.sqrt(1 + D))
-    )
+    rescale = ((1 - xi) * D / ((1 - xi) + xi * jnp.sqrt(1 + D)))
     return 1.0 / (1.0 - rescale)
 
 
@@ -252,10 +249,7 @@ def _autotune_deriv_batch(
             .compile()
         )
         analysis = compiled.memory_analysis()
-        bytes_per_walker = (
-            analysis.alias_size
-            + analysis.temp_size
-        )
+        bytes_per_walker = analysis.alias_size + analysis.temp_size
     except Exception:
         pass
 
@@ -293,11 +287,10 @@ class _VMCOptDriverGTO_Linear:
         self.Z_charges = Z_charges
 
         (log_trial_wavefunction, local_energy, _, _) = \
-            get_psi_fun(
-                mf, params_cusp=params_cusp,
-                trial=trial,
-                jastrow_config=jastrow_config,
-            )
+            get_psi_fun(mf, params_cusp=params_cusp,
+                        trial=trial,
+                        jastrow_config=jastrow_config,
+                        )
         (local_energy_ee, local_energy_nn,
          local_energy_en, local_energy_ke) = local_energy
         enr_nn = local_energy_nn(nuc_crds)
@@ -308,29 +301,21 @@ class _VMCOptDriverGTO_Linear:
             rng_key, elec_crds, _step_size, curr_params
         ):
             key_prop, key_accept = jax.random.split(rng_key)
-            proposed_crds = (
-                elec_crds
-                + _step_size * jax.random.normal(
-                    key_prop, elec_crds.shape
-                )
-            )
+            proposed_crds = elec_crds \
+                + _step_size * jax.random.normal(key_prop, elec_crds.shape)
             diffs_ee = (
                 proposed_crds[i_e] - proposed_crds[j_e]
             )
             dists_ee = jnp.linalg.norm(
                 diffs_ee, axis=-1
             )
-            diffs_en = (
-                proposed_crds[:, None, :]
-                - nuc_crds[None, :, :]
-            )
+            diffs_en = proposed_crds[:, None, :] - nuc_crds[None, :, :]
             dists_en = jnp.linalg.norm(
                 diffs_en, axis=-1
             )
-            valid_move = (
-                (dists_en.min() > MIN_DIST_THRESHOLD)
+            valid_move = \
+                (dists_en.min() > MIN_DIST_THRESHOLD) \
                 & (dists_ee.min() > MIN_DIST_THRESHOLD)
-            )
             log_psi_old = log_trial_wavefunction(
                 elec_crds, nuc_crds, curr_params
             )
@@ -338,8 +323,7 @@ class _VMCOptDriverGTO_Linear:
                 proposed_crds, nuc_crds, curr_params
             )
             accept = (
-                jax.random.uniform(key_accept)
-                < jnp.exp(
+                jax.random.uniform(key_accept) < jnp.exp(
                     2 * (log_psi_new - log_psi_old)
                 )
             ) & valid_move
@@ -356,8 +340,7 @@ class _VMCOptDriverGTO_Linear:
                 + local_energy_en(elec_crds, nuc_crds)
                 + local_energy_ke(
                     elec_crds, nuc_crds, curr_params
-                )
-                + enr_nn
+                ) + enr_nn
             )
 
         # ---- log-psi wrapper (for correlated sampling) --
@@ -739,11 +722,7 @@ class _VMCOptDriverGTO_Linear:
                 (x // n_devices) * n_devices,
             )
 
-        _need_auto = (
-            num_walkers == 'auto'
-            or num_opt_samples == 'auto'
-            or deriv_batch_size == 'auto'
-        )
+        _need_auto = (num_walkers == 'auto' or num_opt_samples == 'auto' or deriv_batch_size == 'auto')
         if _need_auto:
             free_mb = _get_free_gpu_mb()
             auto_bs = _autotune_deriv_batch(
@@ -779,8 +758,7 @@ class _VMCOptDriverGTO_Linear:
                     f"{num_opt_samples}"
                 )
 
-        if (n_devices > 1
-                and deriv_batch_size % n_devices != 0):
+        if (n_devices > 1 and deriv_batch_size % n_devices != 0):
             deriv_batch_size = _snap(deriv_batch_size)
 
         # Sharding objects (None, None on single GPU)
@@ -979,11 +957,8 @@ class _VMCOptDriverGTO_Linear:
                     i:min(i + bs, num_samples)
                 ]
                 if (walkers_sharding is not None
-                        and batch.shape[0]
-                        % n_devices == 0):
-                    batch = jax.device_put(
-                        batch, walkers_sharding
-                    )
+                        and batch.shape[0] % n_devices == 0):
+                    batch = jax.device_put(batch, walkers_sharding)
                 el, dlp, del_ = jax.vmap(
                     compute_walker_derivs,
                     in_axes=(0, None),
@@ -1066,11 +1041,8 @@ class _VMCOptDriverGTO_Linear:
                     i:min(i + bs, num_samples)
                 ]
                 if (walkers_sharding is not None
-                        and sw.shape[0]
-                        % n_devices == 0):
-                    sw = jax.device_put(
-                        sw, walkers_sharding
-                    )
+                        and sw.shape[0] % n_devices == 0):
+                    sw = jax.device_put(sw, walkers_sharding)
                 lp_old_parts.append(jax.vmap(
                     compute_log_psi, in_axes=(0, None)
                 )(sw, flat_params))
