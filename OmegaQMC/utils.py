@@ -182,6 +182,13 @@ def batched_binning_analysis(x, batch_size=100):
     return xbar_all, serr_all, s_all, kappa_all
 
 
+# A sample covariance of K correlated estimators needs many more
+# bins than states to be reliable; with fewer than this many bins
+# per state the off-diagonal entries are too noisy to trust, so
+# blue_combine_states falls back to the inverse-variance estimator.
+MIN_BINS_PER_STATE = 5
+
+
 def blue_combine_states(
     series_per_label, labels, kappa_per_label=None,
 ):
@@ -200,10 +207,14 @@ def blue_combine_states(
     matched block index.  The Best Linear Unbiased
     Estimator under the unit-sum linear constraint is
     then ``w = Σ⁻¹ 1 / (1ᵀ Σ⁻¹ 1)``, ``μ = wᵀ Ê``,
-    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.  When Σ is not positive
-    definite (too few bins, or (near-)degenerate series such
-    as a symmetry-fixed component with ~zero variance) the
-    BLUE is undefined; an equal-weight average is returned.
+    ``Var(μ) = 1 / (1ᵀ Σ⁻¹ 1)``.  The full BLUE is used only
+    when Σ is positive definite *and* there are enough bins to
+    estimate its off-diagonals (``N_b ≥ MIN_BINS_PER_STATE·K``).
+    With too few bins the BLUE weights become noise-driven
+    leverage and the variance is under-reported, so the combine
+    falls back to the inverse-variance (diagonal-Σ) estimator;
+    a (near-)degenerate covariance with non-positive variances
+    falls back to an equal-weight average.  Every fallback warns.
 
     Parameters
     ----------
@@ -278,6 +289,13 @@ def blue_combine_states(
     if N_b < 2:
         # Fewer than two bins: no covariance can be formed.
         # Combine with equal weights; no usable error bar.
+        warnings.warn(
+            f"blue_combine_states: only N_b={N_b} bin(s) for "
+            f"K={K} states; cannot estimate a covariance. "
+            "Falling back to an equal-weight average with no "
+            "usable error bar.",
+            stacklevel=2,
+        )
         w = ones / K
         mean = float(w @ state_means)
         return mean, float('inf'), 0.0, w, bin_size
@@ -288,26 +306,61 @@ def blue_combine_states(
     S = centered.T @ centered / (N_b - 1)  # (K, K)
     Sigma = S / N_b  # covariance of the means
 
-    # Minimum-variance (BLUE) weights solve ``Σ w ∝ 1``, which
-    # is only well defined when Σ is positive definite.  With
-    # too few bins or (near-)perfectly correlated series — e.g.
-    # a symmetry-fixed component whose variance is ~0 — Σ turns
-    # singular or indefinite (``1ᵀ Σ⁻¹ 1 ≤ 0``), which would
-    # divide by zero.  In that degenerate case fall back to an
-    # equal-weight average, whose variance ``1ᵀ Σ 1 / K²`` is
-    # still well defined.
+    # Minimum-variance (BLUE) weights solve ``Σ w ∝ 1`` and need
+    # a positive-definite Σ.  PD alone is not enough, though:
+    # estimating the K×K off-diagonal covariance reliably needs
+    # many more bins than states.  With too few bins the BLUE
+    # weights become noise-driven leverage (large ± values) and
+    # the variance is badly under-reported — the failure mode
+    # that lets the combine drift outside the range of the
+    # inputs.  So the full BLUE is used only when Σ is PD *and*
+    # ``N_b >= MIN_BINS_PER_STATE * K``.  Otherwise fall back to
+    # the inverse-variance (diagonal-Σ) combine, whose convex
+    # weights need only the per-state variances; or, if even
+    # those are unusable, to an equal-weight average.  Every
+    # fallback warns so the degradation is visible.
+    diag = np.diag(Sigma)
+    is_pd = False
     try:
         np.linalg.cholesky(Sigma)  # succeeds iff Σ is PD
         sol = np.linalg.solve(Sigma, ones)
         inv_sum = float(ones @ sol)
         is_pd = np.isfinite(inv_sum) and inv_sum > 0.0
     except np.linalg.LinAlgError:
-        is_pd = False
+        pass
 
-    if is_pd:
+    enough_bins = N_b >= MIN_BINS_PER_STATE * K
+
+    if is_pd and enough_bins:
         w = sol / inv_sum
         var_mu = 1.0 / inv_sum
+    elif np.all(diag > 0.0):
+        if is_pd:
+            warnings.warn(
+                f"blue_combine_states: only N_b={N_b} bins for "
+                f"K={K} states (< MIN_BINS_PER_STATE="
+                f"{MIN_BINS_PER_STATE} per state); the "
+                "off-diagonal covariance is unreliable, so "
+                "falling back to the inverse-variance combine.",
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                "blue_combine_states: covariance is not positive "
+                "definite; falling back to the inverse-variance "
+                "combine.",
+                stacklevel=2,
+            )
+        w = 1.0 / diag
+        w = w / w.sum()
+        var_mu = max(float(w @ Sigma @ w), 0.0)
     else:
+        warnings.warn(
+            "blue_combine_states: degenerate covariance "
+            "(non-positive variances); falling back to an "
+            "equal-weight average.",
+            stacklevel=2,
+        )
         w = ones / K
         var_mu = max(float(w @ Sigma @ w), 0.0)
 
