@@ -1,22 +1,20 @@
-"""Cavity absorption of NH3/cc-pVDZ at three levels of QED theory.
+"""Cavity absorption of NH3/cc-pVDZ at two levels of QED theory.
 
-NH3 analogue of :mod:`run_qed_absorption_h2o`. Three side-by-side spectra
+NH3 analogue of :mod:`run_qed_absorption_h2o`. Two side-by-side spectra
 of ammonia in an optical cavity, lambda-scanned (lambda = 0.00, 0.05,
 0.10) and Gaussian-broadened from excitation energies Omega_m and
 electronic oscillator strengths
 
     f_m = (2/3) * Omega_m * sum_kappa |sum_ai mu^kappa_ai (X+Y)_ai,m|^2 :
 
-(a) QED-RPA               -- photon explicit in the RPA excitation space.
-(b) static QED-BSE@GW      -- photon enters only through the screened
-                             interaction W (include_photon=True); the
-                             excitation space is purely electronic, so the
-                             bright exciton shifts smoothly but cannot
-                             Rabi-split.
-(c) polaritonic QED-BSE@GW -- photon placed explicitly in the BSE
-                             excitation manifold (kept out of W to avoid
-                             double counting); the bright exciton
-                             Rabi-splits into lower/upper polaritons.
+(a) QED-RPA                   -- photon explicit in the RPA excitation
+                                 space.
+(b) polaritonic QED-BSE@evGW  -- photon placed explicitly in the BSE
+                                 excitation manifold (kept out of W to
+                                 avoid double counting) on the
+                                 eigenvalue-self-consistent evGW
+                                 reference; the bright exciton
+                                 Rabi-splits into lower/upper polaritons.
 
 C3v ammonia: the cavity field is polarised along the C3 axis (z), so it
 couples only to z-polarised A1 transitions. The cavity is therefore tuned
@@ -165,21 +163,23 @@ def _bse_context(lam):
 
 
 # ----------------------------------------------------------------------
-# (b) static QED-BSE@GW  (photon in screening only -> no Rabi splitting)
+# (b) polaritonic QED-BSE@G0W0  (photon explicit -> Rabi splitting;
+#     one-shot G0W0 quasiparticle reference)
 # ----------------------------------------------------------------------
-def bse_static_spectrum(lam, grid_ev):
-    qedhf, eps_QP = _bse_context(lam)
-    bse = run_qed_bse(qedhf, tda=True, include_photon=True,
-                      eps_QP=eps_QP, verbose=False)
-    om_ev = bse['Omega_BSE'] * EV
-    f_osc = bse['f_osc']
+def bse_pol_g0w0_spectrum(lam, grid_ev):
+    qedhf, _eps_QP = _bse_context(lam)
+    pol = run_qed_bse_polaritonic(qedhf, gw_mode='G0W0', tda=False,
+                                  verbose=False)
+    om_ev = pol['Omega'] * EV
+    f_osc = pol['f_osc']
     return _broaden(om_ev, f_osc, grid_ev), om_ev, f_osc
 
 
 # ----------------------------------------------------------------------
-# (c) polaritonic QED-BSE@GW  (photon explicit -> Rabi splitting)
+# (c) polaritonic QED-BSE@evGW  (photon explicit -> Rabi splitting;
+#     eigenvalue-self-consistent evGW quasiparticle reference)
 # ----------------------------------------------------------------------
-def bse_pol_spectrum(lam, grid_ev):
+def bse_pol_evgw_spectrum(lam, grid_ev):
     qedhf, eps_QP = _bse_context(lam)
     pol = run_qed_bse_polaritonic(qedhf, gw_mode='evGW', tda=False,
                                   eps_QP=eps_QP, verbose=False)
@@ -189,19 +189,17 @@ def bse_pol_spectrum(lam, grid_ev):
 
 
 # ----------------------------------------------------------------------
-# Assemble the three-panel figure.
+# Assemble the two-panel figure.
 # ----------------------------------------------------------------------
 PANELS = (
     ('(a) QED-RPA', 'photon explicit', OMEGA_RPA, rpa_spectrum),
-    (r'(b) static QED-BSE@$GW$', 'photon in screening', OMEGA_BSE,
-     bse_static_spectrum),
-    (r'(c) polaritonic QED-BSE@$GW$', 'photon explicit', OMEGA_BSE,
-     bse_pol_spectrum),
+    (r'(b) polaritonic QED-BSE@ev$GW$', 'photon explicit', OMEGA_BSE,
+     bse_pol_evgw_spectrum),
 )
 
 grid = np.linspace(6.0, 12.0, 1501)
 offset = 0.85
-fig, axes = plt.subplots(1, 3, figsize=(10.0, 3.4), dpi=300, sharey=True)
+fig, axes = plt.subplots(1, 2, figsize=(6.9, 3.4), dpi=300, sharey=True)
 
 for ax, (title, sub, omega_cav, specfun) in zip(axes, PANELS):
     print(f"\n=== {title} (omega_cav = {omega_cav * EV:.2f} eV) ===")

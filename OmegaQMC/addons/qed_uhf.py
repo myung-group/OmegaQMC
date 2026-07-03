@@ -56,6 +56,8 @@ the λ = 0 limit reproduces pyscf's plain UHF.
 import numpy as np
 from pyscf import gto, scf as pyscf_scf
 
+from .qed_hf import build_eri_df
+
 
 def _spin_square(Ca, Cb, nocc_a, nocc_b, S):
     """<S^2> and spin multiplicity (2S+1) for a UHF determinant.
@@ -78,7 +80,7 @@ def _spin_square(Ca, Cb, nocc_a, nocc_b, S):
 
 
 def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
-                damping=0.0, verbose=False):
+                damping=0.0, verbose=False, auxbasis=None):
     """Self-consistent QED-Unrestricted-Hartree-Fock in the dipole gauge.
 
     Args:
@@ -94,6 +96,11 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
             CH4+, whose t2 hole makes the undamped iteration cycle
             between symmetry-broken solutions).
         verbose: print per-iteration energies.
+        auxbasis: if ``None`` (default) the exact dense ``nao⁴`` ERI is used and
+            the result carries ``'eri_ao'``. If an auxiliary-basis name is given
+            the SCF J/K are built density-fitted and the result carries
+            ``'eri_df'`` (shape ``(naux, nao, nao)``) instead — see
+            :func:`OmegaQMC.addons.qed_hf.run_qed_hf`.
 
     Returns:
         dict with the converged spin-resolved orbitals, dressed Fock
@@ -113,7 +120,13 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
     V = mol.intor('int1e_nuc')
     H_core = T + V
     nao = mol.nao_nr()
-    eri_ao = mol.intor('int2e').reshape(nao, nao, nao, nao)
+    use_df = auxbasis is not None
+    if use_df:
+        B_df = build_eri_df(mol, auxbasis)          # (naux, nao, nao)
+        eri_ao = None
+    else:
+        eri_ao = mol.intor('int2e').reshape(nao, nao, nao, nao)
+        B_df = None
     E_nuc = mol.energy_nuc()
     nocc_a, nocc_b = mol.nelec  # (nalpha, nbeta)
 
@@ -159,9 +172,17 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
         Dt = Da + Db
 
         # Coulomb from the total density; exchange from the same-spin density
-        J = np.einsum('pqrs,rs->pq', eri_ao, Dt, optimize=True)
-        Ka = np.einsum('prqs,rs->pq', eri_ao, Da, optimize=True)
-        Kb = np.einsum('prqs,rs->pq', eri_ao, Db, optimize=True)
+        if use_df:
+            gamma = np.einsum('Prs,rs->P', B_df, Dt, optimize=True)
+            J = np.einsum('Ppq,P->pq', B_df, gamma, optimize=True)
+            Kat = np.einsum('Pqs,rs->Pqr', B_df, Da, optimize=True)
+            Ka = np.einsum('Ppr,Pqr->pq', B_df, Kat, optimize=True)
+            Kbt = np.einsum('Pqs,rs->Pqr', B_df, Db, optimize=True)
+            Kb = np.einsum('Ppr,Pqr->pq', B_df, Kbt, optimize=True)
+        else:
+            J = np.einsum('pqrs,rs->pq', eri_ao, Dt, optimize=True)
+            Ka = np.einsum('prqs,rs->pq', eri_ao, Da, optimize=True)
+            Kb = np.einsum('prqs,rs->pq', eri_ao, Db, optimize=True)
 
         Fa = H_core + J - Ka
         Fb = H_core + J - Kb
@@ -226,7 +247,7 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
 
     ss, mult = _spin_square(Ca, Cb, nocc_a, nocc_b, S)
 
-    return {
+    result = {
         'E_qed_uhf': float(E_new),
         'E_uhf': float(E_uhf),
         'E_nuc': float(E_nuc),
@@ -238,7 +259,6 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
         'mo_energy_b': mo_energy_b,
         'H_core': H_core,
         'oei': oei,
-        'eri_ao': eri_ao,
         'mu_x_ao': mu_x_ao,
         'mu_y_ao': mu_y_ao,
         'mu_z_ao': mu_z_ao,
@@ -252,6 +272,11 @@ def run_qed_uhf(mol, omega, lambda_cav, max_iter=500, tol=1e-10,
         'omega': float(omega),
         'mol': mol,
     }
+    if use_df:
+        result['eri_df'] = B_df
+    else:
+        result['eri_ao'] = eri_ao
+    return result
 
 
 if __name__ == '__main__':

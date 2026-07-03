@@ -1,0 +1,6 @@
+res_energy += 1.0*einsum('ia,ai->', f, t1, optimize=True)
+res_energy += 1.0*einsum('Iia,Iai->', d, u11, optimize=True)
+res_energy += 1.0*einsum('Iia,ai,I->', d, t1, s1, optimize=True)
+res_energy += 0.5*einsum('xia,xjb,baji->', B, B, t2, optimize=True)
+res_energy += 0.5*einsum('xia,xjb,ai,bj->', B, B, t1, t1, optimize=True)
+res_energy += -0.5*einsum('xia,xjb,bi,aj->', B, B, t1, t1, optimize=True)

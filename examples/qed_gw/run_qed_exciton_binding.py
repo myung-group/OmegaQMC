@@ -75,7 +75,7 @@ def bse_full(name, lam):
     """Full QED-BSE@QED-evGW; returns the result dict (energies in Ha)."""
     qedhf = run_qed_hf(build(name), OMEGA, (0.0, 0.0, lam),
                        verbose=False, tol=1e-12)
-    bse = run_qed_bse(qedhf, gw_mode='evGW', tda=True, verbose=False)
+    bse = run_qed_bse(qedhf, gw_mode='evGW', tda=False, verbose=False)
     bse['qedhf'] = qedhf
     return bse
 
@@ -91,7 +91,7 @@ def summarize(b):
 
 
 results = {'omega_cav': OMEGA, 'basis': BASIS, 'gw_mode': 'evGW',
-           'tda': True}
+           'tda': False}
 
 # ----------------------------------------------------------------------
 # 1. Four-molecule table at lambda = 0 and 0.05
@@ -149,9 +149,9 @@ for lam in lams:
         continue
     qedhf = b_full['qedhf']
     eps_qp = b_full['eps_QP']
-    b_qp = run_qed_bse(qedhf, tda=True, eps_QP=eps_qp,
+    b_qp = run_qed_bse(qedhf, tda=False, eps_QP=eps_qp,
                        include_dse=False, include_photon=False, verbose=False)
-    b_dse = run_qed_bse(qedhf, tda=True, eps_QP=eps_qp,
+    b_dse = run_qed_bse(qedhf, tda=False, eps_QP=eps_qp,
                         include_dse=True, include_photon=False, verbose=False)
     qp_eV = {k: b_qp[k] * EV for k in KEYS}
     dse_eV = {k: b_dse[k] * EV for k in KEYS}

@@ -65,8 +65,6 @@ Notes on the active-space projection:
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 from scipy.linalg import eigh
 from pyscf import ao2mo, mcscf
@@ -233,11 +231,11 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
         epsilon = np.array([0.0, 0.0, 1.0])
         lam = 0.0
 
-    # --- Reference orbitals: QED-HF (closed shell) or fall back ---
-    closed_shell = (mol.nelec[0] == mol.nelec[1])
+    # --- Reference orbitals: QED-HF (the open-shell case was dispatched
+    # to _run_qed_ucasci above) or the bare mf.mo_coeff ---
     e_qed_hf = None
     reference = 'HF'
-    if use_qed_hf_reference and closed_shell:
+    if use_qed_hf_reference:
         qedhf = run_qed_hf(
             mol, omega, lambda_cav=tuple(coupling_vec.tolist()),
         )
@@ -245,14 +243,6 @@ def run_qed_casci(mf, ncas, nelecas, omega, coupling_vec,
         e_qed_hf = float(qedhf['E_qed_hf'])
         reference = 'QED-HF'
     else:
-        if use_qed_hf_reference and not closed_shell:
-            warnings.warn(
-                "qed_casci: QED-HF reference requested but molecule is "
-                "open-shell; falling back to mf.mo_coeff. e_corr_qed "
-                "will be None.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
         mo_coeff = np.asarray(mf.mo_coeff)
 
     # --- Electronic integrals (full MO basis) ---

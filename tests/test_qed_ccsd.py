@@ -7,8 +7,9 @@ Covers:
    iterations and the correlation energy is sensible (negative,
    bounded).
 3. Glycolaldehyde / STO-3G QED-CCSD-21 at ω = 3 eV, λ = (0, 0, 0.1)
-   reproduces the published DePrince/White reference total energy
-   −262.416986187 Ha.
+   reproduces the complete-equations total energy −262.416985787 Ha
+   (the published DePrince/White value −262.416986187 Ha comes from
+   equations missing the quartic t2_21 BCH terms and differs by ~4e-7).
 
 The glycolaldehyde test is the slow one (~20 s). It is marked
 ``slow`` so it can be skipped with ``pytest -m 'not slow'``.
@@ -85,11 +86,13 @@ def test_h2_cavity_converges():
 
 @pytest.mark.slow
 def test_glycolaldehyde_qedccsd21_reference():
-    """QED-CCSD-21 / STO-3G total energy matches DePrince/White reference.
+    """QED-CCSD-21 / STO-3G total energy matches the complete equations.
 
-    The reference value -262.416986187232396 was reported by the
-    original psi4-based implementation (see qed_ccsd.py at the repo
-    root). This port reproduces it to ≲ 10⁻⁹ Ha.
+    The psi4-based implementation reported -262.416986187232396, but its
+    t2_21 residual lacks the quartic (4-amplitude) BCH terms; with the
+    complete Wick-derived equations the converged energy is
+    -262.416985787 (validated term-by-term, see
+    tools/qed_ccsd_df_derivation/).
     """
     mol = gto.M(atom=GLYCOLALDEHYDE, basis='STO-3G',
                 unit='Angstrom', symmetry=False, verbose=0)
@@ -103,5 +106,5 @@ def test_glycolaldehyde_qedccsd21_reference():
         verbose=False,
     )
 
-    E_REF = -262.416986187232396
+    E_REF = -262.416985787002
     assert result['E_qed_ccsd_total'] == pytest.approx(E_REF, abs=1e-7)

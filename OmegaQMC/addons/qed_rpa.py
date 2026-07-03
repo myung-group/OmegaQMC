@@ -78,7 +78,7 @@ import numpy as np
 import scipy.linalg as la
 from pyscf import gto
 
-from .qed_hf import run_qed_hf
+from .qed_hf import run_qed_hf, eri_mo_transform
 
 
 def _build_spin_orbital_quantities_uhf(qedhf):
@@ -97,7 +97,6 @@ def _build_spin_orbital_quantities_uhf(qedhf):
     Cb = np.asarray(qedhf['Cb'])
     Fa = np.asarray(qedhf['Fa'])
     Fb = np.asarray(qedhf['Fb'])
-    eri_ao = qedhf['eri_ao']                 # bare ERI (DSE enters via Δ, Δ')
     dipole = qedhf['dipole_x_lambda_tot']    # λ·μ_AO
     nocc_a = qedhf['nocc_a']
     nocc_b = qedhf['nocc_b']
@@ -106,9 +105,9 @@ def _build_spin_orbital_quantities_uhf(qedhf):
     nocc = nocc_a + nocc_b
     nso = 2 * nmo
 
+    # Bare ERI (DSE enters via Δ, Δ'), dispatching on dense/DF representation.
     def _trans(Cp, Cq, Cr, Cs):
-        return np.einsum('pi,qj,pqrs,rk,sl->ijkl',
-                         Cp, Cq, eri_ao, Cr, Cs, optimize=True)
+        return eri_mo_transform(qedhf, Cp, Cq, Cr, Cs, dse=False)
 
     # Gstack[s1, s2] = chemist (i j | k l), electron-1 spin s1, e-2 spin s2.
     Gstack = np.zeros((2, 2, nmo, nmo, nmo, nmo))
@@ -177,7 +176,6 @@ def _build_spin_orbital_quantities(qedhf):
 
     C = qedhf['C']
     F_ao = qedhf['F']
-    eri_ao = qedhf['eri_ao']
     dipole = qedhf['dipole_x_lambda_tot']
     nocc_spatial = qedhf['nocc_spatial']
     nmo = qedhf['nmo_spatial']
@@ -185,11 +183,10 @@ def _build_spin_orbital_quantities(qedhf):
     nso = 2 * nmo
     nocc = 2 * nocc_spatial
 
-    # Spatial MO integrals.
+    # Spatial MO integrals (bare ERI; dispatches on dense/DF representation).
     F_sf = C.T @ F_ao @ C
     d_sf = -C.T @ dipole @ C
-    g_mo_sf = np.einsum('pi,qj,pqrs,rk,sl->ijkl',
-                        C, C, eri_ao, C, C, optimize=True)
+    g_mo_sf = eri_mo_transform(qedhf, C, C, C, C, dse=False)
 
     # Spin-block: spin index convention even=alpha, odd=beta.
     idx = np.arange(nso)

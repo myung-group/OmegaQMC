@@ -305,11 +305,14 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
     Returns:
         dict with 'Omega_BSE' (sorted excitation energies, Ha), 'tda',
         'gw_mode', the underlying 'eps_QP', 'Omega_RPA', the
-        fundamental QP gap 'E_gap', and — in TDA mode — per-root spin
-        labels 'spin' ('S'/'T'), singlet weights 'w_singlet',
-        oscillator strengths 'f_osc', the lowest singlet/triplet
-        energies 'Omega_S1' / 'Omega_T1', and the exciton binding
-        energy 'E_b' = E_gap − Omega_S1 (all Ha).
+        fundamental QP gap 'E_gap', and — in both TDA and full-BSE
+        modes — per-root spin labels 'spin' ('S'/'T'), singlet weights
+        'w_singlet', oscillator strengths 'f_osc', the lowest
+        singlet/triplet energies 'Omega_S1' / 'Omega_T1', and the
+        exciton binding energy 'E_b' = E_gap − Omega_S1 (all Ha). In
+        full-BSE mode the spin projection and oscillator strengths are
+        built from the symplectically normalised transition amplitude
+        X + Y.
     """
     # 1) QP energies from QED-GW (or caller-supplied override).
     eps_QP = _resolve_eps_QP(qedhf, gw_mode, eta, eps_QP, verbose)
@@ -361,14 +364,42 @@ def run_qed_bse(qedhf, gw_mode='evGW', tda=True, n_print=10,
         big[:nov, nov:] = B_BSE
         big[nov:, :nov] = -B_BSE
         big[nov:, nov:] = -A_BSE
-        evals = la.eigvals(big)
+        evals, evecs = la.eig(big)
+        if np.max(np.abs(evals.imag)) > 1e-6 and verbose:
+            print(f"  warning: full-BSE complex eigenvalues "
+                  f"max|Im|={np.max(np.abs(evals.imag)):.2e} — "
+                  f"possible instability; consider tda=True.")
         re = evals.real
-        if np.max(np.abs(evals.imag)) > 1e-6:
-            if verbose:
-                print(f"  warning: full-BSE complex eigenvalues "
-                      f"max|Im|={np.max(np.abs(evals.imag)):.2e} — "
-                      f"possible instability; consider tda=True.")
-        Omega_BSE = np.sort(re[re > 1e-10])
+        # Positive-energy roots, sorted ascending; the paired negative
+        # branch (−Ω) is discarded.
+        pos = np.where(re > 1e-10)[0]
+        order = pos[np.argsort(re[pos])]
+        Omega_BSE = re[order]
+
+        # Casida eigenvectors [X; Y]; take the real part (real eigenvalues
+        # of a real matrix admit real eigenvectors up to a global phase),
+        # then apply the symplectic normalization XᵀX − YᵀY = 1.
+        Vsel = evecs[:, order].real
+        Xv, Yv = Vsel[:nov, :], Vsel[nov:, :]
+        symp = np.sum(Xv * Xv, axis=0) - np.sum(Yv * Yv, axis=0)
+        scale = np.where(np.abs(symp) > 1e-12,
+                         1.0 / np.sqrt(np.abs(symp)), 0.0)
+        T = ((Xv + Yv) * scale).reshape(nvir, nocc, -1)   # transition amp X+Y
+        # Unit-normalise T per root so the singlet-projection threshold is
+        # scale-invariant; rescale the oscillator strengths back afterwards
+        # [f = (2/3)Ω|μ·(X+Y)|² is correct for the symplectic norm].
+        tnorm = np.sqrt(np.einsum('ain,ain->n', T, T))
+        tnorm = np.where(tnorm > 1e-12, tnorm, 1.0)
+        T_unit = T / tnorm
+        spin, w_singlet, f_unit = _classify_and_brightness(
+            qedhf, T_unit, Omega_BSE, nocc)
+        f_osc = f_unit * tnorm ** 2
+        singlets = Omega_BSE[spin == 'S']
+        triplets = Omega_BSE[spin == 'T']
+        Omega_S1 = float(singlets[0]) if len(singlets) else None
+        Omega_T1 = float(triplets[0]) if len(triplets) else None
+        if Omega_S1 is not None:
+            E_b = E_gap - Omega_S1
         method = 'BSE'
 
     EV = 27.211386245988

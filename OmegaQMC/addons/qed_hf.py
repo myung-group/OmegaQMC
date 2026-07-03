@@ -40,7 +40,61 @@ import numpy as np
 from pyscf import gto, scf as pyscf_scf
 
 
-def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
+def build_eri_df(mol, auxbasis):
+    """Density-fitting 3-index factor ``B`` of the AO two-electron integrals.
+
+    Returns ``B`` with shape ``(naux, nao, nao)`` such that the chemist-notation
+    ERI factorises as ``(pq|rs) ≈ Σ_P B[P, p, q] · B[P, r, s]``. ``B`` is the
+    Cholesky-fitted 3-center integral ``L⁻¹(P|pq)`` (metric ``(P|Q) = L Lᵀ``),
+    so storage is ``naux·nao²`` instead of the dense ``nao⁴``.
+
+    ``auxbasis`` is an explicit auxiliary/fitting basis name (e.g. ``'weigend'``,
+    ``'def2-universal-jkfit'``, ``'cc-pvdz-jkfit'``); it is passed straight to
+    PySCF's :func:`df.incore.cholesky_eri`.
+    """
+    from pyscf import df, lib
+    cderi = df.incore.cholesky_eri(mol, auxbasis=auxbasis)  # (naux, nao*(nao+1)/2)
+    return np.ascontiguousarray(lib.unpack_tril(cderi))     # (naux, nao, nao)
+
+
+def eri_mo_transform(qedhf, Cp, Cq, Cr, Cs, dse=False):
+    """AO→MO chemist tensor ``(ij|kl)`` from a QED-HF reference dict.
+
+    Works for both the dense (``qedhf['eri_ao']``) and density-fitted
+    (``qedhf['eri_df']``) representations produced by :func:`run_qed_hf` /
+    :func:`OmegaQMC.qed_uhf.run_qed_uhf`, dispatching on which key is present.
+
+    The returned array is indexed ``[i, j, k, l] = (ij|kl)`` in chemist
+    notation, with ``i,j`` transformed by ``Cp,Cq`` and ``k,l`` by ``Cr,Cs``.
+
+    With ``dse=True`` the dipole self-energy contribution
+    ``Σ_X λ_X² μ_X ⊗ μ_X`` is folded in. Since each DSE term is a rank-1 outer
+    product ``(λ_X μ_X) ⊗ (λ_X μ_X)``, it enters the DF path as three extra
+    auxiliary vectors appended to ``B`` — no dense ``nao⁴`` tensor is ever built.
+    """
+    if dse:
+        lam = qedhf['lambda_cav']
+        mu = (qedhf['mu_x_ao'], qedhf['mu_y_ao'], qedhf['mu_z_ao'])
+
+    if 'eri_df' in qedhf:
+        B = qedhf['eri_df']
+        if dse:
+            dse_vecs = np.stack([lam[a] * mu[a] for a in range(3)])  # (3, nao, nao)
+            B = np.concatenate([B, dse_vecs], axis=0)
+        L = np.einsum('pi,Ppq,qj->Pij', Cp, B, Cq, optimize=True)
+        R = np.einsum('rk,Prs,sl->Pkl', Cr, B, Cs, optimize=True)
+        return np.einsum('Pij,Pkl->ijkl', L, R, optimize=True)
+
+    eri = qedhf['eri_ao']
+    if dse:
+        eri = eri + sum(lam[a] * lam[a]
+                        * np.einsum('pq,rs->pqrs', mu[a], mu[a], optimize=True)
+                        for a in range(3))
+    return np.einsum('pi,qj,pqrs,rk,sl->ijkl', Cp, Cq, eri, Cr, Cs, optimize=True)
+
+
+def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False,
+               auxbasis=None):
     """Self-consistent QED-Hartree-Fock in the dipole gauge.
 
     Args:
@@ -50,6 +104,14 @@ def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
         max_iter: SCF iteration cap.
         tol: energy convergence threshold (on total energy).
         verbose: print per-iteration energies.
+        auxbasis: if ``None`` (default) the exact dense ``nao⁴`` ERI is used and
+            the result carries ``'eri_ao'`` — reproducing the reference energies
+            to machine precision. If an auxiliary-basis name is given, the whole
+            pipeline runs density-fitted: SCF J/K are built from the 3-index
+            factor and the result carries ``'eri_df'`` (shape ``(naux, nao, nao)``)
+            instead of the dense tensor, trading ~mHa DF error for ``nao⁴`` →
+            ``naux·nao²`` memory. Consumers (qed_ccsd, qed_rpa) dispatch on the
+            key via :func:`eri_mo_transform`.
 
     Returns:
         dict with the converged orbitals, dressed Fock, AO operators
@@ -68,7 +130,13 @@ def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
     V = mol.intor('int1e_nuc')
     H_core = T + V
     nao = mol.nao_nr()
-    eri_ao = mol.intor('int2e').reshape(nao, nao, nao, nao)
+    use_df = auxbasis is not None
+    if use_df:
+        B_df = build_eri_df(mol, auxbasis)          # (naux, nao, nao)
+        eri_ao = None
+    else:
+        eri_ao = mol.intor('int2e').reshape(nao, nao, nao, nao)
+        B_df = None
     E_nuc = mol.energy_nuc()
     nocc = mol.nelec[0]
     assert mol.nelec[0] == mol.nelec[1], "qed_hf assumes a closed-shell molecule"
@@ -109,8 +177,14 @@ def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
     oei = np.zeros_like(H_core)
 
     for scf_iter in range(1, max_iter + 1):
-        J = np.einsum('pqrs,rs->pq', eri_ao, D, optimize=True)
-        K = np.einsum('prqs,rs->pq', eri_ao, D, optimize=True)
+        if use_df:
+            gamma = np.einsum('Prs,rs->P', B_df, D, optimize=True)
+            J = np.einsum('Ppq,P->pq', B_df, gamma, optimize=True)
+            Kt = np.einsum('Pqs,rs->Pqr', B_df, D, optimize=True)
+            K = np.einsum('Ppr,Pqr->pq', B_df, Kt, optimize=True)
+        else:
+            J = np.einsum('pqrs,rs->pq', eri_ao, D, optimize=True)
+            K = np.einsum('prqs,rs->pq', eri_ao, D, optimize=True)
 
         F = H_core + 2.0 * J - K
 
@@ -152,7 +226,7 @@ def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
     else:
         raise RuntimeError("QED-HF did not converge in %d iterations" % max_iter)
 
-    return {
+    result = {
         'E_qed_hf': float(E_new),
         'E_rhf': float(E_rhf),
         'E_nuc': float(E_nuc),
@@ -160,7 +234,6 @@ def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
         'F': F,
         'H_core': H_core,
         'oei': oei,
-        'eri_ao': eri_ao,
         'mu_x_ao': mu_x_ao,
         'mu_y_ao': mu_y_ao,
         'mu_z_ao': mu_z_ao,
@@ -171,6 +244,11 @@ def run_qed_hf(mol, omega, lambda_cav, max_iter=500, tol=1e-10, verbose=False):
         'omega': float(omega),
         'mol': mol,
     }
+    if use_df:
+        result['eri_df'] = B_df
+    else:
+        result['eri_ao'] = eri_ao
+    return result
 
 
 if __name__ == '__main__':

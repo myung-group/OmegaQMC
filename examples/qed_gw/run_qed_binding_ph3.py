@@ -17,7 +17,8 @@ conditions are not both met. PH3 is therefore a discriminating
 confirmation of the rule, not a second transparency-breaking case.
 
 Default cavity omega_cav = 0.415668 Ha, z-polarized, cc-pVDZ,
-TDA-BSE@QED-evGW, lambda = 0 and 0.05.
+full QED-BSE@QED-evGW, lambda = 0 and 0.05. Covers all five molecules
+of Table excitonchannel (H2O, HF, NH3, CH4, PH3).
 """
 import json
 import math
@@ -49,8 +50,20 @@ def c3v(heavy, r, angle_deg):
             ['H', (-0.5 * rho, -0.8660254 * rho, z)]]
 
 
+_h2o_half = math.radians(104.5 / 2.0)
+_ch4_t = 1.087 / math.sqrt(3.0)
 GEOMETRIES = {
+    'H2O': [['O', (0.0, 0.0, 0.0)],
+            ['H', (math.sin(_h2o_half), 0.0, -math.cos(_h2o_half))],
+            ['H', (-math.sin(_h2o_half), 0.0, -math.cos(_h2o_half))]],
+    'HF':  [['F', (0.0, 0.0, 0.0)],
+            ['H', (0.0, 0.0, 0.917)]],
     'NH3': c3v('N', 1.0124, 106.67),
+    'CH4': [['C', (0.0, 0.0, 0.0)],
+            ['H', (_ch4_t, _ch4_t, _ch4_t)],
+            ['H', (_ch4_t, -_ch4_t, -_ch4_t)],
+            ['H', (-_ch4_t, _ch4_t, -_ch4_t)],
+            ['H', (-_ch4_t, -_ch4_t, _ch4_t)]],
     'PH3': c3v('P', 1.4200, 93.345),
 }
 
@@ -84,14 +97,14 @@ def s1_props(qedhf, eps_QP):
 results = {}
 print(f"{'mol':5s} {'Om_S1':>7s} {'E_b':>7s} {'muz2':>6s} {'Dd_z':>6s} "
       f"{'dE_b':>8s} {'elec':>8s} {'ker':>8s}  (eV unless noted)")
-for name in ('NH3', 'PH3'):
+for name in ('H2O', 'HF', 'NH3', 'CH4', 'PH3'):
     mol = gto.M(atom=GEOMETRIES[name], basis='cc-pVDZ', unit='Angstrom',
                 symmetry=False, verbose=0)
     qh0 = run_qed_hf(mol, OMEGA, (0, 0, 0.0), verbose=False, tol=1e-12)
-    b0 = run_qed_bse(qh0, gw_mode='evGW', tda=True, verbose=False)
+    b0 = run_qed_bse(qh0, gw_mode='evGW', tda=False, verbose=False)
     qh1 = run_qed_hf(mol, OMEGA, (0, 0, 0.05), verbose=False, tol=1e-12)
-    b1 = run_qed_bse(qh1, gw_mode='evGW', tda=True, verbose=False)
-    b1_elec = run_qed_bse(qh1, tda=True, eps_QP=b1['eps_QP'],
+    b1 = run_qed_bse(qh1, gw_mode='evGW', tda=False, verbose=False)
+    b1_elec = run_qed_bse(qh1, tda=False, eps_QP=b1['eps_QP'],
                           include_dse=False, include_photon=False,
                           verbose=False)
     Eb0, Eb1, Eb1e = b0['E_b'] * EV, b1['E_b'] * EV, b1_elec['E_b'] * EV
@@ -109,6 +122,6 @@ for name in ('NH3', 'PH3'):
 
 with open(os.path.join(HERE, 'qed_binding_ph3_results.json'), 'w') as f:
     json.dump(results, f, indent=1)
-print("\n(shifts in meV; NH3 reproduces Table excitonchannel: "
-      "muz2=0.27, Dd_z=-1.21, dE_b=-7 = elec +11 + ker -18)")
+print("\n(full QED-BSE@QED-evGW, shifts in meV; Table excitonchannel: "
+      "NH3 muz2~0.27, Dd_z~-1.2, dE_b<0 = elec>0 + ker<0; PH3 z-dark, ker~0)")
 print("wrote qed_binding_ph3_results.json")
