@@ -67,8 +67,16 @@ GEOMETRIES = {
 
 
 def build(name):
-    return gto.M(atom=GEOMETRIES[name], basis=BASIS, unit='Angstrom',
-                 symmetry=False, verbose=0)
+    mol = gto.M(atom=GEOMETRIES[name], basis=BASIS, unit='Angstrom',
+                symmetry=False, verbose=0)
+    # Recenter at the nuclear centre of mass (paper convention): the
+    # QED-HF orbital energies -- and hence the QP energies entering the
+    # BSE -- are origin-dependent at lambda > 0.
+    masses = mol.atom_mass_list()
+    coords = mol.atom_coords()                      # Bohr
+    com = masses @ coords / masses.sum()
+    mol.set_geom_(coords - com, unit='Bohr', symmetry=False)
+    return mol
 
 
 def bse_full(name, lam):
@@ -204,8 +212,8 @@ ax2.set_xlabel(r'$\lambda$ (a.u.)')
 ax2.set_ylabel(r'$\delta E_b$ (eV)')
 ax2.legend(fontsize=7, frameon=False)
 fig.tight_layout()
-out = os.path.join(os.path.dirname(__file__), '..', 'OmegaQMC', 'paper',
-                   'fig_exciton_h2o.pdf')
+out = os.path.join(os.path.dirname(__file__), '..', '..', 'OmegaQMC',
+                   'paper', 'fig_exciton_h2o.pdf')
 fig.savefig(os.path.abspath(out))
 print(f"\nwrote {os.path.abspath(out)}")
 
@@ -239,8 +247,8 @@ bx2.set_xlabel(r'$\lambda$ (a.u.)')
 bx2.set_ylabel(r'$\delta E_b$ channels (eV)')
 bx2.legend(fontsize=7, frameon=False, ncol=2)
 fig2.tight_layout()
-out2 = os.path.join(os.path.dirname(__file__), '..', 'OmegaQMC', 'paper',
-                    'fig_exciton_binding_h2o.pdf')
+out2 = os.path.join(os.path.dirname(__file__), '..', '..', 'OmegaQMC',
+                    'paper', 'fig_exciton_binding_h2o.pdf')
 fig2.savefig(os.path.abspath(out2))
 fig2.savefig(os.path.abspath(out2)[:-4] + '.png')
 print(f"wrote {os.path.abspath(out2)}")

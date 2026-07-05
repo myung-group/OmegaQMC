@@ -55,6 +55,12 @@ mol = gto.M(atom=[['N', (0.0, 0.0, 0.0)],
             ['H', (-0.5 * _rho, 0.8660254 * _rho, _z)],
             ['H', (-0.5 * _rho, -0.8660254 * _rho, _z)]],
             basis='cc-pVDZ', unit='Angstrom', symmetry=False, verbose=0)
+# Recenter at the nuclear centre of mass (paper convention): the QP and
+# RPA/BSE excitation energies are origin-dependent at lambda > 0.
+_masses = mol.atom_mass_list()
+_coords = mol.atom_coords()                          # Bohr
+mol.set_geom_(_coords - _masses @ _coords / _masses.sum(), unit='Bohr',
+              symmetry=False)
 
 LAMBDAS = (0.0, 0.05, 0.10)
 COLORS = {0.0: '#444444', 0.05: '#d95f02', 0.10: '#7570b3'}
@@ -231,8 +237,8 @@ axes[0].set_ylabel('absorption (norm., offset)')
 axes[0].set_ylim(-0.08, 2 * offset + 1.25)
 axes[0].set_yticks([])
 fig.tight_layout()
-out = os.path.join(os.path.dirname(__file__), '..', 'OmegaQMC', 'paper',
-                   'fig_absorption_nh3.pdf')
+out = os.path.join(os.path.dirname(__file__), '..', '..', 'OmegaQMC',
+                   'paper', 'fig_absorption_nh3.pdf')
 fig.savefig(os.path.abspath(out))
 fig.savefig(os.path.abspath(out)[:-4] + '.png')
 print(f"\nwrote {os.path.abspath(out)}")

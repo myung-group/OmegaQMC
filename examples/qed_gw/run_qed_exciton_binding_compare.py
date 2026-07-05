@@ -64,8 +64,15 @@ SHIFT_SPECS = (('E_gap', r'$\delta E_\mathrm{gap}$', '#1b9e77', 'o'),
 
 
 def build(name):
-    return gto.M(atom=GEOMETRIES[name], basis=BASIS, unit='Angstrom',
-                 symmetry=False, verbose=0)
+    mol = gto.M(atom=GEOMETRIES[name], basis=BASIS, unit='Angstrom',
+                symmetry=False, verbose=0)
+    # Recenter at the nuclear centre of mass (paper convention): the
+    # QP energies entering the BSE are origin-dependent at lambda > 0.
+    masses = mol.atom_mass_list()
+    coords = mol.atom_coords()                      # Bohr
+    com = masses @ coords / masses.sum()
+    mol.set_geom_(coords - com, unit='Bohr', symmetry=False)
+    return mol
 
 
 def bse_at(mol, omega_cav, lam):
@@ -220,7 +227,7 @@ for j, name in enumerate(('H2O', 'NH3')):
                       loc='upper right')
         ax_bot.legend(fontsize=7, frameon=False, ncol=2)
 fig.tight_layout()
-out = os.path.join(HERE, '..', 'OmegaQMC', 'paper',
+out = os.path.join(HERE, '..', '..', 'OmegaQMC', 'paper',
                    'fig_exciton_binding_compare.pdf')
 fig.savefig(os.path.abspath(out))
 fig.savefig(os.path.abspath(out)[:-4] + '.png')

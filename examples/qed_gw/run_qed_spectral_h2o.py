@@ -38,6 +38,12 @@ hx, hz = math.sin(half), -math.cos(half)
 mol = gto.M(atom=[['O', (0, 0, 0)], ['H', (hx, 0, hz)],
                   ['H', (-hx, 0, hz)]],
             basis='cc-pVDZ', unit='Angstrom', symmetry=False, verbose=0)
+# Recenter at the nuclear centre of mass (paper convention): the QP
+# energies and Sigma_c poles are origin-dependent at lambda > 0.
+_masses = mol.atom_mass_list()
+_coords = mol.atom_coords()                          # Bohr
+mol.set_geom_(_coords - _masses @ _coords / _masses.sum(), unit='Bohr',
+              symmetry=False)
 
 grid_ev = np.linspace(-32.0, -6.0, 5201)
 grid = grid_ev / EV
@@ -110,8 +116,8 @@ ax1.set_xlabel(r'$\omega$ (eV)', fontsize=9)
 ax2.set_xlabel(r'$\omega$ (eV)', fontsize=9)
 ax1.set_ylabel(r'$A_\mathrm{HOMO}(\omega)$ (offset)', fontsize=9)
 fig.tight_layout()
-out = os.path.join(os.path.dirname(__file__), '..', 'OmegaQMC', 'paper',
-                   'fig_spectral_h2o.pdf')
+out = os.path.join(os.path.dirname(__file__), '..', '..', 'OmegaQMC',
+                   'paper', 'fig_spectral_h2o.pdf')
 fig.savefig(os.path.abspath(out))
 print(f"\nwrote {os.path.abspath(out)}")
 

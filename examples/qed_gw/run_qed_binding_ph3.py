@@ -11,7 +11,7 @@ validation that reproduces Table~\ref{tab:excitonchannel}.
 
 Finding: PH3's lowest exciton is z-DARK (mu_z^2(S1)=0.00, an E-symmetry
 x,y state), so the kernel residual never reaches it (ker = 0) and the
-cavity BINDS it (delta E_b = +22 meV, pure quasiparticle channel) ---
+cavity BINDS it (delta E_b = +25 meV, pure quasiparticle channel) ---
 the transparent response the rule predicts when the z-bright/z-dipolar
 conditions are not both met. PH3 is therefore a discriminating
 confirmation of the rule, not a second transparency-breaking case.
@@ -100,6 +100,12 @@ print(f"{'mol':5s} {'Om_S1':>7s} {'E_b':>7s} {'muz2':>6s} {'Dd_z':>6s} "
 for name in ('H2O', 'HF', 'NH3', 'CH4', 'PH3'):
     mol = gto.M(atom=GEOMETRIES[name], basis='cc-pVDZ', unit='Angstrom',
                 symmetry=False, verbose=0)
+    # Recenter at the nuclear centre of mass (paper convention): the QP
+    # energies entering the BSE are origin-dependent at lambda > 0.
+    masses = mol.atom_mass_list()
+    coords = mol.atom_coords()                      # Bohr
+    com = masses @ coords / masses.sum()
+    mol.set_geom_(coords - com, unit='Bohr', symmetry=False)
     qh0 = run_qed_hf(mol, OMEGA, (0, 0, 0.0), verbose=False, tol=1e-12)
     b0 = run_qed_bse(qh0, gw_mode='evGW', tda=False, verbose=False)
     qh1 = run_qed_hf(mol, OMEGA, (0, 0, 0.05), verbose=False, tol=1e-12)
@@ -115,6 +121,10 @@ for name in ('H2O', 'HF', 'NH3', 'CH4', 'PH3'):
         'mu_z2_S1': muz2, 'Delta_d_z': ddz,
         'dEb_total_meV': dEb * 1000, 'dEb_elec_meV': dEb_elec * 1000,
         'dEb_ker_meV': (dEb - dEb_elec) * 1000,
+        # full observable set per lambda (the Table~exciton row)
+        'obs': {str(lam): {k: b[k] * EV for k in
+                           ('E_gap', 'Omega_S1', 'Omega_T1', 'E_b')}
+                for lam, b in ((0.0, b0), (0.05, b1))},
     }
     print(f"{name:5s} {b0['Omega_S1']*EV:7.3f} {Eb0:7.3f} {muz2:6.3f} "
           f"{ddz:+6.2f} {dEb*1000:+7.1f}m {dEb_elec*1000:+7.1f}m "

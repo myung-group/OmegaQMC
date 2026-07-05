@@ -6,8 +6,11 @@ cavity mode (omega_cav = 0.415668 Ha) at lambda = 0 and 0.05:
   IP = E0(N-1) - E0(N),   EA = E0(N) - E0(N+1)
 
 with both energies ground states of the same Pauli-Fierz Hamiltonian
-(vertical: same geometry; heavy atom at the coordinate origin; cation
-and anion are doublets treated with a QED-UHF reference). Methods:
+(vertical: same geometry; each geometry recentered so its nuclear
+centre of mass sits at the coordinate origin — the dipole operator is
+origin-dependent for the charged species, so the gauge origin matters;
+cation and anion are doublets treated with a QED-UHF reference).
+Methods:
 
   Koopmans (-eps_HOMO / -eps_LUMO of QED-HF), Delta-QED-HF,
   linG0W0 / G0W0 / evGW (QED-dRPA-screened self-energy),
@@ -56,8 +59,16 @@ FCI_MOLECULES = ('H2O', 'HF')      # minimal-basis dense-FCI anchors
 
 
 def build(name, basis, charge=0, spin=0):
-    return gto.M(atom=GEOMETRIES[name], basis=basis, unit='Angstrom',
-                 charge=charge, spin=spin, symmetry=False, verbose=0)
+    mol = gto.M(atom=GEOMETRIES[name], basis=basis, unit='Angstrom',
+                charge=charge, spin=spin, symmetry=False, verbose=0)
+    # Recenter at the nuclear centre of mass: the length-gauge dipole
+    # operator is origin-dependent for charged species, so the cation
+    # and anion energies (hence IP/EA) depend on this choice.
+    masses = mol.atom_mass_list()
+    coords = mol.atom_coords()                      # Bohr
+    com = masses @ coords / masses.sum()
+    mol.set_geom_(coords - com, unit='Bohr', symmetry=False)
+    return mol
 
 
 def run_molecule(name, basis, lam, do_fci=False):
