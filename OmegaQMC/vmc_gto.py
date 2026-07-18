@@ -1,5 +1,6 @@
 import sys
 import pathlib
+import pickle
 from collections.abc import Collection
 from datetime import datetime
 import warnings
@@ -120,13 +121,84 @@ def _adapt_step_size(step_size: float, acceptance_ratio: float) -> float:
     return jnp.exp(log_step)
 
 
+def _load_dm0_pickle(path, mol, basis):
+    """Load and validate an SCF initial-guess density matrix from a pickle.
+
+    Returns the density-matrix array if *path* exists and is compatible with
+    *mol* / *basis*, otherwise returns ``None`` (caller falls back to the
+    default SCF initial guess).  A missing file is silent; a present-but-
+    incompatible file warns.
+
+    The pickle may hold either a bare density-matrix ``ndarray`` or a dict of
+    the form written by ``tmp/make_dm0.py``::
+
+        {"dm": ndarray, "basis": ..., "atom_order": (...), ...}
+
+    When metadata is present it is checked (basis and atom ordering); the
+    density-matrix shape is always checked against the number of AOs.
+    """
+    import numpy as np
+
+    p = pathlib.Path(path)
+    if not p.is_file():
+        return None  # no pickle -> use default guess, no noise
+
+    try:
+        with open(p, "rb") as fh:
+            payload = pickle.load(fh)
+    except Exception as e:  # noqa: BLE001 - fall back on any read error
+        warnings.warn(f"Could not read dm0 pickle {p!s}: {e}; "
+                      "using default SCF initial guess.", stacklevel=2)
+        return None
+
+    if isinstance(payload, dict):
+        dm = payload.get("dm")
+        meta_basis = payload.get("basis")
+        meta_atoms = payload.get("atom_order")
+    else:
+        dm = payload
+        meta_basis = None
+        meta_atoms = None
+
+    if dm is None:
+        warnings.warn(f"dm0 pickle {p!s} has no density matrix; "
+                      "using default SCF initial guess.", stacklevel=2)
+        return None
+
+    dm = np.asarray(dm)
+    nao = mol.nao_nr()
+    if dm.ndim < 2 or dm.shape[-1] != nao or dm.shape[-2] != nao:
+        warnings.warn(f"dm0 pickle {p!s} shape {dm.shape} is incompatible "
+                      f"with this molecule (nao={nao}); "
+                      "using default SCF initial guess.", stacklevel=2)
+        return None
+
+    if meta_basis is not None and meta_basis != basis:
+        warnings.warn(f"dm0 pickle {p!s} was built for basis "
+                      f"{meta_basis!r}, but this run uses {basis!r}; "
+                      "using default SCF initial guess.", stacklevel=2)
+        return None
+
+    if meta_atoms is not None and tuple(meta_atoms) != tuple(mol.elements):
+        warnings.warn(f"dm0 pickle {p!s} atom order {tuple(meta_atoms)} "
+                      f"!= molecule {tuple(mol.elements)}; "
+                      "using default SCF initial guess.", stacklevel=2)
+        return None
+
+    print(f"generate_molecular_orbitals: using SCF initial guess dm0 "
+          f"from {p!s}")
+    return dm
+
+
 def generate_molecular_orbitals(astr: str,
                                 unit: str = None, units: str = "Bohr",
                                 spin: int = 0,
                                 basis: str | dict = "aug-cc-pVTZ",
                                 postHF: str = None,
                                 ignore_hydrogen_mass: bool = False,
-                                symmetrization_level: int = 1):
+                                symmetrization_level: int = 1,
+                                scf_options: dict | None = None,
+                                dm0_pkl: str | None = "dm0.pkl"):
     """Run a PySCF mean-field calculation and return the result object.
 
     Wraps PySCF to build a molecule, detect its point-group symmetry,
@@ -160,6 +232,25 @@ def generate_molecular_orbitals(astr: str,
         How aggressively to symmetrize the MOs.  ``0`` = no symmetrization,
         ``1`` = symmetrize degenerate blocks (default), ``2`` = full
         projection onto irreducible representations.
+    scf_options : dict, optional
+        Extra attributes set on the ``pyscf`` mean-field object before
+        ``mf.kernel()`` is called, e.g. ``{"level_shift": 0.3, "damp": 0.5,
+        "max_cycle": 200}``.  Useful for stretched-geometry / near-degenerate
+        cases where the default RHF SCF iteration oscillates instead of
+        converging.  The special key ``"dm0"`` is popped out and passed as
+        the initial density matrix to ``mf.kernel(dm0=...)`` (e.g. the
+        converged density from a nearby, easier-to-converge geometry).  An
+        explicit ``"dm0"`` here takes precedence over *dm0_pkl* below.
+    dm0_pkl : str or None, optional
+        Path to a pickled SCF initial-guess density matrix.  Defaults to
+        ``"dm0.pkl"``, i.e. a file of that name in the current working
+        directory.  If the file exists and is compatible with this molecule
+        (matching basis, atom ordering, and number of AOs) its density matrix
+        is used as ``mf.kernel(dm0=...)``; otherwise the default SCF initial
+        guess is used.  Set to ``None`` to disable the lookup entirely.  The
+        pickle may be a bare density-matrix array or a metadata dict as
+        produced by ``tmp/make_dm0.py``.  Ignored if ``scf_options["dm0"]``
+        is given.
 
     Returns
     -------
@@ -266,7 +357,18 @@ def generate_molecular_orbitals(astr: str,
     # TODO: later use symmetrization_level option
 
     mf = scf.UHF(mol) if spin & 1 else scf.RHF(mol)
-    mf.kernel()
+    dm0 = None
+    if scf_options:
+        scf_options = dict(scf_options)
+        dm0 = scf_options.pop("dm0", None)
+        for key, val in scf_options.items():
+            setattr(mf, key, val)
+    if dm0 is None and dm0_pkl is not None:
+        # Look for a pickled initial-guess density matrix (default: a
+        # "dm0.pkl" in the current directory).  Used if present and
+        # compatible, otherwise the default SCF guess is used.
+        dm0 = _load_dm0_pickle(dm0_pkl, mol, basis)
+    mf.kernel(dm0=dm0)
     # mf_grad = mf.nuc_grad_method()
     # grad = mf_grad.kernel()
 
