@@ -130,12 +130,14 @@ def _load_dm0_pickle(path, mol, basis):
     incompatible file warns.
 
     The pickle may hold either a bare density-matrix ``ndarray`` or a dict of
-    the form written by ``tmp/make_dm0.py``::
+    the form written by `make_dm0`::
 
-        {"dm": ndarray, "basis": ..., "atom_order": (...), ...}
+        {"dm": ndarray, "basis": ..., "atoms_string": ..., "units": ..., ...}
 
-    When metadata is present it is checked (basis and atom ordering); the
-    density-matrix shape is always checked against the number of AOs.
+    When metadata is present the basis is checked, and the atom ordering is
+    checked by parsing the source ``atoms_string`` into element symbols and
+    comparing against the target molecule; the density-matrix shape is always
+    checked against the number of AOs.
     """
     import numpy as np
 
@@ -154,7 +156,24 @@ def _load_dm0_pickle(path, mol, basis):
     if isinstance(payload, dict):
         dm = payload.get("dm")
         meta_basis = payload.get("basis")
-        meta_atoms = payload.get("atom_order")
+        # Derive the source atom ordering (a tuple of element symbols) from the
+        # "atoms_string" geometry stored in the pickle, parsed the same way
+        # generate_molecular_orbitals parses its own geometry, so it can be
+        # compared against the target molecule (mol.elements).  Falls back to
+        # no atom-ordering check if the geometry cannot be parsed (e.g. an
+        # .xyz path that is no longer accessible).
+        from pyscf import gto
+        _src_astr = payload.get("atoms_string")
+        try:
+            if _src_astr is None:
+                meta_atoms = None
+            else:
+                if isinstance(_src_astr, str) and _src_astr.endswith(".xyz"):
+                    _src_astr = gto.mole.fromfile(_src_astr)
+                meta_atoms = tuple(gto.mole._std_symbol(a[0])
+                                   for a in gto.mole.format_atom(_src_astr))
+        except Exception:  # noqa: BLE001 - skip the check if unparseable
+            meta_atoms = None
     else:
         dm = payload
         meta_basis = None
@@ -249,8 +268,7 @@ def generate_molecular_orbitals(astr: str,
         is used as ``mf.kernel(dm0=...)``; otherwise the default SCF initial
         guess is used.  Set to ``None`` to disable the lookup entirely.  The
         pickle may be a bare density-matrix array or a metadata dict as
-        produced by ``tmp/make_dm0.py``.  Ignored if ``scf_options["dm0"]``
-        is given.
+        produced by `make_dm0`.  Ignored if ``scf_options["dm0"]`` is given.
 
     Returns
     -------
@@ -385,6 +403,89 @@ def generate_molecular_orbitals(astr: str,
         #      without doing any symmetry-adapted SCF
         mf.mol.groupname = gpname
         return mf
+
+
+def make_dm0(astr: str,
+             unit: str = None, units: str = "Bohr",
+             spin: int = 0,
+             basis: str | dict = "aug-cc-pVTZ",
+             postHF: str = None,
+             ignore_hydrogen_mass: bool = False,
+             symmetrization_level: int = 1,
+             scf_options: dict | None = None,
+             dm0_pkl: str | None = None,
+             out: str = "dm0_pre.pkl"):
+    """Run a mean-field calculation and pickle its density matrix as a reusable
+    SCF initial guess.
+
+    Thin wrapper around :func:`generate_molecular_orbitals`: it takes the exact
+    same arguments (so the *source* geometry / basis / etc. are specified the
+    same way), runs the mean field, and writes the resulting AO-basis 1-RDM to
+    *out* (default ``"dm0_pre.pkl"``) together with the metadata that
+    :func:`_load_dm0_pickle` validates against.
+
+    The output is deliberately named ``dm0_pre.pkl`` rather than ``dm0.pkl`` so
+    it never collides with the file that ``generate_molecular_orbitals`` reads
+    back.  Rename it to ``dm0.pkl`` (or whatever path you pass as *dm0_pkl* to
+    the next call) to have that call pick it up as its initial guess.
+
+    Typical use: run this on an *easy* geometry (e.g. a shorter bond length)
+    that converges cleanly, then feed the pickled density into a hard,
+    stretched-geometry run that would otherwise not converge.
+
+    Parameters
+    ----------
+    astr, unit, units, spin, basis, postHF, ignore_hydrogen_mass,
+    symmetrization_level, scf_options :
+        Passed straight through to :func:`generate_molecular_orbitals`.
+    dm0_pkl : str or None, optional
+        Passed through to :func:`generate_molecular_orbitals`, but defaults to
+        ``None`` here (rather than ``"dm0.pkl"``) so the source density is
+        computed from a pristine SCF guess and is never seeded by a pre-existing
+        ``dm0.pkl``.  Set it explicitly to chain guesses on purpose.
+    out : str, optional
+        Path to write the pickled density matrix to.  Default
+        ``"dm0_pre.pkl"``.
+
+    Returns
+    -------
+    mf : pyscf.scf.RHF or post-HF object
+        Whatever :func:`generate_molecular_orbitals` returned (also written to
+        *out* as a side effect).
+    """
+    mf = generate_molecular_orbitals(
+        astr, unit=unit, units=units, spin=spin, basis=basis, postHF=postHF,
+        ignore_hydrogen_mass=ignore_hydrogen_mass,
+        symmetrization_level=symmetrization_level,
+        scf_options=scf_options, dm0_pkl=dm0_pkl,
+    )
+
+    # generate_molecular_orbitals returns the mean-field object for postHF=None,
+    # or a post-HF object (e.g. CCSD) otherwise; in the latter case the
+    # underlying SCF object carries the AO-basis density we want for a guess.
+    scf_obj = getattr(mf, "_scf", mf)
+    if not scf_obj.converged:
+        warnings.warn(
+            f"Source SCF did not converge; the density written to {out!r} "
+            "may be a poor initial guess.", stacklevel=2)
+
+    payload = {
+        "dm": scf_obj.make_rdm1(),                   # AO-basis 1-RDM
+        "basis": basis,
+        "atoms_string": astr,                        # source geometry
+        "units": unit if unit is not None else units,
+        "spin": spin,
+        "source_e_tot": float(scf_obj.e_tot),
+    }
+    with open(out, "wb") as fh:
+        pickle.dump(payload, fh)
+
+    target = dm0_pkl if dm0_pkl else "dm0.pkl"
+    print(f"make_dm0: wrote SCF initial-guess density matrix to {out!r} "
+          f"(source E={scf_obj.e_tot:.10f} Ha).")
+    print(f"make_dm0: rename it to {target!r} to use it as the SCF initial "
+          "guess for the next generate_molecular_orbitals call.")
+    return mf
 
 
 # ---------------------------------------------------------------------------
