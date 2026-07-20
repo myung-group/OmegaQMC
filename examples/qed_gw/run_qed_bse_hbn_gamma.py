@@ -15,12 +15,15 @@ periodized Coulomb interaction:
   machinery cannot consume).
 * Cavity coupling: the length-gauge dipole operator does NOT exist
   under PBC, so the coupling matrix is built in the velocity gauge,
-      d_pq = lambda . <p|r|q>_eff,  <p|r|q>_eff = i <p|p_hat|q> / (eps_q - eps_p),
-  from the momentum matrix elements (int1e_ipovlp). At Gamma with real
-  orbitals this is a real symmetric matrix defined on off-diagonal
-  (p != q) pairs only. Caveats (standard for velocity-gauge optics):
-  the [r, Sigma_x] and [r, V_nl(pseudo)] commutator corrections are
-  neglected.
+      d_pq = lambda . <p|r|q>_eff.
+  By default the exact-within-basis route is used (k-derivative of the
+  fixed-density Fock/overlap plus the intra-cell dipole term, see
+  OmegaQMC.addons.qed_polariton_kpts), which captures the [r, Sigma_x]
+  and [r, V_nl(pseudo)] commutators; velocity_gauge_dipole(exact=False)
+  falls back to bare momentum matrix elements (int1e_ipovlp),
+      <p|r|q>_eff = i <p|p_hat|q> / (eps_q - eps_p).
+  At Gamma with real orbitals r_eff is a real symmetric matrix defined
+  on off-diagonal (p != q) pairs only.
 * NO QED-HF ground state and NO dipole self-energy: both require
   <(mu - <mu>)^2> per cell, i.e. the electronic localization tensor —
   a genuine reformulation (and divergent for metals). The photon
@@ -117,27 +120,41 @@ def gamma_df_factor(mf):
     return np.ascontiguousarray(np.concatenate(blocks, axis=0))
 
 
-def velocity_gauge_dipole(mf):
-    """Effective transition-dipole matrices r_eff[x][p,q] (MO basis) from
-    momentum matrix elements:  <p|r|q>_eff = -P_pq / (eps_q - eps_p)
-    with P = C^T <mu|d/dr|nu>_bra C (int1e_ipovlp, antisymmetric, real
-    at Gamma). Diagonal / degenerate pairs are set to zero."""
-    cell = mf.cell
-    C = np.asarray(mf.mo_coeff)
-    eps = np.asarray(mf.mo_energy)
-    ip = np.asarray(cell.pbc_intor('int1e_ipovlp', comp=3))
-    if np.iscomplexobj(ip):
-        assert np.max(np.abs(ip.imag)) < 1e-9
-        ip = ip.real
-    nmo = C.shape[1]
-    r_eff = np.zeros((3, nmo, nmo))
-    dE = eps[None, :] - eps[:, None]
-    safe = np.abs(dE) > 1e-6
-    for x in range(3):
-        P = C.T @ ip[x] @ C
-        r_eff[x][safe] = -P[safe] / dE[safe]
-        r_eff[x] = 0.5 * (r_eff[x] + r_eff[x].T)   # symmetrize (real gauge)
-    return r_eff
+def _gamma_kview(mf):
+    """Wrap a converged Gamma-only RHF into a single-k-point KRHF view so
+    the k-point velocity machinery applies verbatim."""
+    kpts = np.reshape(getattr(mf, 'kpt', np.zeros(3)), (1, 3))
+    kmf = pbcscf.KRHF(mf.cell, kpts=kpts, exxdiv=mf.exxdiv)
+    kmf.with_df = mf.with_df
+    kmf.mo_coeff = [np.asarray(mf.mo_coeff)]
+    kmf.mo_energy = [np.asarray(mf.mo_energy)]
+    kmf.mo_occ = [np.asarray(mf.mo_occ)]
+    return kmf
+
+
+def velocity_gauge_dipole(mf, exact=True, fd_delta=1e-4):
+    """Velocity-gauge effective transition-dipole matrices r_eff[x][p,q]
+    (MO basis, real at Gamma). Diagonal / degenerate pairs are zero.
+
+    exact=True (default): exact-within-basis route — k-derivative of the
+    fixed-density Fock/overlap plus the intra-cell dipole term — which
+    captures the [r, V_nl(pseudo)] and [r, Sigma_x] commutators (see
+    OmegaQMC.addons.qed_polariton_kpts). exact=False: bare momentum
+    matrix elements, <p|r|q>_eff = i P_pq / (eps_q - eps_p) with
+    P = i <del mu|nu> (int1e_ipovlp), commutator corrections neglected.
+    """
+    from OmegaQMC.addons.qed_polariton_kpts import (velocity_dipole_exact,
+                                                   velocity_dipole_bare)
+    kmf = _gamma_kview(mf)
+    if exact:
+        rk, herm_dev = velocity_dipole_exact(kmf, delta=fd_delta)
+        if herm_dev > 1e-3:
+            print(f'  warning: velocity herm dev = {herm_dev:.2e}')
+    else:
+        rk = velocity_dipole_bare(kmf)
+    rk = rk[0]
+    assert np.max(np.abs(rk.imag)) < 1e-6
+    return np.ascontiguousarray(rk.real)
 
 
 def build_sq(mf, B_ao, r_eff, lambda_cav, omega_cav):
@@ -265,17 +282,21 @@ def run_bse_polaritonic(sq, eps_QP, r_eff, lambda_on=True, tda=False):
 # ---------------------------------------------------------------------------
 # Experiment driver
 # ---------------------------------------------------------------------------
-def run_system(nsc, basis, lam_abs, gw_mode, verbose=True):
+def run_system(nsc, basis, lam_abs, gw_mode, verbose=True,
+               velocity='exact'):
     """Full pipeline for one Gamma-only supercell. lambda is along x
-    (in-plane); w_cav is tuned to the lowest bright exciton (lambda=0)."""
+    (in-plane); w_cav is tuned to the lowest bright exciton (lambda=0).
+    velocity='bare' reproduces the pre-exact-route (manuscript-table)
+    intensities."""
     t0 = time.time()
     ncell = nsc[0] * nsc[1]
     tag = f'{nsc[0]}x{nsc[1]}'
-    print(f'\n=== hBN {tag} supercell, Gamma-only, basis={basis} ===')
+    print(f'\n=== hBN {tag} supercell, Gamma-only, basis={basis}, '
+          f'velocity={velocity} ===')
     cell = build_hbn_cell(basis=basis, nsc=nsc)
     mf = run_gamma_rhf(cell)
     B_ao = gamma_df_factor(mf)
-    r_eff = velocity_gauge_dipole(mf)
+    r_eff = velocity_gauge_dipole(mf, exact=(velocity == 'exact'))
     nocc = int(np.count_nonzero(mf.mo_occ > 0))
     nmo = mf.mo_coeff.shape[1]
     print(f'  E_HF = {mf.e_tot:.8f} Ha, nocc = {nocc}, nmo = {nmo}, '
@@ -310,7 +331,7 @@ def run_system(nsc, basis, lam_abs, gw_mode, verbose=True):
     lam_scaled = lam_abs / math.sqrt(ncell)
     out = {'tag': tag, 'ncell': ncell, 'basis': basis,
            'E_HF': float(mf.e_tot), 'nocc': nocc, 'nmo': nmo,
-           'gw_mode': gw_mode,
+           'gw_mode': gw_mode, 'velocity': velocity,
            'gap_HF_eV': float((eps_HF[nocc] - eps_HF[nocc - 1]) * EV),
            'gap_GW_eV': float((eps_QP[nocc] - eps_QP[nocc - 1]) * EV),
            'omega_cav_eV': w_cav * EV,
@@ -341,13 +362,18 @@ def main():
     ap.add_argument('--basis', default='gth-szv')
     ap.add_argument('--lam', type=float, default=0.05)
     ap.add_argument('--gw-mode', default='evGW', choices=['evGW', 'G0W0'])
+    ap.add_argument('--velocity', default='exact',
+                    choices=['exact', 'bare'],
+                    help="'bare' reproduces the pre-exact-route numbers")
     ap.add_argument('--json', default='qed_bse_hbn_gamma_results.json')
     args = ap.parse_args()
 
-    results = {'lambda_abs': args.lam, 'systems': []}
+    results = {'lambda_abs': args.lam, 'velocity': args.velocity,
+               'systems': []}
     for nsc in ((1, 1), (2, 2)):
         results['systems'].append(
-            run_system(nsc, args.basis, args.lam, args.gw_mode))
+            run_system(nsc, args.basis, args.lam, args.gw_mode,
+                       velocity=args.velocity))
 
     # Collective-coupling analysis. A naive Rabi(2x2)/Rabi(1x1) ratio does
     # NOT isolate the sqrt(N) law: a Gamma-only 2x2 supercell folds the M

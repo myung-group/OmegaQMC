@@ -11,13 +11,44 @@ to the q = 0 (k-diagonal) block:
 with the cavity-coupling matrix built in the VELOCITY gauge per k-point
 (the length-gauge position operator does not exist under PBC),
 
-    d_pq(k) = lambda . r_eff(k),   r_eff_pq = i <p k|p_hat|q k> / (eps_q - eps_p),
+    d_pq(k) = lambda . r_eff(k).
 
-from the int1e_ipovlp momentum matrix elements. There is NO QED-HF
-ground-state shift and NO dipole self-energy: both require the
-per-cell dipole-fluctuation (localization) tensor, which is a genuine
-reformulation under PBC. GW and the static W are purely electronic;
-the photon appears once, explicitly, in the BSE excitation space.
+Two velocity routes are provided (``velocity=`` of
+:func:`build_kpts_quantities`):
+
+* ``'exact'`` (default): the exact-within-basis transition dipole from
+  the k-derivative of the fixed-density Fock/overlap matrices plus the
+  intra-cell dipole (basis Berry-connection) term,
+
+      r_eff_pq = i C_p^dag [dF/dk - (eps_p+eps_q)/2 dS/dk] C_q
+                 / (eps_q - eps_p)  +  [C^dag Pbar C]_pq,
+
+  with Pbar the Hermitized lattice-summed dipole integrals
+  P_uv(k) = sum_R e^{ikR} <u 0|r|v R> (``int1e_r``). This is the
+  nonorthogonal-basis momentum formula of Lee, Kim & Son
+  [PRB 98, 115115 (2018), Eq. (7)] divided by the transition energy;
+  it captures the [r, V_nl(pseudo)] and [r, Sigma_x] commutators that
+  the bare-momentum route neglects, and reduces exactly to the
+  length-gauge dipole in the isolated-molecule limit. dF/dk is a
+  central finite difference with the converged density held fixed;
+  hcore, S and the Hartree J are differenced at shifted band k-points
+  (smooth), while the HF exchange is differenced over a RIGID SHIFT of
+  the whole k-mesh (fresh GDF per shifted mesh) — a fixed-mesh
+  difference of K diverges as 4pi/delta^2 through the G = 0 Coulomb
+  component at momentum transfer q = delta (the exxdiv=None spike),
+  whereas the rigid shift keeps every transfer exactly on-mesh and
+  equals the fixed-density dK/dk in the thermodynamic limit
+  (integration by parts over the BZ).
+
+* ``'bare'``: the historical route, r_eff_pq = i P_pq/(eps_q - eps_p)
+  from the bare int1e_ipovlp momentum matrix elements (commutator
+  corrections neglected).
+
+There is NO QED-HF ground-state shift and NO dipole self-energy: both
+require the per-cell dipole-fluctuation (localization) tensor, which
+is a genuine reformulation under PBC. GW and the static W are purely
+electronic; the photon appears once, explicitly, in the BSE
+excitation space.
 
 Coupling-strength convention: ``lambda_cav`` is the coupling of the
 single cavity mode to the WHOLE Born-von-Karman supercell (N_k cells).
@@ -29,12 +60,19 @@ coupling then scales as it must, ~ 1/sqrt(N_k)).
 DF conventions (pyscf GDF, momentum-conserving):
 
     L_pq(ki, kj) = (1/sqrt(N_k)) C(ki)^dag j3c(ki, kj) C(kj)
-    (p ki q kj | r kr s ks) = sum_X L_pq,X(ki,kj) L_rs,X(kr,ks)
+    (p ki q kj | r kr s ks) = sum_X s_X L_pq,X(ki,kj) L_rs,X(kr,ks)
 
 with L_qp(kj, ki) = conj(L_pq(ki, kj)) — the same conventions as
 pyscf.pbc.mp.kmp2 with the 1/N_k folded into the factors, so at
 Gamma-only meshes every quantity reduces to the molecular/supercell
-module exactly.
+module exactly. s_X = +/-1 is the auxiliary-space METRIC: for a 3D
+cell the GDF factorisation is positive (s = +1 identically, the rule
+above is the plain B.B one); for cell.dimension = 2 the truncated
+Coulomb operator is indefinite and pyscf's low-dimensional GDF kernel
+emits sign-split factor blocks (sign = -1 in with_df.sr_loop), i.e.
+(pq|rs) = B.B - Bbar.Bbar. The metric S = diag(s) depends only on the
+momentum transfer q = kj - ki (the j2c decomposition is per q) and is
+carried through every auxiliary-space contraction below.
 
 Screening: the auxiliary-basis dielectric of the molecular module,
 ported to complex arithmetic per momentum transfer q. For each q the
@@ -42,20 +80,47 @@ ported to complex arithmetic per momentum transfer q. For each q the
 
     Pi_XY(q, nu) = sum_{k, ia} conj(L_ia,X(k, k+q)) dE/(nu^2 - dE^2) L_ia,Y(k, k+q)
 
-gives the screened-interaction kernel Lam_eff(q, nu) = 4 Pi (1 - 4 Pi)^{-1}
-by one Woodbury-type inversion (no nov-dimensional diagonalisation at
-any q). The BSE uses Lam_eff(q, 0) (static W); the KGW quasiparticle
-energies use the contour-deformation self-energy with the m-sum running
-over all bands at k - q for every q.
+gives the screened-interaction kernel by one Woodbury-type inversion
+(no nov-dimensional diagonalisation at any q),
 
-Requires a 3D cell (2D materials: vacuum slab) so the GDF factor is a
-plain positive factorisation; cell.dimension = 2 emits sign-split
-blocks that this module does not consume.
+    Lam_eff(q, nu) = S 4 Pi (1 - S 4 Pi)^{-1} S,   S = diag(s(q)),
+
+which for a positive (3D) factorisation, S = 1, is the familiar
+4 Pi (1 - 4 Pi)^{-1}. Every bare-interaction contraction carries the
+same metric: the static-W BSE kernel is L [S + Lam_eff(q,0)] L*
+instead of L [1 + Lam_eff] L*, and the Hartree (transition) channel is
+2 sum_X s_X(0) L_ai L_jb. Lam_eff stays Hermitian for real nu^2
+(S 4Pi (1-S 4Pi)^{-1} S is Hermitian whenever Pi is), so the
+contour-deformation KGW machinery is untouched. The BSE uses
+Lam_eff(q, 0) (static W); the KGW quasiparticle energies use the
+contour-deformation self-energy with the m-sum running over all bands
+at k - q for every q.
+
+Supports both 3D cells (vacuum-slab treatment of 2D materials, all
+signs +1) and cell.dimension = 2 low-dimensional GDF references
+(truncated Coulomb, sign-split factors). The dimension = 2 path
+removes the spurious interlayer screening of the vacuum-slab approach,
+which converges only ~ 1/L_z in the interlayer distance
+[Hueser, Olsen, Thygesen, PRB 88, 245309 (2013)].
 
 Validation: a Gamma-centred 2x2 mesh on the primitive cell reproduces
 the Gamma-only 2x2 supercell (HF, evGW QP energies, TDA and full
-polaritonic BSE spectra) — see
-examples/qed_gw/validate_qed_bse_kpts_hbn.py.
+polaritonic BSE spectra) at the 1e-7 level with velocity='bare' —
+see examples/qed_gw/validate_qed_bse_kpts_hbn.py; the equivalence
+holds identically on the sign-split dimension = 2 path, and the
+dimension = 2 results are the L_z -> infinity limit of the
+vacuum-slab series — see
+examples/qed_gw/validate_qed_bse_kpts_2d.py (machinery validations
+are pinned to velocity='bare'). The exact velocity
+route is validated independently (isolated-molecule length-gauge
+limit; r_nm = i <u_nk|u_m,k+q>/q vertex identity on periodic hBN;
+Hellmann-Feynman band velocities; delta-convergence). Note that the
+exact route is representation-covariant only up to
+basis-incompleteness residuals: evaluated in a SUPERCELL it acquires
+small spurious momentum-forbidden couplings that the primitive-mesh
+evaluation excludes by construction (k-diagonal), so the primitive
+mesh is canonical — the effect on hBN gth-szv 2x2 polaritons is
+quantified in examples/qed_gw/run_qed_velocity_exact_check.py.
 """
 
 import math
@@ -66,6 +131,114 @@ import scipy.linalg as la
 from .qed_polariton_singlet import _imag_freq_grid, _wt_spline, _qp_secant
 
 EV = 27.211386245988
+
+
+# ---------------------------------------------------------------------------
+# Velocity-gauge transition dipoles
+# ---------------------------------------------------------------------------
+def _fd_fock_ovlp(kmf, delta=1e-4):
+    """dF[x][k], dS[x][k] (AO basis) by central finite differences at
+    k +/- delta e_x with the converged density held fixed. hcore, S and
+    the Hartree J are evaluated at shifted band k-points (smooth in k);
+    the HF exchange is evaluated on rigidly shifted meshes so every
+    momentum transfer stays exactly on-mesh (see module docstring)."""
+    from pyscf.pbc import df as pbcdf
+    cell = kmf.cell
+    kpts = np.asarray(kmf.kpts).reshape(-1, 3)
+    nk = len(kpts)
+    nao = cell.nao_nr()
+    dm = kmf.make_rdm1()
+    kb = []
+    for x in range(3):
+        e = np.zeros(3)
+        e[x] = delta
+        kb += [kpts + e, kpts - e]
+    kb = np.concatenate(kb, axis=0)                       # (6 nk, 3)
+
+    hcore = np.asarray(kmf.get_hcore(cell, kb))
+    S = np.asarray(kmf.get_ovlp(cell, kb)).reshape(3, 2, nk, nao, nao)
+    vj = np.asarray(kmf.with_df.get_jk(dm, kpts=kpts, kpts_band=kb,
+                                       with_k=False, exxdiv=None)[0])
+    HJ = (hcore + vj).reshape(3, 2, nk, nao, nao)
+
+    auxbasis = getattr(kmf.with_df, 'auxbasis', None)
+    K = np.empty((3, 2, nk, nao, nao), dtype=complex)
+    for x in range(3):
+        e = np.zeros(3)
+        e[x] = delta
+        for s, sgn in enumerate((1.0, -1.0)):
+            mesh_s = kpts + sgn * e
+            df_s = pbcdf.GDF(cell, kpts=mesh_s)
+            if auxbasis is not None:
+                df_s.auxbasis = auxbasis
+            K[x, s] = np.asarray(df_s.get_jk(dm, kpts=mesh_s, with_j=False,
+                                             exxdiv=None)[1])
+
+    F = HJ - 0.5 * K
+    dF = (F[:, 0] - F[:, 1]) / (2.0 * delta)              # (3, nk, nao, nao)
+    dS = (S[:, 0] - S[:, 1]) / (2.0 * delta)
+    return dF, dS
+
+
+def velocity_dipole_exact(kmf, delta=1e-4, deg_tol=1e-6):
+    """Exact-within-basis velocity-gauge transition dipoles, one
+    (3, nmo, nmo) complex Hermitian array per k-point (module
+    docstring). Returns (r_eff, herm_dev) with herm_dev the maximal
+    pre-symmetrization Hermiticity deviation (finite-difference noise
+    diagnostic)."""
+    cell = kmf.cell
+    kpts = np.asarray(kmf.kpts).reshape(-1, 3)
+    nk = len(kpts)
+    C = [np.asarray(kmf.mo_coeff[k]) for k in range(nk)]
+    eps = [np.asarray(kmf.mo_energy[k]) for k in range(nk)]
+    dF, dS = _fd_fock_ovlp(kmf, delta)
+    rints = cell.pbc_intor('int1e_r', comp=3, kpts=kpts)
+    nao = cell.nao_nr()
+    nmo = C[0].shape[1]
+    r_eff = []
+    herm_dev = 0.0
+    for k in range(nk):
+        rk = np.zeros((3, nmo, nmo), dtype=complex)
+        dE = eps[k][None, :] - eps[k][:, None]
+        eavg = 0.5 * (eps[k][None, :] + eps[k][:, None])
+        safe = np.abs(dE) > deg_tol
+        P = np.asarray(rints[k]).reshape(3, nao, nao)
+        for x in range(3):
+            dF_mo = C[k].conj().T @ dF[x, k] @ C[k]
+            dS_mo = C[k].conj().T @ dS[x, k] @ C[k]
+            P_mo = C[k].conj().T @ (0.5 * (P[x] + P[x].conj().T)) @ C[k]
+            num = 1j * (dF_mo - eavg * dS_mo)
+            rk[x][safe] = num[safe] / dE[safe] + P_mo[safe]
+            herm_dev = max(herm_dev,
+                           float(np.max(np.abs(rk[x] - rk[x].conj().T))))
+            rk[x] = 0.5 * (rk[x] + rk[x].conj().T)
+        r_eff.append(rk)
+    return r_eff, herm_dev
+
+
+def velocity_dipole_bare(kmf, deg_tol=1e-6):
+    """Bare-momentum velocity-gauge dipoles r_eff = i p/dE per k-point
+    ([r, V_nl] and [r, Sigma_x] commutators neglected)."""
+    cell = kmf.cell
+    kpts = np.asarray(kmf.kpts).reshape(-1, 3)
+    nk = len(kpts)
+    C = [np.asarray(kmf.mo_coeff[k]) for k in range(nk)]
+    eps = [np.asarray(kmf.mo_energy[k]) for k in range(nk)]
+    ip_all = cell.pbc_intor('int1e_ipovlp', comp=3, kpts=kpts)
+    nmo = C[0].shape[1]
+    r_eff = []
+    for k in range(nk):
+        ip = np.asarray(ip_all[k])
+        rk = np.zeros((3, nmo, nmo), dtype=complex)
+        dE = eps[k][None, :] - eps[k][:, None]
+        safe = np.abs(dE) > deg_tol
+        for x in range(3):
+            p_mo = C[k].conj().T @ (1j * ip[x]) @ C[k]
+            p_mo = 0.5 * (p_mo + p_mo.conj().T)
+            rk[x][safe] = 1j * p_mo[safe] / dE[safe]
+            rk[x] = 0.5 * (rk[x] + rk[x].conj().T)
+        r_eff.append(rk)
+    return r_eff
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +261,13 @@ def _k_maps(cell, kpts, tol=6):
     return qidx, kplusq
 
 
-def build_kpts_quantities(kmf, verbose=True):
+def build_kpts_quantities(kmf, verbose=True, velocity='exact',
+                          fd_delta=1e-4):
     """Reference quantities from a converged KRHF/GDF calculation:
-    MO energies, the DF factors L[ki][kj] (1/sqrt(nk) folded in) and the
-    velocity-gauge effective dipole matrices r_eff(k)."""
+    MO energies, the DF factors L[ki][kj] (1/sqrt(nk) folded in), the
+    per-q auxiliary metric s(q) (sign-split low-dimensional GDF) and
+    the velocity-gauge effective dipole matrices r_eff(k) (``velocity``
+    selects the 'exact' or 'bare' route, module docstring)."""
     cell = kmf.cell
     kpts = kmf.kpts
     nk = len(kpts)
@@ -103,46 +279,60 @@ def build_kpts_quantities(kmf, verbose=True):
     nocc = occs[0]
     nmo = C[0].shape[1]
     nao = cell.nao_nr()
+    qidx, kplusq = _k_maps(cell, kpts)
 
     L = {}
+    sgn_q = [None] * nk
     for ki in range(nk):
         for kj in range(nk):
-            blocks = []
+            blocks, signs = [], []
             for LpqR, LpqI, sign in kmf.with_df.sr_loop(
                     (kpts[ki], kpts[kj]), compact=False):
-                if sign != 1:
-                    raise RuntimeError(
-                        'sign-split GDF block: use a 3D (vacuum-slab) cell')
-                blocks.append((LpqR + 1j * LpqI).reshape(-1, nao, nao))
+                blk = (LpqR + 1j * LpqI).reshape(-1, nao, nao)
+                blocks.append(blk)
+                signs.append(np.full(blk.shape[0], sign, dtype=float))
             Lao = np.concatenate(blocks, axis=0)
             L[ki, kj] = np.einsum('Lpq,pi,qj->Lij', Lao, C[ki].conj(), C[kj],
                                   optimize=True) / math.sqrt(nk)
-    naux = L[0, 0].shape[0]
+            # the aux metric is a property of q = kj - ki only (the j2c
+            # decomposition is per momentum transfer)
+            s = np.concatenate(signs)
+            iq = int(qidx[ki, kj])
+            if sgn_q[iq] is None:
+                sgn_q[iq] = s
+            elif not np.array_equal(sgn_q[iq], s):
+                raise RuntimeError(
+                    f'inconsistent GDF sign structure within q-channel {iq}')
+    naux_q = np.array([len(s) for s in sgn_q])
+    naux = int(naux_q.max())
+    indefinite = any((s < 0).any() for s in sgn_q)
 
-    # velocity-gauge effective dipole: r_eff = i p / dE, p = i <del mu|nu>
-    ip_all = cell.pbc_intor('int1e_ipovlp', comp=3, kpts=kpts)
-    r_eff = []
-    for k in range(nk):
-        ip = np.asarray(ip_all[k])
-        rk = np.zeros((3, nmo, nmo), dtype=complex)
-        dE = eps[k][None, :] - eps[k][:, None]
-        safe = np.abs(dE) > 1e-6
-        for x in range(3):
-            p_ao = 1j * ip[x]
-            p_mo = C[k].conj().T @ p_ao @ C[k]
-            p_mo = 0.5 * (p_mo + p_mo.conj().T)
-            rk[x][safe] = 1j * p_mo[safe] / dE[safe]
-            rk[x] = 0.5 * (rk[x] + rk[x].conj().T)
-        r_eff.append(rk)
+    # velocity-gauge effective transition dipoles
+    if velocity == 'exact':
+        r_eff, herm_dev = velocity_dipole_exact(kmf, delta=fd_delta)
+    elif velocity == 'bare':
+        r_eff = velocity_dipole_bare(kmf)
+        herm_dev = 0.0
+    else:
+        raise ValueError(f"velocity must be 'exact' or 'bare': {velocity}")
 
-    qidx, kplusq = _k_maps(cell, kpts)
     if verbose:
         print(f'  k-mesh: nk = {nk}, nocc = {nocc}, nmo = {nmo} (per k), '
               f'naux = {naux}')
+        if indefinite:
+            nneg = [int((s < 0).sum()) for s in sgn_q]
+            print(f'  low-dim GDF (dimension = {cell.dimension}): '
+                  f'indefinite metric, naux per q = {naux_q.tolist()}, '
+                  f'negative rows per q = {nneg}')
+        msg = f'  velocity gauge: {velocity}'
+        if velocity == 'exact':
+            msg += (f' (fd_delta = {fd_delta:.1e}, '
+                    f'herm dev = {herm_dev:.1e})')
+        print(msg)
     return {
         'nk': nk, 'nocc': nocc, 'nmo': nmo, 'naux': naux,
-        'eps': eps, 'L': L, 'r_eff': r_eff,
-        'qidx': qidx, 'kplusq': kplusq,
+        'eps': eps, 'L': L, 'r_eff': r_eff, 'velocity': velocity,
+        'sgn': sgn_q, 'qidx': qidx, 'kplusq': kplusq,
     }
 
 
@@ -162,16 +352,30 @@ def _q_channels(kq, eps, iq):
     return np.concatenate(cols, axis=1), np.concatenate(gaps)
 
 
-def _lambda_eff_q(b, dE, nu2):
-    """Screened-interaction kernel Lam_eff(q, nu) = 4 Pi (1 - 4 Pi)^{-1}
+def _lambda_eff_q(b, dE, nu2, sgn=None):
+    """Screened-interaction kernel with the auxiliary metric S = diag(sgn),
+
+        Lam_eff(q, nu) = S 4 Pi (1 - S 4 Pi)^{-1} S,
+
     with Pi_XY = sum conj(b_X) dE/(nu^2 - dE^2) b_Y (complex Woodbury;
-    Hermitian for real nu2). Same algebra as the molecular
-    _aux_wtilde_core with the cavity channel absent."""
+    Hermitian for real nu2 — the metric-dressed form S 4Pi (1-S 4Pi)^{-1} S
+    is Hermitian whenever Pi is, by the push-through identity). For
+    sgn = None (positive 3D factorisation) this is 4 Pi (1 - 4 Pi)^{-1},
+    the same algebra as the molecular _aux_wtilde_core with the cavity
+    channel absent. The RPA series with an indefinite decomposition
+    v = B^T S B inserts S between successive polarizabilities:
+    Lam = S [4Pi + 4Pi S 4Pi + ...] S."""
     x = dE / (nu2 - dE * dE)
     pi = (b.conj() * x) @ b.T
     nch = pi.shape[0]
-    Q = np.linalg.solve(np.eye(nch, dtype=pi.dtype) - 4.0 * pi, pi)
-    return 4.0 * (pi + 4.0 * pi @ Q)
+    eye = np.eye(nch, dtype=pi.dtype)
+    if sgn is None or not (np.asarray(sgn) < 0).any():
+        Q = np.linalg.solve(eye - 4.0 * pi, pi)
+        return 4.0 * (pi + 4.0 * pi @ Q)
+    sgn = np.asarray(sgn, dtype=float)
+    # 4 Pi (1 - S 4 Pi)^{-1} = (1 - 4 Pi S)^{-1} 4 Pi  (push-through)
+    Y = np.linalg.solve(eye - 4.0 * pi * sgn[None, :], 4.0 * pi)
+    return sgn[:, None] * Y * sgn[None, :]
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +442,11 @@ def run_kgw_electronic(kq, mode='evGW', eta=1e-3, max_iter=8, tol=1e-4,
         for iq in range(nk):
             b, dE = chan[iq]
             for f, wpr in enumerate(freqs_all):
-                lam = _lambda_eff_q(b, dE, -wpr * wpr)
+                lam = _lambda_eff_q(b, dE, -wpr * wpr, kq['sgn'][iq])
                 for kp in range(nk):
                     km = int(kq['kplusq'][kp, iq])
-                    R = kq['L'][kp, km].reshape(naux, -1)
+                    Lb = kq['L'][kp, km]
+                    R = Lb.reshape(Lb.shape[0], -1)
                     T = lam @ R
                     blk = (R.conj() * T).sum(axis=0).real.reshape(nmo, nmo)
                     Wt[kp, f, :, km * nmo:(km + 1) * nmo] = blk
@@ -254,7 +459,7 @@ def run_kgw_electronic(kq, mode='evGW', eta=1e-3, max_iter=8, tol=1e-4,
                 km, m = divmod(mflat, nmo)
                 iq = int(kq['qidx'][kp, km])
                 b, dE = chan[iq]
-                lam = _lambda_eff_q(b, dE, nu2)
+                lam = _lambda_eff_q(b, dE, nu2, kq['sgn'][iq])
                 r = kq['L'][kp, km][:, :, m]
                 return np.einsum('Xp,XY,Yp->p', r.conj(), lam, r)
 
@@ -329,7 +534,7 @@ def run_qed_bse_kpts(kq, omega_cav, lambda_cav, eps_QP=None, tda=False,
     Returns dict with 'Omega', 'f_osc' (velocity gauge),
     'photon_weight', 'omega_cav'.
     """
-    nk, no, nmo, naux = kq['nk'], kq['nocc'], kq['nmo'], kq['naux']
+    nk, no, nmo = kq['nk'], kq['nocc'], kq['nmo']
     nv = nmo - no
     novk = nk * no * nv
     dim = novk + 1
@@ -338,12 +543,15 @@ def run_qed_bse_kpts(kq, omega_cav, lambda_cav, eps_QP=None, tda=False,
     eps_QP = [np.asarray(e, dtype=float) for e in eps_QP]
     lam_vec = np.asarray(lambda_cav, dtype=float)
 
-    # static screened-interaction kernels per momentum transfer
-    lam_stat = {}
+    # static screened-interaction kernels per momentum transfer,
+    # bare metric included: K(q) = S(q) + Lam_eff(q, 0)
+    Kq = {}
     for iq in range(nk):
         b, dE = _q_channels(kq, eps_QP, iq)
-        lam_stat[iq] = _lambda_eff_q(b, dE, 0.0)
-    eye = np.eye(naux)
+        Kq[iq] = np.diag(kq['sgn'][iq]) + _lambda_eff_q(
+            b, dE, 0.0, kq['sgn'][iq])
+    iq0 = int(kq['qidx'][0, 0])
+    s0 = kq['sgn'][iq0]                          # metric of the q = 0 channel
 
     Lov0 = [kq['L'][k, k][:, :no, no:] for k in range(nk)]
     A = np.zeros((dim, dim), dtype=complex)
@@ -353,12 +561,12 @@ def run_qed_bse_kpts(kq, omega_cav, lambda_cav, eps_QP=None, tda=False,
         for kj in range(nk):
             sj = kj * no * nv
             iq = int(kq['qidx'][ki, kj])
-            K = eye + lam_stat[iq]              # bare + correlation W(q)
+            K = Kq[iq]                          # bare + correlation W(q)
             Lfull = kq['L'][ki, kj]
             Lij = Lfull[:, :no, :no]
             Lab = Lfull[:, no:, no:]
             # A: 2 (a_ki i_ki | j_kj b_kj) - W_direct
-            blk = 2.0 * np.einsum('Xia,Xjb->iajb', Lov0[ki].conj(),
+            blk = 2.0 * np.einsum('X,Xia,Xjb->iajb', s0, Lov0[ki].conj(),
                                   Lov0[kj], optimize=True)
             blk -= np.einsum('Xab,XY,Yij->iajb', Lab, K, Lij.conj(),
                              optimize=True)
@@ -367,8 +575,9 @@ def run_qed_bse_kpts(kq, omega_cav, lambda_cav, eps_QP=None, tda=False,
             if not tda:
                 Lvo = Lfull[:, no:, :no]        # L_aj (a at ki, j at kj)
                 Lov = Lfull[:, :no, no:]        # L_ib (i at ki, b at kj)
-                blkB = 2.0 * np.einsum('Xia,Xjb->iajb', Lov0[ki].conj(),
-                                       Lov0[kj].conj(), optimize=True)
+                blkB = 2.0 * np.einsum('X,Xia,Xjb->iajb', s0,
+                                       Lov0[ki].conj(), Lov0[kj].conj(),
+                                       optimize=True)
                 blkB -= np.einsum('Xaj,XY,Yib->iajb', Lvo, K, Lov.conj(),
                                   optimize=True)
                 B[si:si + no * nv, sj:sj + no * nv] = blkB.reshape(

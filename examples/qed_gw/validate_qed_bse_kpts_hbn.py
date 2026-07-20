@@ -14,9 +14,19 @@ blocks), so the checks are:
   * every k-space polaritonic BSE root (TDA and full) appears in the
     supercell spectrum; LP/UP energies and photon weights agree
 
+Part 1 uses the BARE velocity route on both sides: bare momentum
+matrix elements conserve the primitive crystal momentum exactly in
+either representation, so the check isolates the BSE/GW machinery at
+the 1e-7 level. The exact-within-basis velocity route is
+representation-covariant only up to basis-incompleteness residuals
+(spurious momentum-forbidden couplings appear in the supercell
+representation), so its supercell<->mesh deviation is a separate,
+physical quantity — measured in run_qed_velocity_exact_check.py.
+
 Part 2 (demo, 3x3 mesh): the 3x3 Gamma-centred mesh folds the K point
 into the sampling — physics a Gamma-only primitive cell cannot see —
-and the cavity is tuned to the lowest bright exciton of that mesh.
+and the cavity is tuned to the lowest bright exciton of that mesh,
+with the production (exact-velocity) coupling route.
 
 Run:  python validate_qed_bse_kpts_hbn.py
 """
@@ -61,7 +71,7 @@ def run_supercell():
     cell = build_hbn_cell(basis=BASIS, nsc=(2, 2))
     mf = run_gamma_rhf(cell)
     B_ao = gamma_df_factor(mf)
-    r_eff = velocity_gauge_dipole(mf)
+    r_eff = velocity_gauge_dipole(mf, exact=False)   # machinery check
     sq0, eps_HF = build_sq(mf, B_ao, r_eff, (0.0, 0.0, 0.0), omega_cav=1.0)
     eps_QP = run_gw_electronic(sq0, eps_HF, mode='evGW')
     bse0 = run_bse_polaritonic(sq0, eps_QP, r_eff, lambda_on=False)
@@ -89,7 +99,7 @@ def run_kmesh(w_cav):
     kmf.kernel()
     if not kmf.converged:
         raise RuntimeError('KRHF did not converge')
-    kq = build_kpts_quantities(kmf)
+    kq = build_kpts_quantities(kmf, velocity='bare')   # machinery check
     eps_QP = run_kgw_electronic(kq, mode='evGW')
     bse_full = run_qed_bse_kpts(kq, w_cav, (LAM, 0.0, 0.0), eps_QP=eps_QP)
     bse_tda = run_qed_bse_kpts(kq, w_cav, (LAM, 0.0, 0.0), eps_QP=eps_QP,

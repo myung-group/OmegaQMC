@@ -6,6 +6,13 @@ energy/eigenvalues, and the polaritonic BSE@HF spectra (TDA and full)
 with the q = 0 photon channel. BSE@HF (eps_QP = HF) keeps the runtime
 small while exercising the full DF/conjugation/W(q)/photon machinery;
 the GW step is validated by examples/qed_gw/validate_qed_bse_kpts_hbn.py.
+
+Both sides use the BARE velocity route: bare momentum matrix elements
+conserve the primitive crystal momentum in either representation, so
+the supercell identity holds to arithmetic precision. The exact
+velocity route is representation-covariant only up to
+basis-incompleteness residuals (see qed_polariton_kpts docstring) and
+is validated separately in examples/qed_gw/run_qed_velocity_exact_check.py.
 """
 
 import math
@@ -38,7 +45,7 @@ def supercell_ref():
     cell = build_hbn_cell(basis='gth-szv', nsc=(1, 2))
     mf = run_gamma_rhf(cell)
     B_ao = gamma_df_factor(mf)
-    r_eff = velocity_gauge_dipole(mf)
+    r_eff = velocity_gauge_dipole(mf, exact=False)   # machinery check
     sq, eps_HF = build_sq(mf, B_ao, r_eff, (LAM, 0.0, 0.0), W_CAV)
     full = run_bse_polaritonic(sq, eps_HF, r_eff, lambda_on=True)
     tda = run_bse_polaritonic(sq, eps_HF, r_eff, lambda_on=True, tda=True)
@@ -53,7 +60,8 @@ def kmesh_run():
     kmf.conv_tol = 1e-10
     kmf.kernel()
     assert kmf.converged
-    kq = build_kpts_quantities(kmf, verbose=False)
+    kq = build_kpts_quantities(kmf, verbose=False,
+                               velocity='bare')      # machinery check
     full = run_qed_bse_kpts(kq, W_CAV, (LAM, 0.0, 0.0), verbose=False)
     tda = run_qed_bse_kpts(kq, W_CAV, (LAM, 0.0, 0.0), tda=True,
                            verbose=False)
