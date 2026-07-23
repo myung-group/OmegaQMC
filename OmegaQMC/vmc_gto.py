@@ -36,7 +36,9 @@ from .observables.force import (
     save_gto_gradients,
 )
 from .symm.point_groups import (auto_symmetrize_molecule,
-                                detect_symmetry_quality)
+                                detect_symmetry_quality,
+                                charge_inertia_axes,
+                                canonicalize_symmetry_axes)
 # from .constants import CHEMICAL_ACCURACY
 from .constants import MIN_DIST_THRESHOLD
 
@@ -296,10 +298,38 @@ def generate_molecular_orbitals(astr: str,
 
     gpname = "C1"
     if symmetrization_level >= 1:
-        # Detect symmetry and get principal axes transformation
+        # Detect symmetry and get principal axes transformation.
+        # ``detect_symm`` centers on the center of nuclear charge (CNC) and
+        # returns the point group, that center, and symmetry axes.
         gpname, centroid, axes = symm.geom.detect_symm(mol._atom)
-        # Apply symmetry-based transformation:
-        # center and rotate to principal axes
+
+        # Replace pyscf's orientation with a deterministic canonical frame
+        # built from the nuclear-charge-weighted inertia about the center
+        # of nuclear charge (isotope-independent; matches the Gaussian
+        # "Standard orientation" -- see tests/orient-molecule/FINDINGS.md).
+        #   * C1: pyscf returns identity axes and a zero centroid (it never
+        #     reorients asymmetric molecules), so use the charge-inertia
+        #     principal axes ordered by ascending moment.
+        #   * Symmetric non-degenerate groups: the charge-inertia
+        #     directions coincide with pyscf's symmetry axes, so keep
+        #     pyscf's axis assignment (needed by the downstream point-group
+        #     operations) but re-sign it deterministically, since pyscf's
+        #     signs otherwise depend on the input orientation.
+        #   * (Near-)degenerate groups (C3v, Td, C4v, D4h, linear): the
+        #     principal axes are ill-defined, so keep pyscf's axes.
+        if gpname == 'C1':
+            canon = charge_inertia_axes(mol.atom_coords(),
+                                        mol.atom_charges())
+        else:
+            canon = canonicalize_symmetry_axes(mol.atom_coords(),
+                                               mol.atom_charges(), axes,
+                                               gpname)
+        if canon is not None:
+            centroid, axes = canon
+
+        # Apply the transformation: center at the CNC and rotate to the
+        # canonical axes.  ``shift_atom`` returns Bohr, so convert back to
+        # the input units; ``b[2]`` re-attaches each atom's fragment index.
         mol.atom = [[a[0], a[1] / _length_in_au(units), b[2]]
                     for a, b in zip(symm.geom.shift_atom(mol._atom,
                                                          centroid, axes),
@@ -315,8 +345,7 @@ def generate_molecular_orbitals(astr: str,
         if masses_adjusted.sum() > 0.0:
             centroid = np.average(mol.atom_coords(), axis=0,
                                   weights=masses_adjusted)
-            mol.set_geom_((mol.atom_coords() - centroid)
-                          / _length_in_au(units))
+            mol.set_geom_((mol.atom_coords() - centroid) / _length_in_au(units))
             mol.build()
         else:
             warnings.warn(

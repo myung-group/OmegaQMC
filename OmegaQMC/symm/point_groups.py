@@ -250,6 +250,44 @@ def get_symmetrizer(point_group: str, **kwargs) -> PointGroupSymmetrizer:
     return SYMMETRIZER_REGISTRY[point_group](**kwargs)
 
 
+def _parse_atom_list(atom_coords):
+    """Split an atom list into ``(symbols, coords, rebuild)``.
+
+    Accepts any of the atom formats used in this codebase:
+
+    * ``[symbol, coords_array]`` -- PySCF ``mol.atom`` / ``mol._atom``;
+    * ``[symbol, coords_array, fragment_index]`` -- ``Mole_custom``, which
+      carries a trailing per-atom fragment label;
+    * ``(symbol, x, y, z)`` -- flat tuple.
+
+    ``coords`` is an ``(N, 3)`` float array.  ``rebuild(new_coords)``
+    reconstructs the list in the original format, preserving any trailing
+    per-atom data (e.g. the fragment index) so it survives a
+    symmetrization round-trip.
+    """
+    first = atom_coords[0]
+    if isinstance(first[1], (list, tuple, np.ndarray)):
+        # [symbol, coords_array, *extra]
+        symbols = [a[0] for a in atom_coords]
+        coords = np.array([np.asarray(a[1], dtype=float)
+                           for a in atom_coords])
+        extras = [list(a[2:]) for a in atom_coords]
+
+        def rebuild(new_coords):
+            return [[symbols[i], new_coords[i], *extras[i]]
+                    for i in range(len(symbols))]
+    else:
+        # (symbol, x, y, z)
+        symbols = [a[0] for a in atom_coords]
+        coords = np.array([(a[1], a[2], a[3]) for a in atom_coords])
+
+        def rebuild(new_coords):
+            return [(symbols[i], new_coords[i, 0], new_coords[i, 1],
+                     new_coords[i, 2]) for i in range(len(symbols))]
+
+    return symbols, coords, rebuild
+
+
 def auto_symmetrize_molecule(atom_coords: list,
                              detected_point_group: str,
                              center: Optional[np.ndarray] = None) -> list:
@@ -267,17 +305,7 @@ def auto_symmetrize_molecule(atom_coords: list,
     Returns:
         Symmetrized atom coordinates in same format as input
     """
-    # Handle both PySCF format [symbol, coords_array]
-    # and tuple format (symbol, x, y, z)
-    is_pyscf_format = len(atom_coords[0]) == 2 \
-        and isinstance(atom_coords[0][1], np.ndarray)
-
-    if is_pyscf_format:
-        coords = np.array([atom[1] for atom in atom_coords])
-        symbols = [atom[0] for atom in atom_coords]
-    else:
-        coords = np.array([(x, y, z) for _, x, y, z in atom_coords])
-        symbols = [symbol for symbol, _, _, _ in atom_coords]
+    symbols, coords, rebuild = _parse_atom_list(atom_coords)
 
     # Determine the best symmetrizer
     # based on detected group and molecular structure
@@ -309,17 +337,9 @@ def auto_symmetrize_molecule(atom_coords: list,
         else:
             symmetrized_coords = symmetrizer.symmetrize(coords, center)
 
-        # Reconstruct atom list in same format as input
-        if is_pyscf_format:
-            symmetrized_atoms = [[symbols[i], symmetrized_coords[i]]
-                                 for i in range(len(symbols))]
-        else:
-            symmetrized_atoms = [(symbols[i], symmetrized_coords[i, 0],
-                                  symmetrized_coords[i, 1],
-                                  symmetrized_coords[i, 2])
-                                 for i in range(len(symbols))]
-
-        return symmetrized_atoms
+        # Reconstruct atom list in the same format as the input, keeping
+        # any trailing per-atom data (e.g. Mole_custom fragment indices).
+        return rebuild(symmetrized_coords)
 
     except Exception as e:
         # If symmetrization fails, return original coordinates
@@ -343,21 +363,7 @@ def symmetrize_molecule(atom_coords: list,
     Returns:
         Symmetrized atom coordinates in same format as input
     """
-    # Handle both PySCF format [symbol, coords_array]
-    # and tuple format (symbol, x, y, z)
-    is_pyscf_format = len(atom_coords[0]) == 2 \
-        and isinstance(atom_coords[0][1], np.ndarray)
-
-    if is_pyscf_format:
-        # PySCF format: [symbol, coordinates_array]
-        coords = np.array([atom[1] for atom in atom_coords])
-        symbols = [atom[0] for atom in atom_coords]
-        output_format = 'pyscf'
-    else:
-        # Tuple format: (symbol, x, y, z)
-        coords = np.array([(x, y, z) for _, x, y, z in atom_coords])
-        symbols = [symbol for symbol, _, _, _ in atom_coords]
-        output_format = 'tuple'
+    _, coords, rebuild = _parse_atom_list(atom_coords)
 
     # Get symmetrizer
     symmetrizer = get_symmetrizer(point_group)
@@ -365,17 +371,9 @@ def symmetrize_molecule(atom_coords: list,
     # Apply symmetrization
     symmetrized_coords = symmetrizer.symmetrize(coords, center)
 
-    # Reconstruct atom list in same format as input
-    if output_format == 'pyscf':
-        symmetrized_atoms = [[symbols[i], symmetrized_coords[i]]
-                             for i in range(len(symbols))]
-    else:
-        symmetrized_atoms = [(symbols[i], symmetrized_coords[i, 0],
-                              symmetrized_coords[i, 1],
-                              symmetrized_coords[i, 2])
-                             for i in range(len(symbols))]
-
-    return symmetrized_atoms
+    # Reconstruct atom list in the same format as the input, keeping any
+    # trailing per-atom data (e.g. Mole_custom fragment indices).
+    return rebuild(symmetrized_coords)
 
 
 def detect_symmetry_quality(atom_coords: list,
@@ -393,16 +391,7 @@ def detect_symmetry_quality(atom_coords: list,
     Returns:
         Dictionary with symmetry quality metrics
     """
-    # Handle both PySCF format [symbol, coords_array]
-    # and tuple format (symbol, x, y, z)
-    if len(atom_coords[0]) == 2 and isinstance(atom_coords[0][1], np.ndarray):
-        # PySCF format: [symbol, coordinates_array]
-        coords = np.array([atom[1] for atom in atom_coords])
-        symbols = [atom[0] for atom in atom_coords]
-    else:
-        # Tuple format: (symbol, x, y, z)
-        coords = np.array([(x, y, z) for _, x, y, z in atom_coords])
-        symbols = [symbol for symbol, _, _, _ in atom_coords]
+    symbols, coords, _ = _parse_atom_list(atom_coords)
 
     # Get symmetrizer
     symmetrizer = get_symmetrizer(point_group)
@@ -432,6 +421,185 @@ def detect_symmetry_quality(atom_coords: list,
     }
 
     return quality_metrics
+
+
+def _reference_atom(proj: np.ndarray, tol_rel: float = 1e-6) -> int:
+    """Index of the atom most strongly projected onto an axis.
+
+    Returns the atom with the largest ``|proj|``, breaking ties by the
+    smallest atom index so the choice is independent of the input
+    orientation.  Symmetry-equivalent atoms have equal ``|proj|`` in exact
+    arithmetic but differ by rounding, which would otherwise let the raw
+    ``argmax`` pick a different atom for a rotated copy of the same
+    molecule; magnitudes are therefore bucketed to a relative tolerance
+    before ranking so such near-ties fall to the index tie-break.
+    """
+    a = np.abs(proj)
+    scale = max(1.0, float(a.max()))
+    bucket = np.round(a / (tol_rel * scale))
+    order = np.lexsort((np.arange(len(proj)), -bucket))
+    return int(order[0])
+
+
+def _charge_inertia_eigen(coords: np.ndarray, charges: np.ndarray):
+    """Eigendecomposition of the charge-weighted inertia tensor.
+
+    Builds the inertia-like tensor of the nuclei about their center of
+    nuclear charge (CNC), using the nuclear charge (atomic number) in
+    place of the mass, and diagonalizes it.
+
+    Returns ``(cnc, x, evals, evecs)`` with ``x`` the CNC-centered
+    coordinates, ``evals`` the ascending principal moments and ``evecs``
+    their eigenvectors as columns.
+    """
+    coords = np.asarray(coords, dtype=float)
+    q = np.asarray(charges, dtype=float)
+    cnc = (q[:, None] * coords).sum(0) / q.sum()
+    x = coords - cnc
+    tensor = np.zeros((3, 3))
+    for qi, xi in zip(q, x):
+        tensor += qi * (xi @ xi * np.eye(3) - np.outer(xi, xi))
+    evals, evecs = np.linalg.eigh(tensor)   # ascending; eigvecs are cols
+    return cnc, x, evals, evecs
+
+
+def _is_degenerate(evals: np.ndarray, degen_rtol: float) -> bool:
+    """True if any two charge-inertia moments coincide to ``degen_rtol``.
+
+    A (near-)degenerate tensor has ill-defined principal axes (linear
+    molecules, or any group with a C_n / S_n axis of order >= 3 such as
+    C3v, Td, C4v, D4h), so the caller should fall back to symmetry axes.
+    """
+    scale = max(1.0, float(np.abs(evals).max()))
+    return bool(np.any(np.diff(evals) < degen_rtol * scale))
+
+
+def _deterministic_frame(dirs: np.ndarray, x: np.ndarray,
+                         tol_rel: float = 1e-8) -> np.ndarray:
+    """Sign an orthonormal axis set deterministically (proper rotation).
+
+    ``dirs`` is a (3, 3) array whose rows are orthonormal axis directions
+    already in the desired (x, y, z) assignment, and ``x`` the CNC-centered
+    nuclear coordinates.  Each axis is signed so that its most strongly
+    projected atom has a positive coordinate (ties broken by atom index),
+    a choice that depends only on the geometry and not on the input
+    orientation.  Axes onto which every atom projects to (near) zero -- for
+    instance the normal of a planar fragment -- are left undetermined here.
+    The overall handedness is then fixed so the frame is a proper rotation
+    (``det == +1``), never a reflection (which would invert chirality): an
+    undetermined axis absorbs the flip when present, otherwise the
+    least-determined axis does.
+    """
+    A = np.array(dirs, dtype=float).copy()
+    scale = max(1.0, float(np.abs(x).max()))
+    tol = tol_rel * scale
+    scores = np.empty(3)
+    for k in range(3):
+        proj = x @ A[k]
+        scores[k] = proj[_reference_atom(proj)]
+    for k in range(3):
+        if scores[k] < -tol:
+            A[k] = -A[k]
+            scores[k] = -scores[k]
+    if np.linalg.det(A) < 0.0:
+        undetermined = [k for k in range(3) if abs(scores[k]) <= tol]
+        k = undetermined[0] if undetermined else int(np.argmin(scores))
+        A[k] = -A[k]
+    return A
+
+
+def charge_inertia_axes(coords: np.ndarray,
+                        charges: np.ndarray,
+                        degen_rtol: float = 1e-3):
+    """Canonical center + orientation from the charge-weighted inertia.
+
+    Returns the center of nuclear charge together with the principal axes
+    of the charge-weighted inertia tensor as a proper-rotation matrix with
+    a deterministic, input-orientation-independent sign convention (see
+    :func:`_deterministic_frame`).
+
+    This reproduces the transformation Gaussian uses for its "Standard
+    orientation" of molecules with no point-group symmetry: translate to
+    the CNC and rotate to the principal axes ordered by ascending
+    charge-weighted moment (smallest-moment axis to x, largest to z),
+    matching g16's axis ordering.  See
+    ``tests/orient-molecule/FINDINGS.md``.  The mass is deliberately *not*
+    used, so the orientation is isotope-independent.
+
+    Parameters
+    ----------
+    coords : ndarray, shape (N, 3)
+        Nuclear coordinates.  The returned center is in these same units;
+        the axes are scale-free.
+    charges : ndarray, shape (N,)
+        Nuclear charges (atomic numbers).
+    degen_rtol : float, optional
+        Relative tolerance for detecting a (near-)degenerate tensor, whose
+        principal axes are ill-defined; ``None`` is returned so the caller
+        can fall back to symmetry axes.
+
+    Returns
+    -------
+    (center, axes) : (ndarray shape (3,), ndarray shape (3, 3)) or None
+        ``center`` is the center of nuclear charge; ``axes`` rows are the
+        principal axes expressed in the input coordinate frame, ordered by
+        ascending moment, forming a right-handed frame (``det == +1``).
+        The pair can be passed straight to
+        :func:`pyscf.symm.geom.shift_atom` as ``(centroid, axes)``.
+        ``None`` if the tensor is (near-)degenerate.
+    """
+    cnc, x, evals, evecs = _charge_inertia_eigen(coords, charges)
+    if _is_degenerate(evals, degen_rtol):
+        return None
+    dirs = np.array([evecs[:, 0], evecs[:, 1], evecs[:, 2]])
+    return cnc, _deterministic_frame(dirs, x)
+
+
+def canonicalize_symmetry_axes(coords: np.ndarray,
+                               charges: np.ndarray,
+                               sym_axes: np.ndarray,
+                               gpname: str,
+                               degen_rtol: float = 1e-3):
+    """Re-sign point-group symmetry axes deterministically.
+
+    For a molecule *with* point-group symmetry the charge-weighted
+    principal directions coincide with the symmetry axes returned by
+    pyscf's ``detect_symm``, so those axes already carry the standard axis
+    *assignment* the downstream operations rely on (principal C_n along z,
+    mirror normals on the expected Cartesians, etc.).  pyscf's *signs*,
+    however, depend on the input orientation.  This keeps pyscf's axis
+    assignment but re-signs each axis with the same deterministic,
+    input-independent rule used for asymmetric molecules
+    (:func:`_deterministic_frame`), yielding a canonical frame while
+    leaving the point-group convention -- and hence the supported symmetry
+    operations and level-2 symmetrizers -- intact.
+
+    Only the non-degenerate groups (Cs, Ci, C2, C2v, C2h, D2h), whose
+    operations are pure coordinate-sign flips, reach the re-signing step;
+    groups with a C_n / S_n axis of order >= 3 (C3v, Td, C4v, D4h) or
+    linear groups have a (near-)degenerate charge-inertia tensor and
+    return ``None`` so the caller keeps pyscf's axes unchanged.
+
+    D2h and Ci additionally have an input-dependent *assignment* of their
+    equal-role principal axes (pyscf may map the three C2 axes of D2h to
+    x/y/z in any order).  Their operation set is invariant under axis
+    permutation, so for these two groups the axes are reordered by
+    ascending charge-weighted moment (as for asymmetric molecules) to
+    remove that freedom; every other group keeps pyscf's assignment, whose
+    special axis (C2 / mirror normal) is already pinned to the convention
+    the downstream operations expect.
+
+    Returns ``(cnc, axes)`` (suitable for
+    :func:`pyscf.symm.geom.shift_atom`) or ``None`` when degenerate.
+    """
+    cnc, x, evals, evecs = _charge_inertia_eigen(coords, charges)
+    if _is_degenerate(evals, degen_rtol):
+        return None
+    if gpname in ('D2h', 'Ci'):
+        dirs = np.array([evecs[:, 0], evecs[:, 1], evecs[:, 2]])
+    else:
+        dirs = np.asarray(sym_axes, dtype=float)
+    return cnc, _deterministic_frame(dirs, x)
 
 
 if __name__ == "__main__":
