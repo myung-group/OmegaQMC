@@ -1095,7 +1095,7 @@ class _VMCOptDriverGTO_Linear:
                     print("  -> Accepted.")
                 if verbose >= 2:
                     curr_params = _unflatten(flat_params)
-                    print(f"  Params: {curr_params}")
+                    print(f"  Params: {curr_params}", flush=True)
             else:
                 # Reject: revert params, raise shift
                 shift_s = shift_s * shift_s_base
