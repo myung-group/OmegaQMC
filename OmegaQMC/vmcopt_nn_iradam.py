@@ -93,6 +93,18 @@ def _autotune_nn_batch(
 # resampling with multiple Adam epochs per iteration.
 _TARGET_UPDATES = 50000
 
+# Maximum number of walkers per forward-Laplacian
+# kinetic-energy evaluation.  The forward-Laplacian
+# materialises an intermediate of shape
+# ``(n_walkers, hidden, 3 * nelec * nelec)`` (e.g. ~5.5 GB
+# for 1000 walkers of a 30-electron PsiFormer), so
+# evaluating the whole walker batch in one fused op
+# overflows GPU memory / GEMM autotuning ("No valid config
+# found!").  The batch is split into chunks of at most this
+# many walkers, which bounds the peak footprint without
+# changing the result.
+_KE_WALKER_CHUNK = 256
+
 
 class _VMCOptDriverNN_IRAdam:
     """Iteratively-resampled Adam VMC optimizer for NN.
@@ -178,6 +190,24 @@ class _VMCOptDriverNN_IRAdam:
         def total_local_energy(elec_crds, params):
             return energy_ee(elec_crds) + energy_en(elec_crds) \
                 + energy_ke(elec_crds, params) + enr_nn
+
+        # --- Walker-chunked batch local energy ---
+        # ``jax.lax.map`` with ``batch_size`` lowers to a scan
+        # over walker chunks of at most ``_KE_WALKER_CHUNK``, so
+        # at most one chunk's forward-Laplacian intermediates
+        # (the big (chunk, hidden, 3*nelec*nelec) tensors, see
+        # the constant's note) are live at a time — and, unlike a
+        # sliced Python loop, XLA cannot re-fuse the chunks into
+        # one whole-batch op.  The result is identical to a plain
+        # vmap over all walkers.
+        def batched_local_energy(walkers, params):
+            n = walkers.shape[0]
+            chunk = min(_KE_WALKER_CHUNK, n)
+            return jax.lax.map(
+                lambda w: total_local_energy(w, params),
+                walkers,
+                batch_size=chunk,
+            )
 
         # --- Metropolis move ---
         @jax.jit
@@ -268,10 +298,7 @@ class _VMCOptDriverNN_IRAdam:
                     w = nw
                     rk = rk0
                 ar = acc.mean()
-                energies = jax.vmap(
-                    total_local_energy,
-                    in_axes=(0, None),
-                )(nw, p)
+                energies = batched_local_energy(nw, p)
                 return (rk, nw, s, p), (ar, energies)
 
             carry = (
@@ -285,25 +312,54 @@ class _VMCOptDriverNN_IRAdam:
             return carry, results
 
         # --- Batch energy ---
+        # Chunked (lax.map) local energy for validation and the
+        # autotune probe.  This is no longer differentiated (the
+        # gradient uses the log-derivative estimator below), so
+        # the memory-safe chunked form is fine here.
         @jax.jit
         def compute_batch_energy(walkers, params):
-            return jax.vmap(
-                total_local_energy,
-                in_axes=(0, None),
-            )(walkers, params)
+            return batched_local_energy(walkers, params)
 
-        # --- Loss function ---
+        # --- Energy value + gradient (log-derivative estimator) ---
+        # The VMC energy gradient is
+        #   d<E_L>/dtheta = 2 <(E_L - <E_L>) d ln|psi|/dtheta>.
+        # This explicit score-function form never differentiates
+        # the local energy E_L, so it never back-propagates
+        # through the analytic forward-Laplacian w.r.t. the
+        # parameters.  Its memory cost is that of a plain forward
+        # log|psi| pass — versus the ~145 GB (72 GB even with
+        # rematerialisation) that autodiff of E_L needs for a
+        # 200-walker batch of this 30-electron PsiFormer.  E_L is
+        # evaluated once (chunked forward-Laplacian) and detached;
+        # the gradient comes from a surrogate whose autodiff only
+        # touches the forward log|psi|.  Pure energy minimisation
+        # drives the local-energy variance to zero as psi
+        # approaches an eigenstate (zero-variance principle), so
+        # the explicit ``std`` term of the old fixed-sample loss
+        # is not needed (and could not be differentiated within
+        # this memory budget anyway).
         @jax.jit
-        def loss_fn(params, batch_walkers):
-            energies = compute_batch_energy(
-                batch_walkers, params,
+        def energy_and_grad(params, batch_walkers):
+            e_loc = jax.lax.stop_gradient(
+                batched_local_energy(batch_walkers, params),
             )
-            return 0.2 * energies.mean() + 0.8 * energies.std()
+            e_mean = e_loc.mean()
+            n = e_loc.shape[0]
+
+            def surrogate(p):
+                log_amp = jax.vmap(
+                    lambda r: log_psi(r, nuc_crds, p),
+                )(batch_walkers)
+                return (2.0 / n) * jnp.sum(
+                    (e_loc - e_mean) * log_amp,
+                )
+
+            return e_mean, jax.grad(surrogate)(params)
 
         self.run_equilibration = run_equilibration
         self.run_production = run_production
         self.compute_batch_energy = compute_batch_energy
-        self.loss_fn = loss_fn
+        self.energy_and_grad = energy_and_grad
 
     def initialize_walkers(self, rng_key, num_walkers):
         """Place electrons near nuclei.
@@ -526,10 +582,8 @@ class _VMCOptDriverNN_IRAdam:
                         n_train,
                     )
                     batch = train_w[si:ei]
-                    loss, grads = (
-                        jax.value_and_grad(
-                            self.loss_fn,
-                        )(params, batch)
+                    loss, grads = self.energy_and_grad(
+                        params, batch,
                     )
                     updates, opt_state = (
                         optimizer.update(
