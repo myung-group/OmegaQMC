@@ -19,10 +19,17 @@ obtain symmetry-averaged nuclear force estimates.
 
 import sys
 
+import ast
+import os
+import re
+import warnings
+from datetime import datetime
+
 import jax
 import h5py
 import numpy as np
 import jax.numpy as jnp
+from pyscf.data.nist import BOHR          # Angstrom per Bohr
 
 from ..utils import (
     batched_binning_analysis_grds,
@@ -1438,6 +1445,66 @@ def _project_force_sum_rules(grd, grd_err, coords, ref):
     return grd_proj, grd_err_proj
 
 
+# Markers delimiting the geometry block echoed at the head of a
+# postprocessing log; ``read_omega_xyz_block`` slices between them.
+XYZ_BEGIN = "--- Geometry (xyz, Angstrom) ---"
+XYZ_END = "--- End geometry ---"
+
+
+def _format_xyz_lines(symbols, coords_ang, frag_ids=None,
+                      comment=None, ndec=10):
+    """Render a geometry as xyz lines with a fragment-index column.
+
+    Produces the project's extended-xyz flavour: an atom count, a
+    comment line carrying a ``Properties=`` spec, then one
+    ``symbol x y z fragment`` row per atom, wrapped in the
+    :data:`XYZ_BEGIN` / :data:`XYZ_END` markers.
+
+    Parameters
+    ----------
+    symbols : sequence of str
+        Element symbols, one per atom.
+    coords_ang : ndarray, shape (N, 3)
+        Nuclear coordinates **in Angstrom** (xyz convention).
+    frag_ids : sequence of int, optional
+        Per-atom fragment labels.  ``None`` emits ``0`` for every atom,
+        matching the default of
+        :func:`~OmegaQMC.utils.parse_molecular_inspheres` when an xyz
+        file carries no fragment column.
+    comment : str, optional
+        Appended to the ``Properties=`` spec on the comment line.
+    ndec : int, optional
+        Decimal places for the coordinates.  The default of 10 keeps the
+        Bohr -> Angstrom conversion lossless well below any tolerance
+        used downstream.
+
+    Returns
+    -------
+    list of str
+        The block's lines, without trailing newlines.
+    """
+    coords_ang = np.asarray(coords_ang, dtype=float)
+    n = len(symbols)
+    if frag_ids is None:
+        frag_ids = [0] * n
+    # ``parse_molecular_inspheres`` warns unless the comment line
+    # advertises a molecule (fragment) column, so always emit the spec.
+    head = "Properties=species:S:1:pos:R:3:molecule:I:1"
+    if comment:
+        head = f"{head}  {comment}"
+    lines = [XYZ_BEGIN, str(n), head]
+    w = ndec + 8
+    for i in range(n):
+        x, y, z = coords_ang[i]
+        lines.append(
+            f"{str(symbols[i]):<2s} {x:>{w}.{ndec}f} "
+            f"{y:>{w}.{ndec}f} {z:>{w}.{ndec}f} "
+            f"{int(frag_ids[i]):>4d}"
+        )
+    lines.append(XYZ_END)
+    return lines
+
+
 def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
@@ -1522,6 +1589,9 @@ nuclear forces using PGCS.
         isinstance(logfile, str) and logfile == ""
     ):
         ofname_log = None
+    elif logfile is True:
+        # Documented behaviour: ``True`` -> "<prefix>.log".
+        ofname_log = prefix + ".log"
     else:
         ofname_log = logfile.strip() \
             if logfile.endswith(".log") \
@@ -1643,6 +1713,24 @@ nuclear forces using PGCS.
             fout = sys.stdout
         else:
             fout = open(ofname_log, 'w', 1)
+
+        # Echo the geometry the forces are computed from, first thing,
+        # so the log is self-contained: the frame-transform pipeline
+        # (:func:`make_reframe_log`) reads it back to align this run
+        # against another package's standard orientation.
+        # ``atom_coords`` is always Bohr (written from pyscf
+        # ``mol.atom_coords()``); convert here rather than going through
+        # ``myMol``, whose ``unit=myUnits`` round-trip misreads runs that
+        # were set up in Angstrom.
+        for line in _format_xyz_lines(
+            [s.decode() for s in atom_symbols],
+            np.asarray(atom_coords[:]) * BOHR,
+            frag_ids=atom_frag_map,
+            comment=("OmegaQMC working frame "
+                     "(center of nuclear charge + "
+                     "charge-inertia axes)"),
+        ):
+            print(line, file=fout)
 
         if auto_msg is not None:
             print(auto_msg, file=fout)
@@ -2236,3 +2324,1022 @@ nuclear forces using PGCS.
             fout.close()
 
         return -ref_grd_tot, ref_grd_err
+
+
+# ---------------------------------------------------------------------------
+# Cross-code frame transforms ("reframing")
+# ---------------------------------------------------------------------------
+# OmegaQMC reorients a molecule into its own canonical frame (center of
+# nuclear charge + charge-weighted-inertia axes) before doing any work, and
+# every other quantum-chemistry package does something similar with its own
+# convention for the degrees of freedom that symmetry does not fix (for a
+# Cs system both may put the mirror plane at z = 0, yet the in-plane axes
+# differ by a rotation about z -- see tests/orient-molecule/FINDINGS.md).
+#
+# The two working geometries are therefore the *same rigid body* expressed
+# in different frames.  Rather than reproduce any package's orientation
+# convention, we recover the map between the frames and record it compactly
+# as a translation vector and a rotation matrix in a ``reframe.log``:
+#
+#     x_target = R @ (x_source + t)        (translate first, then rotate)
+#
+# Forces are vectors and torques are pseudovectors, so with det(R) = +1
+#
+#     F_target = R @ F_source     tau_target = R @ tau_source
+#
+# and the translation cancels for both.  Everything below reads plain-text
+# stdout/log files; the HDF5 gradient file is not re-read.
+
+# per-atom force line:  "O   <Fx> ± <dFx> <Fy> ± <dFy> <Fz> ± <dFz> ..."
+# The symbol may carry a numeric tag ("O1") when atoms were labelled.
+_FORCE_LINE = re.compile(
+    r"^\s*([A-Za-z]{1,2}\d*)\s+"
+    r"([-+0-9.eE]+|[-+]?(?:nan|inf))\s*±\s*([-+0-9.eE]+|[-+]?(?:nan|inf))\s+"
+    r"([-+0-9.eE]+|[-+]?(?:nan|inf))\s*±\s*([-+0-9.eE]+|[-+]?(?:nan|inf))\s+"
+    r"([-+0-9.eE]+|[-+]?(?:nan|inf))\s*±\s*([-+0-9.eE]+|[-+]?(?:nan|inf))")
+
+# Force/torque block headers written by postproc_h5_pgcs.
+_BLOCK_HEADERS = {
+    "Total forces (-gradients)": ("force", "state"),
+    "Total forces (-gradients, averaged)": ("force", "averaged"),
+    "Torque per atom (about centroid)": ("torque", "state"),
+    "Torque per atom (about centroid, averaged)": ("torque", "averaged"),
+}
+
+SUPPORTED_PACKAGES = ("g16", "nwchem")
+
+
+def _bare_symbol(sym):
+    """Strip a trailing numeric tag from an element symbol ("O1" -> "O")."""
+    return re.sub(r"\d+$", "", str(sym)).strip()
+
+
+# ---------------------------------------------------------------------------
+# Readers: OmegaQMC postprocessing log
+# ---------------------------------------------------------------------------
+
+def read_omega_xyz_block(logpath):
+    """Parse the geometry echoed at the head of a postprocessing log.
+
+    Reads the block that :func:`postproc_h5_pgcs` writes between the
+    :data:`XYZ_BEGIN` and :data:`XYZ_END` markers.
+
+    Returns
+    -------
+    (symbols, coords_ang, frag_ids)
+        Element symbols, an ``(N, 3)`` array of coordinates **in
+        Angstrom**, and the per-atom fragment labels.
+
+    Raises
+    ------
+    ValueError
+        If the log carries no geometry block (e.g. it predates this
+        feature); callers may then fall back to
+        :func:`read_omega_orientation`.
+    """
+    with open(logpath) as fh:
+        lines = fh.read().splitlines()
+    try:
+        i0 = next(i for i, ln in enumerate(lines)
+                  if ln.strip() == XYZ_BEGIN)
+    except StopIteration:
+        raise ValueError(
+            f"No geometry block ({XYZ_BEGIN!r}) in {logpath!r}") from None
+    try:
+        i1 = next(i for i in range(i0 + 1, len(lines))
+                  if lines[i].strip() == XYZ_END)
+    except StopIteration:
+        raise ValueError(
+            f"Unterminated geometry block in {logpath!r}") from None
+
+    body = lines[i0 + 1:i1]
+    if len(body) < 2:
+        raise ValueError(f"Empty geometry block in {logpath!r}")
+    natoms = int(body[0].split()[0])
+    symbols, coords, frags = [], [], []
+    for ln in body[2:2 + natoms]:
+        parts = ln.split()
+        symbols.append(parts[0])
+        coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+        frags.append(int(parts[4]) if len(parts) > 4 else 0)
+    if len(symbols) != natoms:
+        raise ValueError(
+            f"Geometry block in {logpath!r} declares {natoms} atoms but "
+            f"carries {len(symbols)} rows")
+    return symbols, np.array(coords, dtype=float), frags
+
+
+def read_omega_orientation(logpath):
+    """Parse OmegaQMC's reoriented geometry from a VMC run's stdout.
+
+    Legacy/alternate source, kept for logs written before
+    :func:`postproc_h5_pgcs` began echoing its geometry (see
+    :func:`read_omega_xyz_block`, which should be preferred).
+    ``generate_molecular_orbitals`` echoes the post-transformation
+    geometry as a Python-literal list of ``(symbol, [x, y, z],
+    fragment_id)`` tuples when ``mol.verbose >= 3``.
+
+    Returns ``(symbols, coords_bohr, frag_ids)`` -- note the
+    coordinates are **in Bohr**, unlike
+    :func:`read_omega_xyz_block`.
+    """
+    with open(logpath) as fh:
+        for line in fh:
+            s = line.strip()
+            if s.startswith("[('") or s.startswith("[("):
+                atoms = ast.literal_eval(s)
+                symbols = [a[0] for a in atoms]
+                coords = np.array([a[1] for a in atoms], float)
+                frags = [a[2] if len(a) > 2 else 0 for a in atoms]
+                return symbols, coords, frags
+    raise ValueError(f"No OmegaQMC geometry line found in {logpath!r}")
+
+
+def read_omega_force_blocks(logpath):
+    """Parse every per-atom force/torque block in a postprocessing log.
+
+    Scans the whole log, tracking the ``--- Reference state ---`` /
+    ``--- Secondary state: <label> ---`` markers, so each block is
+    labelled by the state it belongs to.  Blocks whose header mentions
+    ``reframed`` are skipped, so re-reading a file that already contains
+    reframed output cannot rotate it a second time.
+
+    Returns
+    -------
+    list of dict
+        One entry per block, in file order, with keys ``quantity``
+        (``"force"`` / ``"torque"``), ``kind`` (``"state"`` /
+        ``"averaged"``), ``label`` (``None`` for the reference state,
+        else the secondary-state label), ``header``, ``symbols``,
+        ``values`` and ``errors`` (both ``(N, 3)``), plus ``frag_ids``
+        and ``n_states`` where the averaged block records them.
+    """
+    with open(logpath) as fh:
+        lines = fh.read().splitlines()
+
+    blocks = []
+    state_label = None
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if s.startswith("--- Reference state"):
+            state_label = None
+        elif s.startswith("--- Secondary state:"):
+            state_label = s.split(":", 1)[1].strip().rstrip("-").strip()
+        elif s in _BLOCK_HEADERS and "reframed" not in s:
+            quantity, kind = _BLOCK_HEADERS[s]
+            syms, vals, errs, frags, nsts = [], [], [], [], []
+            j = i + 1
+            while j < len(lines):
+                m = _FORCE_LINE.match(lines[j])
+                if not m:
+                    break
+                g = [float(m.group(k)) for k in range(2, 8)]
+                syms.append(m.group(1))
+                vals.append(g[0::2])
+                errs.append(g[1::2])
+                tail = re.search(r"\(fragment\s+(\d+),\s*over\s+(\d+)",
+                                 lines[j])
+                frags.append(int(tail.group(1)) if tail else None)
+                nsts.append(int(tail.group(2)) if tail else None)
+                j += 1
+            if syms:
+                blocks.append({
+                    "quantity": quantity, "kind": kind,
+                    # The fragment-averaged block combines every state,
+                    # so it belongs to none of them.
+                    "label": None if kind == "averaged" else state_label,
+                    "header": s,
+                    "symbols": syms,
+                    "values": np.array(vals, float),
+                    "errors": np.array(errs, float),
+                    "frag_ids": (frags if any(x is not None for x in frags)
+                                 else None),
+                    "n_states": (nsts[0] if nsts and nsts[0] is not None
+                                 else None),
+                })
+            i = j
+            continue
+        i += 1
+    if not blocks:
+        raise ValueError(f"No force/torque blocks found in {logpath!r}")
+    return blocks
+
+
+def read_omega_forces(logpath, kind="averaged"):
+    """Parse OmegaQMC total forces from a postprocessing log.
+
+    Thin wrapper over :func:`read_omega_force_blocks` kept for
+    backwards compatibility.  ``kind="averaged"`` selects the
+    fragment-wise BLUE-averaged block (falling back to the reference
+    state when a run produced no secondary states); ``kind="state"``
+    selects the **reference** state.
+
+    .. note::
+       Earlier revisions returned the *last secondary* state for
+       ``kind="state"``, not the reference state.
+
+    Returns ``(symbols, forces, forces_err)`` in Hartree/Bohr.
+    """
+    if kind not in ("averaged", "state"):
+        raise ValueError("kind must be 'averaged' or 'state'")
+    blocks = [b for b in read_omega_force_blocks(logpath)
+              if b["quantity"] == "force"]
+    chosen = None
+    if kind == "averaged":
+        chosen = next((b for b in blocks if b["kind"] == "averaged"), None)
+    if chosen is None:
+        chosen = next((b for b in blocks
+                       if b["kind"] == "state" and b["label"] is None), None)
+    if chosen is None:
+        raise ValueError(f"No matching force block in {logpath!r}")
+    return chosen["symbols"], chosen["values"], chosen["errors"]
+
+
+# ---------------------------------------------------------------------------
+# Readers: target quantum-chemistry packages
+# ---------------------------------------------------------------------------
+
+def read_g16_standard_orientation(logpath, strict=False):
+    """Parse the "Standard orientation" block of a Gaussian 16 log file.
+
+    Returns ``(symbols, coords)`` with ``coords`` an ``(N, 3)`` array in
+    Angstrom (Gaussian prints orientation blocks in Angstrom).  The
+    *last* "Standard orientation" block is used.  If the log has none
+    (Gaussian omits it when symmetry is turned off) the last "Input
+    orientation" block is used instead, which then coincides with the
+    working frame; set ``strict=True`` to raise instead of falling back.
+    """
+    from pyscf.data.elements import ELEMENTS
+
+    with open(logpath) as fh:
+        text = fh.read()
+    header = "Standard orientation:"
+    if header not in text:
+        if strict:
+            raise ValueError(
+                f"No 'Standard orientation:' block in {logpath!r}")
+        header = "Input orientation:"
+        warnings.warn(
+            f"{logpath!r} has no 'Standard orientation:' block; falling "
+            "back to 'Input orientation:'.  These coincide only when "
+            "Gaussian ran with symmetry turned off.", stacklevel=2)
+    idx = text.rfind(header)
+    if idx < 0:
+        raise ValueError(f"No orientation block found in {logpath!r}")
+
+    rows = []
+    # Skip the header line + 4 ruler/column-label lines; data rows follow.
+    for line in text[idx:].splitlines()[5:]:
+        if set(line.strip()) <= set("- "):
+            if rows:
+                break          # closing ruler of the table
+            continue           # ruler above the data
+        parts = line.split()
+        if len(parts) == 6 and parts[0].isdigit():
+            rows.append((ELEMENTS[int(parts[1])],
+                         [float(parts[3]), float(parts[4]),
+                          float(parts[5])]))
+        elif rows:
+            break
+    if not rows:
+        raise ValueError(f"Could not parse any atoms from {logpath!r}")
+    return [r[0] for r in rows], np.array([r[1] for r in rows], float)
+
+
+def read_nwchem_orientation(path):
+    """Parse NWChem's output geometry (not implemented yet).
+
+    NWChem echoes its working frame under a ``Geometry "geometry" ->
+    "geometry"`` heading followed by ``Output coordinates in angstroms``
+    and rows of ``index tag charge x y z``; the *last* such block is the
+    geometry the calculation ran on.  Implement this to return
+    ``(symbols, coords_ang)`` exactly like
+    :func:`read_g16_standard_orientation`, and the rest of the reframing
+    pipeline works unchanged.
+    """
+    raise NotImplementedError(
+        "NWChem output parsing is not implemented yet; "
+        "implement read_nwchem_orientation() to add it.")
+
+
+def _sniff_qc_package(path, nlines=400):
+    """Identify which quantum-chemistry package wrote a text output file."""
+    head = []
+    with open(path, errors="ignore") as fh:
+        for _, line in zip(range(nlines), fh):
+            head.append(line)
+    text = "".join(head)
+    if "Gaussian, Inc." in text or "Entering Gaussian System" in text:
+        return "g16"
+    if ("Northwest Computational Chemistry" in text
+            or "NWChem" in text):
+        return "nwchem"
+    raise ValueError(
+        f"Could not identify the quantum-chemistry package that wrote "
+        f"{path!r}; pass package= explicitly.  Supported: "
+        f"{', '.join(SUPPORTED_PACKAGES)}.")
+
+
+def read_target_orientation(path, package="auto"):
+    """Read a target package's working orientation.
+
+    Dispatches to the per-package reader and returns everything in a
+    common form.  ``package="auto"`` sniffs the file (see
+    :func:`_sniff_qc_package`); pass ``"g16"``/``"gaussian"`` or
+    ``"nwchem"`` to force it.
+
+    Returns
+    -------
+    (symbols, coords_ang, package)
+        Element symbols, an ``(N, 3)`` array of coordinates **in
+        Angstrom**, and the resolved package name.
+    """
+    pkg = _sniff_qc_package(path) if package == "auto" else str(package)
+    pkg = {"gaussian": "g16", "g09": "g16", "g16": "g16",
+           "nwchem": "nwchem"}.get(pkg.lower(), pkg.lower())
+    if pkg == "g16":
+        symbols, coords = read_g16_standard_orientation(path)
+    elif pkg == "nwchem":
+        symbols, coords = read_nwchem_orientation(path)
+    else:
+        raise ValueError(
+            f"Unsupported package {package!r}; supported: "
+            f"{', '.join(SUPPORTED_PACKAGES)}.")
+    return symbols, coords, pkg
+
+
+# ---------------------------------------------------------------------------
+# Rigid-body checks and the frame transform
+# ---------------------------------------------------------------------------
+
+def check_rigid_body(src_coords, tgt_coords, src_symbols=None,
+                     tgt_symbols=None, atom_map=None, dist_tol=1e-4):
+    """Compare two geometries for rigid-body equivalence, atom for atom.
+
+    The pairwise distance matrix is the complete frame-independent
+    invariant of a rigid body, so comparing it needs no superposition
+    and localizes the offending atom pair.  It is, however, **blind to
+    chirality**: an enantiomer has an identical distance matrix.  The
+    post-superposition RMSD computed by
+    :func:`compute_reframe_transform` is what rejects mirror images
+    (note that ``det(R)`` does *not*: Kabsch always returns a proper
+    rotation, so a reflected target simply fails to superpose).
+
+    Returns a diagnostics dict with ``max_dist_dev``, ``worst_pair``,
+    ``symbols_match`` and ``natoms``; it never raises.  Use
+    :func:`assert_rigid_body` for the raising form.
+    """
+    src = np.asarray(src_coords, float)
+    tgt = np.asarray(tgt_coords, float)
+    if atom_map is not None:
+        src = src[list(atom_map)]
+        if src_symbols is not None:
+            src_symbols = [src_symbols[i] for i in atom_map]
+    if src.shape != tgt.shape:
+        return {"natoms": (len(src), len(tgt)), "symbols_match": False,
+                "max_dist_dev": float("inf"), "worst_pair": None,
+                "shape_mismatch": True}
+
+    symbols_match = True
+    if src_symbols is not None and tgt_symbols is not None:
+        symbols_match = ([_bare_symbol(s) for s in src_symbols]
+                         == [_bare_symbol(s) for s in tgt_symbols])
+
+    d_src = np.linalg.norm(src[:, None] - src[None], axis=-1)
+    d_tgt = np.linalg.norm(tgt[:, None] - tgt[None], axis=-1)
+    dev = np.abs(d_src - d_tgt)
+    k = int(np.argmax(dev))
+    return {"natoms": (len(src), len(tgt)), "symbols_match": symbols_match,
+            "max_dist_dev": float(dev.max()),
+            "worst_pair": (k // len(src), k % len(src)),
+            "shape_mismatch": False,
+            "dist_ok": bool(dev.max() <= dist_tol)}
+
+
+def assert_rigid_body(src_coords, tgt_coords, src_symbols=None,
+                      tgt_symbols=None, atom_map=None, dist_tol=1e-4):
+    """Raise :class:`ValueError` unless two geometries are the same body.
+
+    See :func:`check_rigid_body`; this is the enforcing wrapper.
+    """
+    d = check_rigid_body(src_coords, tgt_coords, src_symbols,
+                         tgt_symbols, atom_map, dist_tol)
+    if d.get("shape_mismatch"):
+        raise ValueError(
+            f"Atom-count mismatch: source has {d['natoms'][0]} atoms, "
+            f"target has {d['natoms'][1]}.")
+    if not d["symbols_match"]:
+        raise ValueError(
+            "Element symbols differ between the source and target "
+            "geometries (after any atom_map); pass atom_map= to line "
+            "the two atom orders up.")
+    if not d["dist_ok"]:
+        i, j = d["worst_pair"]
+        raise ValueError(
+            f"Geometries are not the same rigid body: interatomic "
+            f"distances differ by {d['max_dist_dev']:.3e} (tolerance "
+            f"{dist_tol:.1e}), worst for the atom pair ({i}, {j}).")
+    return d
+
+
+def _rotation_angle_axis(R):
+    """Return the rotation angle (degrees) and unit axis of ``R``.
+
+    Uses the general ``theta = arccos((tr R - 1) / 2)`` with the axis
+    from the antisymmetric part, valid for any proper rotation -- unlike
+    ``arctan2(R[1, 0], R[0, 0])``, which is only the rotation about z.
+    """
+    R = np.asarray(R, float)
+    cos_t = np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)
+    theta = np.arccos(cos_t)
+    if np.isclose(theta, 0.0):
+        return 0.0, np.array([0.0, 0.0, 1.0])
+    if np.isclose(theta, np.pi):
+        # sin(theta) == 0: recover the axis from R + I, whose columns
+        # are all parallel to it.
+        w, v = np.linalg.eigh((R + np.eye(3)) / 2.0)
+        axis = v[:, int(np.argmax(w))]
+    else:
+        axis = np.array([R[2, 1] - R[1, 2],
+                         R[0, 2] - R[2, 0],
+                         R[1, 0] - R[0, 1]]) / (2.0 * np.sin(theta))
+    n = np.linalg.norm(axis)
+    axis = axis / n if n > 0 else np.array([0.0, 0.0, 1.0])
+    return float(np.degrees(theta)), axis
+
+
+def compute_reframe_transform(src_coords, tgt_coords, src_symbols=None,
+                              tgt_symbols=None, atom_map=None,
+                              rmsd_tol=1e-4, dist_tol=1e-4, sv_tol=1e-6,
+                              strict=True):
+    """Recover the rigid map taking a source frame onto a target frame.
+
+    Kabsch superposition, reported in **translate-then-rotate** form::
+
+        x_target = R @ (x_source + t)
+
+    Kabsch natively yields ``x_t = R x_s + t_post`` with ``t_post =
+    c_t - R c_s``; the two are related by ``t = R.T @ t_post = R.T @ c_t
+    - c_s``.  Both are returned, since confusing them would corrupt any
+    reframing of *positions* while leaving forces (which need only
+    ``R``) looking correct.
+
+    Parameters
+    ----------
+    src_coords, tgt_coords : ndarray, shape (N, 3)
+        Source and target coordinates in the **same length unit**.
+    src_symbols, tgt_symbols : sequence of str, optional
+        Element symbols, checked when both are given.
+    atom_map : sequence of int, optional
+        Permutation lining ``src_coords[atom_map]`` up with
+        ``tgt_coords``.
+    rmsd_tol, dist_tol : float, optional
+        Superposition and interatomic-distance tolerances, in the
+        coordinate unit.  Defaults suit Angstrom input: Gaussian prints
+        6 decimals, so ~2e-6 A of disagreement is expected from print
+        rounding alone.
+    sv_tol : float, optional
+        Relative threshold for calling the fit degenerate (see below).
+    strict : bool, optional
+        When ``True`` (default) failed checks raise; otherwise they warn.
+
+    Returns
+    -------
+    dict
+        ``R``, ``t``, ``t_post``, ``rmsd``, ``max_dist_dev``, ``det_R``,
+        ``singular_values``, ``angle_deg``, ``axis``, ``degenerate``.
+
+    Notes
+    -----
+    A **linear** molecule leaves the rotation about its own axis
+    undetermined (two vanishing singular values), so transverse force
+    components cannot be reframed; this is reported via ``degenerate``
+    and raised under ``strict``.  A **planar** molecule (one vanishing
+    singular value) is *not* a problem -- the proper-rotation constraint
+    fixes the frame uniquely.
+    """
+    src = np.asarray(src_coords, float)
+    tgt = np.asarray(tgt_coords, float)
+    if atom_map is not None:
+        src = src[list(atom_map)]
+        if src_symbols is not None:
+            src_symbols = [src_symbols[i] for i in atom_map]
+
+    checks = (assert_rigid_body if strict else check_rigid_body)(
+        src, tgt, src_symbols, tgt_symbols, None, dist_tol)
+
+    cs, ct = src.mean(0), tgt.mean(0)
+    H = (src - cs).T @ (tgt - ct)
+    U, S, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    t_post = ct - R @ cs                 # x_t = R x_s + t_post
+    t = R.T @ ct - cs                    # x_t = R (x_s + t)
+
+    rmsd = float(np.sqrt((((src + t) @ R.T - tgt) ** 2).sum(1).mean()))
+    det_R = float(np.linalg.det(R))
+    scale = max(S[0], 1e-300)
+    # Two vanishing singular values => linear molecule => the rotation
+    # about the molecular axis is unobservable from the geometry.
+    degenerate = bool(S[1] < sv_tol * scale)
+    planar = bool(S[2] < sv_tol * scale) and not degenerate
+
+    msgs = []
+    if rmsd > rmsd_tol:
+        msgs.append(
+            f"superposition RMSD {rmsd:.3e} exceeds {rmsd_tol:.1e}; the "
+            "geometries are not the same rigid body (a mirror image / "
+            "enantiomer fails here even though interatomic distances "
+            "match), or the atom order differs")
+    if abs(det_R - 1.0) > 1e-8:
+        msgs.append(f"det(R) = {det_R:+.6f}, not +1")
+    if degenerate:
+        msgs.append(
+            "the geometry is linear, so the rotation about the molecular "
+            "axis is undetermined and transverse force components cannot "
+            "be reframed; supply the rotation explicitly")
+    if msgs:
+        text = "compute_reframe_transform: " + "; ".join(msgs) + "."
+        if strict:
+            raise ValueError(text)
+        warnings.warn(text, stacklevel=2)
+    if planar:
+        warnings.warn(
+            "compute_reframe_transform: planar geometry (one vanishing "
+            "singular value).  The proper-rotation constraint still "
+            "determines the frame uniquely; proceeding.", stacklevel=2)
+
+    angle_deg, axis = _rotation_angle_axis(R)
+    return {"R": R, "t": t, "t_post": t_post, "rmsd": rmsd,
+            "max_dist_dev": checks["max_dist_dev"], "det_R": det_R,
+            "singular_values": S, "angle_deg": angle_deg, "axis": axis,
+            "degenerate": degenerate, "planar": planar}
+
+
+def rotate_force_covariance(R, err, cov=None):
+    """Rotate per-atom force (or torque) uncertainties into a new frame.
+
+    With only per-component error bars (``cov is None``) the source
+    covariance is taken to be diagonal, ``C_i = diag(err_i ** 2)``, and
+    the rotated error bars are the axis half-widths of the rotated error
+    ellipsoid::
+
+        C' = R C R.T        s'_k = sqrt(sum_j R_kj**2 * s_j**2)
+
+    This is exact for that covariance, and preserves ``sum_k s_k**2``.
+    It does ignore correlations *between* the components of one atom's
+    force, which the postprocessing log does not record.  Pass an
+    ``(N, 3, 3)`` ``cov`` to propagate the full covariance exactly.
+
+    Returns
+    -------
+    (err_rot, cov_rot)
+        Rotated per-component error bars ``(N, 3)``, and the rotated
+        covariance ``(N, 3, 3)`` when ``cov`` was supplied, else
+        ``None``.
+    """
+    R = np.asarray(R, float)
+    err = np.asarray(err, float)
+    if cov is None:
+        return np.sqrt((err ** 2) @ (R.T ** 2)), None
+    cov = np.asarray(cov, float)
+    cov_rot = np.einsum('ij,njk,lk->nil', R, cov, R)
+    err_rot = np.sqrt(np.clip(np.einsum('nii->ni', cov_rot), 0.0, None))
+    return err_rot, cov_rot
+
+
+# ---------------------------------------------------------------------------
+# reframe.log:  writing, reading, and the driver
+# ---------------------------------------------------------------------------
+
+REFRAME_LOG = "reframe.log"
+
+
+def format_reframe_log(xf, source_log=None, target_log=None,
+                       package=None, symbols=None, atom_map=None,
+                       length_unit="angstrom"):
+    """Render a reframe transform as the text of a ``reframe.log``.
+
+    The layout is meant to be read by both people and
+    :func:`read_reframe_log`: ``#`` starts a comment, ``key: value``
+    gives a scalar or whitespace-separated vector, and a bare ``key:``
+    introduces a matrix whose indented rows follow.
+
+    Returns a list of lines (no trailing newlines).
+    """
+    R, t = np.asarray(xf["R"], float), np.asarray(xf["t"], float)
+    n = len(symbols) if symbols is not None else 0
+    lines = [
+        "# OmegaQMC reframe transform",
+        "# Maps the OmegaQMC working frame onto a target package's frame.",
+        "# Convention:  x_target = R @ (x_source + t)",
+        "#              (translate first, then rotate)",
+        "# Forces:      F_target = R @ F_source",
+        "# Torques:     tau_target = R @ tau_source",
+        "#              (the translation cancels for both; the torque",
+        "#               rule needs det(R) = +1, asserted below)",
+        "# Error bars:  rotated as the axis half-widths of the error",
+        "#              ellipsoid, s'_k = sqrt(sum_j R_kj^2 s_j^2),",
+        "#              i.e. assuming the source covariance is diagonal",
+        "#              (the source log records no cross-component",
+        "#               correlations).",
+        f"# Generated:   {datetime.now().isoformat(timespec='seconds')}",
+        "version: 1",
+    ]
+    if source_log is not None:
+        lines.append(f"source_log: {os.path.abspath(source_log)}")
+    if target_log is not None:
+        lines.append(f"target_log: {os.path.abspath(target_log)}")
+    if package is not None:
+        lines.append(f"target_package: {package}")
+    lines.append(f"length_unit: {length_unit}")
+    if symbols is not None:
+        lines.append(f"natoms: {n}")
+        lines.append("symbols: " + " ".join(_bare_symbol(s)
+                                            for s in symbols))
+    if atom_map is not None:
+        lines.append("atom_map: " + " ".join(str(int(i))
+                                             for i in atom_map))
+    lines += [
+        f"rmsd: {xf['rmsd']:.6e}",
+        f"max_dist_dev: {xf['max_dist_dev']:.6e}",
+        f"det_R: {xf['det_R']:+.12f}",
+        "singular_values: " + " ".join(f"{v:.6e}"
+                                       for v in xf["singular_values"]),
+        f"rotation_angle_deg: {xf['angle_deg']:.6f}",
+        "rotation_axis: " + " ".join(f"{v:.12f}" for v in xf["axis"]),
+        "translation:",
+        "    " + " ".join(f"{v:>21.14e}" for v in t),
+        "rotation:",
+    ]
+    for row in R:
+        lines.append("    " + " ".join(f"{v:>21.14e}" for v in row))
+    return lines
+
+
+def write_reframe_log(path, xf, **kwargs):
+    """Write a ``reframe.log``; see :func:`format_reframe_log`.
+
+    Returns the path written.
+    """
+    with open(path, "w") as fh:
+        fh.write("\n".join(format_reframe_log(xf, **kwargs)) + "\n")
+    return path
+
+
+def read_reframe_log(path):
+    """Parse a ``reframe.log`` written by :func:`write_reframe_log`.
+
+    Returns a dict with ``R`` (3, 3), ``t`` (3,) and whichever metadata
+    the file carries (``symbols``, ``natoms``, ``length_unit``,
+    ``target_package``, ``rmsd``, ...).  ``R`` is re-validated on load
+    (orthogonality to 1e-10 and ``det(R) = +1``) so a hand-edited or
+    truncated file cannot silently corrupt the reframed forces.
+    """
+    data, matrices = {}, {}
+    key = None
+    with open(path) as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if line[:1].isspace() and key is not None:
+                matrices[key].append([float(v) for v in line.split()])
+                continue
+            key = None
+            if ":" not in line:
+                continue
+            k, _, v = line.partition(":")
+            k, v = k.strip(), v.strip()
+            if v == "":
+                key = k
+                matrices[key] = []
+            else:
+                data[k] = v
+
+    out = {}
+    for k, v in data.items():
+        parts = v.split()
+        if k in ("symbols", "target_package", "length_unit",
+                 "source_log", "target_log"):
+            out[k] = parts if k == "symbols" else v
+            continue
+        try:
+            nums = [float(x) for x in parts]
+        except ValueError:
+            out[k] = v
+            continue
+        if k in ("natoms", "version"):
+            out[k] = int(nums[0])
+        elif k == "atom_map":
+            out[k] = [int(x) for x in nums]
+        else:
+            out[k] = nums[0] if len(nums) == 1 else np.array(nums)
+
+    for k, rows in matrices.items():
+        out[k] = np.array(rows, float)
+
+    if "rotation" not in out or "translation" not in out:
+        raise ValueError(
+            f"{path!r} is missing a 'rotation' or 'translation' block")
+    R = out["rotation"]
+    if R.shape != (3, 3):
+        raise ValueError(f"{path!r}: rotation must be 3x3, got {R.shape}")
+    t = np.asarray(out["translation"], float).reshape(-1)
+    if t.size != 3:
+        raise ValueError(f"{path!r}: translation must have 3 components")
+    if not np.allclose(R @ R.T, np.eye(3), atol=1e-10):
+        raise ValueError(f"{path!r}: rotation is not orthogonal")
+    if abs(np.linalg.det(R) - 1.0) > 1e-10:
+        raise ValueError(
+            f"{path!r}: det(rotation) = {np.linalg.det(R):+.12f}, not +1; "
+            "reflections would flip the sign of pseudovectors (torque).")
+    out["R"], out["t"] = R, t
+    return out
+
+
+def _read_source_geometry(main_log):
+    """Return ``(symbols, coords_ang, frag_ids)`` for an OmegaQMC log.
+
+    Prefers the xyz block echoed by :func:`postproc_h5_pgcs`; falls back
+    to the geometry line echoed in a VMC run's stdout (Bohr, converted
+    here) so logs written before that feature still work.
+    """
+    try:
+        return read_omega_xyz_block(main_log)
+    except ValueError:
+        symbols, coords_bohr, frags = read_omega_orientation(main_log)
+        return symbols, coords_bohr * BOHR, frags
+
+
+def make_reframe_log(main_log, target_log, package="auto", out=None,
+                     atom_map=None, rmsd_tol=1e-4, dist_tol=1e-4,
+                     sv_tol=1e-6, strict=True):
+    """Build a ``reframe.log`` from an OmegaQMC log and a target output.
+
+    Reads OmegaQMC's working geometry (the xyz block at the head of a
+    postprocessing log, or a VMC run's stdout as a fallback), reads the
+    target package's working frame via
+    :func:`read_target_orientation`, asserts the two are the same rigid
+    body, computes the translate-then-rotate transform, and writes it to
+    ``reframe.log``.
+
+    Both geometries are handled in Angstrom, so no Bohr conversion
+    enters the transform and the packages' differing Bohr constants
+    never matter.
+
+    Parameters
+    ----------
+    main_log : str
+        OmegaQMC postprocessing log (or VMC run stdout).
+    target_log : str
+        Output file of the target package.
+    package : str, optional
+        ``"auto"`` (default), ``"g16"`` or ``"nwchem"``.
+    out : str, optional
+        Where to write.  Defaults to ``reframe.log`` in the directory of
+        *main_log* (the run path).
+    atom_map : sequence of int, optional
+        Permutation lining the OmegaQMC atom order up with the target's.
+    rmsd_tol, dist_tol, sv_tol, strict :
+        Passed to :func:`compute_reframe_transform`.
+
+    Returns
+    -------
+    dict
+        The transform dict, with ``path`` (the file written),
+        ``symbols`` and ``package`` added.
+    """
+    src_syms, src_xyz, _ = _read_source_geometry(main_log)
+    tgt_syms, tgt_xyz, pkg = read_target_orientation(target_log, package)
+
+    xf = compute_reframe_transform(
+        src_xyz, tgt_xyz, src_symbols=src_syms, tgt_symbols=tgt_syms,
+        atom_map=atom_map, rmsd_tol=rmsd_tol, dist_tol=dist_tol,
+        sv_tol=sv_tol, strict=strict)
+
+    if out is None:
+        out = os.path.join(
+            os.path.dirname(os.path.abspath(main_log)), REFRAME_LOG)
+    write_reframe_log(out, xf, source_log=main_log, target_log=target_log,
+                      package=pkg, symbols=tgt_syms, atom_map=atom_map,
+                      length_unit="angstrom")
+    xf["path"] = out
+    xf["symbols"] = list(tgt_syms)
+    xf["package"] = pkg
+    return xf
+
+
+# ---------------------------------------------------------------------------
+# Applying a recorded transform to printed forces
+# ---------------------------------------------------------------------------
+
+def reframe_forces(force_log, reframe_log=None, blocks="averaged",
+                   include_torque=False, fout=sys.stdout,
+                   check_invariants=True):
+    """Express forces from a postprocessing log in the target frame.
+
+    Reads the rotation recorded in a ``reframe.log`` and the per-atom
+    blocks printed by :func:`postproc_h5_pgcs`, rotates each vector
+    (``F -> R F``) and its error bars (see
+    :func:`rotate_force_covariance`), and prints the result in the same
+    column layout as the source blocks.
+
+    Parameters
+    ----------
+    force_log : str
+        Postprocessing log holding the force blocks.
+    reframe_log : str, optional
+        Transform to apply.  Defaults to ``reframe.log`` beside
+        *force_log*.
+    blocks : str, optional
+        ``"averaged"`` (default; the production result, falling back to
+        the reference state), ``"reference"``, ``"all"``, or a specific
+        secondary-state label.
+    include_torque : bool, optional
+        Also reframe the torque blocks.  Torque is a pseudovector; under
+        a proper rotation it transforms as ``tau' = R tau`` and the
+        translation cancels.  Default ``False``.
+    fout : file object, optional
+        Where to print.  Defaults to ``sys.stdout``.
+    check_invariants : bool, optional
+        Report ``max |d|F_i||`` and ``max |d sum_k s_k^2|``, both of
+        which a rotation must preserve.  These validate the code path,
+        not the diagonal-covariance assumption.
+
+    Returns
+    -------
+    list of dict
+        The reframed blocks, each the source dict with ``values``,
+        ``errors`` and ``header`` replaced.
+    """
+    if reframe_log is None:
+        reframe_log = os.path.join(
+            os.path.dirname(os.path.abspath(force_log)), REFRAME_LOG)
+    xf = read_reframe_log(reframe_log)
+    R = xf["R"]
+    pkg = xf.get("target_package", "target")
+
+    found = read_omega_force_blocks(force_log)
+    wanted = [b for b in found
+              if include_torque or b["quantity"] == "force"]
+    if blocks == "all":
+        chosen = wanted
+    elif blocks == "averaged":
+        chosen = [b for b in wanted if b["kind"] == "averaged"]
+        if not chosen:
+            chosen = [b for b in wanted
+                      if b["kind"] == "state" and b["label"] is None]
+    elif blocks == "reference":
+        chosen = [b for b in wanted
+                  if b["kind"] == "state" and b["label"] is None]
+    else:
+        chosen = [b for b in wanted if b["label"] == blocks]
+    if not chosen:
+        raise ValueError(
+            f"No blocks matching {blocks!r} in {force_log!r}")
+
+    angle, axis = xf.get("rotation_angle_deg"), xf.get("rotation_axis")
+    print(f"# Forces reframed into the {pkg} working frame", file=fout)
+    if angle is not None and axis is not None:
+        print(f"#   rotation {float(angle):.6f} deg about "
+              f"[{axis[0]:.6f}, {axis[1]:.6f}, {axis[2]:.6f}]; "
+              f"det(R) = {np.linalg.det(R):+.6f}", file=fout)
+    if "rmsd" in xf:
+        print(f"#   frame alignment RMSD {float(xf['rmsd']):.3e} "
+              f"{xf.get('length_unit', '')}".rstrip() + " (from "
+              f"{os.path.basename(reframe_log)})", file=fout)
+    print("#   error bars: diagonal-covariance ellipsoid projection; "
+          "correlations", file=fout)
+    print("#   between force components are not recorded by the source "
+          "log.", file=fout)
+
+    out_blocks = []
+    for b in chosen:
+        v_rot = b["values"] @ R.T
+        e_rot, _ = rotate_force_covariance(R, b["errors"])
+        header = b["header"].rstrip(")")
+        header = (f"{header}, reframed to {pkg})" if b["header"].endswith(")")
+                  else f"{b['header']} (reframed to {pkg})")
+        print("", file=fout)
+        if b["label"] is not None:
+            print(f"--- Secondary state: {b['label']} ---", file=fout)
+        print(header, file=fout)
+        for i, s in enumerate(b["symbols"]):
+            tail = ""
+            if b["frag_ids"] is not None and b["frag_ids"][i] is not None:
+                tail = (f"  (fragment {b['frag_ids'][i]},"
+                        f" over {b['n_states']} states)")
+            print("{:4s}{:>16.6g} ± {:>12.6g}{:>16.6g} ± {:>12.6g}"
+                  "{:>16.6g} ± {:>12.6g}{}".format(
+                      s, v_rot[i, 0], e_rot[i, 0], v_rot[i, 1],
+                      e_rot[i, 1], v_rot[i, 2], e_rot[i, 2], tail),
+                  file=fout)
+        tot = v_rot.sum(0)
+        dtot = np.sqrt((e_rot ** 2).sum(0))
+        label = ("Total force on system" if b["quantity"] == "force"
+                 else "Total torque")
+        print(f"{label} (reframed to {pkg})", file=fout)
+        print("    {:>16.6g} ± {:>12.6g}{:>16.6g} ± {:>12.6g}"
+              "{:>16.6g} ± {:>12.6g}".format(
+                  tot[0], dtot[0], tot[1], dtot[1], tot[2], dtot[2]),
+              file=fout)
+
+        if check_invariants:
+            dn = np.abs(np.linalg.norm(v_rot, axis=1)
+                        - np.linalg.norm(b["values"], axis=1)).max()
+            dt = np.abs((e_rot ** 2).sum(1)
+                        - (b["errors"] ** 2).sum(1)).max()
+            print(f"#   invariants: max |d|v_i|| = {dn:.2e}, "
+                  f"max |d sum_k s_k^2| = {dt:.2e}", file=fout)
+
+        nb = dict(b)
+        nb.update({"values": v_rot, "errors": e_rot, "header": header})
+        out_blocks.append(nb)
+    return out_blocks
+
+
+def align_forces_to_reference(ref_coords, work_coords, work_forces,
+                              work_forces_err=None, atom_map=None,
+                              rmsd_warn=1e-2):
+    """Rotate per-atom force vectors into a reference geometry's frame.
+
+    Convenience wrapper around :func:`compute_reframe_transform` and
+    :func:`rotate_force_covariance` for callers holding arrays rather
+    than log files.  ``ref_coords`` and ``work_coords`` must share a
+    length unit and atom order (see ``atom_map``).
+
+    Returns a dict with ``R``, ``t`` (translate-then-rotate), ``t_post``
+    (rotate-then-translate), ``rmsd``, ``forces`` in the reference
+    frame, ``forces_err`` (or ``None``) and ``ref_coords``.
+    """
+    ref = np.asarray(ref_coords, float)
+    work = np.asarray(work_coords, float)
+    forces = np.asarray(work_forces, float)
+    err = None if work_forces_err is None \
+        else np.asarray(work_forces_err, float)
+    if atom_map is not None:
+        sel = list(atom_map)
+        work, forces = work[sel], forces[sel]
+        if err is not None:
+            err = err[sel]
+
+    xf = compute_reframe_transform(work, ref, rmsd_tol=rmsd_warn,
+                                   dist_tol=rmsd_warn, strict=False)
+    err_rot = None if err is None \
+        else rotate_force_covariance(xf["R"], err)[0]
+    return {"R": xf["R"], "t": xf["t"], "t_post": xf["t_post"],
+            "rmsd": xf["rmsd"], "forces": forces @ xf["R"].T,
+            "forces_err": err_rot, "ref_coords": ref}
+
+
+def compare_forces_with_g16(g16_log, omq_geom_log, omq_force_log=None,
+                            forces=None, forces_err=None,
+                            force_kind="averaged", atom_map=None,
+                            print_table=True):
+    """Deprecated: use :func:`make_reframe_log` + :func:`reframe_forces`.
+
+    Kept as a shim over the generalized pipeline.  The replacement is::
+
+        make_reframe_log(omq_geom_log, g16_log, package="g16")
+        reframe_forces(omq_force_log)
+    """
+    warnings.warn(
+        "compare_forces_with_g16 is deprecated; use make_reframe_log() "
+        "to record the frame transform and reframe_forces() to apply it.",
+        DeprecationWarning, stacklevel=2)
+
+    src_syms, src_xyz, _ = _read_source_geometry(omq_geom_log)
+    tgt_syms, tgt_xyz, _ = read_target_orientation(g16_log, "g16")
+    xf = compute_reframe_transform(
+        src_xyz, tgt_xyz, src_symbols=src_syms, tgt_symbols=tgt_syms,
+        atom_map=atom_map, strict=False)
+
+    if forces is None:
+        if omq_force_log is None:
+            raise ValueError("provide either `forces` or `omq_force_log`")
+        _, forces, forces_err = read_omega_forces(omq_force_log,
+                                                  kind=force_kind)
+    forces = np.asarray(forces, float)
+    forces_err = None if forces_err is None \
+        else np.asarray(forces_err, float)
+    err_rot = None if forces_err is None \
+        else rotate_force_covariance(xf["R"], forces_err)[0]
+
+    res = {"R": xf["R"], "t": xf["t"], "t_post": xf["t_post"],
+           "rmsd": xf["rmsd"], "forces": forces @ xf["R"].T,
+           "forces_err": err_rot, "ref_coords": tgt_xyz / BOHR,
+           "symbols": list(tgt_syms)}
+    if print_table:
+        print(f"# OmegaQMC forces reframed to g16 "
+              f"(rotation {xf['angle_deg']:.4f} deg, "
+              f"RMSD {xf['rmsd']:.2e} A)")
+        for i, s in enumerate(res["symbols"]):
+            e = res["forces_err"]
+            row = "  ".join(
+                f"{res['forces'][i, k]:9.5f}"
+                + (f"±{e[i, k]:.5f}" if e is not None else "")
+                for k in range(3))
+            print(f"{s:>3s}{i:<2d}  {row}")
+    return res
