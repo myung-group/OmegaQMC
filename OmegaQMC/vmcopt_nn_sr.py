@@ -56,6 +56,15 @@ _CHK_EVERY_SR = 2000
 _TARGET_ACCEPTANCE_RATE = 0.4
 _STEP_SIZE_ADAPTATION_RATE = 0.05
 
+# Maximum walkers per forward-Laplacian kinetic-energy
+# evaluation.  ``jax.lax.map(..., batch_size=...)`` bounds the
+# (chunk, hidden, 3*nelec*nelec) forward-Laplacian intermediate
+# so the whole-batch energy eval (run_production) does not
+# overflow GPU memory / GEMM autotuning.  See vmcopt_nn_iradam
+# for the detailed rationale.  The SR *gradient* already chunks
+# via ``jac_batch_size``.
+_KE_WALKER_CHUNK = 256
+
 
 def _adapt_step_size(step_size, acceptance_rate):
     """Adapt Metropolis step size toward target."""
@@ -248,6 +257,20 @@ class _VMCOptDriverNN_SR:
             return (energy_ee(elec_crds) + energy_en(elec_crds)
                     + energy_ke(elec_crds, params) + enr_nn)
 
+        # --- Walker-chunked batch local energy ---
+        # lax.map over walker chunks (<= _KE_WALKER_CHUNK) so the
+        # forward-Laplacian kinetic term never materialises its
+        # full (n_walkers, hidden, 3*nelec*nelec) intermediate at
+        # once.  Used for the non-differentiated energy passes.
+        def batched_local_energy(walkers, params):
+            n = walkers.shape[0]
+            chunk = min(_KE_WALKER_CHUNK, n)
+            return jax.lax.map(
+                lambda w: total_local_energy(w, params),
+                walkers,
+                batch_size=chunk,
+            )
+
         # --- Metropolis move ---
         @jax.jit
         def metropolis_move(rng_key, elec_crds, step_size, params):
@@ -334,10 +357,7 @@ class _VMCOptDriverNN_SR:
                     w = nw
                     rk = rk0
                 ar = acc.mean()
-                energies = jax.vmap(
-                    total_local_energy,
-                    in_axes=(0, None),
-                )(nw, p)
+                energies = batched_local_energy(nw, p)
                 return (rk, nw, s, p), (
                     ar, energies,
                 )
@@ -352,13 +372,10 @@ class _VMCOptDriverNN_SR:
             )
             return carry, results
 
-        # --- Batch energy ---
+        # --- Batch energy (chunked; not differentiated) ---
         @jax.jit
         def compute_batch_energy(walkers, params):
-            return jax.vmap(
-                total_local_energy,
-                in_axes=(0, None),
-            )(walkers, params)
+            return batched_local_energy(walkers, params)
 
         self.metropolis_move = metropolis_move
         self.run_equilibration = run_equilibration

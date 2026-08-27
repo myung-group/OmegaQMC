@@ -42,6 +42,13 @@ from .symm.fragments import (
 TARGET_ACCEPTANCE_RATE = 0.4
 STEP_SIZE_ADAPTATION_RATE = 0.05
 
+# Maximum walkers per forward-Laplacian kinetic-energy
+# evaluation.  ``jax.lax.map(..., batch_size=...)`` bounds the
+# forward-Laplacian intermediate so the whole-batch KE eval does
+# not overflow GPU memory / GEMM autotuning.  See
+# vmcopt_nn_iradam for the detailed rationale.
+_KE_WALKER_CHUNK = 256
+
 
 def _adapt_step_size(step_size, acceptance_rate):
     """Adapt Metropolis step size toward target."""
@@ -160,9 +167,23 @@ class _VMCDriverNN:
                 lap_val + jnp.dot(grad_val, grad_val)
             )
 
+        # Walker-chunked KE: lax.map over chunks (<=
+        # _KE_WALKER_CHUNK) bounds the forward-Laplacian
+        # intermediate.  Only the KE is chunked; the ee/en terms
+        # are cheap 1/r sums.
+        def batched_energy_ke(walkers, params):
+            n = walkers.shape[0]
+            chunk = min(_KE_WALKER_CHUNK, n)
+            return jax.lax.map(
+                lambda r: energy_ke(r, params),
+                walkers,
+                batch_size=chunk,
+            )
+
         self.energy_ee = energy_ee
         self.energy_en = energy_en
         self.energy_ke = energy_ke
+        self.batched_energy_ke = batched_energy_ke
 
         # --- Batched log-ψ and total local-energy for PGCS ---
         params_here = self.params
@@ -180,9 +201,7 @@ class _VMCDriverNN:
         def _local_energy_batch(batch):
             ee = jax.vmap(energy_ee)(batch)
             en = jax.vmap(energy_en)(batch)
-            ke = jax.vmap(
-                energy_ke, in_axes=(0, None),
-            )(batch, params_here)
+            ke = batched_energy_ke(batch, params_here)
             return ee + en + ke + enr_nn_val
 
         self._log_psi_batch = _log_psi_batch
@@ -352,6 +371,7 @@ class _VMCDriverNN:
         energy_ee = self.energy_ee
         energy_en = self.energy_en
         energy_ke = self.energy_ke
+        batched_energy_ke = self.batched_energy_ke
         metropolis_move_allw = self._metropolis_move_allw
 
         # --- Informational GPU capacity estimate ---
@@ -505,10 +525,7 @@ class _VMCDriverNN:
                 ar = acc.mean()
                 e_ee = jax.vmap(energy_ee)(nw)
                 e_en = jax.vmap(energy_en)(nw)
-                e_ke = jax.vmap(
-                    energy_ke,
-                    in_axes=(0, None),
-                )(nw, params)
+                e_ke = batched_energy_ke(nw, params)
                 return (
                     (rk, nw, s),
                     (ar, e_ee, e_en, e_ke, nw),
@@ -537,10 +554,7 @@ class _VMCDriverNN:
                 ar = acc.mean()
                 e_ee = jax.vmap(energy_ee)(nw)
                 e_en = jax.vmap(energy_en)(nw)
-                e_ke = jax.vmap(
-                    energy_ke,
-                    in_axes=(0, None),
-                )(nw, params)
+                e_ke = batched_energy_ke(nw, params)
                 return (
                     (rk, nw, s),
                     (ar, e_ee, e_en, e_ke),
