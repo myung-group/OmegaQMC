@@ -2608,19 +2608,81 @@ def read_g16_standard_orientation(logpath, strict=False):
 
 
 def read_nwchem_orientation(path):
-    """Parse NWChem's output geometry (not implemented yet).
+    """Parse the working geometry NWChem echoes for its run.
 
-    NWChem echoes its working frame under a ``Geometry "geometry" ->
-    "geometry"`` heading followed by ``Output coordinates in angstroms``
-    and rows of ``index tag charge x y z``; the *last* such block is the
-    geometry the calculation ran on.  Implement this to return
-    ``(symbols, coords_ang)`` exactly like
-    :func:`read_g16_standard_orientation`, and the rest of the reframing
-    pipeline works unchanged.
+    Returns ``(symbols, coords)`` with ``coords`` an ``(N, 3)`` array in
+    Angstrom, matching :func:`read_g16_standard_orientation`.  NWChem
+    echoes its working frame under a ``Geometry "..." -> "..."`` heading
+    followed by an ``Output coordinates in <unit>`` line and a table of
+    ``No. Tag Charge X Y Z`` rows.  The *last* such block is used, so a
+    geometry optimization reframes against its converged geometry, while a
+    single-point or numerical-gradient run (which echoes the block only
+    once, before the finite-difference displacements) reframes against its
+    input geometry.  Coordinates printed in atomic units are converted to
+    Angstrom.
     """
-    raise NotImplementedError(
-        "NWChem output parsing is not implemented yet; "
-        "implement read_nwchem_orientation() to add it.")
+    from pyscf.data.elements import ELEMENTS
+    from pyscf.data.nist import BOHR          # Angstrom per bohr
+
+    _elem_set = set(ELEMENTS)
+
+    with open(path) as fh:
+        text = fh.read()
+
+    # The last echoed geometry is the frame the (final) step ran on.
+    idx = text.rfind('Geometry "')
+    if idx < 0:
+        raise ValueError(
+            f"No 'Geometry \"...\"' block found in {path!r}")
+    lines = text[idx:].splitlines()
+
+    # Units: honor the "Output coordinates in <unit>" line so a run that
+    # used ``geometry units au`` is still returned in Angstrom.
+    to_ang = 1.0
+    for line in lines[:8]:
+        low = line.lower()
+        if "output coordinates in" in low:
+            # The Angstrom banner also names a.u. ("scale by ... to
+            # convert to a.u."), so test for angstrom first and only
+            # treat the frame as atomic units when it is not Angstrom.
+            if "angstrom" not in low and (
+                    "a.u." in low or "atomic units" in low
+                    or "bohr" in low):
+                to_ang = BOHR
+            break
+
+    # Locate the coordinate table's column-label row, then read the rows
+    # that follow (skipping the ruler beneath the labels).
+    start = None
+    for k, line in enumerate(lines):
+        if line.split()[:3] == ["No.", "Tag", "Charge"]:
+            start = k + 1
+            break
+    if start is None:
+        raise ValueError(
+            f"No coordinate table found in {path!r}")
+
+    rows = []
+    for line in lines[start:]:
+        parts = line.split()
+        if len(parts) >= 6 and parts[0].isdigit():
+            tag = parts[1]
+            # Element from the tag (e.g. 'O', 'Fe1' -> 'Fe'); fall back
+            # to the nuclear-charge column for exotic / ghost tags.
+            elem = tag.rstrip("0123456789_").title()
+            if elem not in _elem_set:
+                z = int(round(float(parts[2])))
+                elem = (ELEMENTS[z] if 0 < z < len(ELEMENTS) else tag)
+            rows.append((elem,
+                         [float(parts[3]), float(parts[4]),
+                          float(parts[5])]))
+        elif rows:
+            break                # blank line / next section closes it
+
+    if not rows:
+        raise ValueError(f"Could not parse any atoms from {path!r}")
+    coords = np.array([r[1] for r in rows], float) * to_ang
+    return [r[0] for r in rows], coords
 
 
 def _sniff_qc_package(path, nlines=400):
