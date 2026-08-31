@@ -116,6 +116,127 @@ def _bspline_eval_vgl(r, coefs, delta_r_inv, max_index):
     return val, d1, d2
 
 
+# --- Numerical (quintic-spline) radial AO helpers ------------------
+# QMCPACK's transform="yes"/NMO idea: tabulate each shell's analytic
+# contracted-Gaussian radial R(r) = Σ_p N_p e^{-α_p r²} as a quintic
+# spline, so the per-shell radial cost becomes independent of the
+# contraction length.  We spline the radial as a function of s = r²
+# rather than r: the contracted Gaussian is naturally a function of s
+# (g(s) = Σ_p N_p e^{-α_p s}), so g is smooth and even symmetry is
+# built in.  This makes the value/gradient/Laplacian triple
+# manifestly division-free — mirroring the analytic ``_radial_vgl`` —
+# with, for R(r) = g(r²):
+#     R          = g(s)
+#     R'(r)/r    = 2 g'(s)
+#     R''+2R'/r  = 6 g'(s) + 4 s g''(s)
+# The knots are placed on a logarithmic grid in r (mapped to s = r²),
+# so the near-nucleus region stays well resolved.  The build step runs
+# once at setup on the host (numpy/scipy); evaluation is a small
+# jittable "locate segment + Horner" kernel.
+
+
+def _build_quintic_radial_spline(alpha, norm, smin=1.0e-6,
+                                 tol=1.0e-7, npts=1001,
+                                 rmax_cap=100.0):
+    """Fit a quintic Hermite spline to the radial in ``s = r²``.
+
+    The contracted Gaussian is naturally a function of ``s``,
+    ``g(s) = Σ_p norm_p · exp(-alpha_p s)``, with analytic ``g'`` and
+    ``g''``.  Each segment is built as the unique quintic matching
+    ``(g, g', g'')`` at both endpoints (``BPoly.from_derivatives``),
+    so value **and** the first two derivatives are exact at every knot
+    — important because the AO Laplacian depends on ``g''``.  Knots lie
+    on a log grid in ``s`` (equivalently in ``r``), with ``s = 0``
+    included so the nucleus is never extrapolated.
+
+    Returns ``(knots, coefs)`` as ``jnp`` arrays: ``knots`` are the
+    ``s``-breakpoints and ``coefs[j]`` the degree-5 coefficients of
+    segment ``j`` in powers of ``(s - knots[j])`` (highest power
+    first), matching :class:`scipy.interpolate.PPoly`.
+
+    Host-side only (numpy/scipy); called once per shell at setup.
+    """
+    import numpy as np
+    from scipy.interpolate import BPoly, PPoly
+
+    a = np.asarray(alpha, dtype=np.float64)
+    c = np.asarray(norm, dtype=np.float64)
+
+    def _derivs(s):   # (g, g', g'') at each s
+        s = np.asarray(s, dtype=np.float64)
+        e = np.exp(-a[None, :] * s[:, None])
+        g = np.sum(c[None, :] * e, axis=1)
+        gp = np.sum((-a * c)[None, :] * e, axis=1)
+        gpp = np.sum((a * a * c)[None, :] * e, axis=1)
+        return np.stack([g, gp, gpp], axis=1)  # (n, 3)
+
+    # Cutoff radius: last r (up to the cap) where |R| exceeds tol.
+    r_scan = np.linspace(0.0, rmax_cap, 20001)
+    big = np.abs(_derivs(r_scan ** 2)[:, 0]) > tol
+    rmax = float(r_scan[np.max(np.nonzero(big))]) if big.any() else 1.0
+    smax = max(rmax ** 2, 100.0 * smin)
+
+    # Log grid in s (= log grid in r), with s = 0 for the nucleus.
+    s_grid = np.concatenate([
+        [0.0],
+        np.logspace(np.log10(smin), np.log10(smax), npts - 1),
+    ])
+    y = _derivs(s_grid)  # (npts, 3): value, 1st, 2nd deriv per knot
+
+    bpoly = BPoly.from_derivatives(s_grid, y)
+    pp = PPoly.from_bernstein_basis(bpoly)
+    knots = np.asarray(pp.x, dtype=np.float64)
+    coefs = np.asarray(pp.c, dtype=np.float64).T  # (nseg, 6)
+    return jnp.asarray(knots), jnp.asarray(coefs)
+
+
+def _locate_and_horner(knots, coefs, s):
+    """Locate ``s``'s segment and Horner-eval the quintic + derivs.
+
+    Returns ``(g, g', g'')`` w.r.t. ``s`` and the ``inside`` mask
+    (``s < knots[-1]``).  Shared by the value-only and VGL paths.
+    """
+    nseg = coefs.shape[0]
+    seg = jnp.clip(
+        jnp.searchsorted(knots, s, side='right') - 1, 0, nseg - 1,
+    )
+    ds = s - knots[seg]
+    c = coefs[seg]  # (..., 6): c0·ds⁵ + c1·ds⁴ + ... + c5
+    g = (((((c[..., 0] * ds + c[..., 1]) * ds + c[..., 2]) * ds
+           + c[..., 3]) * ds + c[..., 4]) * ds + c[..., 5])
+    gp = ((((5.0 * c[..., 0] * ds + 4.0 * c[..., 1]) * ds
+            + 3.0 * c[..., 2]) * ds + 2.0 * c[..., 3]) * ds
+          + c[..., 4])
+    gpp = (((20.0 * c[..., 0] * ds + 12.0 * c[..., 1]) * ds
+            + 6.0 * c[..., 2]) * ds + 2.0 * c[..., 3])
+    inside = s < knots[-1]
+    return g, gp, gpp, inside
+
+
+def _radial_val_spline(knots, coefs, r2, r):
+    """Spline radial value ``R(r) = g(r²)`` (value-only path)."""
+    del r
+    g, _, _, inside = _locate_and_horner(knots, coefs, r2)
+    return jnp.where(inside, g, 0.0)
+
+
+def _radial_vgl_spline(knots, coefs, r2, r):
+    """Spline radial VGL as the same triple as :func:`_radial_vgl`.
+
+    With ``R(r) = g(s)``, ``s = r²``, the triple ``(R, R'/r,
+    R'' + 2 R'/r)`` is division-free: ``(g, 2 g', 6 g' + 4 s g'')``.
+    """
+    del r
+    g, gp, gpp, inside = _locate_and_horner(knots, coefs, r2)
+    R = g
+    R_p_over_r = 2.0 * gp
+    R_lap = 6.0 * gp + 4.0 * r2 * gpp
+    R = jnp.where(inside, R, 0.0)
+    R_p_over_r = jnp.where(inside, R_p_over_r, 0.0)
+    R_lap = jnp.where(inside, R_lap, 0.0)
+    return R, R_p_over_r, R_lap
+
+
 def _compute_eeI_num_params(N_eI, N_ee):
     """Number of free eeI polynomial parameters."""
     NumGamma = (
@@ -697,8 +818,16 @@ class _PsiGTO:
                  jastrow_config=None):
         self.mf = mf
         self.trial = trial
+        # Opt-in AO→quintic-spline radial transform (QMCPACK NMO idea).
+        # The decision is made in ``generate_molecular_orbitals``, which
+        # tags ``mf.mol.ao_radial_transform``; None/falsey keeps the
+        # analytic contracted-Gaussian radial path (the default).
+        self._ao_transform_cfg = getattr(
+            mf.mol, 'ao_radial_transform', None,
+        )
         self._parse_mol(mf, params_cusp, trial)
         self._parse_shells(mf)
+        self._build_radial_splines()
         self._parse_elements(mf)
         self._parse_bspline_cfg(jastrow_config)
         self._parse_eeI_cfg(jastrow_config)
@@ -767,10 +896,33 @@ class _PsiGTO:
                     shell.is_cusp = (
                         self.l_cgto and ish == 0 and jsh == 0
                     )
+                    # Spline every shell except the cusp-corrected
+                    # first s-shells, which keep the analytic cusp path.
+                    shell.use_spline = bool(
+                        self._ao_transform_cfg
+                    ) and not shell.is_cusp
                     nsgs = nsgs + shell.nsgs
                     ncgs = ncgs + shell.ncgs
                     shell_list.append(shell)
         self.shell_list = shell_list
+
+    def _build_radial_splines(self):
+        """Precompute per-shell quintic radial splines (host side).
+
+        Populates ``shell.spline_knots`` / ``shell.spline_coefs`` for
+        every shell flagged ``use_spline`` in :meth:`_parse_shells`.
+        A no-op when the AO transform is disabled.
+        """
+        cfg = self._ao_transform_cfg
+        kwargs = cfg if isinstance(cfg, dict) else {}
+        for shell in self.shell_list:
+            if not shell.use_spline:
+                continue
+            knots, coefs = _build_quintic_radial_spline(
+                shell.alpha, shell.norm, **kwargs,
+            )
+            shell.spline_knots = knots
+            shell.spline_coefs = coefs
 
     def _parse_elements(self, mf):
         """Build unique element list and per-atom element index."""
@@ -867,9 +1019,15 @@ class _PsiGTO:
                 r = jnp.sqrt(r2)
                 alpha = shell.alpha
                 norm = shell.norm
-                rad_s = jnp.sum(
-                    jnp.exp(-alpha * r2) * norm
-                )
+                if shell.use_spline:
+                    rad_s = _radial_val_spline(
+                        shell.spline_knots, shell.spline_coefs,
+                        r2, r,
+                    )
+                else:
+                    rad_s = jnp.sum(
+                        jnp.exp(-alpha * r2) * norm
+                    )
                 cgs = _angular_cartesian(shell.am, dr, rad_s)
                 if shell.am == 0 and shell.is_cusp:
                     cgs = evaluate_cusp_s(
@@ -967,9 +1125,15 @@ class _PsiGTO:
                 dr = elec_crds - pos
                 r2 = jnp.sum(dr * dr, axis=-1)
                 r = jnp.sqrt(r2)
-                R, R_p_over_r, R_lap = _radial_vgl(
-                    shell.alpha, shell.norm, r2, r,
-                )
+                if shell.use_spline:
+                    R, R_p_over_r, R_lap = _radial_vgl_spline(
+                        shell.spline_knots, shell.spline_coefs,
+                        r2, r,
+                    )
+                else:
+                    R, R_p_over_r, R_lap = _radial_vgl(
+                        shell.alpha, shell.norm, r2, r,
+                    )
                 am = shell.am
 
                 if am == 0 and shell.is_cusp:

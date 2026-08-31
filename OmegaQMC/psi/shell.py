@@ -22,6 +22,13 @@ class ShellType:
     alpha: jax.Array = None  # Exponents of primitive Gaussians
     norm: jax.Array = None  # Normalized contraction coefficients
     is_cusp: int = 0 # int 1: True
+    # Optional numerical (quintic-spline) radial representation.
+    # When ``use_spline`` is True the analytic contracted Gaussian is
+    # replaced by a log-grid quintic spline of R(r); see
+    # ``_build_quintic_radial_spline`` / ``_radial_vgl_spline`` in gto.py.
+    use_spline: bool = False
+    spline_knots: jax.Array = None  # log-grid breakpoints (nseg + 1,)
+    spline_coefs: jax.Array = None  # per-segment quintic coeffs (nseg, 6)
 
 
 # Constant used in normalization of Gaussian functions
