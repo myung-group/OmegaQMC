@@ -220,7 +220,7 @@ def generate_molecular_orbitals(astr: str,
                                 symmetrization_level: int = 1,
                                 scf_options: dict | None = None,
                                 dm0_pkl: str | None = "dm0.pkl",
-                                ao_transform: bool | dict | None = None):
+                                ao_splines: bool | dict | None = None):
     """Run a PySCF mean-field calculation and return the result object.
 
     Wraps PySCF to build a molecule, detect its point-group symmetry,
@@ -272,7 +272,7 @@ def generate_molecular_orbitals(astr: str,
         guess is used.  Set to ``None`` to disable the lookup entirely.  The
         pickle may be a bare density-matrix array or a metadata dict as
         produced by `make_dm0`.  Ignored if ``scf_options["dm0"]`` is given.
-    ao_transform : bool or dict or None, optional
+    ao_splines : bool or dict or None, optional
         Opt-in QMCPACK-style AO→quintic-spline radial transform.  When
         truthy, every GTO shell except the cusp-corrected first s-shells
         is evaluated from a log-grid quintic spline of its radial
@@ -409,7 +409,7 @@ def generate_molecular_orbitals(astr: str,
     mol.symmetrization_level = symmetrization_level
     # Opt-in AO→quintic-spline radial transform decision; read later by
     # _PsiGTO when the trial is built.  None keeps the analytic radial.
-    mol.ao_radial_transform = ao_transform
+    mol.ao_radial_transform = ao_splines
     parse_molecular_inspheres(mol)
     assert hasattr(mol, "map_nuc_frag")
     assert hasattr(mol, "map_frag_ctr") and isinstance(mol.map_frag_ctr, dict)
