@@ -45,8 +45,23 @@ OMEGA = 0.415668
 BASIS = 'cc-pVDZ'
 
 _h2o_half = math.radians(104.5 / 2.0)
-_nh3_rho, _nh3_z = 0.93786, -0.38129          # r=1.0124 A, HNH=106.67 deg
 _ch4_t = 1.087 / math.sqrt(3.0)
+
+
+def _c3v(r, angle_deg):
+    """C3v AH3 geometry from the bond length and the H-A-H angle.
+
+    Previously the NH3 rho/z were hard-coded to five decimals, which put
+    this script on a geometry ~2e-4 A away from the one used by
+    run_qed_binding_ph3.py / run_qed_binding_basis.py and shifted E_gap
+    by 2 meV between the tables built from them."""
+    ang = math.radians(angle_deg)
+    cth = math.sqrt((0.5 + math.cos(ang)) / 1.5)   # 1.5cos^2 - 0.5 = cos(HXH)
+    sth = math.sqrt(1.0 - cth ** 2)
+    return r * sth, -r * cth
+
+
+_nh3_rho, _nh3_z = _c3v(1.0124, 106.67)       # r=1.0124 A, HNH=106.67 deg
 
 GEOMETRIES = {
     'H2O': [['O', (0.0, 0.0, 0.0)],

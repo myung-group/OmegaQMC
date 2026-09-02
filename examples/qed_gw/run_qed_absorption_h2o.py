@@ -169,6 +169,40 @@ def bse_pol_evgw_spectrum(lam, grid_ev):
     return _broaden(om_ev, f_osc, grid_ev), om_ev, f_osc
 
 
+
+def _lambda_label_x(grid, curves, offset, xlim, ocav_ev):
+    """Common quiet x-position for the lambda labels of one panel.
+
+    All labels of a panel share one x, so the eye can follow the
+    lambda series vertically.  The window is chosen where the largest
+    intrusion of any curve into its own label strip (including peaks
+    of the row below poking into it) is smallest; among near-degenerate
+    windows the leftmost wins, and windows crossing the omega_cav
+    marker line are penalized.
+    """
+    span = xlim[1] - xlim[0]
+    width = 0.17 * span                     # approx. label width (data units)
+    pad = 0.02 * span
+    cands = np.linspace(xlim[0] + pad, xlim[1] - width - pad, 120)
+    scores = []
+    for c in cands:
+        m = (grid >= c) & (grid <= c + width)
+        if not m.any():
+            scores.append(np.inf)
+            continue
+        v = 0.0
+        for k, norm in enumerate(curves):
+            v = max(v, float(norm[m].max()))
+            if k > 0:                       # row below entering this strip
+                v = max(v, float(curves[k - 1][m].max()) - offset + 0.10)
+        if c - 0.15 < ocav_ev < c + width + 0.15:
+            v += 0.5                        # keep clear of the dotted line
+        scores.append(v)
+    scores = np.asarray(scores)
+    good = scores <= scores.min() + 0.05    # near-degenerate windows:
+    return float(cands[np.argmax(good)])    # the leftmost of them wins
+
+
 # ----------------------------------------------------------------------
 # Assemble the two-panel figure.
 # ----------------------------------------------------------------------
@@ -184,17 +218,22 @@ fig, axes = plt.subplots(1, 2, figsize=(6.9, 3.4), dpi=300, sharey=True)
 
 for ax, (title, sub, omega_cav, specfun) in zip(axes, PANELS):
     print(f"\n=== {title} (omega_cav = {omega_cav * EV:.2f} eV) ===")
-    for k, lam in enumerate(LAMBDAS):
+    curves = []
+    for lam in LAMBDAS:
         spec, om_ev, f_osc = specfun(lam, grid)
         peak = spec.max()
-        norm = spec / peak if peak > 0 else spec
-        ax.plot(grid, norm + k * offset, lw=1.3, color=COLORS[lam])
-        ax.text(7.05, k * offset + 0.07, rf'$\lambda = {lam:.2f}$',
-                fontsize=8, color=COLORS[lam])
+        curves.append(spec / peak if peak > 0 else spec)
         bright = f_osc > 1e-3
         print(f"  lambda={lam:.2f}: bright roots (eV, f):")
         for w0, f in zip(om_ev[bright][:8], f_osc[bright][:8]):
             print(f"     {w0:8.3f}  {f:8.4f}")
+    xlbl = _lambda_label_x(grid, curves, offset, (7.0, 15.2), omega_cav * EV)
+    for k, (lam, norm) in enumerate(zip(LAMBDAS, curves)):
+        ax.plot(grid, norm + k * offset, lw=1.3, color=COLORS[lam])
+        ax.text(xlbl, k * offset + 0.10, rf'$\lambda = {lam:.2f}$',
+                fontsize=8, color=COLORS[lam], zorder=5,
+                bbox=dict(facecolor='white', edgecolor='none',
+                          alpha=0.65, pad=1.2))
 
     ocav_ev = omega_cav * EV
     ax.axvline(ocav_ev, color='k', ls=':', lw=0.8)
