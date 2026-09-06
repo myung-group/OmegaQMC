@@ -279,12 +279,33 @@ class _VMCOptDriverNN_IRAdam:
             return carry, acc
 
         # --- Production scan ---
-        @partial(jax.jit, static_argnums=(4, 5))
+        # The block always performs ``num_spb * num_dc`` Metropolis
+        # moves.  It retains ``n_samples`` measurements, evenly spaced
+        # over those moves (``n_samples=0`` means one per scan step,
+        # i.e. the original cadence).
+        #
+        # ``keep_walkers`` and ``with_energy`` are static, so each call
+        # site compiles its own kernel and pays only for what it uses.
+        # The sampling phase wants walker snapshots and *no* local
+        # energies: the forward-Laplacian dominates the cost here, and
+        # the optimizer re-evaluates E_L on each minibatch at the
+        # current parameters anyway, so energies measured during
+        # sampling were previously computed and thrown away.  The
+        # final-energy evaluation wants the reverse.  Unused outputs
+        # are ``None``, which ``lax.scan`` carries as an empty pytree.
+        @partial(jax.jit, static_argnums=(4, 5, 6, 7, 8))
         def run_production(
             rng_key, walkers, step_size, params,
-            num_spb, num_dc,
+            num_spb, num_dc, n_samples=0,
+            keep_walkers=False, with_energy=True,
         ):
-            def prod_step(carry, _):
+            # Capped at ``num_spb`` so the block never performs more
+            # than the ``num_spb * num_dc`` moves it advertises.
+            n_meas = n_samples if n_samples > 0 else num_spb
+            n_meas = max(1, min(n_meas, num_spb))
+            stride = max(1, num_spb // n_meas)
+
+            def move_once(carry, _):
                 rk, w, s, p = carry
                 for _ in range(num_dc):
                     rk0, rk1 = jax.random.split(rk)
@@ -297,17 +318,27 @@ class _VMCOptDriverNN_IRAdam:
                     )(keys, w, s, p)
                     w = nw
                     rk = rk0
-                ar = acc.mean()
-                energies = batched_local_energy(nw, p)
-                return (rk, nw, s, p), (ar, energies)
+                return (rk, w, s, p), acc.mean()
+
+            def meas_step(carry, _):
+                carry, ars = jax.lax.scan(
+                    move_once, carry, jnp.arange(stride),
+                )
+                _, w, _, p = carry
+                return carry, (
+                    ars[-1],
+                    w if keep_walkers else None,
+                    batched_local_energy(w, p)
+                    if with_energy else None,
+                )
 
             carry = (
                 rng_key, walkers,
                 step_size, params,
             )
             carry, results = jax.lax.scan(
-                prod_step, carry,
-                jnp.arange(num_spb),
+                meas_step, carry,
+                jnp.arange(n_meas),
             )
             return carry, results
 
@@ -392,6 +423,7 @@ class _VMCOptDriverNN_IRAdam:
         num_steps_per_block=200,
         num_steps_decorr=1,
         num_sample_blocks=5,
+        samples_per_block=1,
         num_blocks_equil=5,
         mc_timestep=0.1,
         lr=1e-3,
@@ -431,6 +463,21 @@ class _VMCOptDriverNN_IRAdam:
             num_sample_blocks: Production blocks
                 per iteration for collecting fresh
                 samples.
+            samples_per_block: Walker snapshots kept
+                per production block (default 1, the
+                block's final configuration).  Raising
+                it costs no extra Metropolis work —
+                the snapshots are taken from moves the
+                block already performs — and yields
+                ``num_sample_blocks *
+                samples_per_block * num_walkers``
+                configurations per iteration.  Lower
+                *num_epochs* alongside it to hold the
+                update count fixed while cutting how
+                often each sample is reused; the
+                log-derivative gradient is only
+                unbiased for samples drawn from the
+                current ``|psi|^2``.
             num_blocks_equil: Equilibration blocks
                 (initial only).
             mc_timestep: Initial MC timestep.
@@ -508,6 +555,7 @@ class _VMCOptDriverNN_IRAdam:
             train_split
             * num_walkers
             * num_sample_blocks
+            * max(1, samples_per_block)
         )
         updates_per_iter = num_epochs * max(1, n_train_per_iter // batch_size)
         if auto_iters:
@@ -542,21 +590,29 @@ class _VMCOptDriverNN_IRAdam:
         for iteration in range(
             start_iter, start_iter + num_iters,
         ):
-            # (a) Sample fresh walker snapshots
+            # (a) Sample fresh walker snapshots.  Each block keeps
+            # ``samples_per_block`` snapshots spread over its Metropolis
+            # moves rather than only the final one, and evaluates no
+            # local energies — those are computed by ``energy_and_grad``
+            # on the minibatches that actually enter the update.
             all_samples = []
             for blk in range(num_sample_blocks):
                 (
                     rng_key, walkers,
                     mc_stepsize, _,
-                ), (acc_r, tw_e) = (
+                ), (acc_r, snaps, _) = (
                     self.run_production(
                         rng_key, walkers,
                         mc_stepsize, params,
                         num_steps_per_block,
                         num_steps_decorr,
+                        samples_per_block,
+                        True, False,
                     )
                 )
-                all_samples.append(walkers)
+                all_samples.append(
+                    snaps.reshape(-1, self.nelec, 3),
+                )
             sampled = jnp.vstack(
                 all_samples,
             ).reshape(-1, self.nelec, 3)
@@ -645,13 +701,16 @@ class _VMCOptDriverNN_IRAdam:
                     num_steps_per_block,
                 )
             )
+        # Final estimate: one measurement per scan step (``n_samples=0``)
+        # and no walker snapshots — only the local energies are used.
         (rng_key, walkers, _, _), \
-            (_, tw_e) = (
+            (_, _, tw_e) = (
                 self.run_production(
                     rng_key, walkers,
                     mc_stepsize, params,
                     num_steps_per_block,
                     num_steps_decorr,
+                    0, False, True,
                 )
             )
         final_e = float(jnp.mean(tw_e))

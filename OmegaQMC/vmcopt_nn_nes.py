@@ -416,9 +416,14 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
             # (a) Sample fresh walkers from |Psi_1|^2
             all_samples = []
             for _ in range(num_sample_blocks):
+                # ``1, False, False``: one measurement per block (the
+                # final walkers, taken from the carry below) and no
+                # local energies — this loop only needs the walker
+                # positions, so evaluating E_L here was wasted work.
                 (rng_key, walkers, mc_stepsize, _), _ = self.run_production(
                     rng_key, walkers, mc_stepsize, params,
                     num_steps_per_block, num_steps_decorr,
+                    1, False, False,
                 )
                 all_samples.append(walkers)
             sampled = jnp.vstack(all_samples).reshape(-1, self.nelec, 3)
@@ -718,9 +723,14 @@ class _VMCOptDriverNN_NES_CIOverlap(_VMCOptDriverNN_IRAdam):
         for iteration in range(num_iters):
             all_samples = []
             for _ in range(num_sample_blocks):
+                # ``1, False, False``: one measurement per block (the
+                # final walkers, taken from the carry below) and no
+                # local energies — this loop only needs the walker
+                # positions, so evaluating E_L here was wasted work.
                 (rng_key, walkers, mc_stepsize, _), _ = self.run_production(
                     rng_key, walkers, mc_stepsize, params,
                     num_steps_per_block, num_steps_decorr,
+                    1, False, False,
                 )
                 all_samples.append(walkers)
             sampled = jnp.vstack(all_samples).reshape(-1, self.nelec, 3)
