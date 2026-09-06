@@ -1029,6 +1029,19 @@ class _VMCOptDriverNNHEG_KFAC:
                 dot_step_F_step = dot_step_F_step + dot_gen
 
             # ---- Apply update ----
+            # Each leaf keeps the dtype it was built with.  NNX
+            # initialises the ansatz almost entirely in float32 (only
+            # the envelope / cusp leaves are float64), while
+            # OmegaQMC.config enables jax_enable_x64, so the KFAC
+            # factors, inverses and step are float64.  Writing that
+            # back verbatim promotes the whole network to float64 on
+            # the first iteration: it doubles the parameter and
+            # per-walker-gradient footprint (halving the affordable
+            # walker count for the un-chunked gradient above), forces
+            # a recompile when the dtypes flip, and costs up to ~11x
+            # in per-walker-gradient time once the network is large
+            # enough to be FLOP-bound.  Keep the linear algebra in
+            # float64 and cast only on application.
             scale = -lr_now * clip
             new_params = params
 
@@ -1036,7 +1049,10 @@ class _VMCOptDriverNNHEG_KFAC:
             for layer, step in update_kernels.items():
                 kpath, _ = layer_paths[layer]
                 old_W = _get_at_path(new_params, kpath)
-                new_params = _set_at_path(new_params, kpath, old_W + scale * step)
+                new_params = _set_at_path(
+                    new_params, kpath,
+                    (old_W + scale * step).astype(old_W.dtype),
+                )
 
             # Generic params.  Slice generic_step_flat back into shapes.
             offset = 0
@@ -1052,7 +1068,8 @@ class _VMCOptDriverNNHEG_KFAC:
                 old_param = _get_at_path(params, path)
                 slice_ = slice_.reshape(old_param.shape)
                 new_params = _set_at_path(
-                    new_params, path, old_param + scale * slice_,
+                    new_params, path,
+                    (old_param + scale * slice_).astype(old_param.dtype),
                 )
 
             return (new_params, new_A, new_G, e_mean, var, total_norm,
