@@ -1349,7 +1349,7 @@ class _VMCOptDriverNN_KFAC:
         }
 
 
-def get_vmcopt_nn_kfac_func(mol_info, config, init_key, **kwargs):
+def get_vmcopt_nn_func(mol_info, config, init_key, **kwargs):
     """Create a KFAC natural-gradient VMC optimiser for NN trials.
 
     Builds the NN trial wavefunction from *config*, compiles the
