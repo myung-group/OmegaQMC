@@ -1614,9 +1614,20 @@ nuclear forces using PGCS.
              atom_coords[i, :])
             for i in range(len(atom_symbols))
         ]
+        # Geometry/mass container only: nothing below this point builds
+        # integrals, it is read for atom_coords, atom_mass_list and
+        # atom_symbol alone, so every element gets a one-primitive
+        # placeholder rather than a real basis. Naming a real basis tied
+        # this call to that basis's element coverage; the name used here
+        # was "mini", which pyscf does not ship, so it raised
+        # BasisNotFoundError unless the optional basis-set-exchange
+        # package happened to be installed. spin=None lets pyscf pick a
+        # consistent spin so open-shell systems build as well.
+        placeholder = [[0, [1.0, 1.0]]]
         myMol = gto.M(
-            atom=mole_data, basis="mini",
-            unit=myUnits,
+            atom=mole_data,
+            basis={sym: placeholder for sym, _ in mole_data},
+            unit=myUnits, spin=None,
         )
 
         if "atom_fragment_map" in f["system"]:

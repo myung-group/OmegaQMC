@@ -25,6 +25,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from OmegaQMC.integrals import half_rotate_cholesky_multidet
 from OmegaQMC.utils import do_binning_analysis
 
 from OmegaQMC.afqmc_gto import (
@@ -96,11 +97,11 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
                  trial=None, chol_h5_path=None, chol_chunk_g=128,
-                 e_chunk_g=16):
+                 det_chunk_size=5, e_chunk_g=16):
         super().__init__(
             mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
             trial=trial, chol_h5_path=chol_h5_path,
-            chol_chunk_g=chol_chunk_g,
+            chol_chunk_g=chol_chunk_g, det_chunk_size=det_chunk_size,
         )
         self.e_chunk_g = e_chunk_g
         # Precontract h1e with the trial(s) for the streamed
@@ -113,6 +114,13 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
             self.h1e_trials_b = jnp.einsum(
                 'pq,dqi->dpi', self.h1e, self.trials_dn.conj(),
             )
+            # Per-det half-rotated Cholesky, (ndet, naux, nocc, nbasis).
+            # The propagation path avoids this array by recomputing the
+            # half-rotation on the fly, but the streamed block-end
+            # estimator consumes it directly, so it is built once here.
+            self.rchols_a, self.rchols_b = half_rotate_cholesky_multidet(
+                self.chol, self.trials_up, self.trials_dn,
+                chunk_g=chol_chunk_g)
         else:
             self.h1e_trial_a = self.h1e @ self.trial_up.conj()
             self.h1e_trial_b = self.h1e @ self.trial_dn.conj()
@@ -231,11 +239,11 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
                         propagate_walkers_multidet(
                             phia, phib, weights, overlap, e_hybrid,
                             self.propagator, self.chol,
-                            self.rchols_a, self.rchols_b,
                             self.trials_up, self.trials_dn,
                             self.ci_coeffs, eshift, step_key,
                             walker_chunk_size=walker_chunk_size,
-                            chol_chunk_g=self.chol_chunk_g)
+                            chol_chunk_g=self.chol_chunk_g,
+                            det_chunk_size=self.det_chunk_size)
                 else:
                     phia, phib, weights, overlap, e_hybrid, _ = \
                         propagate_walkers(
