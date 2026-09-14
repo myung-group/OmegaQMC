@@ -20,8 +20,11 @@ from .utils import (parse_molecular_inspheres,
                     Mole_custom,
                     _length_in_au,
                     do_binning_analysis,
-                    _make_sharding,
-                    _autotune_prod_walkers)
+                    _make_sharding)
+from .gpu_memory import (MemoryPlan, GiB, allocator_config,
+                         compile_with_memory_stats, device_budget_bytes,
+                         gpu_devices, physical_gpu, query_gpus,
+                         reuse_compiled)
 # from .symm.water_rotation_matrix import symmetrize_water_molecule
 from .symm.operations import populate_fragment_symmops
 from .symm.fragments import (
@@ -958,18 +961,8 @@ class _VMCDriverGTO:
             )
         )
 
-    def _thermalize_basins(self, rng_key, walkers, num_walkers,
-                           walker_keys_sharding, n_steps):
-        """Thermalize charge-transfer basins of the initial ensemble.
-
-        Runs ``n_steps`` single-electron relocation moves (see
-        ``basin_move_allw``) so the walker ensemble populates the
-        electron-to-nucleus partitions in proportion to |psi|^2.
-        The local production move cannot do this across well-
-        separated fragments, so this is what makes the dissociation
-        limit (e.g. ionic configurations of a stretched bond) get
-        sampled at all.  Returns ``(rng_key, walkers, mean_accept)``.
-        """
+    def _make_basin_step(self, num_walkers, walker_keys_sharding):
+        """Jitted basin-relocation step over all walkers (scan body)."""
         basin_move_allw = self.basin_move_allw
 
         @jax.jit
@@ -983,9 +976,252 @@ class _VMCDriverGTO:
             walkers, accepted = basin_move_allw(walker_keys, walkers)
             return (rng_key, walkers), accepted.mean()
 
+        return basin_step
+
+    def _make_production_step(self, num_walkers, walker_keys_sharding,
+                              num_steps_decorr):
+        """Jitted production step (scan body): moves + local energies."""
+        metropolis_move_allw = self.metropolis_move_allw
+        local_energy_ee = self.local_energy_ee
+        local_energy_en = self.local_energy_en
+        local_energy_ke = self.local_energy_ke
+        nuc_crds = self.nuc_crds
+        params_corr = self.params_corr
+
+        @jax.jit
+        def production_step(state, step_number):
+            rng_key, walkers, step_size = state
+
+            for d in range(num_steps_decorr):
+                rng_key, key_displace = jax.random.split(rng_key)
+                walker_keys = jax.random.split(key_displace, num_walkers)
+                if walker_keys_sharding is not None:
+                    walker_keys = jax.lax.with_sharding_constraint(
+                        walker_keys, walker_keys_sharding)
+                step_count = step_number * num_steps_decorr + d
+                new_walkers, accepted, _is_gaussian \
+                    = metropolis_move_allw(walker_keys, walkers, step_size,
+                                           step_count)
+                walkers = new_walkers
+
+            ratio = accepted.mean()
+            # new_step_size = step_size * (0.5 + ratio)
+
+            # calculate energy
+            # energies = jax.vmap(total_local_energy_fn)(new_walkers)
+            enr_ee = jax.vmap(local_energy_ee)(new_walkers)
+            enr_en = jax.vmap(local_energy_en,
+                              in_axes=(0, None))(new_walkers,
+                                                 nuc_crds)
+            enr_ke = jax.vmap(local_energy_ke,
+                              in_axes=(0, None, None))(new_walkers,
+                                                       nuc_crds,
+                                                       params_corr)
+
+            return (rng_key, walkers, step_size), \
+                (ratio, enr_ee, enr_en, enr_ke, new_walkers)
+        # walkers.shape == (num_walkers, nelec, 3)
+        # ratios.shape == (num_steps_per_block,)
+        # energies.shape == (num_steps_per_block, num_walkers)
+
+        return production_step
+
+    def _thermalize_basins(self, rng_key, walkers, num_walkers,
+                           walker_keys_sharding, n_steps, basin_step=None):
+        """Thermalize charge-transfer basins of the initial ensemble.
+
+        Runs ``n_steps`` single-electron relocation moves (see
+        ``basin_move_allw``) so the walker ensemble populates the
+        electron-to-nucleus partitions in proportion to |psi|^2.
+        The local production move cannot do this across well-
+        separated fragments, so this is what makes the dissociation
+        limit (e.g. ionic configurations of a stretched bond) get
+        sampled at all.  Returns ``(rng_key, walkers, mean_accept)``.
+        """
+        if basin_step is None:
+            basin_step = self._make_basin_step(num_walkers,
+                                               walker_keys_sharding)
         (rng_key, walkers), accepts = jax.lax.scan(
             basin_step, (rng_key, walkers), None, length=n_steps)
         return rng_key, walkers, accepts.mean()
+
+    def _plan_gpu_memory(self, *, check, rng_key, walkers,
+                         walkers_sharding, num_walkers,
+                         num_steps_per_block, step_size, basin_step,
+                         equilibration_step, production_step,
+                         compute_gradients, batch_size):
+        """Check that the run fits in device memory before sampling.
+
+        Compiles every kernel the run executes at its real per-device
+        shape and sharding, reads the XLA scratch-buffer sizes, adds
+        the long-lived device arrays, and compares the estimated peak
+        with the allocator budget (see :mod:`OmegaQMC.gpu_memory`).
+        Force kernels that do not fit get a smaller gradient batch;
+        if the walker kernels do not fit, the run stops
+        (``check='error'``) or warns (``'warn'``) with the estimated
+        walker capacity.
+
+        Returns ``(batch_size, grad_kernels)``: the possibly reduced
+        gradient batch size and the gradient-phase kernels, with
+        full-size batches dispatched to the executables compiled here
+        so the (slow) force-kernel compilation is not repeated.
+        """
+        grad_kernels = {
+            'vmc_gradient_batch': self.vmc_gradient_batch,
+            'param_response_batch': self.param_response_batch,
+            'log_psi_batch': self._log_psi_batch,
+            'local_energy_batch': self._local_energy_batch,
+        }
+        devices = gpu_devices()
+        if check == 'off' or not devices:
+            return batch_size, grad_kernels
+        gpus = query_gpus()
+        phys = [physical_gpu(d, gpus) for d in devices]
+        if any(g is None for g in phys):
+            print("ℹ️\tGPU memory check skipped: cannot map JAX devices "
+                  "to nvidia-smi GPUs")
+            return batch_size, grad_kernels
+
+        config = allocator_config()
+        budget = min(device_budget_bytes(g, config) for g in phys)
+        n_dev = len(devices)
+        n_loc = num_walkers // n_dev
+        nelec, num_nuc = self.nelec, self.num_nuc
+        itemsize = walkers.dtype.itemsize
+        conf_bytes = nelec * 3 * itemsize
+        time_start = datetime.now()
+        print(f"ℹ️\tGPU memory check: compiling kernels at run shapes "
+              f"(GPU {', '.join(str(g.index) for g in phys)}) ...",
+              flush=True)
+
+        # Walker-phase kernels (scan bodies), sharded like the run.
+        step_idx = jnp.arange(1)[0]
+        state = (rng_key, walkers,
+                 jnp.asarray(step_size, dtype=walkers.dtype))
+        walker_stats = []
+        for name, fn, args in (
+                ("basin step", basin_step, ((rng_key, walkers), None)),
+                ("equilibration step", equilibration_step,
+                 (state, step_idx)),
+                ("production step", production_step, (state, step_idx))):
+            if fn is None:
+                continue
+            _, stats = compile_with_memory_stats(fn, *args)
+            if stats is None:
+                print("ℹ️\tGPU memory check unavailable: XLA memory "
+                      "analysis failed")
+                return batch_size, grad_kernels
+            walker_stats.append((name, stats))
+
+        # Gradient-phase kernels at batch b; inputs are replicated
+        # across devices (see the production loop), so each device
+        # holds the full batch.
+        def compile_batch(b):
+            probe = jnp.zeros((b, nelec, 3), dtype=walkers.dtype)
+            if walkers_sharding is not None:
+                probe = jax.device_put(
+                    probe, NamedSharding(walkers_sharding.mesh,
+                                         PartitionSpec()))
+            out = {}
+            for name, fn in grad_kernels.items():
+                if fn is None:
+                    continue
+                compiled, stats = compile_with_memory_stats(fn, probe)
+                if stats is None:
+                    return None, probe
+                out[name] = (compiled, stats)
+            return out, probe
+
+        def build(batch_stats, b):
+            plan = MemoryPlan(config, budget)
+            for name, stats in walker_stats:
+                plan.add_kernel(f"{name} ({n_loc} walkers)", stats,
+                                'walkers')
+            plan.add_persistent("walkers (current + proposed)",
+                                2 * n_loc * conf_bytes, 'walkers')
+            # Scan outputs of the running and the previous block.
+            plan.add_persistent(
+                "production samples (2 blocks)",
+                2 * num_steps_per_block * n_loc
+                * (conf_bytes + 3 * itemsize), 'walkers')
+            if batch_stats is not None:
+                for name, (_, stats) in batch_stats.items():
+                    plan.add_kernel(f"{name} (batch {b})", stats, 'batch')
+                n_samples = num_steps_per_block * num_walkers
+                plan.add_persistent(
+                    "gradient inputs",
+                    n_samples * conf_bytes * (2 if n_dev > 1 else 1),
+                    'walkers')
+                vec = num_nuc * 3 * itemsize
+                per_sample = 3 * vec + len(self.single_frag_combos) \
+                    * (3 * vec + 2 * itemsize)
+                if self.param_response_batch is not None:
+                    per_sample += 2 * self.n_jastrow_params * itemsize \
+                        + 2 * vec
+                # Per-batch lists plus their stacked copies.
+                plan.add_persistent("gradient accumulators",
+                                    2 * n_samples * per_sample, 'walkers')
+            return plan
+
+        b = batch_size
+        batch_stats, probe = None, None
+        if compute_gradients:
+            for _ in range(4):
+                batch_stats, probe = compile_batch(b)
+                if batch_stats is None:
+                    print("ℹ️\tGPU memory check unavailable: XLA memory "
+                          "analysis failed")
+                    return batch_size, grad_kernels
+                plan = build(batch_stats, b)
+                if plan.fits():
+                    break
+                # Temps are ~linear in b at large b; re-verify anyway.
+                b_new = min(b - 1, int(b * plan.max_scale('batch', hi=1.0)))
+                if b_new < 1:
+                    break
+                print(f"ℹ️\tGradient batch {b} does not fit; "
+                      f"trying {b_new}", flush=True)
+                b = b_new
+        else:
+            plan = build(None, b)
+
+        elapsed = (datetime.now() - time_start).total_seconds()
+        print(plan.report(f"GPU memory plan per device ({elapsed:.0f} s):"))
+        capacity = int(n_loc * plan.max_scale('walkers')) * n_dev
+        batch_txt = f"; gradient batch {b}" if compute_gradients else ""
+        print(f"ℹ️\tEst. GPU capacity: {capacity} walkers "
+              f"(user requested {num_walkers}{batch_txt})")
+        if b != batch_size:
+            print(f"ℹ️\tGradient batch size lowered from {batch_size} "
+                  f"to {b} to fit device memory")
+
+        if not plan.fits():
+            msg = (f"Estimated peak device memory "
+                   f"{plan.peak_bytes() / GiB:.1f} GiB exceeds the usable "
+                   f"{plan.usable_bytes / GiB:.1f} GiB per device "
+                   f"({config.description}).")
+            if capacity > 0:
+                msg += f" Reduce num_walkers to at most {capacity}."
+            elif compute_gradients:
+                msg += (f" The force kernels do not fit even at "
+                        f"gradient batch {b}.")
+            else:
+                msg += " Not even one walker per device fits."
+            if config.mode == 'growth':
+                msg += (" Alternatively use the preallocated pool (unset "
+                        "XLA_PYTHON_CLIENT_PREALLOCATE, set "
+                        "XLA_PYTHON_CLIENT_MEM_FRACTION, e.g. 0.9), whose "
+                        "freed blocks can be reused by larger buffers.")
+            msg += " Pass gpu_memory_check='warn' to run anyway."
+            if check == 'error':
+                raise RuntimeError(msg)
+            warnings.warn(msg)
+
+        if batch_stats is not None:
+            for name, (compiled, _) in batch_stats.items():
+                grad_kernels[name] = reuse_compiled(
+                    grad_kernels[name], compiled, probe)
+        return b, grad_kernels
 
     def __call__(self, rng_key: int | jnp.ndarray,
                  num_walkers: int = 1000,
@@ -995,7 +1231,8 @@ class _VMCDriverGTO:
                  fname_log: str = None,
                  mode_restart: bool = False,
                  num_steps_basin: int = N_BASIN_THERMAL_STEPS,
-                 compute_gradients: bool = False) -> None:
+                 compute_gradients: bool = False,
+                 gpu_memory_check: str = 'error') -> None:
         """Execute a VMC run and write results to HDF5 checkpoint files.
 
         Runs Metropolis-Hastings Monte Carlo sampling of the trial wave
@@ -1041,6 +1278,14 @@ class _VMCDriverGTO:
             If ``True``, accumulate and save nuclear-force gradient data
             needed by :func:`~OmegaQMC.observables.force.postproc_h5_pgcs`.
             Default ``False``.
+        gpu_memory_check : {'error', 'warn', 'off'}, optional
+            Before sampling, compile the run's kernels at their real
+            shapes, estimate peak device memory from XLA's buffer
+            assignment and the allocator settings, and lower the
+            gradient batch size if needed.  ``'error'`` stops a run
+            that is estimated not to fit, ``'warn'`` only warns,
+            ``'off'`` skips the check.  Ignored on CPU.
+            Default ``'error'``.
 
         Returns
         -------
@@ -1058,30 +1303,14 @@ class _VMCDriverGTO:
         num_nuc = self.num_nuc
         enr_nn = self.enr_nn
         grd_nn = self.grd_nn
-        params_corr = self.params_corr
         metropolis_move_allw = self.metropolis_move_allw
         ofname_chkpt = self.ofname_chkpt
         ofname_grd = self.ofname_grd
         timestamp_init = self.timestamp_init
-        local_energy_ee = self.local_energy_ee
-        local_energy_en = self.local_energy_en
-        local_energy_ke = self.local_energy_ke
 
-        # --- Informational GPU capacity estimate ---
-        # Does NOT modify num_walkers.
-        try:
-            from .vmcopt_gto_linear import _get_free_gpu_mb
-            free_mb = _get_free_gpu_mb()
-            n_rec, bpw = _autotune_prod_walkers(
-                self._local_energy_batch, nelec, free_mb)
-            free_txt = (f"{free_mb:.0f} MiB free"
-                        if free_mb is not None
-                        else "free GPU mem unknown")
-            print(f"ℹ️\tEst. GPU capacity: {n_rec} walkers "
-                  f"(user requested {num_walkers}; "
-                  f"{bpw / 1e6:.2f} MB/walker, {free_txt})")
-        except Exception as e:
-            print(f"ℹ️\tGPU capacity estimate unavailable: {e}")
+        if gpu_memory_check not in ('error', 'warn', 'off'):
+            raise ValueError("gpu_memory_check must be 'error', 'warn' "
+                             f"or 'off', got {gpu_memory_check!r}")
 
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
@@ -1095,21 +1324,6 @@ class _VMCDriverGTO:
         walkers_sharding, walker_keys_sharding = _make_sharding(num_walkers)
         if walkers_sharding is not None:
             walkers = jax.device_put(walkers, walkers_sharding)
-
-        # Thermalize charge-transfer basins before equilibration so
-        # the initial ensemble populates electron-to-nucleus
-        # partitions per |psi|^2.  The local move alone cannot reach
-        # ionic configurations across well-separated fragments, which
-        # otherwise biases the energy below the trial-wavefunction
-        # value at large bond lengths.  Skipped on restart (the
-        # restored walkers are already thermalized).
-        if not mode_restart and num_steps_basin > 0:
-            rng_key, basin_key = jax.random.split(rng_key)
-            basin_key, walkers, basin_accept = self._thermalize_basins(
-                basin_key, walkers, num_walkers, walker_keys_sharding,
-                num_steps_basin)
-            print(f"ℹ️\tBasin thermalization: {num_steps_basin} "
-                  f"relocation steps, acceptance {basin_accept:.2f}")
 
         mc_stepsize = (3 * mc_timestep)**0.5
 
@@ -1135,6 +1349,49 @@ class _VMCDriverGTO:
 
             return (rng_key, new_walkers, new_step_size), gauss_ratio
         # walkers.shape == (num_walkers, nelec, 3)
+
+        # Production phase
+        production_step = self._make_production_step(
+            num_walkers, walker_keys_sharding, num_steps_decorr)
+
+        do_basin = not mode_restart and num_steps_basin > 0
+        basin_step = (self._make_basin_step(num_walkers,
+                                            walker_keys_sharding)
+                      if do_basin else None)
+
+        base_batch_size = 500
+        memory_factor = max(1, nelec * num_nuc // 1000)
+        batch_size = min(50, base_batch_size // memory_factor)
+
+        # Pre-flight device-memory check at the real kernel shapes.
+        # May lower batch_size; returns the gradient-phase kernels
+        # bound to the executables it compiled.
+        batch_size, grad_kernels = self._plan_gpu_memory(
+            check=gpu_memory_check, rng_key=rng_key, walkers=walkers,
+            walkers_sharding=walkers_sharding, num_walkers=num_walkers,
+            num_steps_per_block=num_steps_per_block,
+            step_size=mc_stepsize, basin_step=basin_step,
+            equilibration_step=(None if mode_restart
+                                else equilibration_step),
+            production_step=production_step,
+            compute_gradients=compute_gradients, batch_size=batch_size)
+        num_batches = (num_steps_per_block * num_walkers + batch_size - 1) \
+            // batch_size
+
+        # Thermalize charge-transfer basins before equilibration so
+        # the initial ensemble populates electron-to-nucleus
+        # partitions per |psi|^2.  The local move alone cannot reach
+        # ionic configurations across well-separated fragments, which
+        # otherwise biases the energy below the trial-wavefunction
+        # value at large bond lengths.  Skipped on restart (the
+        # restored walkers are already thermalized).
+        if do_basin:
+            rng_key, basin_key = jax.random.split(rng_key)
+            basin_key, walkers, basin_accept = self._thermalize_basins(
+                basin_key, walkers, num_walkers, walker_keys_sharding,
+                num_steps_basin, basin_step=basin_step)
+            print(f"ℹ️\tBasin thermalization: {num_steps_basin} "
+                  f"relocation steps, acceptance {basin_accept:.2f}")
 
         if mode_restart:
             with h5py.File(ofname_chkpt, 'r') as f:
@@ -1182,43 +1439,6 @@ class _VMCDriverGTO:
         print(f"ℹ️\tAdjusted step size: {mc_stepsize:.4f} bohr "
               f"~ {mc_timestep:.4f} Ha⁻¹ in Brownian time")
 
-        # Production phase
-        @jax.jit
-        def production_step(state, step_number):
-            rng_key, walkers, step_size = state
-
-            for d in range(num_steps_decorr):
-                rng_key, key_displace = jax.random.split(rng_key)
-                walker_keys = jax.random.split(key_displace, num_walkers)
-                if walker_keys_sharding is not None:
-                    walker_keys = jax.lax.with_sharding_constraint(
-                        walker_keys, walker_keys_sharding)
-                step_count = step_number * num_steps_decorr + d
-                new_walkers, accepted, _is_gaussian \
-                    = metropolis_move_allw(walker_keys, walkers, step_size,
-                                           step_count)
-                walkers = new_walkers
-
-            ratio = accepted.mean()
-            # new_step_size = step_size * (0.5 + ratio)
-
-            # calculate energy
-            # energies = jax.vmap(total_local_energy_fn)(new_walkers)
-            enr_ee = jax.vmap(local_energy_ee)(new_walkers)
-            enr_en = jax.vmap(local_energy_en,
-                              in_axes=(0, None))(new_walkers,
-                                                 nuc_crds)
-            enr_ke = jax.vmap(local_energy_ke,
-                              in_axes=(0, None, None))(new_walkers,
-                                                       nuc_crds,
-                                                       params_corr)
-
-            return (rng_key, walkers, step_size), \
-                (ratio, enr_ee, enr_en, enr_ke, new_walkers)
-        # walkers.shape == (num_walkers, nelec, 3)
-        # ratios.shape == (num_steps_per_block,)
-        # energies.shape == (num_steps_per_block, num_walkers)
-
         if fname_log is None \
                 or (isinstance(fname_log, str) and fname_log == ""):
             fout = sys.stdout
@@ -1262,11 +1482,6 @@ class _VMCDriverGTO:
                 g.create_dataset("atom_fragment_map",
                                  data=mf.mol.map_nuc_frag)
 
-        base_batch_size = 500
-        memory_factor = max(1, nelec * num_nuc // 1000)
-        batch_size = min(50, base_batch_size // memory_factor)
-        num_batches = (num_steps_per_block * num_walkers + batch_size - 1) \
-            // batch_size
         # mark_samples = ((jnp.arange(num_steps_per_block)+1) == 0)
         print("ℹ️\tAdjusted batch size, number of batches: "
               f"{batch_size}, {num_batches}")
@@ -1327,12 +1542,12 @@ class _VMCDriverGTO:
                     batch_size, num_batches,
                     self.single_frag_combos,
                     self.ofname_grd,
-                    self.vmc_gradient_batch,
-                    self._log_psi_batch,
-                    self._local_energy_batch,
+                    grad_kernels['vmc_gradient_batch'],
+                    grad_kernels['log_psi_batch'],
+                    grad_kernels['local_energy_batch'],
                     self._apply_single_frag_symmop,
                     param_response_batch=(
-                        self.param_response_batch
+                        grad_kernels['param_response_batch']
                     ),
                 )
                 if combo_E:

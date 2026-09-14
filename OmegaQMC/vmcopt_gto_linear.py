@@ -15,7 +15,6 @@ Reference: QMCPACK ``QMCFixedSampleLinearOptimize.cpp``,
 ``one_shift_run()``.
 """
 
-import subprocess
 import warnings
 import jax
 import jax.numpy as jnp
@@ -172,7 +171,11 @@ def _nonlinear_rescale(dP, S_block):
 # -----------------------------------------------------------
 
 def _get_free_gpu_mb():
-    """Return free GPU memory in MiB via nvidia-smi.
+    """Return free memory of the first visible GPU in MiB via nvidia-smi.
+
+    JAX device ids are logical (``CudaDevice(id=0)`` under
+    ``CUDA_VISIBLE_DEVICES=2`` is physical GPU 2), so the device is
+    mapped to its physical GPU before querying.
 
     Returns
     -------
@@ -180,26 +183,12 @@ def _get_free_gpu_mb():
         Free GPU memory in MiB, or None if unavailable.
     """
     try:
-        result = subprocess.run(
-            [
-                'nvidia-smi',
-                '--query-gpu=memory.free',
-                '--format=csv,noheader,nounits',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
+        from .gpu_memory import MiB, gpu_devices, physical_gpu
+        gpu_devs = gpu_devices()
+        gpu = physical_gpu(gpu_devs[0]) if gpu_devs else None
+        if gpu is None:
             return None
-        lines = result.stdout.strip().split('\n')
-        gpu_devs = [
-            d for d in jax.devices()
-            if d.platform == 'gpu'
-        ]
-        idx = gpu_devs[0].id if gpu_devs else 0
-        idx = min(idx, len(lines) - 1)
-        return float(lines[idx].strip())
+        return (gpu.total_bytes - gpu.used_bytes) / MiB
     except Exception:
         return None
 
@@ -249,7 +238,8 @@ def _autotune_deriv_batch(
             .compile()
         )
         analysis = compiled.memory_analysis()
-        bytes_per_walker = analysis.alias_size + analysis.temp_size
+        bytes_per_walker = (analysis.alias_size_in_bytes
+                            + analysis.temp_size_in_bytes)
     except Exception:
         pass
 

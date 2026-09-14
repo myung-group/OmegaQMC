@@ -1013,8 +1013,8 @@ def _autotune_prod_walkers(prod_batch, nelec, free_mb, mem_frac=0.75):
         probe = jnp.zeros((1, nelec, 3))
         compiled = jax.jit(prod_batch).lower(probe).compile()
         analysis = compiled.memory_analysis()
-        bytes_per_walker = (analysis.alias_size
-                            + analysis.temp_size)
+        bytes_per_walker = (analysis.alias_size_in_bytes
+                            + analysis.temp_size_in_bytes)
     except Exception:
         pass
 
