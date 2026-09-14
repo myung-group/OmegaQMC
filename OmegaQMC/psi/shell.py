@@ -67,7 +67,11 @@ def evaluate_cusp_s(r, rc, Z, rad_s, q0, coeff):
         b*s*r_powers
     ])
 
-    return jnp.dot(coeff, terms)
+    # Not ``jnp.dot``: on GPU, a 1-D inner product with a jit-captured
+    # constant ``coeff`` fails MHLO->HLO export once the walker batch
+    # is sharded across devices ("Slice index count does not match
+    # argument rank").  The elementwise sum is equivalent and exports.
+    return jnp.sum(coeff * terms, axis=-1)
 
 
 @jax.jit
