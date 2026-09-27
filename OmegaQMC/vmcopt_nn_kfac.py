@@ -428,6 +428,17 @@ class _VMCOptDriverNN_KFAC:
         damping: Initial Tikhonov damping, used by both the Linear
             (KFAC) and generic (full-Fisher) blocks.
         damping_adapt: Enable adaptive Levenberg-Marquardt damping.
+            Off by default, matching DeepQMC's constant damping
+            schedule (``conf/task/opt/kfac.yaml``): the ratio test
+            compares the measured energy change with the quadratic
+            model's prediction, and once sigma(E_L) ~ 2 Ha over 1000
+            walkers the per-iteration noise (~0.07 Ha) exceeds the
+            real improvement, so the ratio is mostly noise and damping
+            random-walks upward.  On an H2O PsiFormer it inflated
+            1e-3 -> 1.05 over 1200 iterations while ``|step|``
+            collapsed 25x and the energy stopped improving.  The
+            Fisher-norm trust region (``norm_constraint``) is what
+            bounds the step.
         damping_min, damping_max: Bounds on the adapted damping.
         damping_lookback: Iterations aggregated before consulting
             the quadratic-model ratio, and the window used by the
@@ -460,7 +471,7 @@ class _VMCOptDriverNN_KFAC:
         lr: float = 0.05,
         lr_decay: Optional[float] = 1.0e4,
         damping: float = 1.0e-3,
-        damping_adapt: bool = True,
+        damping_adapt: bool = False,
         damping_min: float = 1.0e-6,
         damping_max: float = 1.0e2,
         damping_lookback: int = 10,
@@ -1041,6 +1052,10 @@ class _VMCOptDriverNN_KFAC:
         Args:
             rng_key: JAX PRNG key (int or key array).
             num_iters: KFAC iterations (one parameter update each).
+                ``0`` performs no update: with a checkpoint at
+                ``{prefix}.chk.h5`` this loads it and only runs the
+                final estimate, so ``energy['sigma']`` measures the
+                saved wavefunction.
             num_walkers: Number of MC walkers.
             factor_chunk_size: Walkers per Kronecker-factor
                 accumulation chunk.  Peak gradient memory is
@@ -1343,7 +1358,12 @@ class _VMCOptDriverNN_KFAC:
 
         self.params = params
         return params, {
-            'energy': {'mean': final_e, 'stderr': final_err},
+            # ``sigma`` is taken after the last update on freshly
+            # equilibrated walkers, so it is the right spread to size a
+            # production run with -- unlike Var_history[-1], which is
+            # measured on the pre-update distribution.
+            'energy': {'mean': final_e, 'stderr': final_err,
+                       'sigma': final_std},
             'E_history': e_history,
             'Var_history': var_history,
         }
