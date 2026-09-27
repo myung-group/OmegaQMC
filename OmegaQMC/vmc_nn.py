@@ -148,7 +148,7 @@ class _VMCDriverNN:
     def __init__(
         self, mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
-        symmop_list=None,
+        symmop_list=None, nn_dtype='float32',
     ):
         # Populate fragment metadata lazily for Mole_custom
         # instances that did not come through the GTO
@@ -203,7 +203,8 @@ class _VMCDriverNN:
         )
 
         log_psi, init_params, graphdef, lap_grad \
-            = make_nn_log_psi(config, mol_info, init_key)
+            = make_nn_log_psi(config, mol_info, init_key,
+                              compute_dtype=nn_dtype)
         self.log_psi = log_psi
         self.params = init_params
         self.lap_grad = lap_grad
@@ -1070,7 +1071,7 @@ class _VMCDriverNN:
 
 def get_vmc_nn_func(
     mol_info, config, init_key, prefix='vmc',
-    symmop_list=None,
+    symmop_list=None, nn_dtype='float32',
 ):
     """Construct a VMC driver for NN wavefunctions.
 
@@ -1096,6 +1097,14 @@ def get_vmc_nn_func(
             a list of strings or per-fragment dict
             restricts the set.  Matches the GTO
             driver's *symmop_list* semantics.
+        nn_dtype: Precision the network (log|psi|, its gradients
+            and the forward Laplacian) is evaluated in.
+            ``'float32'`` (default) matches DeepQMC and runs 20-40x
+            faster on a GeForce GPU than the float64 that
+            ``jax_enable_x64`` otherwise implies; potentials,
+            energies and accumulators stay float64.  ``None``
+            evaluates in the input precision (float64).  See
+            :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`.
 
     Returns:
         :class:`_VMCDriverNN` instance.  Call it with
@@ -1111,5 +1120,5 @@ def get_vmc_nn_func(
     return _VMCDriverNN(
         mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
-        symmop_list=symmop_list,
+        symmop_list=symmop_list, nn_dtype=nn_dtype,
     )

@@ -460,6 +460,14 @@ class _VMCOptDriverNN_KFAC:
         fixed_scale: With ``capture_activations``, multiply each
             layer's step by ``n_e`` to match textbook KFAC
             magnitude (FermiNet's ``fixed_scale``).
+        nn_dtype: Precision the network (log|psi|, its gradients
+            and the forward Laplacian) is evaluated in.
+            ``'float32'`` (default) matches DeepQMC and runs 20-40x
+            faster on a GeForce GPU than the float64 that
+            ``jax_enable_x64`` otherwise implies; potentials,
+            energies and accumulators stay float64.  ``None``
+            evaluates in the input precision (float64).  See
+            :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`.
     """
 
     def __init__(
@@ -483,6 +491,7 @@ class _VMCOptDriverNN_KFAC:
         var_weight: float = 0.0,
         capture_activations: bool = False,
         fixed_scale: bool = False,
+        nn_dtype: Optional[str] = 'float32',
     ):
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
@@ -524,7 +533,7 @@ class _VMCOptDriverNN_KFAC:
         self.fixed_scale = bool(fixed_scale)
 
         log_psi, init_params, graphdef, lap_grad = make_nn_log_psi(
-            config, mol_info, init_key,
+            config, mol_info, init_key, compute_dtype=nn_dtype,
         )
         self.log_psi = log_psi
         self.graphdef = graphdef

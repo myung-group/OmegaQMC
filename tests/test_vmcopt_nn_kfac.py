@@ -33,8 +33,10 @@ def _h2():
 
 @pytest.fixture(scope="module")
 def drv():
+    # float64 network, so the chunk-invariance checks below compare
+    # summation orders rather than float32 rounding.
     return _VMCOptDriverNN_KFAC(
-        _h2(), "psiformer", jax.random.key(0),
+        _h2(), "psiformer", jax.random.key(0), nn_dtype=None,
     )
 
 

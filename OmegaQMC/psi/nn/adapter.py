@@ -338,7 +338,22 @@ def _build_vgl_kwargs(
     }
 
 
-def make_nn_log_psi(config, mol_info, rng_key):
+def cast_floats(tree, dtype):
+    """Cast the floating-point array leaves of *tree* to *dtype*.
+
+    Integer, boolean and non-array leaves (strings, Python scalars,
+    ``None``) are returned unchanged, so this is safe on parameter
+    states and on the VGL keyword dicts alike.
+    """
+    def _cast(x):
+        if (isinstance(x, jax.Array)
+                and jnp.issubdtype(x.dtype, jnp.floating)):
+            return x.astype(dtype)
+        return x
+    return jax.tree.map(_cast, tree)
+
+
+def make_nn_log_psi(config, mol_info, rng_key, compute_dtype=None):
     """Create an NN trial wavefunction.
 
     Args:
@@ -347,6 +362,20 @@ def make_nn_log_psi(config, mol_info, rng_key):
         mol_info: :class:`~OmegaQMC.utils.Mole_custom`
             instance.
         rng_key: JAX PRNG key for parameter init.
+        compute_dtype: Precision the network is evaluated in, e.g.
+            ``'float32'``.  Electron and nuclear coordinates,
+            parameters and model constants are cast to it on entry
+            and the results are cast back to the precision of the
+            coordinates, so callers keep float64 potentials and
+            accumulators while the network itself runs in float32,
+            as DeepQMC's does.  This matters because
+            ``OmegaQMC.config`` enables ``jax_enable_x64``: float64
+            walkers, nuclear coordinates and the float64 envelope
+            and cusp parameters otherwise promote the whole network
+            to float64, which a GeForce GPU runs at a small fraction
+            of its float32 rate.  ``None`` (default) evaluates in
+            the precision of the inputs.  Stored parameter dtypes
+            are never changed.
 
     Returns:
         Tuple ``(log_psi, init_params, graphdef, lap_grad)``.
@@ -378,6 +407,17 @@ def make_nn_log_psi(config, mol_info, rng_key):
     )
     init_params = params
 
+    cdt = None if compute_dtype is None else jnp.dtype(compute_dtype)
+    other_c = other if cdt is None else cast_floats(other, cdt)
+
+    def _prep(elec_crds, nuc_crds, params):
+        """Inputs in the compute precision, plus the output dtype."""
+        out_dt = jnp.promote_types(elec_crds.dtype, nuc_crds.dtype)
+        if cdt is None:
+            return elec_crds, nuc_crds, params, other, out_dt
+        return (elec_crds.astype(cdt), nuc_crds.astype(cdt),
+                cast_floats(params, cdt), other_c, out_dt)
+
     n_up = mol_info.n_up
     n_down = mol_info.n_down
     n_e = n_up + n_down
@@ -408,6 +448,9 @@ def make_nn_log_psi(config, mol_info, rng_key):
             nuc_crds: ``(natom, 3)``.
             params: NNX State pytree.
         """
+        elec_crds, nuc_crds, params, oth, out_dt = _prep(
+            elec_crds, nuc_crds, params,
+        )
         r_up = elec_crds[::2]
         r_dn = elec_crds[1::2]
         r_grouped = jnp.concatenate(
@@ -418,8 +461,8 @@ def make_nn_log_psi(config, mol_info, rng_key):
             r=r_grouped,
             mol_idx=jnp.array(0),
         )
-        mdl = nnx.merge(graphdef, params, other)
-        return mdl(phys_conf).log
+        mdl = nnx.merge(graphdef, params, oth)
+        return mdl(phys_conf).log.astype(out_dt)
 
     def log_psi_signed(elec_crds, nuc_crds, params):
         """Evaluate ``(sign(psi), log|psi|)`` for a single walker.
@@ -428,6 +471,9 @@ def make_nn_log_psi(config, mol_info, rng_key):
         needed for estimators like ``f_I = D_I / psi`` that
         cannot be reconstructed from ``log|psi|`` alone.
         """
+        elec_crds, nuc_crds, params, oth, out_dt = _prep(
+            elec_crds, nuc_crds, params,
+        )
         r_up = elec_crds[::2]
         r_dn = elec_crds[1::2]
         r_grouped = jnp.concatenate(
@@ -438,9 +484,9 @@ def make_nn_log_psi(config, mol_info, rng_key):
             r=r_grouped,
             mol_idx=jnp.array(0),
         )
-        mdl = nnx.merge(graphdef, params, other)
+        mdl = nnx.merge(graphdef, params, oth)
         out = mdl(phys_conf)
-        return out.sign, out.log
+        return out.sign.astype(out_dt), out.log.astype(out_dt)
 
     log_psi.signed = log_psi_signed
 
@@ -451,23 +497,29 @@ def make_nn_log_psi(config, mol_info, rng_key):
         return laplacian(f_flat)(elec_crds.reshape(-1))
 
     def _lap_grad_vgl(elec_crds, nuc_crds, params):
+        elec_crds, nuc_crds, params, oth, out_dt = _prep(
+            elec_crds, nuc_crds, params,
+        )
         r_up = elec_crds[::2]
         r_dn = elec_crds[1::2]
         r_grouped = jnp.concatenate(
             [r_up, r_dn], axis=0,
         )
         elec_flat = r_grouped.reshape(-1)
-        mdl = nnx.merge(graphdef, params, other)
+        mdl = nnx.merge(graphdef, params, oth)
         kwargs = _build_vgl_kwargs(
             mdl, ne_log_rescale=config.ne_log_rescale,
             edge_features=_static_edge_features,
         )
+        if cdt is not None:
+            # e.g. the float64 initial alpha of a non-trainable cusp
+            kwargs = cast_floats(kwargs, cdt)
         out = log_psi_vgl_psiformer(
             elec_flat, nuc_crds,
             n_up=n_up, n_down=n_down, n_det=n_det,
             **kwargs,
         )
-        return out.lap, out.grad
+        return out.lap.astype(out_dt), out.grad.astype(out_dt)
 
     lap_grad = (
         _lap_grad_vgl if use_vgl else _lap_grad_linearize

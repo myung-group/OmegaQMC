@@ -115,7 +115,8 @@ class _VMCOptDriverNN_IRAdam:
     target number of parameter updates is reached.
     """
 
-    def __init__(self, mol_info, config, init_key):
+    def __init__(self, mol_info, config, init_key,
+                 nn_dtype='float32'):
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
         )
@@ -137,6 +138,7 @@ class _VMCOptDriverNN_IRAdam:
         log_psi, init_params, graphdef, lap_grad = (
             make_nn_log_psi(
                 config, mol_info, init_key,
+                compute_dtype=nn_dtype,
             )
         )
         self.init_params = init_params
@@ -735,7 +737,8 @@ class _VMCOptDriverNN_IRAdam:
                                    'sigma': final_std}}
 
 
-def get_vmcopt_nn_func(mol_info, config, init_key):
+def get_vmcopt_nn_func(mol_info, config, init_key,
+                       nn_dtype='float32'):
     """Create an iteratively-resampled Adam VMC
     optimizer for NN.
 
@@ -750,6 +753,14 @@ def get_vmcopt_nn_func(mol_info, config, init_key):
             or a string (built-in name or YAML path).
         init_key: JAX PRNG key for parameter
             initialisation.
+        nn_dtype: Precision the network (log|psi|, its gradients
+            and the forward Laplacian) is evaluated in.
+            ``'float32'`` (default) matches DeepQMC and runs 20-40x
+            faster on a GeForce GPU than the float64 that
+            ``jax_enable_x64`` otherwise implies; potentials,
+            energies and accumulators stay float64.  ``None``
+            evaluates in the input precision (float64).  See
+            :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`.
 
     Returns:
         :class:`_VMCOptDriverNN_IRAdam` instance.
@@ -757,7 +768,7 @@ def get_vmcopt_nn_func(mol_info, config, init_key):
         the optimization.
     """
     return _VMCOptDriverNN_IRAdam(
-        mol_info, config, init_key,
+        mol_info, config, init_key, nn_dtype=nn_dtype,
     )
 
 

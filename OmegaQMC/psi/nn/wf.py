@@ -36,8 +36,8 @@ def eval_log_slater(xs):
     """
     if xs.shape[-1] == 0:
         return (
-            jnp.ones(xs.shape[:-2]),
-            jnp.zeros(xs.shape[:-2]),
+            jnp.ones(xs.shape[:-2], dtype=xs.dtype),
+            jnp.zeros(xs.shape[:-2], dtype=xs.dtype),
         )
     return jnp.linalg.slogdet(xs)
 

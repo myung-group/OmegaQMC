@@ -130,8 +130,8 @@ class ElectronEmbedding(nnx.Module):
             )
             if self.use_spin:
                 spins = jnp.concatenate([
-                    jnp.ones(self.n_up),
-                    -jnp.ones(self.n_down),
+                    jnp.ones(self.n_up, dtype=x.dtype),
+                    -jnp.ones(self.n_down, dtype=x.dtype),
                 ])[:, None]
                 x = jnp.concatenate(
                     [x, spins], axis=1,

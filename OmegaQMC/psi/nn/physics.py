@@ -64,7 +64,7 @@ def pairwise_self_distance(
     dists = norm(diffs[..., i, j, :], safe=True, axis=-1)
     if full:
         dists = (
-            jnp.zeros(diffs.shape[:-1])
+            jnp.zeros(diffs.shape[:-1], dtype=dists.dtype)
             .at[..., i, j].set(dists)
             .at[..., j, i].set(dists)
         )
