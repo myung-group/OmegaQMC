@@ -41,6 +41,35 @@ from .vmcopt_nn_iradam import _VMCOptDriverNN_IRAdam
 from .psi.nn.checkpoint import load_nn_checkpoint, save_nn_checkpoint
 
 
+def _final_energy(drv, rng_key, walkers, mc_stepsize, params,
+                  num_blocks_equil, num_steps_per_block, verbose):
+    """Energy of *params* on walkers re-equilibrated to them.
+
+    The per-iteration energy the loops below print is evaluated with
+    the *updated* parameters on validation walkers drawn before the
+    update, so it is off-distribution, and with ``num_iters=0`` it is
+    never computed at all.  This re-equilibrates the walkers to
+    ``|psi(params)|^2`` and takes one snapshot, as the KFAC driver
+    does, so each walker contributes one sample.
+
+    Returns:
+        Dict with ``'mean'``, ``'stderr'`` and ``'sigma'`` (spread of
+        the individual local energies).
+    """
+    (_, walkers, _, _), _ = drv.run_equilibration(
+        rng_key, walkers, mc_stepsize, params,
+        num_blocks_equil, num_steps_per_block,
+    )
+    e = drv.compute_batch_energy(walkers, params)
+    mean = float(jnp.mean(e))
+    sigma = float(jnp.std(e))
+    stderr = sigma / max(1, e.size) ** 0.5
+    if verbose >= 1:
+        print(f"Final energy: {mean:.8f} +/- {stderr:.8f}"
+              f"  (sigma(E_L) = {sigma:.4e})")
+    return {'mean': mean, 'stderr': stderr, 'sigma': sigma}
+
+
 class _VMCOptDriverNN_NES(_VMCOptDriverNN_IRAdam):
     """Penalty-method NES-VMC optimiser.
 
@@ -394,6 +423,16 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
         ``constraint_target`` is the desired cos^2 (default 0). After
         each outer iter, lambda is updated as
         ``lambda += lambda_lr * max(cos^2 - constraint_target^2, 0)``.
+
+        ``num_iters=0`` makes no update and only runs the final
+        estimate, on the starting parameters: unlike the IRAdam, SR
+        and KFAC drivers, this one does not resume from
+        ``{prefix}.chk.h5``.
+
+        Returns:
+            Tuple ``(params, {'energy': {'mean', 'stderr',
+            'sigma'}})``, the energy taken after the last update
+            (see :func:`_final_energy`).
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
@@ -515,7 +554,11 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
                 self.config_name, self.mol_info, energy=iter_e,
             )
 
-        return params, {"energy": {"mean": iter_e, "stderr": iter_err}}
+        final = _final_energy(
+            self, rng_key, walkers, mc_stepsize, params,
+            num_blocks_equil, num_steps_per_block, verbose,
+        )
+        return params, {"energy": final}
 
 
 def get_vmcopt_nn_nes_basis_func(
@@ -701,6 +744,16 @@ class _VMCOptDriverNN_NES_CIOverlap(_VMCOptDriverNN_IRAdam):
         ``batch_size = None`` (default) uses the entire training set in
         each Adam step, which is necessary for low-variance estimation
         of the per-coefficient sample means.
+
+        ``num_iters=0`` makes no update and only runs the final
+        estimate, on the starting parameters: unlike the IRAdam, SR
+        and KFAC drivers, this one does not resume from
+        ``{prefix}.chk.h5``.
+
+        Returns:
+            Tuple ``(params, {'energy': {'mean', 'stderr',
+            'sigma'}})``, the energy taken after the last update
+            (see :func:`_final_energy`).
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
@@ -798,7 +851,11 @@ class _VMCOptDriverNN_NES_CIOverlap(_VMCOptDriverNN_IRAdam):
                 self.config_name, self.mol_info, energy=iter_e,
             )
 
-        return params, {"energy": {"mean": iter_e, "stderr": iter_err}}
+        final = _final_energy(
+            self, rng_key, walkers, mc_stepsize, params,
+            num_blocks_equil, num_steps_per_block, verbose,
+        )
+        return params, {"energy": final}
 
 
 def get_vmcopt_nn_nes_ci_func(

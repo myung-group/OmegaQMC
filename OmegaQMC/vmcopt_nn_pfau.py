@@ -49,6 +49,33 @@ from .psi.nn.checkpoint import save_nn_checkpoint, load_nn_checkpoint
 MIN_DIST_THRESHOLD = 1e-4
 
 
+def _final_trace_energy(trace_batch, walkers, batch_size, verbose):
+    """Tr(E) of the final parameters on re-equilibrated walkers.
+
+    The per-iteration Tr(E) is measured before that iteration's
+    update, and with ``num_iters=0`` it is never computed at all, so
+    the drivers below re-equilibrate the joint walkers to the final
+    parameters and evaluate *trace_batch* on one snapshot, in chunks
+    of *batch_size* walkers.
+
+    Returns:
+        Dict with ``'mean'``, ``'stderr'`` and ``'sigma'`` (spread of
+        the per-walker trace).
+    """
+    n = walkers.shape[0]
+    tr = jnp.concatenate([
+        trace_batch(walkers[i:min(i + batch_size, n)])
+        for i in range(0, n, batch_size)
+    ])
+    mean = float(jnp.mean(tr))
+    sigma = float(jnp.std(tr))
+    stderr = sigma / max(1, tr.size) ** 0.5
+    if verbose >= 1:
+        print(f"Final Tr(E): {mean:.8f} +/- {stderr:.8f}"
+              f"  (sigma = {sigma:.4e})")
+    return {'mean': mean, 'stderr': stderr, 'sigma': sigma}
+
+
 class _VMCOptDriverNN_Pfau_K2:
     """Pfau-NES driver for K=2 states (one ground + one excited).
 
@@ -316,6 +343,15 @@ class _VMCOptDriverNN_Pfau_K2:
         ``train_split`` from the previous Adam call signature are kept
         for backward compatibility but ignored: SR does one walker
         decorrelation + one preconditioned update per outer iter.
+
+        ``num_iters=0`` makes no update and only runs the final
+        estimate, on ``(self.params_1, self.params_2)``; this driver
+        does not resume from its ``{prefix}_k.chk.h5`` files.
+
+        Returns:
+            Tuple ``((p1, p2), {'trace_E': {'mean', 'stderr',
+            'sigma'}})``, Tr(E) taken after the last update on
+            re-equilibrated walkers.
         """
         p1, p2 = self.params_1, self.params_2
         p1_flat, unravel_1 = ravel_pytree(p1)
@@ -474,9 +510,24 @@ class _VMCOptDriverNN_Pfau_K2:
                     self.config_name, self.mol_info, energy=L_mean / 2,
                 )
 
+        # --- Final estimate ---
+        for _ in range(num_blocks_equil):
+            rng_key, sub = jax.random.split(rng_key)
+            carry = self.joint_sweep(
+                sub, walkers, mc_stepsize, (p1, p2), num_steps_per_block,
+            )
+            _, walkers, mc_stepsize = carry
+        trace_fn = jax.jit(jax.vmap(
+            self.trace_loss_one_walker, in_axes=(0, 0, None, None),
+        ))
+        final = _final_trace_energy(
+            lambda w: trace_fn(w[:, 0], w[:, 1], p1, p2),
+            walkers, jac_batch_size, verbose,
+        )
+
         self.params_1 = p1
         self.params_2 = p2
-        return (p1, p2), {"trace_E": {"mean": L_mean, "stderr": L_err}}
+        return (p1, p2), {"trace_E": final}
 
 
 def get_vmcopt_nn_pfau_k2_func(
@@ -753,7 +804,17 @@ class _VMCOptDriverNN_Pfau_K:
         verbose: int = 1,
         prefix: str = "pfau_nes_k",
     ):
-        """SR joint loop on all K parameter sets."""
+        """SR joint loop on all K parameter sets.
+
+        ``num_iters=0`` makes no update and only runs the final
+        estimate, on ``self.params``; this driver does not resume from
+        its ``{prefix}_k.chk.h5`` files.
+
+        Returns:
+            Tuple ``(params, {'trace_E': {'mean', 'stderr',
+            'sigma'}})``, Tr(E) taken after the last update on
+            re-equilibrated walkers.
+        """
         K = self.K
         params_list = list(self.params)
         flat_list, unravels = [], []
@@ -886,10 +947,25 @@ class _VMCOptDriverNN_Pfau_K:
                         self.config_name, self.mol_info, energy=L_mean / K,
                     )
 
-        self.params = tuple(params_list)
-        return tuple(params_list), {
-            "trace_E": {"mean": L_mean, "stderr": L_err},
-        }
+        # --- Final estimate ---
+        params_tuple = tuple(params_list)
+        for _ in range(num_blocks_equil):
+            rng_key, sub = jax.random.split(rng_key)
+            carry = self.joint_sweep(
+                sub, walkers, mc_stepsize, num_steps_per_block,
+                params_tuple,
+            )
+            _, walkers, mc_stepsize = carry
+        trace_fn = jax.jit(jax.vmap(
+            self.trace_loss_one_walker, in_axes=(0, None),
+        ))
+        final = _final_trace_energy(
+            lambda w: trace_fn(w, params_tuple),
+            walkers, jac_batch_size, verbose,
+        )
+
+        self.params = params_tuple
+        return params_tuple, {"trace_E": final}
 
 
 def get_vmcopt_nn_pfau_k_func(

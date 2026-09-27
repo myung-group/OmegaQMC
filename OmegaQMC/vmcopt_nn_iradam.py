@@ -452,6 +452,12 @@ class _VMCOptDriverNN_IRAdam:
                 (resample + optimize) iterations,
                 or ``'auto'`` to target
                 ~50 000 total parameter updates.
+                ``0`` performs no update: with a
+                checkpoint at ``{prefix}.chk.h5``
+                this loads it and only runs the
+                final estimate, so
+                ``energy['sigma']`` measures the
+                saved wavefunction.
             num_epochs: Adam passes over sampled
                 data per iteration.
             num_walkers: Number of MC walkers, or
@@ -494,7 +500,11 @@ class _VMCOptDriverNN_IRAdam:
             Tuple ``(params_final, energy_data)``
             where *params_final* is the optimized
             NNX parameter pytree and *energy_data*
-            is a dict with key ``'energy'``.
+            is a dict with key ``'energy'``, itself
+            a dict with ``'mean'``, ``'stderr'``
+            and ``'sigma'`` (spread of the
+            individual local energies) from a
+            final estimate after the last update.
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
@@ -721,7 +731,8 @@ class _VMCOptDriverNN_IRAdam:
         if verbose >= 1:
             print(f"Final energy: {final_e:.8f} +/- {final_err:.8f}")
 
-        return params, {'energy': {'mean': final_e, 'stderr': final_err}}
+        return params, {'energy': {'mean': final_e, 'stderr': final_err,
+                                   'sigma': final_std}}
 
 
 def get_vmcopt_nn_func(mol_info, config, init_key):
