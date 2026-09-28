@@ -891,7 +891,8 @@ class _AFQMCDriverGTO:
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
                  trial=None, chol_h5_path=None, chol_chunk_g=128,
-                 det_chunk_size=5, integrals=None, e_hf=None):
+                 det_chunk_size=5, integrals=None, e_hf=None,
+                 eshift0=None):
         """Prepare integrals and build the propagator.
 
         Args:
@@ -922,6 +923,9 @@ class _AFQMCDriverGTO:
                 None computes the energy of the HF trial determinant
                 from the integrals. Ignored on the ``mf`` path, which
                 reports ``mf.e_tot``.
+            eshift0: Default initial energy shift for :meth:`__call__`,
+                given as a total energy (e.g. E_HF). None keeps the
+                original initialisation eshift = 0.
         """
         self.mf = mf
         self.dt = dt
@@ -1032,6 +1036,14 @@ class _AFQMCDriverGTO:
                 self.trial_up, self.trial_dn, dt,
                 chol_chunk_g=chol_chunk_g)
 
+        # The hybrid energy (and hence eshift) omits the constant
+        # enuc + 1/2 sum_g mf_shift_g^2 (mf_shift is imaginary), so a
+        # total energy E corresponds to eshift = E - e_const.
+        mf_shift = self.propagator['mf_shift']
+        self.e_const = float(
+            self.enuc + 0.5 * jnp.sum(mf_shift * mf_shift).real)
+        self.eshift0 = eshift0
+
         if verbose:
             print(f"  E_HF = {self.ehf:.10f}")
             print(f"  dt = {dt}")
@@ -1039,7 +1051,8 @@ class _AFQMCDriverGTO:
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
                  pop_control_freq=5, num_blocks_equil=10,
-                 fname_log="afqmc.log", walker_chunk_size=None):
+                 fname_log="afqmc.log", walker_chunk_size=None,
+                 eshift0=None):
         """Run the AFQMC simulation.
 
         Args:
@@ -1060,6 +1073,10 @@ class _AFQMCDriverGTO:
                 exceed device memory. Must divide num_walkers cleanly only
                 if you also want even chunks; the last chunk is allowed
                 to be shorter. Default None preserves prior behavior.
+            eshift0: Initial energy shift as a total energy (e.g.
+                E_HF); converted internally to the hybrid-energy level
+                as eshift0 - e_const. None uses the constructor's
+                ``eshift0``; if that is also None, eshift starts at 0.
 
         Returns:
             dict with:
@@ -1124,7 +1141,9 @@ class _AFQMCDriverGTO:
         # Main QMC loop
         total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
-        eshift = 0.0
+        if eshift0 is None:
+            eshift0 = self.eshift0
+        eshift = 0.0 if eshift0 is None else float(eshift0) - self.e_const
         step_count = 0
 
         # On-device accumulators — avoids per-step
