@@ -735,12 +735,13 @@ class _AFQMCDriverPWHEG:
                 # Population control
                 if step_count % pop_control_freq == 0:
                     rng_key, pc_key = jax.random.split(rng_key)
-                    weights, phia, phib = population_control_comb(
-                        weights, phia, phib, pc_key)
+                    weights, phia, phib, e_hybrid = population_control_comb(
+                        weights, phia, phib, pc_key, e_hybrid=e_hybrid)
                     if phi_sharding is not None:
                         phia = jax.device_put(phia, phi_sharding)
                         phib = jax.device_put(phib, phi_sharding)
                         weights = jax.device_put(weights, scalar_sharding)
+                        e_hybrid = jax.device_put(e_hybrid, scalar_sharding)
 
                 # Accumulate for eshift on-device — single
                 # host sync at end of block instead of per step.

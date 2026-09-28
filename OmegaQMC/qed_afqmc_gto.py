@@ -103,7 +103,8 @@ class QEDWalkers:
 
 
 @jax.jit
-def population_control_comb_qed(weights, phia, phib, q, rng_key):
+def population_control_comb_qed(weights, phia, phib, q, rng_key,
+                                e_hybrid=None):
     """Comb population control that also resamples the photon coordinate.
 
     Pure JAX so the gather stays on device — the previous numpy
@@ -116,9 +117,12 @@ def population_control_comb_qed(weights, phia, phib, q, rng_key):
         phib: shape (nwalkers, nbasis, ndown).
         q: photon coordinate, shape (nwalkers,).
         rng_key: JAX random key.
+        e_hybrid: Optional per-walker hybrid energy, shape (nwalkers,),
+            resampled with the same indices as the walkers.
 
     Returns:
-        weights_new, phia_new, phib_new, q_new.
+        weights_new, phia_new, phib_new, q_new, plus e_hybrid_new
+        when ``e_hybrid`` is given.
     """
     nwalkers = weights.shape[0]
     total_weight = jnp.sum(weights)
@@ -138,6 +142,9 @@ def population_control_comb_qed(weights, phia, phib, q, rng_key):
     q_new = q[new_indices]
     weights_new = jnp.ones(nwalkers, dtype=weights.dtype)
 
+    if e_hybrid is not None:
+        return (weights_new, phia_new, phib_new, q_new,
+                e_hybrid[new_indices])
     return weights_new, phia_new, phib_new, q_new
 
 
@@ -921,13 +928,16 @@ class _QEDAFQMCDriverGTO:
                 # Population control (QED: also resamples q)
                 if step_count % pop_control_freq == 0:
                     rng_key, pc_key = jax.random.split(rng_key)
-                    weights, phia, phib, q = population_control_comb_qed(
-                        weights, phia, phib, q, pc_key)
+                    weights, phia, phib, q, e_hybrid = \
+                        population_control_comb_qed(
+                            weights, phia, phib, q, pc_key,
+                            e_hybrid=e_hybrid)
                     if phi_sharding is not None:
                         phia = jax.device_put(phia, phi_sharding)
                         phib = jax.device_put(phib, phi_sharding)
                         weights = jax.device_put(weights, scalar_sharding)
                         q = jax.device_put(q, scalar_sharding)
+                        e_hybrid = jax.device_put(e_hybrid, scalar_sharding)
 
                 # Accumulate for eshift on-device — single
                 # host sync at end of block instead of per step.
