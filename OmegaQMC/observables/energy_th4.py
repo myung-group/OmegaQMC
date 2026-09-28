@@ -8,6 +8,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from OmegaQMC.observables.energy import local_energy_1body, local_energy_2body
 from OmegaQMC.observables.greens import _gf_spin_single_det
 from OmegaQMC.observables.greens_th4 import _pad_and_chunk
 
