@@ -330,10 +330,11 @@ class _VMCOptDriverNN_Pfau_K2:
         wavefunction Psi(x_a, x_b) = det[psi_i(x_j)]) to precondition
         the gradient.
 
-        Walkers (x_a, x_b) are sampled jointly from |Psi(x_a, x_b)|^2
-        via the existing self.joint_sweep MCMC. The per-walker
-        ``local loss'' is the trace ``trace_loss_one_walker``; the
-        per-walker derivative is the gradient of log|Psi| with respect
+        Walkers (x_a, x_b) are sampled jointly from
+        ``|Psi(x_a, x_b)|^2`` via the existing self.joint_sweep MCMC.
+        The per-walker "local loss" is the trace
+        ``trace_loss_one_walker``; the per-walker derivative is the
+        gradient of ``log|Psi|`` with respect
         to a CONCATENATED flat parameter vector (p1_flat, p2_flat).
         The SR force f = mean(dL * dO) is solved against
         (dO^T dO / N + damping * I) by conjugate gradient (identical
@@ -349,9 +350,9 @@ class _VMCOptDriverNN_Pfau_K2:
         does not resume from its ``{prefix}_k.chk.h5`` files.
 
         Returns:
-            Tuple ``((p1, p2), {'trace_E': {'mean', 'stderr',
-            'sigma'}})``, Tr(E) taken after the last update on
-            re-equilibrated walkers.
+            Tuple ``((p1, p2), info)``, where ``info['trace_E']``
+            holds ``'mean'``, ``'stderr'`` and ``'sigma'`` of Tr(E)
+            taken after the last update on re-equilibrated walkers.
         """
         p1, p2 = self.params_1, self.params_2
         p1_flat, unravel_1 = ravel_pytree(p1)
@@ -603,7 +604,7 @@ class _VMCOptDriverNN_Pfau_K:
     All K states share the same NN architecture (config); only the
     parameter sets differ. The joint walker has shape
     ``(num_walkers, K, n_elec, 3)``, MCMC-sampled from
-    |det M(x^1, ..., x^K)|^2 with M[i,j] = psi_i(x^j).
+    ``|det M(x^1, ..., x^K)|^2`` with ``M[i,j] = psi_i(x^j)``.
     """
 
     def __init__(self, mol_info, config, init_keys):
@@ -811,9 +812,9 @@ class _VMCOptDriverNN_Pfau_K:
         its ``{prefix}_k.chk.h5`` files.
 
         Returns:
-            Tuple ``(params, {'trace_E': {'mean', 'stderr',
-            'sigma'}})``, Tr(E) taken after the last update on
-            re-equilibrated walkers.
+            Tuple ``(params, info)``, where ``info['trace_E']`` holds
+            ``'mean'``, ``'stderr'`` and ``'sigma'`` of Tr(E) taken
+            after the last update on re-equilibrated walkers.
         """
         K = self.K
         params_list = list(self.params)
@@ -979,15 +980,16 @@ def get_vmcopt_nn_pfau_k_func(
 ):
     """Factory for the K-general Pfau-NES driver.
 
-    ``K``: number of states.
-    ``init_from_ground_checkpoint``: if given, state 0 (and optionally
-        more) is initialised from the GS ckpt; the rest are either
-        random PsiFormer inits (if ``init_random_states >= 1``) or the
-        GS checkpoint perturbed by Gaussian noise of std
-        ``init_perturbation``.
-    ``init_random_states``: number of states (counting from K-1
-        backward) that get fully random inits. The default (None) uses
-        the perturbation strategy for all non-ground states.
+    Args:
+        K: Number of states.
+        init_from_ground_checkpoint: If given, state 0 (and optionally
+            more) is initialised from the GS ckpt; the rest are either
+            random PsiFormer inits (if ``init_random_states >= 1``) or
+            the GS checkpoint perturbed by Gaussian noise of std
+            ``init_perturbation``.
+        init_random_states: Number of states (counting from K-1
+            backward) that get fully random inits. The default (None)
+            uses the perturbation strategy for all non-ground states.
     """
     keys = jax.random.split(init_key, K)
     driver = _VMCOptDriverNN_Pfau_K(mol_info, config, list(keys))

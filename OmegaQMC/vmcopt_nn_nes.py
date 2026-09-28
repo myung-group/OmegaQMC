@@ -430,9 +430,9 @@ class _VMCOptDriverNN_NES_Basis(_VMCOptDriverNN_IRAdam):
         ``{prefix}.chk.h5``.
 
         Returns:
-            Tuple ``(params, {'energy': {'mean', 'stderr',
-            'sigma'}})``, the energy taken after the last update
-            (see :func:`_final_energy`).
+            Tuple ``(params, info)``, where ``info['energy']`` holds
+            ``'mean'``, ``'stderr'`` and ``'sigma'`` of the energy
+            taken after the last update (see :func:`_final_energy`).
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)
@@ -751,9 +751,9 @@ class _VMCOptDriverNN_NES_CIOverlap(_VMCOptDriverNN_IRAdam):
         ``{prefix}.chk.h5``.
 
         Returns:
-            Tuple ``(params, {'energy': {'mean', 'stderr',
-            'sigma'}})``, the energy taken after the last update
-            (see :func:`_final_energy`).
+            Tuple ``(params, info)``, where ``info['energy']`` holds
+            ``'mean'``, ``'stderr'`` and ``'sigma'`` of the energy
+            taken after the last update (see :func:`_final_energy`).
         """
         params = self.init_params
         optimizer = optax.adam(learning_rate=lr)

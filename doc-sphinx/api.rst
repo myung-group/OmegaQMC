@@ -101,6 +101,62 @@ forming the full overlap matrix.
 
 .. autofunction:: OmegaQMC.vmcopt_nn_iradam.pretrain_to_hf
 
+**Kronecker-factored natural gradient (KFAC)**
+
+Natural-gradient optimizer whose curvature is a per-layer
+Kronecker-factored approximation of the Fisher matrix, so its
+state does not grow with the walker count.  The step is bounded
+by a Fisher-norm trust region (``norm_constraint``), and the
+defaults follow DeepQMC's KFAC configuration, including constant
+damping.
+
+.. autofunction:: OmegaQMC.vmcopt_nn_kfac.get_vmcopt_nn_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_kfac._VMCOptDriverNN_KFAC
+   :members: __call__
+
+**Excited states: NES-VMC penalty methods**
+
+Optimise a trial orthogonal to a frozen ground state by adding an
+overlap penalty to the loss.  The three variants differ in how the
+overlap is measured: against a ground-state NN trial, against a
+synthetic ground state built from a CI vector, or as the cosine
+between CI vectors.  :class:`~OmegaQMC.vmcopt_nn_nes._VMCOptDriverNN_NES`
+uses the IRAdam loop
+(:meth:`~OmegaQMC.vmcopt_nn_iradam._VMCOptDriverNN_IRAdam.__call__`).
+
+.. autofunction:: OmegaQMC.vmcopt_nn_nes.get_vmcopt_nn_nes_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_nes._VMCOptDriverNN_NES
+   :members: evaluate_overlap
+
+.. autofunction:: OmegaQMC.vmcopt_nn_nes.get_vmcopt_nn_nes_basis_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_nes._VMCOptDriverNN_NES_Basis
+   :members: __call__
+
+.. autofunction:: OmegaQMC.vmcopt_nn_nes.get_vmcopt_nn_nes_ci_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_nes._VMCOptDriverNN_NES_CIOverlap
+   :members: __call__
+
+**Excited states: determinantal K-state optimizers**
+
+Optimise K states jointly through the determinant of single-state
+trials evaluated at K configurations, which enforces orthogonality
+without a penalty (see :mod:`OmegaQMC.vmcopt_nn_pfau`).  Joint
+walkers are updated by stochastic reconfiguration.
+
+.. autofunction:: OmegaQMC.vmcopt_nn_pfau.get_vmcopt_nn_pfau_k2_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_pfau._VMCOptDriverNN_Pfau_K2
+   :members: __call__
+
+.. autofunction:: OmegaQMC.vmcopt_nn_pfau.get_vmcopt_nn_pfau_k_func
+
+.. autoclass:: OmegaQMC.vmcopt_nn_pfau._VMCOptDriverNN_Pfau_K
+   :members: __call__
+
 NN checkpoints
 ---------------
 
