@@ -258,6 +258,23 @@ def _cholesky_direct_pivoted(mol, chol_cut, max_vecs, verbose=False):
     return chol_arr[:n_vec].reshape(n_vec, nbasis, nbasis)
 
 
+def one_body_chol_correction(chol):
+    """One-body correction v0 from the Cholesky factorisation of the ERIs.
+
+    v0[i,k] = -0.5 sum_{g,j} L[g,i,j] L[g,k,j], so that
+    h1e_mod = h1e + v0. Shared by the PySCF and the array-input paths.
+
+    Args:
+        chol: np.ndarray, shape (naux, nmo, nmo).
+
+    Returns:
+        v0: np.ndarray, shape (nmo, nmo).
+    """
+    naux, nmo = chol.shape[0], chol.shape[1]
+    A = chol.transpose(0, 2, 1).reshape(naux * nmo, nmo)
+    return -0.5 * (A.T @ A)
+
+
 def prepare_afqmc_integrals(
     mf, chol_cut=1e-5, mo_coeff=None,
     chol_h5_path=None, chol_chunk_g=128,
@@ -319,9 +336,7 @@ def prepare_afqmc_integrals(
             @ tmp.transpose(1, 0, 2).reshape(nbasis, naux * nmo)
         ).reshape(nmo, naux, nmo).transpose(1, 0, 2)
 
-        # v0[i,k] = -0.5 sum_{g,j} L[g,i,j] L[g,k,j]
-        A = chol_mo.transpose(0, 2, 1).reshape(naux * nmo, nmo)
-        v0 = -0.5 * (A.T @ A)
+        v0 = one_body_chol_correction(chol_mo)
         chol_out = jnp.array(chol_mo)
 
     else:
@@ -372,6 +387,84 @@ def prepare_afqmc_integrals(
         'ndown': ndown,
         'mo_coeff': jnp.array(mo_coeff),
     }
+
+
+def prepare_afqmc_integrals_from_arrays(h1, chol, ecore, nelec, mo_coeff=None):
+    """Prepare AFQMC integrals from given one-body and Cholesky arrays.
+
+    Array-input counterpart of :func:`prepare_afqmc_integrals` for
+    Hamiltonians that do not come from a PySCF ``mf`` (e.g. an active
+    space from CASCI ``get_h1eff``/``get_h2eff`` or an FCIDUMP). The
+    arrays must be in an orthonormal orbital basis; ``ecore`` carries
+    every constant (nuclear repulsion plus any frozen-core energy).
+
+    Args:
+        h1: One-body Hamiltonian, shape (norb, norb).
+        chol: Cholesky vectors of the ERIs, shape (naux, norb, norb),
+            (pq|rs) = sum_g L[g,p,q] L[g,r,s].
+        ecore: Constant energy (float).
+        nelec: (nup, ndown).
+        mo_coeff: Optional (norb, norb) rotation into the trial orbital
+            basis, h1 -> C^T h1 C and L_g -> C^T L_g C. Default identity.
+
+    Returns:
+        dict with the same keys as :func:`prepare_afqmc_integrals`;
+        'nbasis' is norb and 'mo_coeff' is the rotation used.
+    """
+    h1 = np.asarray(h1, dtype=np.float64)
+    chol = np.asarray(chol, dtype=np.float64)
+    norb = h1.shape[0]
+    if h1.shape != (norb, norb) or chol.ndim != 3 \
+            or chol.shape[1:] != (norb, norb):
+        raise ValueError(
+            f"shape mismatch: h1 {h1.shape}, chol {chol.shape}")
+    if not np.allclose(h1, h1.T, atol=1e-10):
+        raise ValueError("h1 is not symmetric")
+    if not np.allclose(chol, chol.transpose(0, 2, 1), atol=1e-10):
+        raise ValueError("Cholesky vectors are not symmetric in (p, q)")
+
+    if mo_coeff is None:
+        mo_coeff = np.eye(norb)
+    else:
+        mo_coeff = np.asarray(mo_coeff, dtype=np.float64)
+        h1 = mo_coeff.T @ h1 @ mo_coeff
+        chol = np.einsum('pi,gpq,qj->gij', mo_coeff, chol, mo_coeff)
+
+    nup, ndown = int(nelec[0]), int(nelec[1])
+    v0 = one_body_chol_correction(chol)
+
+    return {
+        'h1e': jnp.array(h1),
+        'h1e_mod': jnp.array(h1 + v0),
+        'chol': jnp.array(chol),
+        'enuc': float(ecore),
+        'nbasis': norb,
+        'nup': nup,
+        'ndown': ndown,
+        'mo_coeff': jnp.array(mo_coeff),
+    }
+
+
+def determinant_energy_from_integrals(h1, chol, ecore, nup, ndown):
+    """Energy of the determinant occupying the lowest ``nup``/``ndown``
+    orbitals (the HF trial used by the AFQMC driver).
+
+    E = ecore + sum_i h_ii (both spins)
+        + 1/2 sum_g [(sum_{i in a} L_ii + sum_{i in b} L_ii)^2
+                     - sum_{ij in a} L_ij^2 - sum_{ij in b} L_ij^2]
+
+    This is the RHF/ROHF determinant energy in the given orbitals; no
+    SCF is performed.
+    """
+    h1 = np.asarray(h1)
+    chol = np.asarray(chol)
+    e1 = np.trace(h1[:nup, :nup]) + np.trace(h1[:ndown, :ndown])
+    ja = np.einsum('gii->g', chol[:, :nup, :nup])
+    jb = np.einsum('gii->g', chol[:, :ndown, :ndown])
+    ka = np.sum(chol[:, :nup, :nup] ** 2)
+    kb = np.sum(chol[:, :ndown, :ndown] ** 2)
+    e2 = 0.5 * (np.sum((ja + jb) ** 2) - ka - kb)
+    return float(ecore + e1 + e2)
 
 
 def half_rotate_cholesky(chol, trial_up, trial_dn, chunk_g=None):
