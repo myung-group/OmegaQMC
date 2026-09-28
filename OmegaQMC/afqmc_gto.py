@@ -60,6 +60,7 @@ def _make_afqmc_sharding(num_walkers):
 from OmegaQMC.integrals.cholesky import (        # noqa: E402
     chunked_cholesky,
     prepare_afqmc_integrals,
+    prepare_afqmc_integrals_from_arrays,
     determinant_energy_from_integrals,
     half_rotate_cholesky,
     half_rotate_cholesky_multidet,
@@ -1325,3 +1326,42 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
                         trial=trial, chol_h5_path=chol_h5_path,
                         chol_chunk_g=chol_chunk_g,
                         det_chunk_size=det_chunk_size)
+
+
+def get_afqmc_func_from_integrals(h1, chol, ecore, nelec, mo_coeff=None,
+                                  e_hf=None, dt=0.005, trial=None,
+                                  eshift0=None, verbose=True,
+                                  chol_chunk_g=128, det_chunk_size=5):
+    """Create a reusable AFQMC driver from Hamiltonian arrays.
+
+    For Hamiltonians not tied to a PySCF ``mf``, e.g. an active space
+    from CASCI ``get_h1eff``/``get_h2eff`` or an FCIDUMP. Uses the same
+    driver as :func:`get_afqmc_func`; only integral preparation differs.
+
+    Args:
+        h1: One-body Hamiltonian, shape (norb, norb), orthonormal basis.
+        chol: ERI Cholesky vectors, shape (naux, norb, norb).
+        ecore: Constant energy (nuclear repulsion + frozen core).
+        nelec: (nup, ndown).
+        mo_coeff: Optional (norb, norb) rotation to the trial orbitals.
+            Default identity.
+        e_hf: HF energy to report. None computes the energy of the HF
+            trial determinant from (h1, chol, ecore).
+        dt: Imaginary time step.
+        trial: Multi-determinant trial dict indexing these orbitals
+            directly, or None for the single-det HF trial.
+        eshift0: Default initial energy shift as a total energy
+            (e.g. E_HF); None keeps eshift = 0.
+        verbose: Print progress.
+        chol_chunk_g, det_chunk_size: As in :func:`get_afqmc_func`.
+
+    Returns:
+        _AFQMCDriverGTO instance (callable).
+    """
+    integrals = prepare_afqmc_integrals_from_arrays(
+        h1, chol, ecore, nelec, mo_coeff=mo_coeff)
+    return _AFQMCDriverGTO(None, dt=dt, verbose=verbose, trial=trial,
+                           chol_chunk_g=chol_chunk_g,
+                           det_chunk_size=det_chunk_size,
+                           integrals=integrals, e_hf=e_hf,
+                           eshift0=eshift0)
