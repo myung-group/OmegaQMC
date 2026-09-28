@@ -182,7 +182,7 @@ def orthogonalize_walkers(phia, phib):
 
 
 @jax.jit
-def population_control_comb(weights, phia, phib, rng_key):
+def population_control_comb(weights, phia, phib, rng_key, e_hybrid=None):
     """Comb population control with weight rescaling.
 
     Rescales weights to sum to nwalkers (ipie convention), then
@@ -198,9 +198,14 @@ def population_control_comb(weights, phia, phib, rng_key):
         phia: shape (nwalkers, nbasis, nup).
         phib: shape (nwalkers, nbasis, ndown).
         rng_key: JAX random key.
+        e_hybrid: Optional per-walker hybrid energy, shape (nwalkers,).
+            When given it is resampled with the same indices as the
+            walkers, since the next step averages it with the new
+            hybrid energy of the same walker.
 
     Returns:
-        weights_new, phia_new, phib_new.
+        weights_new, phia_new, phib_new, plus e_hybrid_new when
+        ``e_hybrid`` is given.
     """
     nwalkers = weights.shape[0]
     total_weight = jnp.sum(weights)
@@ -228,6 +233,8 @@ def population_control_comb(weights, phia, phib, rng_key):
     # All walkers get equal weight = 1.0 after resampling
     weights_new = jnp.ones(nwalkers, dtype=weights.dtype)
 
+    if e_hybrid is not None:
+        return weights_new, phia_new, phib_new, e_hybrid[new_indices]
     return weights_new, phia_new, phib_new
 
 
@@ -1208,12 +1215,13 @@ class _AFQMCDriverGTO:
                 # Population control
                 if step_count % pop_control_freq == 0:
                     rng_key, pc_key = jax.random.split(rng_key)
-                    weights, phia, phib = population_control_comb(
-                        weights, phia, phib, pc_key)
+                    weights, phia, phib, e_hybrid = population_control_comb(
+                        weights, phia, phib, pc_key, e_hybrid=e_hybrid)
                     if phi_sharding is not None:
                         phia = jax.device_put(phia, phi_sharding)
                         phib = jax.device_put(phib, phi_sharding)
                         weights = jax.device_put(weights, scalar_sharding)
+                        e_hybrid = jax.device_put(e_hybrid, scalar_sharding)
 
                 # Accumulate weighted hybrid energy for eshift.
                 # Stays on device — the float() cast is deferred
