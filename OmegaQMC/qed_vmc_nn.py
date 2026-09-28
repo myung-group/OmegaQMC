@@ -64,6 +64,29 @@ _TARGET_ACCEPT_R = 0.5
 _TARGET_ACCEPT_N = 0.5
 _STEP_ADAPT_RATE = 0.05
 
+# Fewest production blocks for which the error bar comes from a
+# binning analysis; below it the autocorrelation estimate is too
+# noisy and the naive standard error is used.
+_MIN_BLOCKS_BINNING = 9
+
+
+def _block_serr(blocks):
+    """Standard error of the mean of a series of block averages.
+
+    Uses :func:`~OmegaQMC.utils.do_binning_analysis`, which corrects
+    for correlation between successive blocks, when there are at
+    least ``_MIN_BLOCKS_BINNING`` of them, and the naive
+    ``std / sqrt(n)`` otherwise.  Returns NaN for an empty series.
+    """
+    blocks = jnp.asarray(blocks)
+    n = blocks.shape[0]
+    if n == 0:
+        return float('nan')
+    if n >= _MIN_BLOCKS_BINNING:
+        _, serr, _, _ = do_binning_analysis(blocks)
+        return float(serr)
+    return float(jnp.std(blocks)) / float(np.sqrt(n))
+
 
 class _QEDVMCDriverNN:
     """Internal driver class. Use :func:`get_qed_vmc_nn_func`.
@@ -490,7 +513,8 @@ class _QEDVMCDriverNN:
               blocks the error comes from a binning analysis
               (:func:`~OmegaQMC.utils.do_binning_analysis`), which
               corrects for correlation between blocks, otherwise it
-              is the naive ``std / sqrt(num_blocks)``;
+              is the naive ``std / sqrt(num_blocks)`` (likewise for
+              ``l_z_serr``);
             * ``E_blocks``, ``n_photon_blocks``: per-block mean energy
               and mean photon number (production only), and their
               mean ``n_photon_mean``;
@@ -588,18 +612,9 @@ class _QEDVMCDriverNN:
         prod_E = jnp.array(block_energies[num_blocks_equil:])
         prod_n = jnp.array(n_photon_means[num_blocks_equil:])
 
-        # Use binning analysis for stderr (handles autocorrelation).
-        # do_binning_analysis returns (mean, serr, sdev, kappa); this
-        # used to unpack three values inside a blanket try/except, so
-        # the ValueError always sent it to the naive branch below.
-        if len(prod_E) > 8:
-            _, e_serr, _, _ = do_binning_analysis(prod_E)
-        else:
-            e_serr = float(jnp.std(prod_E)) / max(jnp.sqrt(len(prod_E)), 1.0)
-
         result = {
             "E_mean": float(jnp.mean(prod_E)),
-            "E_serr": float(e_serr),
+            "E_serr": _block_serr(prod_E),
             "E_blocks": prod_E,
             "n_photon_mean": float(jnp.mean(prod_n)),
             "n_photon_blocks": prod_n,
@@ -614,9 +629,7 @@ class _QEDVMCDriverNN:
         if l_z_means:
             prod_lz = jnp.array(l_z_means[num_blocks_equil:])
             result["l_z_mean"] = float(jnp.mean(prod_lz))
-            result["l_z_serr"] = float(
-                jnp.std(prod_lz) / max(jnp.sqrt(len(prod_lz)), 1.0)
-            )
+            result["l_z_serr"] = _block_serr(prod_lz)
             result["l_z_blocks"] = prod_lz
         if walker_snapshots:
             result["walker_positions"] = np.stack(walker_snapshots, axis=0)
