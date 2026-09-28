@@ -82,17 +82,29 @@ def _autotune_walker_chunk_size(driver, free_mb, mem_frac=0.25):
 
 
 class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
-    """Memory-lean single-determinant phaseless AFQMC driver.
+    """Memory-lean phaseless AFQMC driver (single or multi-det).
 
     Inherits all setup logic (integral preparation, Cholesky
     half-rotation, propagator build) from :class:`_AFQMCDriverGTO`.
     Overrides only the block-end energy path and the walker-chunk
-    default in :meth:`__call__`.
+    default in :meth:`__call__`.  There is no factory function:
+    construct it directly with the arguments of
+    :func:`~OmegaQMC.afqmc_gto.get_afqmc_func`, plus *e_chunk_g*.
+    It is a drop-in replacement for the default driver and should
+    reproduce its energies; only the peak memory differs.
 
     Args (in addition to :class:`_AFQMCDriverGTO`):
         e_chunk_g: Slab size along the auxiliary axis for the
             streamed exchange-trace in the block-end energy
             estimator.  Default 16.
+
+    For a multi-determinant trial the constructor also builds the
+    per-determinant half-rotated Cholesky tensors, two arrays of
+    shape ``(ndet, naux, nocc, nbasis)`` (one per spin), which the
+    streamed estimator reads.  Propagation does not need them (it
+    recomputes the half-rotation on the fly), so for many
+    determinants this constructor-time allocation can outweigh the
+    block-end saving.
     """
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,

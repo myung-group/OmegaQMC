@@ -181,7 +181,21 @@ def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
         ``(frag_centroids, frag_inradii, frag_Vh,
         frag_is_planar)`` — always a 4-tuple of JAX
         arrays with leading dimension equal to the
-        number of fragments.
+        number of fragments.  Rows of ``frag_Vh[f]`` are
+        the local axes in the lab frame, so local
+        coordinates are ``(r - centroid) @ Vh.T``.
+        ``frag_is_planar[f]`` is True for a fragment of
+        three or more atoms that applies a non-identity
+        operation; its frame comes from a geometric fit
+        that lands local z on the true C_n / S_n axis
+        and local x / y on the sigma_v / C2' elements,
+        continuously under distortion.  (The name is
+        historical: the fragment need not be planar.)
+        Diatomics and single atoms keep the
+        ``detect_symm`` axes.  Without fragment data
+        (no ``map_frag_symmops``) the whole molecule is
+        one fragment about its nuclear centroid, with
+        an infinite in-radius and the identity frame.
     """
     if hasattr(mol, 'map_frag_symmops'):
         frag_ids = sorted(mol.map_frag_ctr.keys())
@@ -267,8 +281,37 @@ def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
 
 
 def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
-    """Process *symmop_list* (``None`` / ``"auto"`` /
-    ``list`` / ``dict``) into a per-fragment dict."""
+    """Process *symmop_list* into per-fragment operation lists.
+
+    Args:
+        mol: Molecule after
+            :func:`~OmegaQMC.symm.operations.populate_fragment_symmops`,
+            so ``mol.map_frag_symmops`` holds each fragment's
+            detected operations.
+        symmop_list: One of
+
+            * ``None``: identity only for every fragment
+              (no correlated sampling);
+            * ``"auto"``: every detected operation of each fragment;
+            * a list of symbols: the same request for every fragment;
+            * a dict ``{frag_id: [symbols]}``: per-fragment requests;
+              fragments not listed get identity only.
+
+            Symbols are normalised through
+            :data:`~OmegaQMC.symm.operations.POINT_GROUP_OP_ALIASES`
+            (with a warning), and symbols that are not canonical
+            operations at all are dropped with a warning.  A
+            canonical operation outside a fragment's *detected*
+            point group is kept when ``mol.symmetrization_level < 2``
+            (the default is 1), so a slightly distorted fragment can
+            still use the operations of its ideal group, and dropped
+            with a warning when ``symmetrization_level >= 2``.
+        frag_ids: Fragment ids to process.
+
+    Returns:
+        ``{frag_id: sorted list of symbols}``, always including
+        ``'E'``.
+    """
     if symmop_list is None:
         return {fid: ['E'] for fid in frag_ids}
 
@@ -410,7 +453,8 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
                     if symm_level < 2:
                         print(
                             f"ℹ️\tFragment {fid}: including operations "
-                            "outside its point group {sorted(nonelements_pg)} "
+                            "outside its point group "
+                            f"{sorted(nonelements_pg)} "
                             "(symmetrization_level < 2)"
                         )
                         frag_symmops[fid] = sorted(
@@ -450,8 +494,23 @@ def build_frag_symmops(mol, symmop_list, frag_ids) -> dict:
 
 
 def build_single_frag_combos(frag_ids, frag_symmops) -> list:
-    """Enumerate ``(frag_pos, op, label)`` tuples for
-    single-fragment correlated sampling."""
+    """Enumerate the single-fragment operations to sample.
+
+    Each combination transforms exactly one fragment by one
+    non-identity operation and leaves every other fragment unchanged;
+    products of operations on several fragments are not generated.
+
+    Args:
+        frag_ids: Fragment ids, in the order used for ``frag_pos``.
+        frag_symmops: Output of :func:`build_frag_symmops`.
+
+    Returns:
+        List of ``(frag_pos, op, label)``: the position of the
+        transformed fragment in *frag_ids*, its canonical operation
+        symbol, and a label such as ``"1:Rz180,2:E"`` giving the
+        operation applied to every fragment.  The label names the
+        combination in the gradient HDF5 file.
+    """
     single_frag_combos = []
     for frag_pos, fid in enumerate(frag_ids):
         for op in frag_symmops[fid]:
@@ -482,6 +541,27 @@ def make_apply_single_frag_symmop(
     ``_VMCDriverNN`` use this factory so the JAX
     closure is compiled once per driver from the same
     source.
+
+    For an electron ``r`` inside the in-sphere of fragment ``f``
+    the image is ``c + op((r - c) @ Vh.T) @ Vh``, with ``c`` and
+    ``Vh`` the centroid and local frame from
+    :func:`build_frag_transform_data`; electrons outside it are
+    returned unchanged.  The secondary configuration is therefore a
+    symmetry image of the fragment's own electrons only, not of the
+    whole system, which is why the correlated-sampling estimators
+    reweight it by ``psi^2(R') / psi^2(R)``.  The map is
+    volume-preserving inside and outside the sphere, so no Jacobian
+    factor is needed.
+
+    Args:
+        frag_centroids, frag_Vh, frag_inradii: From
+            :func:`build_frag_transform_data`.
+
+    Returns:
+        Callable ``(batch_samples, frag_pos, s_op_fn) -> batch``,
+        where ``batch_samples`` has shape
+        ``(n_samples, n_elec, 3)`` and ``s_op_fn`` is an entry of
+        :data:`~OmegaQMC.symm.operations.symmetry_operations_map`.
     """
     def _apply_single_frag_symmop(
         batch_samples, frag_pos, s_op_fn,

@@ -13,7 +13,7 @@ descending.
 
 The pre-training stage below sidesteps this entirely by training
 the network **against a known analytic target** — the Hartree-Fock
-Slater determinant — using supervised regression:
+Slater determinant — using supervised regression::
 
     θ*  =  argmin_θ  𝔼_{r ~ |ψ_HF|²}  ‖ Φ_NN(r; θ)  −  Φ_HF(r) ‖²
 
@@ -43,13 +43,13 @@ Usage.
 
     from OmegaQMC.pretrain_heg import pretrain_heg_psiformer
 
-    trained_params = pretrain_heg_psiformer(
+    out = pretrain_heg_psiformer(
         config,
         init_key,
         num_iters=500,
         num_walkers=256,
     )
-    # Feed ``trained_params`` into the Adam/SR energy optimizer as
+    # Feed ``out['params']`` into the Adam/SR energy optimizer as
     # its initial parameter pytree.
 """
 
@@ -131,7 +131,24 @@ def _hf_orb_matrices(r, n_up, basis_up, basis_down):
 # =====================================================================
 
 class _HEGPreTrainDriver:
-    """Adam-on-MSE pre-training for HEG PsiFormer."""
+    """Adam-on-MSE pre-training for HEG PsiFormer.
+
+    Walkers are sampled from ``|psi_HF|^2`` by Metropolis with
+    periodic wrapping, never from the network, and the loss is the
+    mean squared difference between the network's post-backflow
+    orbital matrices and the free-electron plane-wave orbitals
+    (real ``cos`` / ``sin`` combinations of the filled Fermi sea).
+    Every one of the ``n_det`` determinants is regressed onto the
+    *same* HF matrix, so after pre-training the determinants start
+    out (nearly) identical; the subsequent energy optimisation has
+    to differentiate them.  Works for ``config.dim`` 3 (cubic cell)
+    and 2 (square cell).
+
+    Args:
+        config: :class:`~OmegaQMC.psi.nn.heg_wf.HEGPsiFormerConfig`.
+        init_key: JAX PRNG key for the network parameter init.
+        lr: Adam learning rate.
+    """
 
     def __init__(
         self,
@@ -271,10 +288,12 @@ class _HEGPreTrainDriver:
         Args:
             rng_key: JAX PRNG key (int or array).
             num_iters: Adam iterations on the MSE loss.
-            num_walkers: MCMC walkers (sampled from |ψ_HF|²).
+            num_walkers: MCMC walkers (sampled from ``|ψ_HF|²``).
             num_equil_steps: Burn-in MCMC steps before training.
             mcmc_decorr_steps: MCMC steps between updates.
-            mc_timestep: Initial Metropolis timestep.
+            mc_timestep: Initial Metropolis timestep ``tau``; the
+                Gaussian step is ``sqrt(3 tau)`` bohr, adapted
+                toward 50% acceptance after every MCMC step.
             fname_log: Optional log file path.
             verbose: 0 silent, 1 per-iter summary.
 
@@ -417,7 +436,7 @@ def pretrain_heg_psiformer(
             quantity in the pretraining stage (NN params and MCMC
             walker trajectories).
         num_iters: Adam iterations on the MSE loss.
-        num_walkers: MCMC walkers (sampled from |ψ_HF|²).
+        num_walkers: MCMC walkers (sampled from ``|ψ_HF|²``).
         lr: Adam learning rate.
         num_equil_steps: Burn-in MCMC steps before training.
         mcmc_decorr_steps: MCMC steps between updates.

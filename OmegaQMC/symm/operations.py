@@ -1,3 +1,40 @@
+"""Point-group symmetry operations on Cartesian coordinates.
+
+Each ``apply_*`` function maps coordinates of shape ``(..., 3)`` to
+their image under one operation, acting on the last axis.
+:data:`symmetry_operations_map` keys them by 16 canonical symbols:
+
+* ``E``: identity.
+* ``i``: inversion, ``(x, y, z) -> (-x, -y, -z)``.
+* ``sx``, ``sy``, ``sz``: mirror planes yz, xz and xy, i.e. negate
+  the named coordinate.
+* ``sxy``, ``sxmy``: diagonal sigma_d mirrors,
+  ``(y, x, z)`` and ``(-y, -x, z)``.
+* ``Rz90``, ``Rz180``, ``Rz270``: rotation about z by 90 degrees
+  counter-clockwise (``(-y, x, z)``), 180 and 270 degrees.
+* ``Rx180``, ``Ry180``: C2 about x and about y.
+* ``C2xy``, ``C2xmy``: C2 about the diagonals,
+  ``(y, x, -z)`` and ``(-y, -x, -z)``.
+* ``S4``, ``S4_3``: improper rotations,
+  ``(y, -x, -z)`` and ``(-y, x, -z)``.
+
+The axes are those of a *fragment-local* frame, not the lab frame.
+For Point Group Correlated Sampling the drivers shift electrons to
+the fragment centroid, rotate them into the frame built by
+:func:`~OmegaQMC.symm.fragments.build_frag_transform_data` (principal
+C_n / S_n axis along local z, sigma_v / C2' elements along local x
+and y), apply the operation and transform back; see
+:func:`~OmegaQMC.symm.fragments.make_apply_single_frag_symmop`.
+
+:data:`POINT_GROUP_OPS` lists the operations of each supported point
+group in that convention.  The linear groups Coov and Dooh are
+represented by their C4v and D4h subgroups, and any other group is
+treated as C1 (identity only).  :data:`POINT_GROUP_OP_ALIASES` maps
+alternative spellings (``"C2z"``, ``"sigma_x"``, ``"-1"``, ...) to
+the canonical symbols; user input should be normalised through it,
+as :func:`~OmegaQMC.symm.fragments.build_frag_symmops` does.
+"""
+
 import jax
 from pyscf import gto, symm
 
@@ -249,6 +286,28 @@ def populate_fragment_symmops(mol: gto.Mole):
 
     Supported point groups: C1, Cs, C2v, C2h, D2h, C4v, D4h
     Linear molecules (Coov, Dooh) are mapped to C4v, D4h respectively.
+
+    Each fragment is detected on its own atoms with PySCF's default
+    tolerance, so a slightly distorted fragment drops to a lower
+    group (a distorted water is found as Cs rather than C2v).
+
+    Args:
+        mol: Molecule with the fragment maps ``map_frag_ctr`` and
+            ``map_nuc_frag`` set by
+            :func:`~OmegaQMC.utils.parse_molecular_inspheres`.
+
+    Sets:
+        ``mol.map_frag_symmops[fid]``: the operations of the
+        detected group (:data:`POINT_GROUP_OPS`), or ``['E']`` for
+        an unsupported group or a failed detection.
+
+        ``mol.map_frag_axes[fid]``: ``(3, 3)`` rows are PySCF's
+        standard-orientation axes in the lab frame, flipped if
+        needed to a proper rotation; the identity when detection
+        fails.  Multi-atom fragments that apply symmetry operations
+        get their frame from a geometric fit in
+        :func:`~OmegaQMC.symm.fragments.build_frag_transform_data`
+        instead.
     """
     import numpy as _np
 

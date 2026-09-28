@@ -252,24 +252,51 @@ class _QEDVMCOptDriverNN_SR:
             rng_key: JAX PRNG key.
             num_iters: Number of SR update steps.
             num_walkers: Walker batch size.
-            num_steps_per_block: MH steps in equilibration block.
+            num_steps_per_block: MH steps per equilibration block
+                (used for equilibration only).
             num_blocks_equil: Equilibration blocks before SR begins.
             num_steps_decorr: Decorrelation MH steps between SR updates.
-            mc_timestep: Initial MH stepsize (Gaussian σ for r).
+            mc_timestep: Standard deviation (bohr) of the Gaussian
+                electron move.  It is used directly, not as a
+                timestep, and held fixed for the whole run: unlike
+                the VMC driver, the optimizer never adapts it, so
+                choose it for a reasonable acceptance.
             lr: SR learning rate (scalar).
             damping: Diagonal damping for the SR linear system.
             cg_maxiter: Conjugate-gradient max iterations.
-            max_param_change: Cap on max |δp| element after the solve
-                (clips before applying lr).
+            max_param_change: If the largest element of the solved
+                step ``|δp|`` exceeds this, the whole step is rescaled
+                so that it equals it (before the learning rate).
             jac_batch_size: Walkers per Jacobian micro-batch (memory).
             alpha_lr_scale: Multiplier on the learning rate applied to α
-                only (NN params get plain lr).
+                only (NN params get plain lr).  Applies to the
+                ``factorized`` and ``hybrid`` ansatze; with
+                ``signed_hybrid`` a trainable α moves at plain lr.
             verbose: 0 = silent, 1 = per-iter logs, 2 = + acceptance.
+            chirality_sign_penalty: With *complex_psi*, subtract
+                ``chirality_sign_penalty * chiral_handedness * L_z``
+                from each local energy used in the SR force, which
+                biases the optimisation toward the sign of ``<L_z>``
+                matching the cavity handedness.  The recorded
+                energies exclude it.  ``0`` (default) disables it.
+
+        Each iteration decorrelates the walkers, measures the local
+        energies and log-derivative Jacobians on that one set of
+        walkers, then updates; the recorded energy therefore belongs
+        to the parameters *before* that iteration's update.
 
         Returns:
-            ``(params_final, history)`` where history contains
-            ``energies``, ``acceptances``, ``alpha_history`` (list of
-            float per iter) if ``alpha_train``.
+            ``(params_final, history)``.  *history* holds per-iteration
+            lists ``energies``, ``energy_serrs`` (standard error over
+            the walkers), ``acceptances_r``, ``acceptances_n``,
+            ``param_change_max`` (largest ``|δp|`` before rescaling),
+            ``alpha_history`` (when α is a parameter) and
+            ``l_z_means`` (with *complex_psi*).
+
+            The parameters are *not* written back to ``self.driver``
+            and nothing is checkpointed: assign *params_final* to
+            ``self.driver.params`` (or another QED-VMC driver's
+            ``params``) to evaluate the optimised trial.
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
@@ -548,13 +575,21 @@ def get_qed_vmcopt_nn_sr_func(
         corrections. Allows the joint Ψ(r, n) to flip sign across Fock
         sectors with r-dependence — required for capturing polariton
         ground-state stabilisation in symmetric systems.
+      * ``arch='tang_native'``   — the photon index enters the GNN as
+        a per-electron one-hot feature, with the Slater sign and no
+        Fock head or coherent-state factor.
 
     For backward compatibility, ``arch`` defaults to ``None`` and is
     inferred from the legacy ``n_aware`` bool when omitted.
 
     ``alpha_*`` arguments apply when α is part of the chosen architecture
-    (factorized, hybrid, signed_hybrid). With ``arch='n_aware'`` they are
-    ignored.
+    (factorized, hybrid, signed_hybrid). With ``arch='n_aware'`` or
+    ``'tang_native'`` they are ignored.
+
+    *complex_psi*, *chiral_eps_y* and *chiral_handedness* are as in
+    :func:`~OmegaQMC.qed_vmc_nn.get_qed_vmc_nn_func`; here
+    *complex_psi* requires a signed ansatz (``'signed_hybrid'`` or
+    ``'tang_native'``) and adds the phase Jacobian to the SR metric.
 
     See :class:`_QEDVMCOptDriverNN_SR.__call__` for run-time hyperparameters.
     """

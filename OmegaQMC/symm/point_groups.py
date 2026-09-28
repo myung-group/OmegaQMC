@@ -5,6 +5,19 @@ in molecular coordinates after PySCF symmetry alignment.
 
 This module implements symmetrization algorithms for various point groups,
 starting with C2v for water molecules and designed to be extensible.
+
+It also supplies the molecular frame that
+:func:`~OmegaQMC.vmc_gto.generate_molecular_orbitals` applies when
+``symmetrization_level >= 1``: :func:`charge_inertia_axes` for a
+molecule without point-group symmetry (Gaussian's "Standard
+orientation", built from the nuclear-charge rather than the mass
+distribution), and :func:`canonicalize_symmetry_axes`, which keeps
+PySCF's symmetry-axis assignment but re-signs the axes
+deterministically, for one with symmetry.  Either way the frame does
+not depend on the input orientation.  With
+``symmetrization_level >= 2`` the coordinates are also symmetrized
+by :func:`auto_symmetrize_molecule` whenever
+:func:`detect_symmetry_quality` finds them off the ideal group.
 """
 
 import numpy as np

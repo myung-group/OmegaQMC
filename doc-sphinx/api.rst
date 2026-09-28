@@ -172,10 +172,37 @@ AFQMC driver
 .. autoclass:: OmegaQMC.afqmc_gto._AFQMCDriverGTO
    :members: __call__
 
+**Energy-streaming variant**
+
+.. automodule:: OmegaQMC.afqmc_gto_estream
+
+.. autoclass:: OmegaQMC.afqmc_gto_estream._AFQMCDriverGTO_EStream
+   :members: __call__
+
 QED-AFQMC driver
 -----------------
 
 .. autoclass:: OmegaQMC.qed_afqmc_gto._QEDAFQMCDriverGTO
+   :members: __call__
+
+QED-VMC driver and optimizer
+-----------------------------
+
+Joint electron-photon VMC for a molecule coupled to one cavity mode
+(dipole-gauge Pauli-Fierz Hamiltonian), sampling electron
+coordinates and a photon Fock index together.  The optimizer builds
+its own QED-VMC driver (``opt.driver``) and returns the optimised
+parameters without writing them back; assign them to a driver's
+``params`` to evaluate the trial.
+
+.. autofunction:: OmegaQMC.qed_vmc_nn.get_qed_vmc_nn_func
+
+.. autoclass:: OmegaQMC.qed_vmc_nn._QEDVMCDriverNN
+   :members: __call__, initialize_walkers
+
+.. autofunction:: OmegaQMC.qed_vmcopt_nn_sr.get_qed_vmcopt_nn_sr_func
+
+.. autoclass:: OmegaQMC.qed_vmcopt_nn_sr._QEDVMCOptDriverNN_SR
    :members: __call__
 
 HEG drivers
@@ -189,6 +216,9 @@ are available:
   twist averaging.
 * **Plane-wave AFQMC** in the jellium plane-wave basis, with
   symmetrised Cholesky vectors and twist averaging.
+
+A supervised Hartree-Fock pre-training stage prepares the NN
+ansatz for the energy optimizers.
 
 NN VMC driver
 ~~~~~~~~~~~~~
@@ -227,6 +257,16 @@ NN VMC optimizers
 .. autofunction:: OmegaQMC.vmcopt_nn_heg.get_vmcopt_nn_heg_func
 
 .. autoclass:: OmegaQMC.vmcopt_nn_heg._VMCOptDriverNNHEG_Adam
+   :members: __call__
+
+Supervised pre-training
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: OmegaQMC.pretrain_heg
+
+.. autofunction:: OmegaQMC.pretrain_heg.pretrain_heg_psiformer
+
+.. autoclass:: OmegaQMC.pretrain_heg._HEGPreTrainDriver
    :members: __call__
 
 Plane-wave AFQMC driver
@@ -484,6 +524,55 @@ Utility functions
 .. autofunction:: OmegaQMC.psi.nn.utils.flatten
 
 .. autofunction:: OmegaQMC.psi.nn.utils.unflatten
+
+Symmetry
+--------
+
+Point-group operations, the fragment helpers behind Point Group
+Correlated Sampling (PGCS), and the molecular orientation and
+symmetrization applied by
+:func:`~OmegaQMC.vmc_gto.generate_molecular_orbitals`.
+
+Operations
+~~~~~~~~~~
+
+.. automodule:: OmegaQMC.symm.operations
+
+.. autofunction:: OmegaQMC.symm.operations.populate_fragment_symmops
+
+.. autofunction:: OmegaQMC.symm.operations.get_global_symmops
+
+Fragment helpers for PGCS
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: OmegaQMC.symm.fragments
+
+.. autofunction:: OmegaQMC.symm.fragments.build_frag_symmops
+
+.. autofunction:: OmegaQMC.symm.fragments.build_frag_transform_data
+
+.. autofunction:: OmegaQMC.symm.fragments.build_single_frag_combos
+
+.. autofunction:: OmegaQMC.symm.fragments.make_apply_single_frag_symmop
+
+Orientation and symmetrization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: OmegaQMC.symm.point_groups
+
+.. autofunction:: OmegaQMC.symm.point_groups.charge_inertia_axes
+
+.. autofunction:: OmegaQMC.symm.point_groups.canonicalize_symmetry_axes
+
+.. autofunction:: OmegaQMC.symm.point_groups.detect_symmetry_quality
+
+.. autofunction:: OmegaQMC.symm.point_groups.auto_symmetrize_molecule
+
+.. autofunction:: OmegaQMC.symm.point_groups.symmetrize_molecule
+
+.. autofunction:: OmegaQMC.symm.point_groups.get_symmetrizer
+
+.. autoclass:: OmegaQMC.symm.point_groups.PointGroupSymmetrizer
 
 Utilities
 ----------

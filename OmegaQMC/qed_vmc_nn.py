@@ -66,7 +66,11 @@ _STEP_ADAPT_RATE = 0.05
 
 
 class _QEDVMCDriverNN:
-    """Internal driver class. Use :func:`get_qed_vmc_nn_func`."""
+    """Internal driver class. Use :func:`get_qed_vmc_nn_func`.
+
+    ``params`` holds the parameters the run evaluates; there is no
+    checkpoint loader, so assign optimised parameters to it directly.
+    """
 
     def __init__(
         self,
@@ -445,9 +449,59 @@ class _QEDVMCDriverNN:
     ):
         """Execute a fixed-parameter QED-VMC run.
 
+        Each Metropolis step moves every walker by one of two moves,
+        chosen with equal probability: a Gaussian move of all
+        electron coordinates at fixed photon index ``n``, or an
+        ``n -> n +/- 1`` move at fixed coordinates (proposals outside
+        ``[0, nph_max]`` are rejected).  Both are accepted with
+        probability ``min(1, |Psi'/Psi|^2)``.
+
+        The local energy is evaluated once per block, on all walkers
+        after the block's last step, so a run has
+        ``num_blocks * num_walkers`` energy samples and
+        ``num_steps_per_block`` sets only the decorrelation between
+        them.
+
+        Args:
+            rng_key: JAX PRNG key (int or array).
+            num_walkers: Number of walkers.
+            num_steps_per_block: Metropolis steps between energy
+                measurements.
+            num_blocks: Production blocks.
+            num_blocks_equil: Equilibration blocks; their energies
+                are computed and printed but excluded from the
+                statistics.
+            mc_timestep: Initial *standard deviation* (bohr) of the
+                Gaussian electron move.  Unlike
+                :class:`~OmegaQMC.vmc_nn._VMCDriverNN`, it is used
+                directly as the step size, not as a timestep ``tau``
+                with step ``sqrt(3 tau)``.  It is adapted toward 50%
+                electron-move acceptance during equilibration and
+                held fixed afterwards.
+            verbose: Print one line per block when nonzero.
+            dump_walker_positions: Also return the electron
+                coordinates at the end of every production block.
+
         Returns:
-            dict with ``E_mean``, ``E_serr``, ``E_blocks``,
-            ``n_photon_mean``, ``acceptance_r``, ``acceptance_n``.
+            dict with
+
+            * ``E_mean``, ``E_serr``: mean and standard error of the
+              production blocks' mean energies; with more than 8
+              blocks the error comes from a binning analysis
+              (:func:`~OmegaQMC.utils.do_binning_analysis`), which
+              corrects for correlation between blocks, otherwise it
+              is the naive ``std / sqrt(num_blocks)``;
+            * ``E_blocks``, ``n_photon_blocks``: per-block mean energy
+              and mean photon number (production only), and their
+              mean ``n_photon_mean``;
+            * ``acceptance_r``, ``acceptance_n``: acceptance of each
+              move type over all blocks, including equilibration;
+            * ``sigma_r_final``: the electron step size used in
+              production;
+            * with *complex_psi*: ``l_z_mean``, ``l_z_serr`` and
+              ``l_z_blocks`` for ``<L_z>``;
+            * with *dump_walker_positions*: ``walker_positions`` of
+              shape ``(num_blocks, num_walkers, n_elec, 3)``.
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
@@ -535,11 +589,11 @@ class _QEDVMCDriverNN:
         prod_n = jnp.array(n_photon_means[num_blocks_equil:])
 
         # Use binning analysis for stderr (handles autocorrelation).
+        # do_binning_analysis returns (mean, serr, sdev, kappa); this
+        # used to unpack three values inside a blanket try/except, so
+        # the ValueError always sent it to the naive branch below.
         if len(prod_E) > 8:
-            try:
-                _, e_serr, _ = do_binning_analysis(prod_E)
-            except Exception:
-                e_serr = float(jnp.std(prod_E)) / max(jnp.sqrt(len(prod_E)), 1.0)
+            _, e_serr, _, _ = do_binning_analysis(prod_E)
         else:
             e_serr = float(jnp.std(prod_E)) / max(jnp.sqrt(len(prod_E)), 1.0)
 
@@ -611,9 +665,52 @@ def get_qed_vmc_nn_func(
         nph_max: photon-Fock cutoff. With coherent-state shift, 5–10 is
             typically sufficient even at λ ~ 1; without shift, may need
             ≥ 30 at large λ.
+        n_aware: legacy switch, equivalent to ``arch='n_aware'``; used
+            only when *arch* is ``None``.
+        fock_hidden_dim: hidden width of the Fock-index head of the
+            ``n_aware``, ``hybrid`` and ``signed_hybrid`` ansatze.
+        arch: joint electron-photon ansatz.  ``None`` (default) means
+            ``'n_aware'`` if *n_aware* is set, else ``'factorized'``.
+
+            * ``'factorized'``: ``Psi_e(r) <n|alpha>``, an electronic NN
+              times a coherent-state photon factor.
+            * ``'n_aware'``: ``Psi_e(r)`` plus a Fock-index head, with no
+              coherent-state envelope; *alpha_init* and *alpha_train* are
+              ignored.
+            * ``'hybrid'``: ``Psi_e(r) <n|alpha>`` plus a Fock-index head,
+              which adds ``(r, n)`` entanglement; a positive-Psi
+              ansatz.
+            * ``'signed_hybrid'``: as ``'hybrid'``, but the NN sign is
+              carried through and the head also corrects the sign, so
+              ``Psi(r, n)`` can change sign between Fock sectors depending
+              on ``r``.
+            * ``'tang_native'``: the photon index enters the GNN as a
+              per-electron one-hot feature, with the Slater sign and no
+              Fock head or coherent-state factor; *alpha_init*,
+              *alpha_train* and *fock_hidden_dim* are ignored.
+
+        complex_psi: treat the trial as complex, ``|Psi| exp(i phi)``.
+            Only has an effect for the signed ansatze (``'signed_hybrid'``,
+            ``'tang_native'``).  The local energy is then complex, the
+            reported energy is its real part, and ``<L_z>`` is measured
+            too.
+        chiral_eps_y: second in-plane polarization vector ``(3,)`` of a
+            circularly polarized (chiral) cavity mode; *coupling_vec* gives
+            the first.  ``None`` (default) is a linearly polarized mode.
+            Requires *complex_psi*.
+        chiral_handedness: ``+1`` (sigma+) or ``-1`` (sigma-) for a chiral
+            mode.
 
     Returns:
         A callable driver instance (use ``driver(rng_key, …)``).
+
+    The driver has no PGCS, force or checkpoint support, unlike
+    :func:`~OmegaQMC.vmc_nn.get_vmc_nn_func`: it evaluates whatever is in
+    ``driver.params``, which starts as the random initialisation.  To
+    evaluate an optimised trial, assign the parameters returned by the
+    optimizer from
+    :func:`~OmegaQMC.qed_vmcopt_nn_sr.get_qed_vmcopt_nn_sr_func` to
+    ``driver.params`` before calling it.
     """
     return _QEDVMCDriverNN(
         mol_info, config, init_key,
