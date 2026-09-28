@@ -60,6 +60,7 @@ def _make_afqmc_sharding(num_walkers):
 from OmegaQMC.integrals.cholesky import (        # noqa: E402
     chunked_cholesky,
     prepare_afqmc_integrals,
+    determinant_energy_from_integrals,
     half_rotate_cholesky,
     half_rotate_cholesky_multidet,
     DiskChol,
@@ -890,11 +891,12 @@ class _AFQMCDriverGTO:
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
                  trial=None, chol_h5_path=None, chol_chunk_g=128,
-                 det_chunk_size=5):
+                 det_chunk_size=5, integrals=None, e_hf=None):
         """Prepare integrals and build the propagator.
 
         Args:
             mf: PySCF mean-field object (must have run kernel()).
+                May be None when ``integrals`` is given.
             dt: Imaginary time step (default 0.005 Ha^{-1}).
             chol_cut: Cholesky decomposition threshold.
             verbose: Print progress.
@@ -910,6 +912,16 @@ class _AFQMCDriverGTO:
             det_chunk_size: Dets per scan step for the chunked-scan
                 multi-det Green's function and local energy
                 (lower = less memory, default 5).
+            integrals: Pre-built integral dict from
+                :func:`prepare_afqmc_integrals_from_arrays`. When given,
+                ``mf`` and ``chol_cut`` are not used for the integrals
+                and a multi-det ``trial`` must index the orbitals of
+                these integrals directly (its 'mo_coeff' must be None or
+                the identity).
+            e_hf: HF energy reported as 'ehf' on the ``integrals`` path.
+                None computes the energy of the HF trial determinant
+                from the integrals. Ignored on the ``mf`` path, which
+                reports ``mf.e_tot``.
         """
         self.mf = mf
         self.dt = dt
@@ -922,10 +934,25 @@ class _AFQMCDriverGTO:
             print("Preparing integrals (Cholesky decomposition)...")
             t0 = time.time()
 
-        mo_coeff_override = trial['mo_coeff'] if trial is not None else None
-        integrals = prepare_afqmc_integrals(
-            mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override,
-            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+        if integrals is None:
+            mo_coeff_override = (
+                trial['mo_coeff'] if trial is not None else None)
+            integrals = prepare_afqmc_integrals(
+                mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override,
+                chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+            self.ehf = float(mf.e_tot)
+        else:
+            trial_mo = trial.get('mo_coeff') if trial is not None else None
+            if trial_mo is not None and not np.allclose(
+                    np.asarray(trial_mo), np.eye(integrals['nbasis'])):
+                raise ValueError(
+                    "with `integrals`, trial['mo_coeff'] must be None or "
+                    "the identity; rotate the integrals instead")
+            if e_hf is None:
+                e_hf = determinant_energy_from_integrals(
+                    integrals['h1e'], integrals['chol'], integrals['enuc'],
+                    integrals['nup'], integrals['ndown'])
+            self.ehf = float(e_hf)
 
         self.h1e = integrals['h1e']
         self.h1e_mod = integrals['h1e_mod']
@@ -1006,7 +1033,7 @@ class _AFQMCDriverGTO:
                 chol_chunk_g=chol_chunk_g)
 
         if verbose:
-            print(f"  E_HF = {float(mf.e_tot):.10f}")
+            print(f"  E_HF = {self.ehf:.10f}")
             print(f"  dt = {dt}")
 
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
@@ -1223,10 +1250,10 @@ class _AFQMCDriverGTO:
 
         if verbose:
             print("-" * 70, file=fout)
-            print(f"E_HF     = {float(self.mf.e_tot):.10f}", file=fout)
+            print(f"E_HF     = {self.ehf:.10f}", file=fout)
             print(f"E_AFQMC  = {float(e_mean):.10f} +/- {float(e_err):.10f}",
                   file=fout)
-            print(f"E_corr   = {float(e_mean) - float(self.mf.e_tot):.10f}",
+            print(f"E_corr   = {float(e_mean) - self.ehf:.10f}",
                   file=fout)
             print(f"kappa    = {float(kappa):.2f}", file=fout)
 
@@ -1239,7 +1266,7 @@ class _AFQMCDriverGTO:
             'energy_err': float(e_err),
             'energy_std': float(e_std),
             'kappa': float(kappa),
-            'ehf': float(self.mf.e_tot),
+            'ehf': self.ehf,
         }
 
     def close(self):
