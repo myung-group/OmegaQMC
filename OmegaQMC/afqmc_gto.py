@@ -1060,7 +1060,7 @@ class _AFQMCDriverGTO:
                  num_steps_per_block=25, stabilize_freq=5,
                  pop_control_freq=5, num_blocks_equil=10,
                  fname_log="afqmc.log", walker_chunk_size=None,
-                 eshift0=None):
+                 eshift0=None, local_energy_cap=False):
         """Run the AFQMC simulation.
 
         Args:
@@ -1085,6 +1085,11 @@ class _AFQMCDriverGTO:
                 E_HF); converted internally to the hybrid-energy level
                 as eshift0 - e_const. None uses the constructor's
                 ``eshift0``; if that is also None, eshift starts at 0.
+            local_energy_cap: If True, clip the real part of each walker's
+                local energy to E_ref +/- sqrt(2/dt) before the block
+                average, with E_ref = eshift + e_const (total-energy
+                level) and, in block 0, eshift0 or else ehf. Default
+                False (no cap).
 
         Returns:
             dict with:
@@ -1149,6 +1154,8 @@ class _AFQMCDriverGTO:
         # Main QMC loop
         total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
+        n_capped = 0
+        ebound = float(np.sqrt(2.0 / self.dt))
         if eshift0 is None:
             eshift0 = self.eshift0
         eshift = 0.0 if eshift0 is None else float(eshift0) - self.e_const
@@ -1248,6 +1255,18 @@ class _AFQMCDriverGTO:
                     self.rchol_a, self.rchol_b, self.enuc,
                     walker_chunk_size)
 
+            if local_energy_cap:
+                if iblock == 0:
+                    e_ref_cap = (float(eshift0) if eshift0 is not None
+                                 else self.ehf)
+                else:
+                    e_ref_cap = eshift + self.e_const
+                e_real = e_tot.real
+                n_capped += int(jnp.sum(
+                    jnp.abs(e_real - e_ref_cap) > ebound))
+                e_tot = jnp.clip(e_real, e_ref_cap - ebound,
+                                 e_ref_cap + ebound) + 1j * e_tot.imag
+
             # Weighted average over walkers
             w = jnp.abs(weights)
             w_sum = jnp.sum(w)
@@ -1288,7 +1307,7 @@ class _AFQMCDriverGTO:
         if fout is not sys.stdout:
             fout.close()
 
-        return {
+        out = {
             'energy_blocks': energy_blocks,
             'energy_mean': float(e_mean),
             'energy_err': float(e_err),
@@ -1296,6 +1315,10 @@ class _AFQMCDriverGTO:
             'kappa': float(kappa),
             'ehf': self.ehf,
         }
+        if local_energy_cap:
+            out['local_energy_cap_bound'] = ebound
+            out['n_local_energy_capped'] = n_capped
+        return out
 
     def close(self):
         """Release the disk‑backed Cholesky HDF5 file, if any."""
