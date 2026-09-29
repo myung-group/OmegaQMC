@@ -7,6 +7,20 @@ decomposed per-walker gradient components
 (Hellmann-Feynman, kinetic, :math:`\\log|\\psi|`) for
 GTO and NN trial wavefunctions respectively.
 
+Estimators, selected by the drivers' ``force_warp`` argument:
+
+* GTO, ``'swct'`` (default): space-warp coordinate
+  transformation (SWCT), with ``gr_scheme`` weights.
+* GTO or NN, ``'fast_warp'``: the same space warp with every
+  kinetic-energy derivative removed by Hermiticity (Qian, Li and
+  Chen, Faraday Discuss. 254, 529 (2024));
+  :func:`vmc_nn_gradients_fast_warp` for NN trials.
+* NN, ``None`` (default): the no-warp ZVZB estimator
+  :func:`vmc_nn_gradients_zvzb`.
+
+All write the same three components, so storage and
+post-processing do not depend on the choice.
+
 :func:`save_gto_gradients` / :func:`save_nn_gradients`
 accumulate and write per-block gradient data
 (reference + optional symmetry-related secondary
@@ -40,6 +54,122 @@ from ..utils import (
 
 PSI2_RATIO_THRESHOLD = 1e-4
 
+# Space-warp choices for the nuclear-force estimators.  ``None`` is no
+# warp (the no-SWCT estimator, NN only); ``'swct'`` differentiates
+# every local-energy term along the space-warp coordinate
+# transformation (GTO only); ``'fast_warp'`` keeps the same warp but
+# removes all derivatives of the kinetic energy by Hermiticity
+# (Qian, Li and Chen, Faraday Discuss. 254, 529 (2024), SI Eq. 19).
+FORCE_WARPS_GTO = ('swct', 'fast_warp')
+FORCE_WARPS_NN = (None, 'fast_warp')
+
+
+# ---------------------------------------------------------------------
+# Space-warp helpers shared by the GTO and NN estimators
+# ---------------------------------------------------------------------
+def _warp_weights_distance_vg(elec_crds, nuc_crds, eps):
+    """Distance-based space-warp weights and their gradients.
+
+    ``w[e, n] = d_en^-4 / sum_m d_em^-4`` (Filippi-Umrigar
+    ``f(r) = r^-4``) and ``diag_grad[e, n, K] = dw[e, n] / dr[e, K]``.
+    Each electron's weights depend only on its own coordinate, so
+    this electron-diagonal gradient is the whole Jacobian.
+    """
+    diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
+    d2 = jnp.sum(diff * diff, axis=-1)
+    d = jnp.sqrt(d2)
+    d_safe = jnp.where(d < eps, eps, d)
+    # g[e,n] = d^{-4}
+    g = d_safe ** (-4.0)
+    G = jnp.sum(g, axis=-1, keepdims=True)
+    w = g / G
+    # ∂g[e,n]/∂r[e,K] = −4 d^{-5} ê_K = −4 g · diff_K / d²
+    # The inactive ``d < eps`` clamp zeroes the gradient
+    # at coincident e–n positions (matches the original
+    # scheme's behavior under autodiff of the clamp).
+    active = (d >= eps)
+    inv_d2 = jnp.where(active, 1.0 / (d_safe * d_safe), 0.0)
+    dg = -4.0 * g[..., None] * diff * inv_d2[..., None]
+    dG = jnp.sum(dg, axis=1, keepdims=True)
+    diag_grad = (dg - w[..., None] * dG) / G[..., None]
+    return w, diag_grad
+
+
+def _warp_weight_laplacian(weights_vg, elec_crds):
+    """Electron Laplacian ``lap[e, n] = nabla_e^2 w[e, n]``.
+
+    *weights_vg* maps ``elec_crds`` ``(n_e, 3)`` to
+    ``(w, diag_grad)`` as :func:`_warp_weights_distance_vg` does.
+    Because ``w[e]`` depends only on electron ``e``, one ``jax.jvp``
+    with tangent ``e_K`` on *every* electron at once gives
+    ``d/dr[e, K]`` of ``diag_grad[e]`` with no cross-electron
+    mixing; three of them give the Laplacian.
+    """
+    def _diag_grad(x):
+        return weights_vg(x)[1]
+
+    lap = 0.0
+    for k in range(3):
+        tangent = jnp.zeros_like(elec_crds).at[:, k].set(1.0)
+        _, d_dg = jax.jvp(_diag_grad, (elec_crds,), (tangent,))
+        lap = lap + d_dg[..., k]
+    return lap
+
+
+def _logpsi_grad_hessian_blocks(logpsi_of_flat, elec_crds):
+    """Electron gradient and same-electron Hessian blocks of ln|psi|.
+
+    Returns ``g`` ``(n_e, 3)`` and ``hblk`` ``(n_e, 3, 3)`` with
+    ``hblk[i, a, b] = d^2 ln|psi| / dr[i, a] dr[i, b]``, taken from
+    the full ``3 n_e x 3 n_e`` Hessian (``jax.jacfwd`` over
+    ``jax.grad``, i.e. ``3 n_e`` Hessian-vector products).  The
+    electron order is that of *elec_crds*, which must match the
+    space-warp weights.
+    """
+    n_e = elec_crds.shape[0]
+
+    def _grad_with_aux(x):
+        gx = jax.grad(logpsi_of_flat)(x)
+        return gx, gx
+
+    hess, g_flat = jax.jacfwd(_grad_with_aux, has_aux=True)(
+        elec_crds.reshape(-1),
+    )
+    h4 = hess.reshape(n_e, 3, n_e, 3)
+    idx = jnp.arange(n_e)
+    return g_flat.reshape(n_e, 3), h4[idx, :, idx, :]
+
+
+def _fast_warp_terms(w, dw, lap_w, g, hblk):
+    """Kinetic-free warp terms of the fast-warp estimator.
+
+    With ``w``, ``dw`` and ``lap_w`` the space-warp weights, their
+    electron gradients and Laplacians, ``g = nabla ln|psi|`` and
+    ``hblk`` its same-electron Hessian blocks, returns
+
+    * ``grd_warp[n, k] = sum_i [ 1/2 lap_w[i, n] g[i, k]
+      + sum_a dw[i, n, a] (hblk[i, a, k] + g[i, a] g[i, k]) ]``,
+      i.e. ``1/2 (nabla_i^2 w) d_ik psi / psi
+      + (nabla_i w) . (nabla_i d_ik psi) / psi``; and
+    * ``p_warp[n, k] = sum_i [ w[i, n] g[i, k]
+      + 1/2 dw[i, n, k] ]``, the warp part of the Pulay vector
+      ``P`` (add the explicit ``d ln|psi| / dR``).
+
+    Both have shape ``(n_nuc, 3)``.  These are the terms of SI Eq.
+    19 of Qian, Li and Chen (2024) that replace SWCT's
+    ``sum_i w d_ri E_kin``, written for a real trial wavefunction.
+    """
+    d2psi = hblk + g[:, :, None] * g[:, None, :]
+    grd_warp = (
+        0.5 * jnp.einsum('in,ik->nk', lap_w, g)
+        + jnp.einsum('ina,iak->nk', dw, d2psi)
+    )
+    p_warp = (
+        jnp.einsum('in,ik->nk', w, g)
+        + 0.5 * jnp.sum(dw, axis=0)
+    )
+    return grd_warp, p_warp
+
 
 def vmc_gto_gradients(
     local_energy_ee,
@@ -57,6 +187,7 @@ def vmc_gto_gradients(
     C0=None,
     mo1s=None,
     num_nuc=None,
+    force_warp='swct',
 ):
     """Build a JIT-compiled nuclear-gradient batch function.
 
@@ -110,6 +241,20 @@ def vmc_gto_gradients(
     num_nuc : int, optional
         Number of nuclei (required when *mo_relax*
         is ``True``).
+    force_warp : {'swct', 'fast_warp'}, optional
+        ``'swct'`` (default) is the space-warp coordinate
+        transformation estimator: every local-energy term
+        is differentiated as ``d/dR + sum_e w[e] d/dr_e``.
+        ``'fast_warp'`` keeps the same warp (and the same
+        *gr_scheme* weights) but replaces the kinetic
+        term by the kinetic-free warp terms of
+        :func:`_fast_warp_terms`, so no derivative of the
+        kinetic energy (third derivatives of ψ) is taken;
+        with *mo_relax* the MO-response kinetic term is
+        dropped for the same reason, while the
+        MO-response ``log|ψ|`` term stays in the Pulay
+        vector.  ``grd_ee``, ``grd_en`` and ``grd_logpsi``
+        are identical in both.
 
     Returns
     -------
@@ -152,30 +297,35 @@ def vmc_gto_gradients(
 
     @jax.jit
     def _redistribute_scheme2_vg(elec_crds):
-        diff = elec_crds[:, None, :] - nuc_crds[None, :, :]
-        d2 = jnp.sum(diff * diff, axis=-1)
-        d = jnp.sqrt(d2)
-        d_safe = jnp.where(d < eps, eps, d)
-        # g[e,n] = d^{-4}
-        g = d_safe ** (-4.0)
-        G = jnp.sum(g, axis=-1, keepdims=True)
-        w = g / G
-        # ∂g[e,n]/∂r[e,K] = −4 d^{-5} ê_K = −4 g · diff_K / d²
-        # The inactive ``d < eps`` clamp zeroes the gradient
-        # at coincident e–n positions (matches the original
-        # scheme's behavior under autodiff of the clamp).
-        active = (d >= eps)
-        inv_d2 = jnp.where(active, 1.0 / (d_safe * d_safe), 0.0)
-        dg = -4.0 * g[..., None] * diff * inv_d2[..., None]
-        dG = jnp.sum(dg, axis=1, keepdims=True)
-        diag_grad = (dg - w[..., None] * dG) / G[..., None]
-        return w, diag_grad
+        return _warp_weights_distance_vg(elec_crds, nuc_crds, eps)
 
     rescale_value_and_diag_grad_fn = (
         _redistribute_scheme2_vg
         if 'scheme2' in gr_scheme
         else _redistribute_scheme1_vg
     )
+
+    if force_warp not in FORCE_WARPS_GTO:
+        raise ValueError(
+            f"force_warp must be one of {FORCE_WARPS_GTO} for GTO "
+            f"trials, got {force_warp!r}"
+        )
+    fast_warp = (force_warp == 'fast_warp')
+
+    @jax.jit
+    def _grd_ke_fast_warp(e_pos):
+        """Fast-warp replacement of the SWCT kinetic term."""
+        def _logpsi_flat(x):
+            return log_trial_wavefunction(
+                x.reshape(e_pos.shape), nuc_crds, params_corr,
+            )
+        g, hblk = _logpsi_grad_hessian_blocks(_logpsi_flat, e_pos)
+        w, dw = rescale_value_and_diag_grad_fn(e_pos)
+        lap_w = _warp_weight_laplacian(
+            rescale_value_and_diag_grad_fn, e_pos,
+        )
+        grd_warp, _ = _fast_warp_terms(w, dw, lap_w, g, hblk)
+        return grd_warp
 
     # --- Per-walker gradient functions ---
     @jax.jit
@@ -244,9 +394,10 @@ def vmc_gto_gradients(
         grd_en_elc, grd_en_nuc = jax.vmap(
             _grad_fn_en,
         )(batch_samples)
-        grd_ke_elc, grd_ke_nuc = jax.vmap(
-            _grad_fn_ke,
-        )(batch_samples)
+        if not fast_warp:
+            grd_ke_elc, grd_ke_nuc = jax.vmap(
+                _grad_fn_ke,
+            )(batch_samples)
         grd_logpsi_elc, grd_logpsi_nuc = jax.vmap(
             _grad_fn_logpsi,
         )(batch_samples)
@@ -264,9 +415,12 @@ def vmc_gto_gradients(
         grd_en = grd_en_nuc + jnp.einsum(
             'beK,ben->bnK', grd_en_elc, rescale,
         )
-        grd_ke = grd_ke_nuc + jnp.einsum(
-            'beK,ben->bnK', grd_ke_elc, rescale,
-        )
+        if fast_warp:
+            grd_ke = jax.vmap(_grd_ke_fast_warp)(batch_samples)
+        else:
+            grd_ke = grd_ke_nuc + jnp.einsum(
+                'beK,ben->bnK', grd_ke_elc, rescale,
+            )
 
         grd_logpsi = grd_logpsi_nuc + jnp.einsum(
             'beK,ben->bnK',
@@ -275,14 +429,18 @@ def vmc_gto_gradients(
         grd_logpsi += novel_correction
 
         if mo_relax:
-            grd_ke_mo_batch = jax.vmap(
-                _grad_fn_ke_mo,
-            )(batch_samples)
+            # Fast-warp drops the MO-response kinetic term (see
+            # *force_warp*); the SWCT order of operations is kept.
+            if not fast_warp:
+                grd_ke_mo_batch = jax.vmap(
+                    _grad_fn_ke_mo,
+                )(batch_samples)
             grd_logpsi_mo_batch = jax.vmap(
                 _grad_fn_logpsi_mo,
             )(batch_samples)
 
-            grd_ke = grd_ke + grd_ke_mo_batch
+            if not fast_warp:
+                grd_ke = grd_ke + grd_ke_mo_batch
             grd_logpsi = grd_logpsi + grd_logpsi_mo_batch
 
         return grd_ee, grd_en, grd_ke, grd_logpsi
@@ -620,6 +778,113 @@ def vmc_nn_gradients_zvzb(
         return jax.vmap(_grd_zvzb)(batch_walkers)
 
     return _grd_zvzb_batch
+
+
+def vmc_nn_gradients_fast_warp(
+    log_psi,
+    nuc_crds,
+    charges,
+    nelec,
+    params,
+    eps=None,
+):
+    """Build a JIT-compiled fast-warp gradient batch function.
+
+    Implements the fast-warp force estimator of Qian, Li and Chen
+    (Faraday Discuss. 254, 529 (2024), SI Eq. 19) for a real NN
+    trial wavefunction.  It applies the space-warp coordinate
+    transformation of SWCT, with distance weights
+    ``w[i, n] ~ |r_i - R_n|^-4``, but uses the Hermiticity of the
+    Hamiltonian to remove every derivative of the kinetic energy.
+    Only the gradient and same-electron Hessian blocks of
+    ``log|ψ|`` and the nuclear gradient of ``log|ψ|`` are needed,
+    so there is no forward Laplacian and no differentiation of it
+    with respect to nuclear coordinates, unlike
+    :func:`vmc_nn_gradients_zvzb`.  That also removes the kinetic
+    term's dependence on the learned ``d psi / dR``, the main
+    source of variance for NN trials.
+
+    The per-walker *negated* force is returned decomposed like
+    :func:`vmc_nn_gradients_zvzb`, so :func:`save_nn_gradients`
+    and :func:`postproc_h5_pgcs` apply unchanged:
+
+    * ``grd_ee_en = dV/dR + sum_i w[i] dV/dr_i`` with
+      ``V = V_en + V_ee``; with the warp, ``V_ee`` contributes
+      although it has no explicit nuclear dependence;
+    * ``grd_ke``: the kinetic-free warp terms of
+      :func:`_fast_warp_terms`;
+    * ``grd_logpsi = P = d log|ψ|/dR + sum_i (w[i] d log|ψ|/dr_i
+      + 1/2 dw[i]/dr_i)``, multiplied by ``2 (E_L - <E>)``
+      downstream exactly as in the no-warp estimator.
+
+    Parameters
+    ----------
+    log_psi : callable
+        ``(elec_crds, nuc_crds, params) -> float``.
+    nuc_crds : jnp.ndarray
+        Nuclear coordinates, shape ``(natom, 3)``.
+    charges : jnp.ndarray
+        Nuclear charges, shape ``(natom,)``.
+    nelec : int
+        Total number of electrons.
+    params : pytree
+        NN wavefunction parameters.
+    eps : float, optional
+        Distance clamp of the warp weights; defaults to the machine
+        epsilon of *nuc_crds*.
+
+    Returns
+    -------
+    callable
+        ``(batch_walkers) -> (grd_ee_en, grd_ke, grd_logpsi)``
+        with *batch_walkers* ``(batch, nelec, 3)`` and each output
+        ``(batch, natom, 3)``.
+    """
+    if eps is None:
+        eps = float(jnp.finfo(jnp.asarray(nuc_crds).dtype).eps)
+    i_e, j_e = jnp.triu_indices(nelec, k=1)
+
+    def _v_pot(elec_crds, R):
+        """``V_en + V_ee`` for one walker."""
+        d_en = jnp.linalg.norm(
+            elec_crds[:, None, :] - R[None, :, :], axis=-1,
+        )
+        v_en = -jnp.sum(charges[None, :] / d_en)
+        if nelec > 1:
+            d_ee = jnp.linalg.norm(
+                elec_crds[i_e] - elec_crds[j_e], axis=-1,
+            )
+            return v_en + jnp.sum(1.0 / d_ee)
+        return v_en
+
+    def _weights_vg(elec_crds):
+        return _warp_weights_distance_vg(elec_crds, nuc_crds, eps)
+
+    @jax.jit
+    def _grd_fast_warp(elec_crds):
+        dv_dr, dv_dR = jax.grad(_v_pot, argnums=(0, 1))(
+            elec_crds, nuc_crds,
+        )
+        dlp_dR = jax.grad(log_psi, argnums=1)(
+            elec_crds, nuc_crds, params,
+        )
+
+        def _logpsi_flat(x):
+            return log_psi(x.reshape(nelec, 3), nuc_crds, params)
+
+        g, hblk = _logpsi_grad_hessian_blocks(_logpsi_flat, elec_crds)
+        w, dw = _weights_vg(elec_crds)
+        lap_w = _warp_weight_laplacian(_weights_vg, elec_crds)
+        grd_warp, p_warp = _fast_warp_terms(w, dw, lap_w, g, hblk)
+
+        grd_ee_en = dv_dR + jnp.einsum('ik,in->nk', dv_dr, w)
+        return grd_ee_en, grd_warp, dlp_dR + p_warp
+
+    @jax.jit
+    def _grd_fast_warp_batch(batch_walkers):
+        return jax.vmap(_grd_fast_warp)(batch_walkers)
+
+    return _grd_fast_warp_batch
 
 
 def save_nn_gradients(
@@ -1699,6 +1964,15 @@ nuclear forces using PGCS.
         )
 
         grd_nn = jnp.asarray(f['grd_nn'][()])
+
+        # Which estimator wrote the file (absent in older files).
+        if 'force_warp' in f.attrs:
+            warp_weights = f.attrs.get('warp_weights', None)
+            print(
+                f"Force estimator: warp = {f.attrs['force_warp']}"
+                + (f", weights = {warp_weights}"
+                   if warp_weights is not None else "")
+            )
 
         # Identify combo labels from fragment_weights
         combo_labels = []

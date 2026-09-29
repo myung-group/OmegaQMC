@@ -317,6 +317,8 @@ Nuclear forces
 
 .. autofunction:: OmegaQMC.observables.force.vmc_nn_gradients_zvzb
 
+.. autofunction:: OmegaQMC.observables.force.vmc_nn_gradients_fast_warp
+
 .. autofunction:: OmegaQMC.observables.force.save_nn_gradients
 
 Green's functions

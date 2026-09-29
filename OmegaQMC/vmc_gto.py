@@ -679,6 +679,7 @@ class _VMCDriverGTO:
                  ofname_chkpt, ofname_grd, timestamp_init,
                  gr_scheme='scheme1',
                  force_estimator='simple',
+                 force_warp='swct',
                  trial=None,
                  jastrow_config=None):
         # --- Store state ---
@@ -686,6 +687,8 @@ class _VMCDriverGTO:
         self.params_corr = params_corr
         self.mo_relax = mo_relax
         self.force_estimator = force_estimator
+        self.force_warp = force_warp
+        self.gr_scheme = gr_scheme
         self.nuc_crds = nuc_crds
         self.single_frag_combos = single_frag_combos
         self.frag_symmops = frag_symmops
@@ -761,6 +764,7 @@ class _VMCDriverGTO:
             eps,
             gr_scheme,
             mo_relax=mo_relax,
+            force_warp=force_warp,
             **_mo_kw,
         )
 
@@ -1473,6 +1477,11 @@ class _VMCDriverGTO:
             if p.exists():
                 p.unlink()
             with h5py.File(ofname_grd, 'a') as f:
+                f.attrs['force_warp'] = self.force_warp
+                f.attrs['warp_weights'] = (
+                    'distance' if 'scheme2' in self.gr_scheme
+                    else 'mo_density'
+                )
                 f.create_dataset('grd_nn', data=grd_nn)
                 g = f.create_group("system")
                 asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
@@ -1601,6 +1610,7 @@ def get_vmc_gto_func(mf,
                      cusp_scheme='Quady2025',
                      gr_scheme='scheme1',
                      force_estimator='simple',
+                     force_warp='swct',
                      prefix='vmc',
                      symmop_list: str | list[str] | dict[int, list[str]] | None = None,
                      cluster_idx: Collection[int] = None,
@@ -1627,13 +1637,26 @@ def get_vmc_gto_func(mf,
         (default) uses the scheme described in Quady *et al.* (2025).
         Pass ``None`` to disable cusp corrections.
     gr_scheme : str, optional
-        Gradient estimator scheme.  Default is ``"scheme1"``.
+        Space-warp weights of the force estimator: ``"scheme1"``
+        (default) from per-atom MO densities, ``"scheme2"`` from
+        inverse fourth powers of the electron-nucleus distances.
     force_estimator : str, optional
         Force estimator to use.  ``'simple'`` (default)
         uses the standard ZVZB estimator.  ``'zvzb2'``
         adds a parameter-response variance-reduction
         correction via analytical linear response of
         the Jastrow parameters.
+    force_warp : str, optional
+        How the space warp enters the force estimator.
+        ``'swct'`` (default) differentiates every local-energy
+        term along the warp, which for the kinetic energy takes
+        third derivatives of the trial wavefunction.
+        ``'fast_warp'`` (Qian, Li and Chen, 2024) keeps the same
+        warp and *gr_scheme* weights but removes the kinetic-energy
+        derivatives by Hermiticity, needing only the same-electron
+        Hessian blocks of ``log|psi|``.  Both have the same
+        expectation value and write the same ``.grd.h5`` layout;
+        the choice is recorded in its ``force_warp`` attribute.
     prefix : str, optional
         Stem used for output file names (``<prefix>.chk.h5``,
         ``<prefix>.grd.h5``, ``<prefix>.log``).  Default is ``"vmc"``.
@@ -1718,5 +1741,6 @@ def get_vmc_gto_func(mf,
                          timestamp_init,
                          gr_scheme=gr_scheme,
                          force_estimator=force_estimator,
+                         force_warp=force_warp,
                          trial=trial,
                          jastrow_config=jastrow_config)

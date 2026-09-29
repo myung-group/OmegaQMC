@@ -148,8 +148,17 @@ class _VMCDriverNN:
     def __init__(
         self, mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
-        symmop_list=None, nn_dtype='float32',
+        symmop_list=None, nn_dtype='float32', force_warp=None,
     ):
+        from .observables.force import FORCE_WARPS_NN
+        if force_warp == 'none':
+            force_warp = None
+        if force_warp not in FORCE_WARPS_NN:
+            raise ValueError(
+                f"force_warp must be one of {FORCE_WARPS_NN} for NN "
+                f"trials, got {force_warp!r}"
+            )
+        self.force_warp = force_warp
         # Populate fragment metadata lazily for Mole_custom
         # instances that did not come through the GTO
         # factory (e.g. from Mole_custom.from_arrays).
@@ -540,6 +549,7 @@ class _VMCDriverNN:
             import h5py
             import pathlib
             from .observables.force import (
+                vmc_nn_gradients_fast_warp,
                 vmc_nn_gradients_zvzb,
                 save_nn_gradients,
             )
@@ -548,16 +558,28 @@ class _VMCDriverNN:
             grd_nn = self.grd_nn
             mol_info = self.mol_info
 
-            nn_gradient_batch = vmc_nn_gradients_zvzb(
-                self.log_psi, nuc_crds, charges,
-                nelec, params,
-                lap_grad=self.lap_grad,
-            )
+            if self.force_warp == 'fast_warp':
+                nn_gradient_batch = vmc_nn_gradients_fast_warp(
+                    self.log_psi, nuc_crds, charges,
+                    nelec, params,
+                )
+            else:
+                nn_gradient_batch = vmc_nn_gradients_zvzb(
+                    self.log_psi, nuc_crds, charges,
+                    nelec, params,
+                    lap_grad=self.lap_grad,
+                )
 
             p = pathlib.Path(ofname_grd)
             if p.exists():
                 p.unlink()
             with h5py.File(ofname_grd, 'w') as f:
+                f.attrs['force_warp'] = (
+                    'none' if self.force_warp is None
+                    else self.force_warp
+                )
+                if self.force_warp is not None:
+                    f.attrs['warp_weights'] = 'distance'
                 f.create_dataset(
                     'grd_nn', data=grd_nn,
                 )
@@ -1071,7 +1093,7 @@ class _VMCDriverNN:
 
 def get_vmc_nn_func(
     mol_info, config, init_key, prefix='vmc',
-    symmop_list=None, nn_dtype='float32',
+    symmop_list=None, nn_dtype='float32', force_warp=None,
 ):
     """Construct a VMC driver for NN wavefunctions.
 
@@ -1105,6 +1127,19 @@ def get_vmc_nn_func(
             energies and accumulators stay float64.  ``None``
             evaluates in the input precision (float64).  See
             :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`.
+        force_warp: Nuclear-force estimator used when the run
+            computes gradients.  ``None`` (default, or ``'none'``)
+            is the no-warp ZVZB estimator
+            (:func:`~OmegaQMC.observables.force.vmc_nn_gradients_zvzb`),
+            whose kinetic term differentiates the forward
+            Laplacian with respect to the nuclei.
+            ``'fast_warp'`` is the space-warp estimator of Qian,
+            Li and Chen (2024) with no kinetic-energy derivatives
+            (:func:`~OmegaQMC.observables.force.vmc_nn_gradients_fast_warp`):
+            cheaper, and much less sensitive to the network's
+            learned nuclear derivative.  Both write the same
+            ``.grd.h5`` layout; the choice is recorded in its
+            ``force_warp`` attribute.
 
     Returns:
         :class:`_VMCDriverNN` instance.  Call it with
@@ -1121,4 +1156,5 @@ def get_vmc_nn_func(
         mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
         symmop_list=symmop_list, nn_dtype=nn_dtype,
+        force_warp=force_warp,
     )
