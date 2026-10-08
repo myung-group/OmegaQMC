@@ -212,9 +212,14 @@ class _VMCOptDriverNN_IRAdam:
             )
 
         # --- Metropolis move ---
-        @jax.jit
-        def metropolis_move(
-            rng_key, elec_crds, step_size, params,
+        # ``metropolis_move_lp`` takes and returns ``log|psi|`` of the
+        # current configuration, so a move costs one network
+        # evaluation instead of two (DeepQMC keeps it in the sampler
+        # state the same way).  The cache is only valid for the
+        # parameters it was computed with, so every scan below
+        # re-evaluates it once on entry.
+        def metropolis_move_lp(
+            rng_key, elec_crds, lp_old, step_size, params,
         ):
             key_prop, key_accept = jax.random.split(
                 rng_key,
@@ -234,9 +239,6 @@ class _VMCOptDriverNN_IRAdam:
             )
             valid = (dists_en.min() > MIN_DIST_THRESHOLD) \
                 & (dists_ee.min() > MIN_DIST_THRESHOLD)
-            lp_old = log_psi(
-                elec_crds, nuc_crds, params,
-            )
             lp_new = log_psi(
                 proposed, nuc_crds, params,
             )
@@ -247,7 +249,13 @@ class _VMCOptDriverNN_IRAdam:
             new_crds = jnp.where(
                 accept, proposed, elec_crds,
             )
-            return new_crds, accept
+            new_lp = jnp.where(accept, lp_new, lp_old)
+            return new_crds, new_lp, accept
+
+        move_lp_allw = jax.vmap(
+            metropolis_move_lp, in_axes=(0, 0, 0, None, None),
+        )
+        log_psi_allw = jax.vmap(log_psi, in_axes=(0, None, None))
 
         # --- Equilibration scan ---
         @partial(jax.jit, static_argnums=(4, 5))
@@ -256,21 +264,19 @@ class _VMCOptDriverNN_IRAdam:
             num_be, num_spb,
         ):
             def eq_step(carry, _):
-                rk, w, s, p = carry
+                rk, w, lp, s, p = carry
                 rk0, rk1 = jax.random.split(rk)
                 keys = jax.random.split(
                     rk1, w.shape[0],
                 )
-                nw, acc = jax.vmap(
-                    metropolis_move,
-                    in_axes=(0, 0, None, None),
-                )(keys, w, s, p)
+                nw, nlp, acc = move_lp_allw(keys, w, lp, s, p)
                 ar = acc.mean()
                 ns = s * (0.6 + ar)
-                return (rk0, nw, ns, p), ar
+                return (rk0, nw, nlp, ns, p), ar
 
             carry = (
                 rng_key, walkers,
+                log_psi_allw(walkers, nuc_crds, params),
                 step_size, params,
             )
             for _ in range(num_be):
@@ -278,7 +284,8 @@ class _VMCOptDriverNN_IRAdam:
                     eq_step, carry,
                     jnp.arange(num_spb),
                 )
-            return carry, acc
+            rk, w, _, s, p = carry
+            return (rk, w, s, p), acc
 
         # --- Production scan ---
         # The block always performs ``num_spb * num_dc`` Metropolis
@@ -308,25 +315,21 @@ class _VMCOptDriverNN_IRAdam:
             stride = max(1, num_spb // n_meas)
 
             def move_once(carry, _):
-                rk, w, s, p = carry
+                rk, w, lp, s, p = carry
                 for _ in range(num_dc):
                     rk0, rk1 = jax.random.split(rk)
                     keys = jax.random.split(
                         rk1, w.shape[0],
                     )
-                    nw, acc = jax.vmap(
-                        metropolis_move,
-                        in_axes=(0, 0, None, None),
-                    )(keys, w, s, p)
-                    w = nw
+                    w, lp, acc = move_lp_allw(keys, w, lp, s, p)
                     rk = rk0
-                return (rk, w, s, p), acc.mean()
+                return (rk, w, lp, s, p), acc.mean()
 
             def meas_step(carry, _):
                 carry, ars = jax.lax.scan(
                     move_once, carry, jnp.arange(stride),
                 )
-                _, w, _, p = carry
+                _, w, _, _, p = carry
                 return carry, (
                     ars[-1],
                     w if keep_walkers else None,
@@ -336,13 +339,14 @@ class _VMCOptDriverNN_IRAdam:
 
             carry = (
                 rng_key, walkers,
+                log_psi_allw(walkers, nuc_crds, params),
                 step_size, params,
             )
-            carry, results = jax.lax.scan(
+            (rk, w, _, s, p), results = jax.lax.scan(
                 meas_step, carry,
                 jnp.arange(n_meas),
             )
-            return carry, results
+            return (rk, w, s, p), results
 
         # --- Batch energy ---
         # Chunked (lax.map) local energy for validation and the

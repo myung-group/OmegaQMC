@@ -315,9 +315,14 @@ class _VMCDriverNN:
         self._i_e, self._j_e = i_e, j_e
 
         # --- Metropolis move ---
-        @jax.jit
-        def metropolis_move(
-            rng_key, elec_crds, step_size, params,
+        # ``metropolis_move_lp`` takes and returns ``log|psi|`` of the
+        # current configuration, so a move costs one network
+        # evaluation instead of two (DeepQMC keeps it in the sampler
+        # state the same way).  The parameters are fixed during a run,
+        # so ``__call__`` carries the cache from equilibration through
+        # production.
+        def metropolis_move_lp(
+            rng_key, elec_crds, lp_old, step_size, params,
         ):
             key_prop, key_acc = jax.random.split(
                 rng_key,
@@ -342,9 +347,6 @@ class _VMCDriverNN:
                 (dists_en.min() > MIN_DIST_THRESHOLD)
                 & (dists_ee.min() > MIN_DIST_THRESHOLD)
             )
-            lp_old = log_psi(
-                elec_crds, nuc_crds, params,
-            )
             lp_new = log_psi(
                 proposed, nuc_crds, params,
             )
@@ -355,12 +357,29 @@ class _VMCDriverNN:
             new_crds = jnp.where(
                 accept, proposed, elec_crds,
             )
+            new_lp = jnp.where(accept, lp_new, lp_old)
+            return new_crds, new_lp, accept
+
+        @jax.jit
+        def metropolis_move(
+            rng_key, elec_crds, step_size, params,
+        ):
+            lp_old = log_psi(
+                elec_crds, nuc_crds, params,
+            )
+            new_crds, _, accept = metropolis_move_lp(
+                rng_key, elec_crds, lp_old, step_size, params,
+            )
             return new_crds, accept
 
         self._metropolis_move = metropolis_move
         self._metropolis_move_allw = jax.vmap(
             metropolis_move,
             in_axes=(0, 0, None, None),
+        )
+        self._metropolis_move_lp_allw = jax.vmap(
+            metropolis_move_lp,
+            in_axes=(0, 0, 0, None, None),
         )
 
     def initialize_walkers(self, rng_key, num_walkers):
@@ -524,7 +543,7 @@ class _VMCDriverNN:
         energy_en = self.energy_en
         energy_ke = self.energy_ke
         batched_energy_ke = self.batched_energy_ke
-        metropolis_move_allw = self._metropolis_move_allw
+        metropolis_move_lp_allw = self._metropolis_move_lp_allw
 
         # --- Informational GPU capacity estimate ---
         # Does NOT modify num_walkers.
@@ -651,12 +670,14 @@ class _VMCDriverNN:
         if walkers_sharding is not None:
             walkers = jax.device_put(
                 walkers, walkers_sharding)
+        # log|psi| of the walkers, carried with them through the run
+        walkers_lp = self._log_psi_batch_p(walkers, params)
         mc_stepsize = (3 * mc_timestep) ** 0.5
 
         # --- Equilibration ---
         @jax.jit
         def eq_step(state, _):
-            rk, w, s = state
+            rk, w, lp, s = state
             rk, key = jax.random.split(rk)
             keys = jax.random.split(
                 key, num_walkers,
@@ -669,12 +690,12 @@ class _VMCDriverNN:
                         walker_keys_sharding,
                     )
                 )
-            nw, acc = metropolis_move_allw(
-                keys, w, s, params,
+            nw, nlp, acc = metropolis_move_lp_allw(
+                keys, w, lp, s, params,
             )
             ar = acc.mean()
             ns = _adapt_step_size(s, ar)
-            return (rk, nw, ns), ar
+            return (rk, nw, nlp, ns), ar
 
         # Per-step stationarity criterion for automatic equilibration:
         # the walker-averaged mean electron-electron distance (DeepQMC's
@@ -711,12 +732,12 @@ class _VMCDriverNN:
         eq_note = ""
         if num_steps_equil is None:
             for _ in range(num_blocks_equil):
-                state = (rng_key, walkers, mc_stepsize)
+                state = (rng_key, walkers, walkers_lp, mc_stepsize)
                 state, ratios = jax.lax.scan(
                     eq_step, state,
                     jnp.arange(num_steps_per_block),
                 )
-                rng_key, walkers, mc_stepsize = state
+                rng_key, walkers, walkers_lp, mc_stepsize = state
             n_eq_done = num_blocks_equil * num_steps_per_block
         else:
             # Chunks of _EQ_AUTO_BLOCK samples, so the scan compiles
@@ -730,11 +751,11 @@ class _VMCDriverNN:
             n_eq_done = 0
             converged = False
             while n_eq_done < n_eq_target:
-                state = (rng_key, walkers, mc_stepsize)
+                state = (rng_key, walkers, walkers_lp, mc_stepsize)
                 state, (ratios, crit) = jax.lax.scan(
                     eq_step_c, state, jnp.arange(_EQ_AUTO_BLOCK),
                 )
-                rng_key, walkers, mc_stepsize = state
+                rng_key, walkers, walkers_lp, mc_stepsize = state
                 n_eq_done += _EQ_AUTO_BLOCK * eq_stride
                 if not auto_eq:
                     continue
@@ -764,7 +785,7 @@ class _VMCDriverNN:
         if compute_gradients:
             @jax.jit
             def prod_step(state, _):
-                rk, w, s = state
+                rk, w, lp, s = state
                 for _ in range(num_steps_decorr):
                     rk, key = jax.random.split(rk)
                     keys = jax.random.split(
@@ -778,8 +799,8 @@ class _VMCDriverNN:
                                 walker_keys_sharding,
                             )
                         )
-                    nw, acc = metropolis_move_allw(
-                        keys, w, s, params,
+                    nw, lp, acc = metropolis_move_lp_allw(
+                        keys, w, lp, s, params,
                     )
                     w = nw
                 ar = acc.mean()
@@ -787,13 +808,13 @@ class _VMCDriverNN:
                 e_en = jax.vmap(energy_en)(nw)
                 e_ke = batched_energy_ke(nw, params)
                 return (
-                    (rk, nw, s),
+                    (rk, nw, lp, s),
                     (ar, e_ee, e_en, e_ke, nw),
                 )
         else:
             @jax.jit
             def prod_step(state, _):
-                rk, w, s = state
+                rk, w, lp, s = state
                 for _ in range(num_steps_decorr):
                     rk, key = jax.random.split(rk)
                     keys = jax.random.split(
@@ -807,8 +828,8 @@ class _VMCDriverNN:
                                 walker_keys_sharding,
                             )
                         )
-                    nw, acc = metropolis_move_allw(
-                        keys, w, s, params,
+                    nw, lp, acc = metropolis_move_lp_allw(
+                        keys, w, lp, s, params,
                     )
                     w = nw
                 ar = acc.mean()
@@ -816,7 +837,7 @@ class _VMCDriverNN:
                 e_en = jax.vmap(energy_en)(nw)
                 e_ke = batched_energy_ke(nw, params)
                 return (
-                    (rk, nw, s),
+                    (rk, nw, lp, s),
                     (ar, e_ee, e_en, e_ke),
                 )
 
@@ -838,7 +859,7 @@ class _VMCDriverNN:
                 return time.perf_counter() - t0, out
 
             t_step, (_, probe_out) = _timed(
-                prod_step, (rng_key, walkers, mc_stepsize), None,
+                prod_step, (rng_key, walkers, walkers_lp, mc_stepsize), None,
             )
             per_sample = t_step / num_walkers
             if compute_gradients:
@@ -911,12 +932,12 @@ class _VMCDriverNN:
             )
 
         for blk in range(1, num_blocks + 1):
-            state = (rng_key, walkers, mc_stepsize)
+            state = (rng_key, walkers, walkers_lp, mc_stepsize)
             state, result = jax.lax.scan(
                 prod_step, state,
                 jnp.arange(num_steps_per_block),
             )
-            rng_key, walkers, _ = state
+            rng_key, walkers, walkers_lp, _ = state
 
             if compute_gradients:
                 (ratios, e_ee, e_en, e_ke, sampled_w) = result

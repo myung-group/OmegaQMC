@@ -274,8 +274,14 @@ class _VMCOptDriverNN_SR:
             )
 
         # --- Metropolis move ---
-        @jax.jit
-        def metropolis_move(rng_key, elec_crds, step_size, params):
+        # ``metropolis_move_lp`` takes and returns ``log|psi|`` of the
+        # current configuration, so a move costs one network
+        # evaluation instead of two (DeepQMC keeps it in the sampler
+        # state the same way).  The cache is only valid for the
+        # parameters it was computed with, so every scan below
+        # re-evaluates it once on entry.
+        def metropolis_move_lp(rng_key, elec_crds, lp_old, step_size,
+                               params):
             key_prop, key_accept = jax.random.split(rng_key)
             proposed = elec_crds + step_size * (
                 jax.random.normal(
@@ -293,9 +299,6 @@ class _VMCOptDriverNN_SR:
             valid = \
                 (dists_en.min() > MIN_DIST_THRESHOLD) \
                 & (dists_ee.min() > MIN_DIST_THRESHOLD)
-            lp_old = log_psi(
-                elec_crds, nuc_crds, params,
-            )
             lp_new = log_psi(
                 proposed, nuc_crds, params,
             )
@@ -306,7 +309,21 @@ class _VMCOptDriverNN_SR:
             new_crds = jnp.where(
                 accept, proposed, elec_crds,
             )
+            new_lp = jnp.where(accept, lp_new, lp_old)
+            return new_crds, new_lp, accept
+
+        @jax.jit
+        def metropolis_move(rng_key, elec_crds, step_size, params):
+            lp_old = log_psi(elec_crds, nuc_crds, params)
+            new_crds, _, accept = metropolis_move_lp(
+                rng_key, elec_crds, lp_old, step_size, params,
+            )
             return new_crds, accept
+
+        move_lp_allw = jax.vmap(
+            metropolis_move_lp, in_axes=(0, 0, 0, None, None),
+        )
+        log_psi_allw = jax.vmap(log_psi, in_axes=(0, None, None))
 
         # --- Equilibration scan ---
         @partial(jax.jit, static_argnums=(4, 5))
@@ -315,21 +332,19 @@ class _VMCOptDriverNN_SR:
             num_be, num_spb,
         ):
             def eq_step(carry, _):
-                rk, w, s, p = carry
+                rk, w, lp, s, p = carry
                 rk0, rk1 = jax.random.split(rk)
                 keys = jax.random.split(
                     rk1, w.shape[0],
                 )
-                nw, acc = jax.vmap(
-                    metropolis_move,
-                    in_axes=(0, 0, None, None),
-                )(keys, w, s, p)
+                nw, nlp, acc = move_lp_allw(keys, w, lp, s, p)
                 ar = acc.mean()
                 ns = _adapt_step_size(s, ar)
-                return (rk0, nw, ns, p), ar
+                return (rk0, nw, nlp, ns, p), ar
 
             carry = (
                 rng_key, walkers,
+                log_psi_allw(walkers, nuc_crds, params),
                 step_size, params,
             )
             for _ in range(num_be):
@@ -337,7 +352,8 @@ class _VMCOptDriverNN_SR:
                     eq_step, carry,
                     jnp.arange(num_spb),
                 )
-            return carry, acc
+            rk, w, _, s, p = carry
+            return (rk, w, s, p), acc
 
         # --- Production scan ---
         @partial(jax.jit, static_argnums=(4, 5))
@@ -346,33 +362,31 @@ class _VMCOptDriverNN_SR:
             num_spb, num_dc,
         ):
             def prod_step(carry, _):
-                rk, w, s, p = carry
+                rk, w, lp, s, p = carry
                 for _ in range(num_dc):
                     rk0, rk1 = jax.random.split(rk)
                     keys = jax.random.split(
                         rk1, w.shape[0],
                     )
-                    nw, acc = jax.vmap(
-                        metropolis_move,
-                        in_axes=(0, 0, None, None),
-                    )(keys, w, s, p)
+                    nw, lp, acc = move_lp_allw(keys, w, lp, s, p)
                     w = nw
                     rk = rk0
                 ar = acc.mean()
                 energies = batched_local_energy(nw, p)
-                return (rk, nw, s, p), (
+                return (rk, nw, lp, s, p), (
                     ar, energies,
                 )
 
             carry = (
                 rng_key, walkers,
+                log_psi_allw(walkers, nuc_crds, params),
                 step_size, params,
             )
-            carry, results = jax.lax.scan(
+            (rk, w, _, s, p), results = jax.lax.scan(
                 prod_step, carry,
                 jnp.arange(num_spb),
             )
-            return carry, results
+            return (rk, w, s, p), results
 
         # --- Batch energy (chunked; not differentiated) ---
         @jax.jit
@@ -380,6 +394,8 @@ class _VMCOptDriverNN_SR:
             return batched_local_energy(walkers, params)
 
         self.metropolis_move = metropolis_move
+        self._move_lp_allw = move_lp_allw
+        self._log_psi_allw = log_psi_allw
         self.run_equilibration = run_equilibration
         self.run_production = run_production
         self.compute_batch_energy = compute_batch_energy
@@ -637,28 +653,28 @@ class _VMCOptDriverNN_SR:
             params, num_steps,
         ):
             def step(carry, _):
-                rk, w, s, p = carry
+                rk, w, lp, s, p = carry
                 rk, rk1 = jax.random.split(rk)
                 keys = jax.random.split(
                     rk1, w.shape[0],
                 )
-                nw, acc = jax.vmap(
-                    self.metropolis_move,
-                    in_axes=(0, 0, None, None),
-                )(keys, w, s, p)
+                nw, nlp, acc = self._move_lp_allw(
+                    keys, w, lp, s, p,
+                )
                 ar = acc.mean()
                 ns = _adapt_step_size(s, ar)
-                return (rk, nw, ns, p), ar
+                return (rk, nw, nlp, ns, p), ar
 
             carry = (
                 rng_key, walkers,
+                self._log_psi_allw(walkers, self.nuc_crds, params),
                 step_size, params,
             )
-            carry, ars = jax.lax.scan(
+            (rk, w, _, s, p), ars = jax.lax.scan(
                 step, carry,
                 jnp.arange(num_steps),
             )
-            return carry, ars
+            return (rk, w, s, p), ars
 
         # --- CG solve (JIT-compiled) ---
         @jax.jit

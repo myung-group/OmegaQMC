@@ -598,8 +598,14 @@ class _VMCOptDriverNN_KFAC:
         self.compute_batch_energy = jax.jit(batched_local_energy)
 
         # --- Metropolis ---
-        @jax.jit
-        def metropolis_move(rng_key, elec_crds, step_size, params):
+        # ``metropolis_move_lp`` takes and returns ``log|psi|`` of the
+        # current configuration, so a move costs one network
+        # evaluation instead of two (DeepQMC keeps it in the sampler
+        # state the same way).  The cache is only valid for the
+        # parameters it was computed with, so ``decorr_scan``
+        # re-evaluates it once on entry.
+        def metropolis_move_lp(rng_key, elec_crds, lp_old, step_size,
+                               params):
             key_prop, key_accept = jax.random.split(rng_key)
             proposed = elec_crds + step_size * jax.random.normal(
                 key_prop, elec_crds.shape,
@@ -614,15 +620,24 @@ class _VMCOptDriverNN_KFAC:
                 (dists_en.min() > MIN_DIST_THRESHOLD)
                 & (dists_ee.min() > MIN_DIST_THRESHOLD)
             )
-            lp_old = log_psi(elec_crds, nuc_crds, params)
             lp_new = log_psi(proposed, nuc_crds, params)
             accept = (
                 jax.random.uniform(key_accept)
                 < jnp.exp(2 * (lp_new - lp_old))
             ) & valid
             return (
-                jnp.where(accept, proposed, elec_crds), accept,
+                jnp.where(accept, proposed, elec_crds),
+                jnp.where(accept, lp_new, lp_old),
+                accept,
             )
+
+        @jax.jit
+        def metropolis_move(rng_key, elec_crds, step_size, params):
+            lp_old = log_psi(elec_crds, nuc_crds, params)
+            new_crds, _, accept = metropolis_move_lp(
+                rng_key, elec_crds, lp_old, step_size, params,
+            )
+            return new_crds, accept
 
         self._metropolis_move_allw = jax.jit(jax.vmap(
             metropolis_move, in_axes=(0, 0, None, None),
@@ -632,20 +647,24 @@ class _VMCOptDriverNN_KFAC:
         def decorr_scan(rng_key, walkers, step_size, params,
                         num_steps):
             def step(carry, _):
-                rk, w, s, p = carry
+                rk, w, lp, s, p = carry
                 rk, rk1 = jax.random.split(rk)
                 keys = jax.random.split(rk1, w.shape[0])
-                nw, acc = jax.vmap(
-                    metropolis_move, in_axes=(0, 0, None, None),
-                )(keys, w, s, p)
+                nw, nlp, acc = jax.vmap(
+                    metropolis_move_lp,
+                    in_axes=(0, 0, 0, None, None),
+                )(keys, w, lp, s, p)
                 ar = acc.mean()
-                return (rk, nw, _adapt_step_size(s, ar), p), ar
+                return (rk, nw, nlp, _adapt_step_size(s, ar), p), ar
 
-            carry = (rng_key, walkers, step_size, params)
-            carry, ars = jax.lax.scan(
+            lp0 = jax.vmap(
+                log_psi, in_axes=(0, None, None),
+            )(walkers, nuc_crds, params)
+            carry = (rng_key, walkers, lp0, step_size, params)
+            (rk, w, _, s, p), ars = jax.lax.scan(
                 step, carry, jnp.arange(num_steps),
             )
-            return carry, ars
+            return (rk, w, s, p), ars
 
         self.decorr_scan = decorr_scan
 
@@ -859,34 +878,58 @@ class _VMCOptDriverNN_KFAC:
         )
         generic_sizes = list(self._generic_sizes)
 
+        # Linear layers grouped by kernel shape.  kfac_apply inverts
+        # each group's factors in one batched call: 32 of the 39
+        # PsiFormer layers are 256 x 256, and their small LU
+        # factorisations are launch-bound when done one at a time
+        # (63 ms per iteration, against 11 ms batched).
+        shape_groups: Dict[Tuple[int, int], List[str]] = {}
+        for layer in layer_paths:
+            shape_groups.setdefault(
+                tuple(self._kernel_shapes[layer]), [],
+            ).append(layer)
+        batched_kron_inverse = jax.vmap(
+            _damped_kron_inverse, in_axes=(0, 0, None),
+        )
+
         # --- KFAC solve + parameter update ---
         def kfac_apply(params, A_hat, G_hat, dW_hat, generic_flat,
                        de_eff, A_state, G_state, lr_now,
                        damping_arr, kernel_scale):
             new_A: Dict[str, jax.Array] = {}
             new_G: Dict[str, jax.Array] = {}
-            update_kernels: Dict[str, jax.Array] = {}
-            layer_dW_loss: Dict[str, jax.Array] = {}
+            layer_steps: Dict[str, jax.Array] = {}
 
             for layer in layer_paths:
-                A_new = (
+                new_A[layer] = (
                     ema_decay_arr * A_state[layer]
                     + (1.0 - ema_decay_arr) * A_hat[layer]
                 )
-                G_new = (
+                new_G[layer] = (
                     ema_decay_arr * G_state[layer]
                     + (1.0 - ema_decay_arr) * G_hat[layer]
                 )
-                new_A[layer] = A_new
-                new_G[layer] = G_new
-                A_inv, G_inv = _damped_kron_inverse(
-                    A_new, G_new, damping_arr,
+            for layers in shape_groups.values():
+                A_inv, G_inv = batched_kron_inverse(
+                    jnp.stack([new_A[lyr] for lyr in layers]),
+                    jnp.stack([new_G[lyr] for lyr in layers]),
+                    damping_arr,
                 )
-                dW_loss = dW_hat[layer]
                 # (in, in) @ (in, out) @ (out, out) -> (in, out)
-                step = G_inv @ dW_loss @ A_inv
-                update_kernels[layer] = kernel_scale[layer] * step
-                layer_dW_loss[layer] = dW_loss
+                steps = G_inv @ jnp.stack(
+                    [dW_hat[lyr] for lyr in layers],
+                ) @ A_inv
+                for i, lyr in enumerate(layers):
+                    layer_steps[lyr] = steps[i]
+            # Back in layer order, so the sums below do not depend on
+            # the grouping.
+            update_kernels: Dict[str, jax.Array] = {
+                layer: kernel_scale[layer] * layer_steps[layer]
+                for layer in layer_paths
+            }
+            layer_dW_loss: Dict[str, jax.Array] = {
+                layer: dW_hat[layer] for layer in layer_paths
+            }
 
             if generic_flat.shape[1] > 0:
                 generic_step, generic_grad = (
