@@ -4,7 +4,9 @@ Evaluates, for one walker and without automatic differentiation,
 
 * ``log|psi|``,
 * its gradient with respect to every network parameter, returned
-  in the structure of the NNX parameter state, and
+  in the structure of the NNX parameter state,
+* its gradient with respect to the nuclear coordinates (through
+  ``backward.nuclear_grad``), used by the ZVZB force, and
 * for every ``nnx.Linear`` layer the per-electron inputs ``a`` and
   output cotangents ``g = d log|psi| / d(layer output)``, the
   quantities KFAC builds its Kronecker factors from
@@ -122,6 +124,13 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         applied to.  Layers the forward pass never uses (the
         ``subnet_g`` kernels without deep features) get zero
         gradients and no capture.
+
+        ``backward.nuclear_grad(elec_crds, nuc_crds, params)``
+        returns ``(log_psi, dlogpsi_dR)`` with ``dlogpsi_dR`` of
+        shape ``(n_nuc, 3)``, from the same pass (the nuclei enter
+        only through ``r - R`` in the embedding features and the
+        envelope distances).  Under ``jit`` the parameter
+        gradients it does not return are eliminated as dead code.
     """
     if isinstance(config, str):
         config = load_nn_config(config)
@@ -191,7 +200,7 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
     cdt = None if compute_dtype is None else jnp.dtype(compute_dtype)
     sdt = jax.dtypes.canonicalize_dtype(jnp.float64)
 
-    def backward(elec_crds, nuc_crds, params):
+    def _core(elec_crds, nuc_crds, params):
         out_dt = jnp.promote_types(elec_crds.dtype, nuc_crds.dtype)
         # gradients are returned in the dtype of each given parameter
         p_dtypes = [leaf.dtype for leaf in jax.tree.leaves(params)]
@@ -312,6 +321,7 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         # ---------------- backward ----------------
         caps = {}
         g_h = jnp.zeros_like(h)
+        g_rr_e = []                 # d log|psi| / d rr_e, per spin block
         n_up_rows = gS[:, :n_up, :]
         n_dn_rows = gS[:, n_up:, :]
         for s, g_orb in (('up', n_up_rows), ('down', n_dn_rows)):
@@ -332,6 +342,8 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
                                                     g_env, ex)
             grads['envelope/zetas' + suf] = -jnp.sign(zeta) * pi * (
                 jnp.einsum('io,ioc,ic->oc', g_env, ex, rr_e[sl]))
+            g_rr_e.append(-jnp.einsum('io,oc,ioc->ic', g_env,
+                                      pi * jnp.abs(zeta), ex))
 
         for i in reversed(range(n_layers)):
             T = tape[i]
@@ -380,6 +392,26 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         caps[emb_name] = (feats, g_h)
         grads[emb_name + '/kernel'] = feats.T @ g_h
 
+        # d log|psi| / dR: R enters only through d = r - R, in the
+        # embedding features and the envelope distances.
+        n_p = len(ne_powers)
+        g_f = (g_h @ P[emb_name + '/kernel'].T)[:, :-1]  # drop spin
+        g_f = jnp.swapaxes(g_f.reshape(n_e, R.shape[0], -1), 0, 1)
+        g_fdist, g_fdiff = g_f[..., :n_p], g_f[..., n_p:]
+        g_d = g_fdiff * fac[..., None]
+        g_fac = jnp.sum(g_fdiff * d, axis=-1)
+        g_rr = jnp.zeros_like(rr).at[center_idx].add(
+            jnp.concatenate(g_rr_e, axis=0).T)
+        for j, pw in enumerate(ne_powers):
+            g_fac = g_fac + g_fdist[..., j] * rr ** pw
+            g_rr = g_rr + g_fdist[..., j] * pw * rr ** (pw - 1) * fac
+        if ne_log_rescale:
+            # fac = log(1 + rr) / rr
+            g_rr = g_rr + g_fac * (1.0 / ((1.0 + rr) * rr)
+                                   - jnp.log1p(rr) / (rr * rr))
+        g_d = g_d + (g_rr / rr)[..., None] * d
+        dlp_dR = -jnp.sum(g_d, axis=1)                  # (n_nuc, 3)
+
         grad_leaves = []
         for pth, leaf, odt in zip(paths, jax.tree.leaves(params),
                                   p_dtypes):
@@ -388,6 +420,16 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
                 gl = jnp.zeros_like(leaf)
             grad_leaves.append(gl.astype(odt))
         grad_tree = jax.tree_util.tree_unflatten(treedef, grad_leaves)
-        return log_psi.astype(out_dt), grad_tree, caps
+        return (log_psi.astype(out_dt), grad_tree, caps,
+                dlp_dR.astype(out_dt))
 
+    def backward(elec_crds, nuc_crds, params):
+        log_psi, grad_tree, caps, _ = _core(elec_crds, nuc_crds, params)
+        return log_psi, grad_tree, caps
+
+    def nuclear_grad(elec_crds, nuc_crds, params):
+        log_psi, _, _, dlp_dR = _core(elec_crds, nuc_crds, params)
+        return log_psi, dlp_dR
+
+    backward.nuclear_grad = nuclear_grad
     return backward, layer_names

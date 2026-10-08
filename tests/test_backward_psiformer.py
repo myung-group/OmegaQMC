@@ -13,6 +13,8 @@ so same-spin cusp pairs and multi-electron attention are covered):
   undamped solve, ``g = (a a^T)^-1 a M``;
 * the KFAC driver with ``backward='manual'`` builds the same energy
   gradient and generic-leaf gradients as the autodiff driver.
+* ``nuclear_grad`` gives ``d log|psi| / dR`` as ``jax.grad`` does,
+  and the ZVZB force components built with it are unchanged.
 """
 import jax
 import jax.numpy as jnp
@@ -132,8 +134,49 @@ def test_kfac_backward_auto_resolution():
         raise AssertionError("backward='manual' accepted a FermiNet")
 
 
+def test_nuclear_grad_and_zvzb():
+    """``nuclear_grad`` gives ``d log|psi| / dR`` as ``jax.grad``
+    does, and the ZVZB force components built with it are unchanged.
+    """
+    from OmegaQMC.observables.force import vmc_nn_gradients_zvzb
+    from OmegaQMC.vmc_nn import get_vmc_nn_func
+
+    mol = _lih()
+    log_psi, params, bwd, _names, nuc, walkers = _pieces(mol)
+    lp, dR = jax.vmap(
+        lambda r: bwd.nuclear_grad(r, nuc, params))(walkers)
+    dR_ref = jax.vmap(
+        lambda r: jax.grad(log_psi, argnums=1)(r, nuc, params),
+    )(walkers)
+    scale = float(jnp.max(jnp.abs(dR_ref)))
+    assert float(jnp.max(jnp.abs(dR - dR_ref))) < RTOL * scale
+
+    _, _, _, lap_grad = make_nn_log_psi(
+        'psiformer', mol, jax.random.key(SEED), compute_dtype=None,
+    )
+    charges = jnp.asarray([3.0, 1.0])
+    out = [
+        vmc_nn_gradients_zvzb(
+            log_psi, nuc, charges, 4, params, lap_grad=lap_grad,
+            nuc_grad=ng,
+        )(walkers[:3])
+        for ng in (bwd.nuclear_grad, None)
+    ]
+    for a, b in zip(*out):
+        assert float(jnp.max(jnp.abs(a - b))) <= RTOL * float(
+            jnp.max(jnp.abs(b)))
+
+    # The VMC driver picks the hand-written pass for a PsiFormer.
+    key = jax.random.key(SEED)
+    assert get_vmc_nn_func(mol, 'psiformer', key,
+                           prefix='/tmp/bwd_test').backward == 'manual'
+    assert get_vmc_nn_func(mol, 'ferminet', key,
+                           prefix='/tmp/bwd_test').backward == 'autodiff'
+
+
 if __name__ == '__main__':
     test_backward_matches_autodiff()
     test_kfac_manual_gradient_matches_autodiff()
     test_kfac_backward_auto_resolution()
+    test_nuclear_grad_and_zvzb()
     print('OK')

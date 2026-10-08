@@ -548,6 +548,7 @@ def vmc_nn_gradients_zvzb(
     nelec,
     params,
     lap_grad=None,
+    nuc_grad=None,
 ):
     """Build a JIT-compiled ZVZB gradient batch function.
 
@@ -622,6 +623,15 @@ def vmc_nn_gradients_zvzb(
         \\nabla_R\\log|\\psi|`.  When omitted or with
         ``use_vgl == False``, the original
         ``laplacian``-per-component path is used.
+    nuc_grad : callable, optional
+        ``(elec_crds, nuc_crds, params) -> (log_psi, dlogpsi_dR)``
+        giving :math:`\\nabla_R\\log|\\psi|` for a single walker
+        without automatic differentiation, e.g. the
+        ``nuclear_grad`` attribute of the hand-written PsiFormer
+        backward pass
+        (:func:`~OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward`).
+        Used for ``grd_logpsi``; when omitted it is
+        ``jax.grad(log_psi, argnums=1)``.
 
     Returns
     -------
@@ -672,6 +682,8 @@ def vmc_nn_gradients_zvzb(
     # --- Grad of log|psi| w.r.t. nuclear coords ---
     @jax.jit
     def _grad_nuc_log_psi(elec_crds):
+        if nuc_grad is not None:
+            return nuc_grad(elec_crds, nuc_crds, params)[1]
         return jax.grad(
             log_psi, argnums=1,
         )(elec_crds, nuc_crds, params)

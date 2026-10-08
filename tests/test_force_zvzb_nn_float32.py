@@ -33,7 +33,10 @@ from OmegaQMC.observables.force import vmc_nn_gradients_zvzb
 SEED = 920
 DET_RATIO = 1e-6
 # Tolerance relative to max(1, |grd_ke|): the float32 network itself
-# limits the agreement to ~1e-4 relative.
+# limits the agreement to ~1e-3 relative.  The comparison runs at
+# 'highest' matmul precision, since a GPU's default TF32 matmuls add
+# ~2e-2 on their own; this test is about the Slater-stage
+# cancellation (errors of ~1e5 without the float64 stage).
 RTOL = 1e-2
 
 
@@ -112,7 +115,8 @@ def test_h2_psiformer_zvzb_float32_near_det_node():
         fn = vmc_nn_gradients_zvzb(
             log_psi, nuc, charges, 2, params, lap_grad=lap_grad,
         )
-        grd_ke[dt] = np.asarray(fn(batch)[1])
+        with jax.default_matmul_precision('highest'):
+            grd_ke[dt] = np.asarray(fn(batch)[1])
 
     ref = grd_ke[None]
     err = np.abs(grd_ke['float32'] - ref) / np.maximum(1.0, np.abs(ref))

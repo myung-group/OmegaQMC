@@ -149,6 +149,7 @@ class _VMCDriverNN:
         self, mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
         symmop_list=None, nn_dtype='float32', force_warp=None,
+        backward='auto',
     ):
         from .observables.force import FORCE_WARPS_NN
         if force_warp == 'none':
@@ -217,6 +218,31 @@ class _VMCDriverNN:
         self.log_psi = log_psi
         self.params = init_params
         self.lap_grad = lap_grad
+
+        # d log|psi| / dR for the ZVZB force: the hand-written
+        # backward pass where the ansatz supports it (see
+        # get_vmc_nn_func), else jax.grad.
+        if backward not in ('auto', 'autodiff', 'manual'):
+            raise ValueError(
+                "backward must be 'auto', 'autodiff' or 'manual',"
+                f" got {backward!r}"
+            )
+        self._nuc_grad = None
+        if backward != 'autodiff':
+            from .psi.nn.backward_psiformer import (
+                make_psiformer_backward,
+            )
+            try:
+                bwd, _ = make_psiformer_backward(
+                    config, mol_info, init_key, compute_dtype=nn_dtype,
+                )
+                self._nuc_grad = bwd.nuclear_grad
+            except NotImplementedError:
+                if backward == 'manual':
+                    raise
+        self.backward = (
+            'manual' if self._nuc_grad is not None else 'autodiff'
+        )
 
         # Precompute nuclear repulsion energy and gradient
         def _nuc_repulsion(R):
@@ -587,6 +613,7 @@ class _VMCDriverNN:
                     self.log_psi, nuc_crds, charges,
                     nelec, params,
                     lap_grad=self.lap_grad,
+                    nuc_grad=self._nuc_grad,
                 )
 
             p = pathlib.Path(ofname_grd)
@@ -659,7 +686,8 @@ class _VMCDriverNN:
                 )
             if verbose >= 1:
                 print(f"Force gradient: batches of {batch_size},"
-                      f" vmap chunks of {force_chunk}")
+                      f" vmap chunks of {force_chunk};"
+                      f" d log|psi|/dR by {self.backward} backward")
 
         rng_key, init_key = jax.random.split(rng_key)
         walkers = self.initialize_walkers(
@@ -1115,6 +1143,7 @@ class _VMCDriverNN:
 def get_vmc_nn_func(
     mol_info, config, init_key, prefix='vmc',
     symmop_list=None, nn_dtype='float32', force_warp=None,
+    backward='auto',
 ):
     """Construct a VMC driver for NN wavefunctions.
 
@@ -1161,6 +1190,16 @@ def get_vmc_nn_func(
             learned nuclear derivative.  Both write the same
             ``.grd.h5`` layout; the choice is recorded in its
             ``force_warp`` attribute.
+        backward: How the no-warp ZVZB estimator gets
+            :math:`\\nabla_R \\log|\\psi|` (its ``grd_logpsi``
+            term).  ``'manual'`` uses the hand-written PsiFormer
+            backward pass of
+            :mod:`~OmegaQMC.psi.nn.backward_psiformer`,
+            ``'autodiff'`` uses ``jax.grad``, and ``'auto'``
+            (default) is ``'manual'`` whenever the ansatz supports
+            it; the choice made is in the driver's ``backward``
+            attribute.  The ZV kinetic term still differentiates the
+            forward Laplacian with ``jax.jacfwd``.
 
     Returns:
         :class:`_VMCDriverNN` instance.  Call it with
@@ -1177,5 +1216,5 @@ def get_vmc_nn_func(
         mol_info, config, init_key,
         ofname_chkpt, ofname_grd,
         symmop_list=symmop_list, nn_dtype=nn_dtype,
-        force_warp=force_warp,
+        force_warp=force_warp, backward=backward,
     )
