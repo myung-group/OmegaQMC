@@ -1482,6 +1482,35 @@ def slogdet_vgl(orb_vgl: VGL):
     return sign, VGL(value=logdet, grad=grad, lap=lap)
 
 
+def _vgl_to_slater_dtype(vin: VGL) -> VGL:
+    """Promote the Slater orbital matrices to float64.
+
+    :func:`slogdet_vgl` works with ``A = S^-1``, so near a node of
+    one determinant of a multi-determinant sum (``det_d -> 0``
+    while ``psi`` stays finite) its ``grad`` and ``lap`` grow as
+    ``1/det_d`` and ``1/det_d^2``, and :func:`slogdet_multidet_vgl`
+    recovers the finite ``grad psi / psi`` and ``lap psi / psi``
+    only by cancellation against the vanishing weight
+    ``det_d / psi``.  In float32 that loses all precision once
+    ``|det_d| / max|det|`` falls below ~1e-5, which ordinary
+    walkers of a 16-determinant PsiFormer reach.  The kinetic
+    energy survives it (rms error 2e-5 Ha), but the ZVZB force,
+    which differentiates the Laplacian once more with respect to
+    the nuclei, gets errors of 1e2-1e5 Ha/bohr on such samples.
+    The map from ``(S, grad S, lap S)`` to the derivatives of
+    ``psi`` is itself well conditioned, so doing only this small
+    ``(n_det, n_e, n_e)`` stage in float64 removes the problem
+    while the network keeps running in float32.  Without
+    ``jax_enable_x64`` this is a no-op.
+    """
+    dt = jax.dtypes.canonicalize_dtype(jnp.float64)
+    return VGL(
+        value=vin.value.astype(dt),
+        grad=vin.grad.astype(dt),
+        lap=vin.lap.astype(dt),
+    )
+
+
 def slogdet_multidet_vgl(
     log_vgl: VGL, signs: jnp.ndarray, coeffs: jnp.ndarray,
 ) -> VGL:
@@ -2867,10 +2896,12 @@ def log_psi_vgl_psiformer(
     orb_up = vgl_mul(orb_up_env, mult_up)
     orb_dn = vgl_mul(orb_dn_env, mult_dn)
 
-    # 6. Slater multi-det
+    # 6. Slater multi-det, in float64 even when the network runs
+    #    in float32 (see _vgl_to_slater_dtype)
     orb_full = vgl_concat(
         [orb_up, orb_dn], axis=-2,
     )                                           # (n_det, n_e, n_e)
+    orb_full = _vgl_to_slater_dtype(orb_full)
     sign_per_det, log_abs = slogdet_vgl(orb_full)
     coeffs = jnp.ones((n_det,), dtype=elec_flat.dtype)
     log_psi_main = slogdet_multidet_vgl(
