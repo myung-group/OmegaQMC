@@ -457,9 +457,21 @@ class _VMCOptDriverNN_KFAC:
             ``<E> + beta Var(E_L)`` objective (0 = pure energy).
         capture_activations: Use the exact per-electron factor path
             (builds a capturing twin of the model).
-        fixed_scale: With ``capture_activations``, multiply each
-            layer's step by ``n_e`` to match textbook KFAC
-            magnitude (FermiNet's ``fixed_scale``).
+        fixed_scale: With per-electron factors
+            (``capture_activations`` or ``backward='manual'``),
+            multiply each layer's step by ``n_e`` to match textbook
+            KFAC magnitude (FermiNet's ``fixed_scale``).
+        backward: How the per-walker derivatives of ``log|psi|``
+            are obtained.  ``'autodiff'`` (default) differentiates
+            the network with ``jax.grad``, one walker at a time.
+            ``'manual'`` uses the hand-written backward pass of
+            :func:`~OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward`
+            (PsiFormer configuration only), which returns each
+            Linear layer's per-electron inputs and output
+            cotangents directly; the factors are then the exact
+            per-electron ones of ``capture_activations=True``,
+            without a capturing twin, per-walker parameter
+            gradients or the per-walker solve for the cotangents.
         nn_dtype: Precision the network (log|psi|, its gradients
             and the forward Laplacian) is evaluated in.
             ``'float32'`` (default) matches DeepQMC and runs 20-40x
@@ -492,6 +504,7 @@ class _VMCOptDriverNN_KFAC:
         capture_activations: bool = False,
         fixed_scale: bool = False,
         nn_dtype: Optional[str] = 'float32',
+        backward: str = 'autodiff',
     ):
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
@@ -530,6 +543,17 @@ class _VMCOptDriverNN_KFAC:
         )
         self.var_weight = float(var_weight)
         self.capture_activations = bool(capture_activations)
+        if backward not in ('autodiff', 'manual'):
+            raise ValueError(
+                "backward must be 'autodiff' or 'manual', got"
+                f" {backward!r}"
+            )
+        if backward == 'manual' and self.capture_activations:
+            raise ValueError(
+                "backward='manual' already gives per-electron factors;"
+                " do not combine it with capture_activations"
+            )
+        self.backward = backward
         self.fixed_scale = bool(fixed_scale)
 
         log_psi, init_params, graphdef, lap_grad = make_nn_log_psi(
@@ -801,6 +825,69 @@ class _VMCOptDriverNN_KFAC:
 
         self._factor_chunk = jax.jit(factor_chunk)
 
+        # --- Hand-written backward pass (backward='manual') ---
+        # Same per-electron factors as the capture path, from the
+        # inputs ``a`` and output cotangents ``g`` of every Linear
+        # that the backward pass returns:
+        #     G_in = sum a a^T,  A_out = sum g g^T,
+        #     dW_loss = sum_w de_w sum_e a_we (x) g_we.
+        # Kernels the network never uses (``subnet_g`` without deep
+        # features) have zero gradients; they get zero factors.
+        manual_bwd = None
+        if backward == 'manual':
+            from .psi.nn.backward_psiformer import (
+                make_psiformer_backward,
+            )
+            bwd_one, bwd_layers = make_psiformer_backward(
+                config, mol_info, init_key, compute_dtype=nn_dtype,
+            )
+            unknown = set(bwd_layers) - set(layer_paths)
+            if unknown:
+                raise RuntimeError(
+                    "backward pass layers missing from the parameter"
+                    f" layout: {sorted(unknown)}"
+                )
+            manual_bwd = jax.vmap(
+                lambda p, w: bwd_one(w, nuc_crds, p),
+                in_axes=(None, 0),
+            )
+            self._manual_bwd = jax.jit(manual_bwd)
+
+        def factor_chunk_manual(params, w_chunk, de_chunk):
+            _, pw_grad, caps = manual_bwd(params, w_chunk)
+            n_w = w_chunk.shape[0]
+            A_sums: Dict[str, jax.Array] = {}
+            G_sums: Dict[str, jax.Array] = {}
+            dW_sums: Dict[str, jax.Array] = {}
+            counts: Dict[str, jax.Array] = {}
+            for layer in layer_paths:
+                in_, out_ = self._kernel_shapes[layer]
+                if layer in caps:
+                    a, g = caps[layer]          # (w, n, in), (w, n, out)
+                    de_c = de_chunk.astype(a.dtype)[:, None, None]
+                    G_sums[layer] = jnp.einsum('wni,wnj->ij', a, a)
+                    A_sums[layer] = jnp.einsum('wno,wnp->op', g, g)
+                    dW_sums[layer] = jnp.einsum(
+                        'wni,wno->io', a * de_c, g,
+                    )
+                    n_s = a.shape[0] * a.shape[1]
+                else:
+                    G_sums[layer] = jnp.zeros((in_, in_))
+                    A_sums[layer] = jnp.zeros((out_, out_))
+                    dW_sums[layer] = jnp.zeros((in_, out_))
+                    n_s = n_w
+                counts[layer] = jnp.asarray(n_s, dtype=jnp.float64)
+            generic_flat = (
+                jnp.concatenate(
+                    [_get_at_path(pw_grad, p).reshape(n_w, -1)
+                     for p in generic_paths],
+                    axis=1,
+                )
+                if generic_paths
+                else jnp.zeros((n_w, 0))
+            )
+            return A_sums, G_sums, dW_sums, counts, generic_flat
+
         capture_fn = None
         if self.capture_activations:
             cap_inters_init = self._cap_inters_init
@@ -831,13 +918,18 @@ class _VMCOptDriverNN_KFAC:
             def body(carry, xs):
                 A_c, G_c, dW_c, cnt_c = carry
                 w_c, de_c = xs
-                cap_c = (
-                    capture_fn(params, w_c)
-                    if capture_fn is not None else {}
-                )
-                A_s, G_s, dW_s, n_s, gen_s = factor_chunk(
-                    params, w_c, de_c, cap_c,
-                )
+                if manual_bwd is not None:
+                    A_s, G_s, dW_s, n_s, gen_s = factor_chunk_manual(
+                        params, w_c, de_c,
+                    )
+                else:
+                    cap_c = (
+                        capture_fn(params, w_c)
+                        if capture_fn is not None else {}
+                    )
+                    A_s, G_s, dW_s, n_s, gen_s = factor_chunk(
+                        params, w_c, de_c, cap_c,
+                    )
                 return (
                     {k: A_c[k] + A_s[k] for k in A_c},
                     {k: G_c[k] + G_s[k] for k in G_c},
@@ -1214,7 +1306,8 @@ class _VMCOptDriverNN_KFAC:
             print(
                 f"# num_walkers={num_walkers},"
                 f" factor_chunk_size={chunk},"
-                f" capture_activations={self.capture_activations}",
+                f" capture_activations={self.capture_activations},"
+                f" backward={self.backward}",
                 file=fout,
             )
             if ars is not None:
@@ -1240,7 +1333,12 @@ class _VMCOptDriverNN_KFAC:
         kernel_scale: Dict[str, float] = {
             layer: 1.0 for layer in self._kernel_shapes
         }
-        if self.fixed_scale and self.capture_activations:
+        if self.fixed_scale and self.backward == 'manual':
+            for layer, (a, _g) in self._manual_bwd(
+                params, walkers[:1],
+            )[2].items():
+                kernel_scale[layer] = float(a.shape[1])
+        elif self.fixed_scale and self.capture_activations:
             for layer, arr in self._capture_for(
                 params, walkers[:1],
             ).items():
