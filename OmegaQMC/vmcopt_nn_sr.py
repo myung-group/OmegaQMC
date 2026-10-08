@@ -363,14 +363,23 @@ class _VMCOptDriverNN_SR:
         ):
             def prod_step(carry, _):
                 rk, w, lp, s, p = carry
-                for _ in range(num_dc):
+                # The num_dc decorrelation moves run in a lax.scan rather
+                # than an unrolled Python loop (one network copy each in
+                # the compiled kernel); same key sequence.
+
+                def move(c, _):
+                    rk, w, lp, _acc = c
                     rk0, rk1 = jax.random.split(rk)
                     keys = jax.random.split(
                         rk1, w.shape[0],
                     )
-                    nw, lp, acc = move_lp_allw(keys, w, lp, s, p)
-                    w = nw
-                    rk = rk0
+                    w, lp, acc = move_lp_allw(keys, w, lp, s, p)
+                    return (rk0, w, lp, acc), None
+
+                acc0 = jnp.zeros(w.shape[0], dtype=bool)
+                (rk, nw, lp, acc), _ = jax.lax.scan(
+                    move, (rk, w, lp, acc0), None, length=num_dc,
+                )
                 ar = acc.mean()
                 energies = batched_local_energy(nw, p)
                 return (rk, nw, lp, s, p), (

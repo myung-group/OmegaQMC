@@ -810,64 +810,47 @@ class _VMCDriverNN:
                   f" {mc_stepsize:.4f} bohr ~ {mc_timestep:.4f} Ha^-1")
 
         # --- Production ---
-        if compute_gradients:
-            @jax.jit
-            def prod_step(state, _):
-                rk, w, lp, s = state
-                for _ in range(num_steps_decorr):
-                    rk, key = jax.random.split(rk)
-                    keys = jax.random.split(
-                        key, num_walkers,
-                    )
-                    if walker_keys_sharding is not None:
-                        keys = (
-                            jax.lax
-                            .with_sharding_constraint(
-                                keys,
-                                walker_keys_sharding,
-                            )
-                        )
-                    nw, lp, acc = metropolis_move_lp_allw(
-                        keys, w, lp, s, params,
-                    )
-                    w = nw
-                ar = acc.mean()
-                e_ee = jax.vmap(energy_ee)(nw)
-                e_en = jax.vmap(energy_en)(nw)
-                e_ke = batched_energy_ke(nw, params)
-                return (
-                    (rk, nw, lp, s),
-                    (ar, e_ee, e_en, e_ke, nw),
+        # The ``num_steps_decorr`` Metropolis moves between samples run
+        # in a ``lax.scan``.  As a Python loop they were unrolled into
+        # that many copies of the network in the compiled step, which
+        # took 25-35 s to compile for 20 moves of an H2 PsiFormer.
+        # The key sequence is the loop's, so the samples are the same.
+        @jax.jit
+        def prod_step(state, _):
+            rk, w, lp, s = state
+
+            def move(carry, _):
+                rk, w, lp, _acc = carry
+                rk, key = jax.random.split(rk)
+                keys = jax.random.split(
+                    key, num_walkers,
                 )
-        else:
-            @jax.jit
-            def prod_step(state, _):
-                rk, w, lp, s = state
-                for _ in range(num_steps_decorr):
-                    rk, key = jax.random.split(rk)
-                    keys = jax.random.split(
-                        key, num_walkers,
-                    )
-                    if walker_keys_sharding is not None:
-                        keys = (
-                            jax.lax
-                            .with_sharding_constraint(
-                                keys,
-                                walker_keys_sharding,
-                            )
+                if walker_keys_sharding is not None:
+                    keys = (
+                        jax.lax
+                        .with_sharding_constraint(
+                            keys,
+                            walker_keys_sharding,
                         )
-                    nw, lp, acc = metropolis_move_lp_allw(
-                        keys, w, lp, s, params,
                     )
-                    w = nw
-                ar = acc.mean()
-                e_ee = jax.vmap(energy_ee)(nw)
-                e_en = jax.vmap(energy_en)(nw)
-                e_ke = batched_energy_ke(nw, params)
-                return (
-                    (rk, nw, lp, s),
-                    (ar, e_ee, e_en, e_ke),
+                w, lp, acc = metropolis_move_lp_allw(
+                    keys, w, lp, s, params,
                 )
+                return (rk, w, lp, acc), None
+
+            acc0 = jnp.zeros(num_walkers, dtype=bool)
+            (rk, nw, lp, acc), _ = jax.lax.scan(
+                move, (rk, w, lp, acc0), None,
+                length=num_steps_decorr,
+            )
+            ar = acc.mean()
+            e_ee = jax.vmap(energy_ee)(nw)
+            e_en = jax.vmap(energy_en)(nw)
+            e_ke = batched_energy_ke(nw, params)
+            out = (ar, e_ee, e_en, e_ke)
+            if compute_gradients:
+                out = out + (nw,)
+            return (rk, nw, lp, s), out
 
         # --- Sampling rate and time-budgeted sizing ---
         # Measured on the real walkers with the kernels production

@@ -316,13 +316,23 @@ class _VMCOptDriverNN_IRAdam:
 
             def move_once(carry, _):
                 rk, w, lp, s, p = carry
-                for _ in range(num_dc):
+                # The num_dc decorrelation moves run in a lax.scan rather
+                # than an unrolled Python loop (one network copy each in
+                # the compiled kernel); same key sequence.
+
+                def move(c, _):
+                    rk, w, lp, _acc = c
                     rk0, rk1 = jax.random.split(rk)
                     keys = jax.random.split(
                         rk1, w.shape[0],
                     )
                     w, lp, acc = move_lp_allw(keys, w, lp, s, p)
-                    rk = rk0
+                    return (rk0, w, lp, acc), None
+
+                acc0 = jnp.zeros(w.shape[0], dtype=bool)
+                (rk, w, lp, acc), _ = jax.lax.scan(
+                    move, (rk, w, lp, acc0), None, length=num_dc,
+                )
                 return (rk, w, lp, s, p), acc.mean()
 
             def meas_step(carry, _):
