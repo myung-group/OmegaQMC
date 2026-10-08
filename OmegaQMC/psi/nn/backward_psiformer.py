@@ -127,6 +127,12 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         config = load_nn_config(config)
     if rng_key is None:
         rng_key = jax.random.key(0)
+    # Before _build_vgl_kwargs, which assumes the PsiFormer layout
+    if not _psiformer_compat(config):
+        raise NotImplementedError(
+            "backward_psiformer does not support this ansatz"
+            " configuration",
+        )
     model = build_nn_wf(config, mol_info, nnx.Rngs(rng_key))
     kw = _build_vgl_kwargs(model, ne_log_rescale=config.ne_log_rescale)
     _check_supported(config, kw)

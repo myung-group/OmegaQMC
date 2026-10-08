@@ -61,24 +61,37 @@ also that the HEG driver's ``pmap`` path passes ``captured_inputs``
 into a ``pmap``ed step without sharding it, so its multi-device
 and ``capture_activations`` options do not currently compose.
 
-Two factor-extraction paths are available, matching the HEG driver:
+Three factor-extraction paths are available:
 
-a. **M^T M / M M^T (default, fast, biased).**  Uses the per-walker
-   pytree gradient directly.  For a per-electron Linear with
-   ``d log|psi_w| / dW = sum_e a_we (x) g_we`` this gives factors
-   biased by per-walker ``||a||`` / ``||g||`` weights relative to
-   FermiNet's strict per-(walker, electron) factorisation, but it
-   is numerically stable and needs no model instrumentation.
+a. **Hand-written backward pass (default for the PsiFormer).**
+   ``backward='manual'`` (chosen by ``backward='auto'`` whenever the
+   ansatz supports it) evaluates
+   :func:`OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward`,
+   which returns, without automatic differentiation, every Linear
+   layer's per-electron inputs ``a_we`` and output cotangents
+   ``g_we``.  The factors ``sum a a^T`` and ``sum g g^T`` run over
+   the flattened ``(W * n_e)`` population, exactly as FermiNet's
+   ``RepeatedDenseBlock`` and kfac-jax do.  No per-walker parameter
+   gradient is formed, which makes an iteration ~5x faster than (b).
 
-b. **Per-electron capture (FermiNet-style, exact).**  Set
-   ``capture_activations=True`` to build a *capturing twin* of the
-   model in which every ``nnx.Linear`` is a ``CapturingLinear``
-   (see :func:`OmegaQMC.psi.nn.kfac_capture.use_capturing_linears`).
-   A single jitted vmap returns ``(log_psi, grad, captures)``; the
-   per-electron output gradients ``g_we`` are then recovered from
-   the captured inputs by a small ``(n_e, n_e)`` solve and the
-   factors are accumulated over the flattened ``(W * n_e)``
-   population, exactly as FermiNet's ``RepeatedDenseBlock`` does.
+b. **M^T M / M M^T (``backward='autodiff'``, biased).**  Uses the
+   per-walker pytree gradient from ``jax.grad`` directly.  For a
+   per-electron Linear with ``d log|psi_w| / dW = sum_e a_we (x)
+   g_we`` this gives factors biased by per-walker ``||a||`` /
+   ``||g||`` weights relative to FermiNet's strict per-(walker,
+   electron) factorisation, but it needs no model-specific code, so
+   it is the fallback for other ansatz configurations.
+
+c. **Per-electron capture (``capture_activations=True``).**  Builds
+   a *capturing twin* of the model in which every ``nnx.Linear`` is
+   a ``CapturingLinear`` (see
+   :func:`OmegaQMC.psi.nn.kfac_capture.use_capturing_linears`) and
+   recovers ``g_we`` from the captured inputs and the per-walker
+   gradient by a damped ``(n_e, n_e)`` solve.  It targets the same
+   factors as (a), but the solve is inaccurate where a walker's
+   per-electron inputs are nearly parallel (up to 0.5% in ``g g^T``
+   for the PsiFormer's attention output projections), and it is the
+   slowest path.
 
 """
 
@@ -455,23 +468,33 @@ class _VMCOptDriverNN_KFAC:
             ``None`` disables the clip.
         var_weight: Umrigar-style beta for a mixed
             ``<E> + beta Var(E_L)`` objective (0 = pure energy).
-        capture_activations: Use the exact per-electron factor path
-            (builds a capturing twin of the model).
+        capture_activations: Use per-electron factors from a
+            capturing twin of the model, with the output cotangents
+            recovered from the per-walker gradients by a damped
+            solve (inaccurate where a walker's per-electron inputs
+            are nearly parallel, e.g. the attention output
+            projections).  Implies ``backward='autodiff'``.
         fixed_scale: With per-electron factors
             (``capture_activations`` or ``backward='manual'``),
             multiply each layer's step by ``n_e`` to match textbook
             KFAC magnitude (FermiNet's ``fixed_scale``).
         backward: How the per-walker derivatives of ``log|psi|``
-            are obtained.  ``'autodiff'`` (default) differentiates
-            the network with ``jax.grad``, one walker at a time.
-            ``'manual'`` uses the hand-written backward pass of
+            are obtained.  ``'manual'`` uses the hand-written
+            backward pass of
             :func:`~OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward`
             (PsiFormer configuration only), which returns each
             Linear layer's per-electron inputs and output
-            cotangents directly; the factors are then the exact
-            per-electron ones of ``capture_activations=True``,
-            without a capturing twin, per-walker parameter
-            gradients or the per-walker solve for the cotangents.
+            cotangents directly; the Kronecker factors are then the
+            exact per-electron (FermiNet / kfac-jax) ones, and an
+            iteration is ~5x faster than with ``'autodiff'``.
+            ``'autodiff'`` differentiates the network with
+            ``jax.grad`` one walker at a time and builds the
+            walker-level ``M^T M`` factors (or, with
+            ``capture_activations``, approximate per-electron ones).
+            ``'auto'`` (default) is ``'manual'`` whenever the ansatz
+            supports it and ``capture_activations`` is off, and
+            ``'autodiff'`` otherwise; the choice made is in
+            ``self.backward``.
         nn_dtype: Precision the network (log|psi|, its gradients
             and the forward Laplacian) is evaluated in.
             ``'float32'`` (default) matches DeepQMC and runs 20-40x
@@ -504,7 +527,7 @@ class _VMCOptDriverNN_KFAC:
         capture_activations: bool = False,
         fixed_scale: bool = False,
         nn_dtype: Optional[str] = 'float32',
-        backward: str = 'autodiff',
+        backward: str = 'auto',
     ):
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
@@ -543,16 +566,20 @@ class _VMCOptDriverNN_KFAC:
         )
         self.var_weight = float(var_weight)
         self.capture_activations = bool(capture_activations)
-        if backward not in ('autodiff', 'manual'):
+        if backward not in ('auto', 'autodiff', 'manual'):
             raise ValueError(
-                "backward must be 'autodiff' or 'manual', got"
-                f" {backward!r}"
+                "backward must be 'auto', 'autodiff' or 'manual',"
+                f" got {backward!r}"
             )
         if backward == 'manual' and self.capture_activations:
             raise ValueError(
                 "backward='manual' already gives per-electron factors;"
                 " do not combine it with capture_activations"
             )
+        if backward == 'auto' and self.capture_activations:
+            backward = 'autodiff'
+        # 'auto' is resolved below, once the backward pass has been
+        # tried on this ansatz
         self.backward = backward
         self.fixed_scale = bool(fixed_scale)
 
@@ -834,13 +861,22 @@ class _VMCOptDriverNN_KFAC:
         # Kernels the network never uses (``subnet_g`` without deep
         # features) have zero gradients; they get zero factors.
         manual_bwd = None
-        if backward == 'manual':
+        bwd_one = None
+        if backward in ('auto', 'manual'):
             from .psi.nn.backward_psiformer import (
                 make_psiformer_backward,
             )
-            bwd_one, bwd_layers = make_psiformer_backward(
-                config, mol_info, init_key, compute_dtype=nn_dtype,
-            )
+            try:
+                bwd_one, bwd_layers = make_psiformer_backward(
+                    config, mol_info, init_key,
+                    compute_dtype=nn_dtype,
+                )
+            except NotImplementedError:
+                if backward == 'manual':
+                    raise
+            backward = 'manual' if bwd_one is not None else 'autodiff'
+            self.backward = backward
+        if bwd_one is not None:
             unknown = set(bwd_layers) - set(layer_paths)
             if unknown:
                 raise RuntimeError(

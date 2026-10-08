@@ -34,9 +34,12 @@ def _h2():
 @pytest.fixture(scope="module")
 def drv():
     # float64 network, so the chunk-invariance checks below compare
-    # summation orders rather than float32 rounding.
+    # summation orders rather than float32 rounding.  The checks
+    # below exercise the autodiff path's ``_factor_chunk``, so pin it
+    # (the default for a PsiFormer is the hand-written backward pass).
     return _VMCOptDriverNN_KFAC(
         _h2(), "psiformer", jax.random.key(0), nn_dtype=None,
+        backward='autodiff',
     )
 
 
@@ -122,6 +125,31 @@ def test_chunked_accumulation_matches_single_chunk(drv, batch):
         assert _rel_max_diff(dW1[layer], dW2[layer]) < tol, layer
         assert float(cnt1[layer]) == float(cnt2[layer])
     assert _rel_max_diff(gen1, gen2) < tol
+
+
+def test_manual_accumulation_is_chunk_invariant(batch):
+    """Same chunk invariance for the hand-written backward pass."""
+    d = _VMCOptDriverNN_KFAC(
+        _h2(), "psiformer", jax.random.key(0), nn_dtype=None,
+        backward='manual',
+    )
+    w, de = batch
+    n = w.shape[0]
+    one = d._accumulate_factors(
+        d.init_params, w[None], de[None],
+    )
+    two = d._accumulate_factors(
+        d.init_params,
+        w.reshape((2, n // 2) + w.shape[1:]),
+        de.reshape(2, n // 2),
+    )
+    tol = 1.0e-10
+    for k in range(3):
+        for layer in one[k]:
+            assert _rel_max_diff(one[k][layer], two[k][layer]) < tol, (
+                k, layer)
+            assert float(one[3][layer]) == float(two[3][layer])
+    assert _rel_max_diff(one[4], two[4]) < tol
 
 
 def test_update_preserves_pytree_and_dtypes(drv, batch):

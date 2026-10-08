@@ -112,7 +112,28 @@ def test_kfac_manual_gradient_matches_autodiff():
         jnp.max(jnp.abs(gen_ref)))
 
 
+def test_kfac_backward_auto_resolution():
+    """``backward='auto'`` (the default) picks the hand-written pass
+    for the PsiFormer and falls back to autodiff otherwise."""
+    mol = _lih()
+    key = jax.random.key(SEED)
+    assert get_vmcopt_nn_func(
+        mol, 'psiformer', key).backward == 'manual'
+    assert get_vmcopt_nn_func(
+        mol, 'ferminet', key).backward == 'autodiff'
+    assert get_vmcopt_nn_func(
+        mol, 'psiformer', key,
+        capture_activations=True).backward == 'autodiff'
+    try:
+        get_vmcopt_nn_func(mol, 'ferminet', key, backward='manual')
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("backward='manual' accepted a FermiNet")
+
+
 if __name__ == '__main__':
     test_backward_matches_autodiff()
     test_kfac_manual_gradient_matches_autodiff()
+    test_kfac_backward_auto_resolution()
     print('OK')
