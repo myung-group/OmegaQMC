@@ -384,17 +384,27 @@ class _VMCOptDriverGTO_Linear:
             @jax.jit
             def prod_step(carried_in, _):
                 rkey, w, s, cp = carried_in
-                for _ in range(num_dc):
+                # The num_dc decorrelation moves run in a lax.scan
+                # rather than an unrolled Python loop (one copy of the
+                # move per iteration in the compiled kernel).
+
+                def move(c, _):
+                    rkey, w, _acc = c
                     rkey0, rkey1 = jax.random.split(rkey)
                     keys = jax.random.split(
                         rkey1, w.shape[0]
                     )
-                    new_w, accepted = jax.vmap(
+                    w, accepted = jax.vmap(
                         metropolis_move,
                         in_axes=(0, 0, None, None),
                     )(keys, w, s, cp)
-                    w = new_w
-                    rkey = rkey0
+                    return (rkey0, w, accepted), None
+
+                (rkey, new_w, accepted), _ = jax.lax.scan(
+                    move,
+                    (rkey, w, jnp.zeros(w.shape[0], dtype=bool)),
+                    None, length=num_dc,
+                )
                 r = accepted.mean()
                 energies = jax.vmap(
                     total_local_energy_fn,
@@ -823,7 +833,12 @@ class _VMCOptDriverGTO_Linear:
         ):
             def prod_step(carried_in, _):
                 rkey, w, s, cp = carried_in
-                for _ in range(num_dc):
+                # The num_dc decorrelation moves run in a lax.scan
+                # rather than an unrolled Python loop (one copy of the
+                # move per iteration in the compiled kernel).
+
+                def move(c, _):
+                    rkey, w, _acc = c
                     rkey0, rkey1 = (
                         jax.random.split(rkey)
                     )
@@ -841,12 +856,17 @@ class _VMCOptDriverGTO_Linear:
                                 walker_keys_sharding,
                             )
                         )
-                    new_w, accepted = jax.vmap(
+                    w, accepted = jax.vmap(
                         _metro,
                         in_axes=(0, 0, None, None),
                     )(keys, w, s, cp)
-                    w = new_w
-                    rkey = rkey0
+                    return (rkey0, w, accepted), None
+
+                (rkey, new_w, accepted), _ = jax.lax.scan(
+                    move,
+                    (rkey, w, jnp.zeros(w.shape[0], dtype=bool)),
+                    None, length=num_dc,
+                )
                 r = accepted.mean()
                 energies = jax.vmap(
                     _enr_fn, in_axes=(0, None),

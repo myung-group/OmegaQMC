@@ -288,16 +288,25 @@ class _VMCOptDriverGTO_IRSGD:
             def production_step(carried_in, step_idx):
                 rkey, w, s, curr_params = carried_in
 
-                for _ in range(num_dc):
+                # The num_dc decorrelation moves run in a lax.scan rather
+                # than an unrolled Python loop.  Each move takes a fresh
+                # key: the loop split the same ``rkey`` every time, so
+                # with num_dc > 1 all moves reused one set of proposals
+                # and acceptance draws.
+                def move(c, _):
+                    rkey, w, _acc = c
                     rkey0, rkey1 = jax.random.split(rkey)
                     keys = jax.random.split(rkey1, w.shape[0])
-
-                    new_w, accepted \
+                    w, accepted \
                         = jax.vmap(metropolis_move,
                                    in_axes=(0, 0, None, None))(keys, w, s,
                                                                curr_params)
-                    w = new_w
+                    return (rkey0, w, accepted), None
 
+                (rkey0, new_w, accepted), _ = jax.lax.scan(
+                    move, (rkey, w, jnp.zeros(w.shape[0], dtype=bool)),
+                    None, length=num_dc,
+                )
                 r = accepted.mean()
 
                 energies = jax.vmap(total_local_energy_fn,

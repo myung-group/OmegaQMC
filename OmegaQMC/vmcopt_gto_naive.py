@@ -264,20 +264,29 @@ class _VMCOptDriverGTO_Naive:
         def production_step(carried_in, _):
             rkey, w, s, curr_params = carried_in
 
-            for _ in range(num_steps_decorr):
+            # The decorrelation moves run in a lax.scan rather than an
+            # unrolled Python loop.  Each move takes a fresh key: the
+            # loop split the same ``rkey`` every time, so with
+            # num_steps_decorr > 1 all moves reused one set of
+            # proposals and acceptance draws.
+            def move(c, _):
+                rkey, w, _acc = c
                 rkey0, rkey1 = jax.random.split(rkey)
                 keys = jax.random.split(rkey1, num_walkers + 1)
-                rkey1 = keys[0]
                 keys = keys[1:]
                 if walker_keys_sharding is not None:
                     keys = jax.lax.with_sharding_constraint(
                         keys, walker_keys_sharding)
-                new_w, accepted \
+                w, accepted \
                     = jax.vmap(self.metropolis_move,
                                in_axes=(0, 0, None, None))(keys, w, s,
                                                            curr_params)
-                w = new_w
+                return (rkey0, w, accepted), None
 
+            (rkey0, new_w, accepted), _ = jax.lax.scan(
+                move, (rkey, w, jnp.zeros(num_walkers, dtype=bool)),
+                None, length=num_steps_decorr,
+            )
             r = accepted.mean()
             # new_s = step_size * (0.6 + r)
 
