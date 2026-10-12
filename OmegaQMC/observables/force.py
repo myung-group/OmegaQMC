@@ -1883,9 +1883,27 @@ nuclear forces using PGCS.
             f["system"]["atom_symbols"][()].split()
         )
         atom_coords = f["system"]["atom_coords"]
+        # ``atom_coords`` is always Bohr: every writer fills it from
+        # pyscf's ``mol.atom_coords()``, which converts to Bohr
+        # whatever ``Mole.unit`` the input geometry used.  The stored
+        # ``units`` label records ``Mole.unit`` -- the unit of that
+        # *input* -- so a run set up in Angstrom labels Bohr
+        # coordinates 'ANGSTROM'.  Feeding that label back to
+        # ``gto.M`` scaled every length by 1 / 0.52917721 = 1.8897 and
+        # silently corrupted the sum-rule projection and the torque
+        # rows, so the geometry is rebuilt in Bohr unconditionally and
+        # the label is only checked.  Files written before this was
+        # fixed therefore read correctly here.
         myUnits = (
             f["system"]["units"][()].decode()
         )
+        if myUnits.strip().upper() not in ("BOHR", "AU", "A.U."):
+            warnings.warn(
+                f"{ofname_grd}: system/units is {myUnits!r} but "
+                "system/atom_coords is written in Bohr; ignoring the "
+                "label and reading the geometry as Bohr.",
+                stacklevel=2,
+            )
         mole_data = [
             (atom_symbols[i].decode(),
              atom_coords[i, :])
@@ -1904,7 +1922,7 @@ nuclear forces using PGCS.
         myMol = gto.M(
             atom=mole_data,
             basis={sym: placeholder for sym, _ in mole_data},
-            unit=myUnits, spin=None,
+            unit='Bohr', spin=None,
         )
 
         if "atom_fragment_map" in f["system"]:

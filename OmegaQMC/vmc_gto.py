@@ -1470,7 +1470,9 @@ class _VMCDriverGTO:
                 else [mf.mol.basis[asym[i]] for i in range(num_nuc)]
             # TODO: add pseudopotentials ~"atom_pp" here as needed
             g.create_dataset("ao_basis", data=" ".join(aobs))
-            g.create_dataset("units", data=mf.mol.unit.upper())
+            # atom_coords above is mf.mol.atom_coords(), always Bohr;
+            # mf.mol.unit describes the *input* geometry.
+            g.create_dataset("units", data="BOHR")
 
         if compute_gradients and not mode_restart:
             p = pathlib.Path(ofname_grd)
@@ -1487,7 +1489,8 @@ class _VMCDriverGTO:
                 asym = [mf.mol.atom_symbol(i) for i in range(num_nuc)]
                 g.create_dataset("atom_symbols", data=" ".join(asym))
                 g.create_dataset("atom_coords", data=mf.mol.atom_coords())
-                g.create_dataset("units", data=mf.mol.unit.upper())
+                # atom_coords above is always Bohr (see above).
+                g.create_dataset("units", data="BOHR")
                 g.create_dataset("atom_fragment_map",
                                  data=mf.mol.map_nuc_frag)
 

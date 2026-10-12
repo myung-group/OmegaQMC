@@ -645,8 +645,11 @@ class _VMCDriverNN:
                     "charges", data=charges,
                 )
                 g.create_dataset(
-                    "units",
-                    data=mol_info.unit.upper(),
+                    # atom_coords above is mol_info.coords, i.e.
+                    # mol.atom_coords(), which is always Bohr --
+                    # mol_info.unit describes the *input* geometry and
+                    # would mislabel a run set up in Angstrom.
+                    "units", data="BOHR",
                 )
                 g.create_dataset(
                     "atom_fragment_map",
