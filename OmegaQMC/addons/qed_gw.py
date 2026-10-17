@@ -223,7 +223,7 @@ def _rpa_at_eps(static, eps_so, full_output=False):
     XplusY_p = UpV[-1, :]
 
     # M_{p,m,s} for the full p, m range (Eq. 29 + QED additions).
-    M_full = (np.einsum('pmai,ais->pms', static['K_pmai'], XplusY_e_4d)
+    M_full = (np.einsum('pmai,ais->pms', static['K_pmai'], XplusY_e_4d, optimize=True)
               + np.einsum('pm,s->pms', static['K_pmphot'], XplusY_p))
     if full_output:
         return Omega, M_full, XplusY_p
