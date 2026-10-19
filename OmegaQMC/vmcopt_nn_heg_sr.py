@@ -777,7 +777,7 @@ class _VMCOptDriverNNHEG_SR:
             )
             header = (
                 f"# iter       <E>/N            Var(E)          "
-                f"|f|       Δt_block"
+                f"|f|               Δt_block"
             )
             print(header, file=fout)
 
@@ -908,7 +908,7 @@ class _VMCOptDriverNNHEG_SR:
                     f"{it:>6d}  {e_per:>14.8e}  "
                     f"{float(var):>12.4e}  "
                     f"{float(g_norm):>12.4e}  "
-                    f"{dt:>8.3f}",
+                    f"{dt:>16.6f}",
                     file=fout,
                 )
 

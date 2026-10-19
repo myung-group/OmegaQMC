@@ -996,6 +996,8 @@ class _VMCDriverGTO:
         def production_step(state, step_number):
             rng_key, walkers, step_size = state
 
+            # Acceptance over all the moves, not just the last one.
+            acc_sum = 0.0
             for d in range(num_steps_decorr):
                 rng_key, key_displace = jax.random.split(rng_key)
                 walker_keys = jax.random.split(key_displace, num_walkers)
@@ -1007,8 +1009,9 @@ class _VMCDriverGTO:
                     = metropolis_move_allw(walker_keys, walkers, step_size,
                                            step_count)
                 walkers = new_walkers
+                acc_sum = acc_sum + accepted.mean()
 
-            ratio = accepted.mean()
+            ratio = acc_sum / num_steps_decorr
             # new_step_size = step_size * (0.5 + ratio)
 
             # calculate energy
@@ -1499,7 +1502,8 @@ class _VMCDriverGTO:
               f"{batch_size}, {num_batches}")
         print("# block_cnt        E_loc_mean      E_loc_std"
               "       eePotential     enPotential     Kinetic"
-              "          Δt_block", file=fout)
+              "          weight_block        Δt_block"
+              " acc_ratio", file=fout)
 
         timestamp_prev = datetime.now()
         # Main sampling phase with pre-allocated arrays
@@ -1537,9 +1541,14 @@ class _VMCDriverGTO:
 
             timestamp_curr = datetime.now()
             tdelta_block = (timestamp_curr - timestamp_prev).total_seconds()
+            # Every sample carries unit weight, so the effective
+            # number of samples is the number of local energies.
+            weight_block = float(E_loc_sw.size)
             print(f"{block_cnt:>8d}{E_mean:>24.8e}{std_E_s:>16.8e}"
                   f"{enr_ee:>16.8e}{enr_en:>16.8e}{enr_ke:>16.8e}"
-                  f"{tdelta_block:>16.6f}", file=fout)
+                  f"{weight_block:>16.8e}"
+                  f"{tdelta_block:>16.6f}"
+                  f"{float(ratios.mean()):>10.4f}", file=fout)
 
             if compute_gradients:
                 if walkers_sharding is not None:

@@ -694,11 +694,12 @@ class _AFQMCDriverPWHEG:
                   f"stabilize every {stabilize_freq} steps", file=fout)
             coul_str = "ON" if has_coulomb else "OFF"
             print(f"  Coulomb: {coul_str}", file=fout)
-            print("-" * 80, file=fout)
+            print("-" * 100, file=fout)
             print(f"{'Block':>6} {'E_total':>16} {'E_shift':>16} "
-                  f"{'W_sum':>12} {'W_max':>12} {'Δt_block':>12}",
+                  f"{'W_sum':>12} {'W_max':>12} "
+                  f"{'weight_block':>16} {'Δt_block':>16}",
                   file=fout)
-            print("-" * 80, file=fout)
+            print("-" * 100, file=fout)
 
         # Wall time between successive block records.
         t_prev = time.perf_counter()
@@ -768,6 +769,10 @@ class _AFQMCDriverPWHEG:
             w = jnp.abs(weights)
             w_sum = jnp.sum(w)
             e_block = float(jnp.sum(w * e_tot.real) / w_sum)
+            # Effective number of samples behind the weighted block
+            # energy: the Kish size (sum w)^2 / sum w^2 of the walker
+            # weights (num_walkers when all weights are equal).
+            weight_block = w_sum * w_sum / jnp.sum(w * w)
             energy_blocks.append(e_block)
 
             is_eqlb = iblock < num_blocks_equil
@@ -783,7 +788,8 @@ class _AFQMCDriverPWHEG:
                       f"{float(eshift):16.10f} "
                       f"{float(w_sum):12.4f} "
                       f"{float(jnp.max(weights)):12.4f} "
-                      f"{t_now - t_prev:12.4f}", file=fout)
+                      f"{float(weight_block):>16.8e} "
+                      f"{t_now - t_prev:>16.6f}", file=fout)
                 t_prev = t_now
 
         # Analyze results
@@ -798,7 +804,7 @@ class _AFQMCDriverPWHEG:
         e_per_elec_ry = e_per_elec_ha * 2.0  # 1 Ha = 2 Ry
 
         if verbose:
-            print("-" * 80, file=fout)
+            print("-" * 100, file=fout)
             print(f"E_trial       = {self.e_trial:.10f} Ha", file=fout)
             print(f"E_AFQMC       = {float(e_mean):.10f} +/- "
                   f"{float(e_err):.10f} Ha", file=fout)

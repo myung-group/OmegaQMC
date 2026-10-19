@@ -347,7 +347,7 @@ class _HEGPreTrainDriver:
                 file=fout,
             )
             print(
-                "# iter       MSE             step size  Δt_block",
+                "# iter       MSE             step size          Δt_block",
                 file=fout,
             )
 
@@ -379,7 +379,7 @@ class _HEGPreTrainDriver:
                 print(
                     f"{it:>6d}  {loss:>14.6e}  "
                     f"{float(step_size):>10.4f}  "
-                    f"{dt:>8.3f}",
+                    f"{dt:>16.6f}",
                     file=fout,
                 )
 

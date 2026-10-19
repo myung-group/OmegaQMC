@@ -823,7 +823,7 @@ class _VMCDriverNN:
             rk, w, lp, s = state
 
             def move(carry, _):
-                rk, w, lp, _acc = carry
+                rk, w, lp, acc_sum = carry
                 rk, key = jax.random.split(rk)
                 keys = jax.random.split(
                     key, num_walkers,
@@ -839,14 +839,14 @@ class _VMCDriverNN:
                 w, lp, acc = metropolis_move_lp_allw(
                     keys, w, lp, s, params,
                 )
-                return (rk, w, lp, acc), None
+                return (rk, w, lp, acc_sum + acc.mean()), None
 
-            acc0 = jnp.zeros(num_walkers, dtype=bool)
-            (rk, nw, lp, acc), _ = jax.lax.scan(
-                move, (rk, w, lp, acc0), None,
+            # Acceptance over all the moves, not just the last one.
+            (rk, nw, lp, acc_sum), _ = jax.lax.scan(
+                move, (rk, w, lp, jnp.zeros(())), None,
                 length=num_steps_decorr,
             )
-            ar = acc.mean()
+            ar = acc_sum / num_steps_decorr
             e_ee = jax.vmap(energy_ee)(nw)
             e_en = jax.vmap(energy_en)(nw)
             e_ke = batched_energy_ke(nw, params)
@@ -920,7 +920,8 @@ class _VMCDriverNN:
         print(
             "# block_cnt        E_loc_mean      E_loc_std"
             "       eePotential     enPotential     Kinetic"
-            "          Δt_block",
+            "          weight_block        Δt_block"
+            " acc_ratio",
             file=fout,
         )
 
@@ -974,10 +975,14 @@ class _VMCDriverNN:
             ke_m = e_ke.mean()
             now = datetime.now()
             dt = (now - timestamp_prev).total_seconds()
+            # Every sample carries unit weight, so the effective
+            # number of samples is the number of local energies.
+            weight_block = float(E_loc.size)
             print(
                 f"{blk:>8d}{E_mean:>24.8e}{E_std:>16.8e}"
                 f"{ee_m:>16.8e}{en_m:>16.8e}{ke_m:>16.8e}"
-                f"{dt:>16.6f}",
+                f"{weight_block:>16.8e}{dt:>16.6f}"
+                f"{float(ratios.mean()):>10.4f}",
                 file=fout,
             )
             timestamp_prev = now

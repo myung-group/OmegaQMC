@@ -1244,7 +1244,7 @@ class _VMCOptDriverNNHEG_KFAC:
             )
             print(
                 "# iter       <E>/N            Var(E)        "
-                "lr           damping     ‖step‖   Δt_block",
+                "lr           damping     ‖step‖           Δt_block",
                 file=fout,
             )
 
@@ -1370,7 +1370,7 @@ class _VMCOptDriverNNHEG_KFAC:
                     f"{lr_now:>10.4e}  "
                     f"{damping_now:>9.3e}  "
                     f"{float(step_norm):>10.4e}  "
-                    f"{dt:>8.3f}",
+                    f"{dt:>16.6f}",
                     file=fout,
                 )
 

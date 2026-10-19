@@ -321,7 +321,8 @@ class _VMCDriverNNHEG:
         if verbose >= 1:
             print(
                 "# block   E_loc_mean        E_loc_std"
-                "       E_pot            E_kin            Δt_block",
+                "       E_pot            E_kin      "
+                "      weight_block          Δt_block   acc_ratio",
                 file=fout,
             )
 
@@ -330,12 +331,14 @@ class _VMCDriverNNHEG:
 
         for blk in range(1, num_blocks + 1):
             e_pot_steps, e_kin_steps = [], []
+            acc_moves = []      # acceptance of every move in the block
             for _step in range(num_steps_per_block):
                 # Decorrelation moves (kept as Python loop).
                 for _ in range(num_steps_decorr):
-                    rng_key, walkers, _ = _mcmc_one_step(
+                    rng_key, walkers, ar_move = _mcmc_one_step(
                         rng_key, walkers, mc_stepsize, params,
                     )
+                    acc_moves.append(ar_move)
                 e_pot = _pot_batch(walkers)
                 e_kin = _kin_batch(walkers, params)
                 e_pot_steps.append(e_pot)
@@ -357,7 +360,9 @@ class _VMCDriverNNHEG:
                     f"{float(E_std):>14.6e}  "
                     f"{float(e_pot.mean()):>14.6e}  "
                     f"{float(e_kin.mean()):>14.6e}  "
-                    f"{dt:>10.4f}",
+                    f"{float(E_loc.size):>16.8e}  "
+                    f"{dt:>16.6f}  "
+                    f"{float(jnp.mean(jnp.stack(acc_moves))):>10.4f}",
                     file=fout,
                 )
             timestamp_prev = now
@@ -649,7 +654,8 @@ class _VMCDriverNNHEG_Twist:
                   file=fout)
             print(
                 "# block   E_loc_mean        E_loc_std"
-                "       E_pot            E_kin            Δt_block",
+                "       E_pot            E_kin      "
+                "      weight_block          Δt_block   acc_ratio",
                 file=fout,
             )
 
@@ -658,11 +664,13 @@ class _VMCDriverNNHEG_Twist:
 
         for blk in range(1, num_blocks + 1):
             e_pot_steps, e_kin_steps = [], []
+            acc_moves = []      # acceptance of every move in the block
             for _step in range(num_steps_per_block):
                 for _ in range(num_steps_decorr):
-                    rng_key, walkers, _ = _mcmc_one_step(
+                    rng_key, walkers, ar_move = _mcmc_one_step(
                         rng_key, walkers, mc_stepsize, params,
                     )
+                    acc_moves.append(ar_move)
                 e_pot = _pot_batch(walkers)
                 e_kin = _kin_batch(walkers, params)
                 e_pot_steps.append(e_pot)
@@ -684,7 +692,9 @@ class _VMCDriverNNHEG_Twist:
                     f"{float(E_std):>14.6e}  "
                     f"{float(e_pot.mean()):>14.6e}  "
                     f"{float(e_kin.mean()):>14.6e}  "
-                    f"{dt:>10.4f}",
+                    f"{float(E_loc.size):>16.8e}  "
+                    f"{dt:>16.6f}  "
+                    f"{float(jnp.mean(jnp.stack(acc_moves))):>10.4f}",
                     file=fout,
                 )
             timestamp_prev = now

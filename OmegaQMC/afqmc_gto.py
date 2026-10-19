@@ -1111,11 +1111,12 @@ class _AFQMCDriverGTO:
                   f"{num_blocks} prod blocks", file=fout)
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps", file=fout)
-            print("-" * 80, file=fout)
+            print("-" * 100, file=fout)
             print(f"{'Block':>6} {'E_mixed':>16} {'E_shift':>16} "
-                  f"{'W_sum':>12} {'W_max':>12} {'Δt_block':>12}",
+                  f"{'W_sum':>12} {'W_max':>12} "
+                  f"{'weight_block':>16} {'Δt_block':>16}",
                   file=fout)
-            print("-" * 80, file=fout)
+            print("-" * 100, file=fout)
 
         # Wall time between successive block records (the block's
         # float() host syncs make it the full block cost).
@@ -1202,6 +1203,10 @@ class _AFQMCDriverGTO:
             w_sum = jnp.sum(w)
             e_block = jnp.sum(w * e_tot.real) / w_sum
             e_block_val = float(e_block)
+            # Effective number of samples behind the weighted block
+            # energy: the Kish size (sum w)^2 / sum w^2 of the walker
+            # weights (num_walkers when all weights are equal).
+            weight_block = w_sum * w_sum / jnp.sum(w * w)
             energy_blocks.append(e_block_val)
 
             # Update energy shift — single host sync per
@@ -1218,7 +1223,8 @@ class _AFQMCDriverGTO:
                       f"{float(eshift):16.10f} "
                       f"{float(w_sum):12.4f} "
                       f"{float(jnp.max(weights)):12.4f} "
-                      f"{t_now - t_prev:12.4f}", file=fout)
+                      f"{float(weight_block):>16.8e} "
+                      f"{t_now - t_prev:>16.6f}", file=fout)
                 t_prev = t_now
 
         # Analyze results
@@ -1229,7 +1235,7 @@ class _AFQMCDriverGTO:
             jnp.array(prod_energies))
 
         if verbose:
-            print("-" * 80, file=fout)
+            print("-" * 100, file=fout)
             print(f"E_HF     = {float(self.mf.e_tot):.10f}", file=fout)
             print(f"E_AFQMC  = {float(e_mean):.10f} +/- {float(e_err):.10f}",
                   file=fout)
