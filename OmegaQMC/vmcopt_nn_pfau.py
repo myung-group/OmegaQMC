@@ -492,7 +492,7 @@ class _VMCOptDriverNN_Pfau_K2:
                 print(f"Iter {iteration:5d} | "
                       f"Tr(E) = {L_mean:.6f} +/- {L_err:.5f} | "
                       f"max_dp = {max_dp:.4e} | scale = {scale:.3f} | "
-                      f"dt = {dt:.1f}s")
+                      f"Δt_block = {dt:.1f}s")
 
             # (g) Save checkpoints periodically
             if (iteration + 1) % 50 == 0 or iteration == num_iters - 1:
@@ -936,7 +936,7 @@ class _VMCOptDriverNN_Pfau_K:
                 print(f"Iter {iteration:5d} | "
                       f"Tr(E) = {L_mean:.6f} +/- {L_err:.5f} | "
                       f"max_dp = {max_dp:.4e} | scale = {scale:.3f} | "
-                      f"dt = {dt:.1f}s")
+                      f"Δt_block = {dt:.1f}s")
 
             if (iteration + 1) % 50 == 0 or iteration == num_iters - 1:
                 for k_idx in range(K):

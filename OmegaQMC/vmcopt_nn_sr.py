@@ -806,7 +806,7 @@ class _VMCOptDriverNN_SR:
                 print(f"Iter {iteration:5d} | E = {E_mean:.8f}"
                       f" +/- {E_std / num_walkers**0.5:.8f}"
                       f" | max_dp = {max_dp:.4e} | scale = {scale:.3f}"
-                      f" | ar = {ar_last:.2f} | dt = {dt:.1f}s")
+                      f" | ar = {ar_last:.2f} | Δt_block = {dt:.1f}s")
 
             # (h) Checkpoint (every _CHK_EVERY_SR iters
             # plus always at the last iteration)

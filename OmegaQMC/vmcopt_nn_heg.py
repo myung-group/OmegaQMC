@@ -318,13 +318,13 @@ class _VMCOptDriverNNHEG_Adam:
         if verbose >= 1:
             header = (
                 "# iter       <E>/N            var(E)          "
-                "|g|             step          dt"
+                "|g|             step    Δt_block"
             )
             if self.var_weight > 0.0:
                 header = (
                     f"# iter       <E>/N            var(E)"
                     f"         L/N (β={self.var_weight:.3g})     "
-                    f"|g|             step          dt"
+                    f"|g|             step    Δt_block"
                 )
             print(header, file=fout)
         e_history = []

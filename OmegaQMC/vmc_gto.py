@@ -1499,7 +1499,7 @@ class _VMCDriverGTO:
               f"{batch_size}, {num_batches}")
         print("# block_cnt        E_loc_mean      E_loc_std"
               "       eePotential     enPotential     Kinetic"
-              "          ∆t_block", file=fout)
+              "          Δt_block", file=fout)
 
         timestamp_prev = datetime.now()
         # Main sampling phase with pre-allocated arrays

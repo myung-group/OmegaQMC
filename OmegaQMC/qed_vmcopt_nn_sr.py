@@ -529,7 +529,7 @@ class _QEDVMCOptDriverNN_SR:
                     f"[QED-SR iter {iteration + 1}/{num_iters}] "
                     f"E={E_mean:.6f}±{E_serr:.6f}  "
                     f"|δp|max={max_abs:.4f}  "
-                    f"dt={dt:.2f}s"
+                    f"Δt_block={dt:.2f}s"
                 )
                 if lz_iter is not None:
                     msg += f"  <L_z>={lz_iter:+.4f}"

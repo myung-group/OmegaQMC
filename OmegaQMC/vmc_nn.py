@@ -920,7 +920,7 @@ class _VMCDriverNN:
         print(
             "# block_cnt        E_loc_mean      E_loc_std"
             "       eePotential     enPotential     Kinetic"
-            "          ∆t_block",
+            "          Δt_block",
             file=fout,
         )
 

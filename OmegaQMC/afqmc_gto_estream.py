@@ -20,6 +20,7 @@ multi-determinant trials) with a smaller GPU footprint:
 """
 
 import sys
+import time
 
 import numpy as np
 import jax
@@ -228,11 +229,15 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps",
                   file=fout)
-            print("-" * 70, file=fout)
+            print("-" * 80, file=fout)
             print(f"{'Block':>6} {'E_mixed':>16} {'E_shift':>16} "
-                  f"{'W_sum':>12} {'W_max':>12}", file=fout)
-            print("-" * 70, file=fout)
+                  f"{'W_sum':>12} {'W_max':>12} {'Δt_block':>12}",
+                  file=fout)
+            print("-" * 80, file=fout)
 
+        # Wall time between successive block records (the block's
+        # float() host syncs make it the full block cost).
+        t_prev = time.perf_counter()
         for iblock in range(total_blocks):
             acc_weight = jnp.zeros((), dtype=jnp.float64)
             acc_ehybrid = jnp.zeros((), dtype=jnp.float64)
@@ -324,11 +329,13 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
             if verbose:
                 is_eqlb = iblock < num_blocks_equil
                 phase = "EQ" if is_eqlb else "  "
+                t_now = time.perf_counter()
                 print(f"{phase}{iblock:4d} {e_block_val:16.10f} "
                       f"{float(eshift):16.10f} "
                       f"{float(w_sum):12.4f} "
-                      f"{float(jnp.max(weights)):12.4f}",
-                      file=fout)
+                      f"{float(jnp.max(weights)):12.4f} "
+                      f"{t_now - t_prev:12.4f}", file=fout)
+                t_prev = t_now
 
         energy_blocks = np.array(energy_blocks)
         prod_energies = energy_blocks[num_blocks_equil:]
@@ -337,7 +344,7 @@ class _AFQMCDriverGTO_EStream(_AFQMCDriverGTO):
             jnp.array(prod_energies))
 
         if verbose:
-            print("-" * 70, file=fout)
+            print("-" * 80, file=fout)
             print(f"E_HF     = {float(self.mf.e_tot):.10f}",
                   file=fout)
             print(f"E_AFQMC  = {float(e_mean):.10f} "

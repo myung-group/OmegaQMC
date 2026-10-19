@@ -867,11 +867,14 @@ class _QEDAFQMCDriverGTO:
                   f"{num_blocks} prod blocks")
             print(f"  {num_steps_per_block} steps/block, "
                   f"stabilize every {stabilize_freq} steps")
-            print("-" * 80)
+            print("-" * 90)
             print(f"{'Block':>6} {'E_total':>16} {'E_shift':>16} "
-                  f"{'<q>':>10} {'E_ph':>12} {'W_sum':>10}")
-            print("-" * 80)
+                  f"{'<q>':>10} {'E_ph':>12} {'W_sum':>10} "
+                  f"{'Δt_block':>12}")
+            print("-" * 90)
 
+        # Wall time between successive block records.
+        t_prev = time.perf_counter()
         for iblock in range(total_blocks):
             # On-device accumulators — reduces per-step
             # GPU↔CPU sync to one per block.
@@ -980,10 +983,13 @@ class _QEDAFQMCDriverGTO:
             if verbose:
                 is_eqlb = iblock < num_blocks_equil
                 phase = "EQ" if is_eqlb else "  "
+                t_now = time.perf_counter()
                 print(f"{phase}{iblock:4d} {e_block:16.10f} "
                       f"{float(eshift):16.10f} "
                       f"{q_mean:10.4f} {e_ph_block:12.6f} "
-                      f"{float(w_sum):10.4f}")
+                      f"{float(w_sum):10.4f} "
+                      f"{t_now - t_prev:12.4f}")
+                t_prev = t_now
 
         # Analyze results
         energy_blocks = np.array(energy_blocks)
@@ -1001,7 +1007,7 @@ class _QEDAFQMCDriverGTO:
             else float(self.mf.e_tot)
 
         if verbose:
-            print("-" * 80)
+            print("-" * 90)
             print(f"E_HF       = {float(self.mf.e_tot):.10f}")
             if self.e_qed_hf is not None:
                 print(f"E_QED-HF   = {float(self.e_qed_hf):.10f}")

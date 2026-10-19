@@ -347,7 +347,7 @@ class _HEGPreTrainDriver:
                 file=fout,
             )
             print(
-                "# iter       MSE             step size      dt",
+                "# iter       MSE             step size  Δt_block",
                 file=fout,
             )
 

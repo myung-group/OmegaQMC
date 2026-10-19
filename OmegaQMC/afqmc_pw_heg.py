@@ -694,11 +694,14 @@ class _AFQMCDriverPWHEG:
                   f"stabilize every {stabilize_freq} steps", file=fout)
             coul_str = "ON" if has_coulomb else "OFF"
             print(f"  Coulomb: {coul_str}", file=fout)
-            print("-" * 70, file=fout)
+            print("-" * 80, file=fout)
             print(f"{'Block':>6} {'E_total':>16} {'E_shift':>16} "
-                  f"{'W_sum':>12} {'W_max':>12}", file=fout)
-            print("-" * 70, file=fout)
+                  f"{'W_sum':>12} {'W_max':>12} {'Δt_block':>12}",
+                  file=fout)
+            print("-" * 80, file=fout)
 
+        # Wall time between successive block records.
+        t_prev = time.perf_counter()
         for iblock in range(total_blocks):
             # On-device accumulators — reduces per-step
             # GPU↔CPU sync to one per block.
@@ -775,10 +778,13 @@ class _AFQMCDriverPWHEG:
 
             if verbose:
                 phase = "EQ" if is_eqlb else "  "
+                t_now = time.perf_counter()
                 print(f"{phase}{iblock:4d} {e_block:16.10f} "
                       f"{float(eshift):16.10f} "
                       f"{float(w_sum):12.4f} "
-                      f"{float(jnp.max(weights)):12.4f}", file=fout)
+                      f"{float(jnp.max(weights)):12.4f} "
+                      f"{t_now - t_prev:12.4f}", file=fout)
+                t_prev = t_now
 
         # Analyze results
         energy_blocks = np.array(energy_blocks)
@@ -792,7 +798,7 @@ class _AFQMCDriverPWHEG:
         e_per_elec_ry = e_per_elec_ha * 2.0  # 1 Ha = 2 Ry
 
         if verbose:
-            print("-" * 70, file=fout)
+            print("-" * 80, file=fout)
             print(f"E_trial       = {self.e_trial:.10f} Ha", file=fout)
             print(f"E_AFQMC       = {float(e_mean):.10f} +/- "
                   f"{float(e_err):.10f} Ha", file=fout)
