@@ -304,6 +304,12 @@ from OmegaQMC.observables.energy import (        # noqa: E402
 from OmegaQMC.observables.energy_th4 import (    # noqa: E402
     local_energy_multidet,
 )
+from OmegaQMC.observables.wick import (          # noqa: E402
+    build_wick_trial,
+    wick_force_bias,
+    wick_local_energy,
+    wick_overlap,
+)
 
 
 def _local_energy_walker_chunked(
@@ -387,6 +393,38 @@ def _local_energy_multidet_walker_chunked(
             trials_up, trials_dn, ci_coeffs, enuc,
             det_chunk_size=det_chunk_size,
         )
+        e_tot_parts.append(et)
+        e_1b_parts.append(e1)
+        e_2b_parts.append(e2)
+    return (
+        jnp.concatenate(e_tot_parts, axis=0),
+        jnp.concatenate(e_1b_parts, axis=0),
+        jnp.concatenate(e_2b_parts, axis=0),
+    )
+
+
+def _local_energy_wick_walker_chunked(
+    wick_trial, phia, phib, enuc, det_chunk_size, walker_chunk_size,
+):
+    """Walker-chunked wrapper around :func:`wick_local_energy`.
+
+    Args:
+        walker_chunk_size: Walkers per chunk. None or >= nwalkers
+            calls the jitted estimator once on all walkers.
+
+    Returns:
+        (e_tot, e_1b, e_2b): each shape (nwalkers,).
+    """
+    nw = phia.shape[0]
+    if walker_chunk_size is None or walker_chunk_size >= nw:
+        return wick_local_energy(
+            phia, phib, wick_trial, enuc, batch_size=det_chunk_size)
+    e_tot_parts, e_1b_parts, e_2b_parts = [], [], []
+    for s in range(0, nw, walker_chunk_size):
+        e = s + walker_chunk_size
+        et, e1, e2 = wick_local_energy(
+            phia[s:e], phib[s:e], wick_trial, enuc,
+            batch_size=det_chunk_size)
         e_tot_parts.append(et)
         e_1b_parts.append(e1)
         e_2b_parts.append(e2)
@@ -792,6 +830,102 @@ def propagate_walkers_multidet(phia, phib, weights, overlap, e_hybrid,
     return phia, phib, weights_new, ovlp_new, e_hybrid_new, rng_key
 
 
+def propagate_walkers_wick(phia, phib, weights, overlap, e_hybrid,
+                           propagator, chol, wick_trial,
+                           eshift, rng_key,
+                           fbbound=None, exp_nmax=6,
+                           walker_chunk_size=None,
+                           chol_chunk_g=None,
+                           det_chunk_size=5):
+    """Propagate all walkers by one time step using a Wick's trial.
+
+    Same as :func:`propagate_walkers_multidet`, but the force bias and
+    overlaps come from the generalized Wick's theorem
+    (:mod:`OmegaQMC.observables.wick`): one inverse per walker and
+    spin instead of one per determinant, and exact also for walkers
+    that coincide with a trial determinant.
+
+    Args:
+        phia: shape (nwalkers, nbasis, nup).
+        phib: shape (nwalkers, nbasis, ndown).
+        weights: shape (nwalkers,).
+        overlap: Overlap from previous step, shape (nwalkers,).
+        e_hybrid: Hybrid energy from previous step, shape (nwalkers,).
+        propagator: dict from build_propagator().
+        chol: Cholesky vectors, shape (naux, nbasis, nbasis).
+            May be a :class:`DiskChol`.
+        wick_trial: :class:`OmegaQMC.observables.wick.WickTrial`.
+        eshift: Energy shift for population control (scalar).
+        rng_key: JAX random key.
+        fbbound: Force bias magnitude bound (default: 1.0).
+        exp_nmax: Taylor expansion order for matrix exponential.
+        walker_chunk_size: Walkers per VHS chunk. None = no walker
+            chunking for VHS apply.
+        chol_chunk_g: g-axis slab size for VHS streaming.
+        det_chunk_size: Strings or dets per batch in the Wick's
+            kernels (static).
+
+    Returns:
+        phia_new, phib_new, weights_new, overlap_new, e_hybrid_new, rng_key.
+    """
+    dt = propagator['dt']
+    expH1 = propagator['expH1']
+    mf_shift = propagator['mf_shift']
+    nwalkers = phia.shape[0]
+    naux = chol.shape[0]
+
+    if fbbound is None:
+        fbbound = FBBOUND_DEFAULT
+
+    # 1. Force bias Tr(L_g G) and overlap from the current walkers
+    vbias, ovlp = wick_force_bias(
+        phia, phib, wick_trial, batch_size=det_chunk_size)
+
+    # 2. Apply first half of one-body propagator
+    phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
+    phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
+
+    # 3. Optimal shift
+    xbar = -jnp.sqrt(dt) * (1j * vbias - mf_shift[:, None])
+    xbar = xbar.T  # (nwalkers, naux)
+
+    # Bound force bias
+    xbar_abs = jnp.abs(xbar)
+    xbar = jnp.where(xbar_abs > fbbound,
+                     xbar * fbbound / xbar_abs,
+                     xbar)
+
+    # 4. Sample auxiliary fields
+    rng_key, subkey = jax.random.split(rng_key)
+    xi = jax.random.normal(subkey, shape=(nwalkers, naux))
+
+    # Shifted fields
+    xshifted = xi - xbar
+
+    # Constant factors for weight update
+    cmf = -jnp.sqrt(dt) * jnp.einsum('wg,g->w', xshifted, mf_shift)
+    cfb = (jnp.sum(xi * xbar, axis=1)
+           - 0.5 * jnp.sum(xbar * xbar, axis=1))
+
+    # 5. Construct and apply VHS (chunked over walkers and g)
+    phia, phib = _apply_exp_vhs_from_chol(
+        xshifted, chol, phia, phib, dt, exp_nmax,
+        walker_chunk_size, chol_chunk_g)
+
+    # 6. Apply second half of one-body propagator
+    phia = jnp.einsum('pq,wqn->wpn', expH1, phia)
+    phib = jnp.einsum('pq,wqn->wpn', expH1, phib)
+
+    # 7. Compute new overlap
+    ovlp_new = wick_overlap(
+        phia, phib, wick_trial, batch_size=det_chunk_size)
+
+    weights_new, e_hybrid_new = _update_weights_phaseless(
+        weights, ovlp, ovlp_new, cfb, cmf, e_hybrid, eshift, dt)
+
+    return phia, phib, weights_new, ovlp_new, e_hybrid_new, rng_key
+
+
 # ===================================================================
 # Driver
 # ===================================================================
@@ -843,7 +977,15 @@ def _autotune_afqmc_walkers(driver, free_mb, mem_frac=0.75, k=4):
             e_hybrid = jnp.zeros((n,), dtype=jnp.complex128)
             return phia, phib, weights, overlap, e_hybrid
 
-        if driver.multidet:
+        if driver.wick_trial is not None:
+            def _call(phia, phib, weights, overlap, e_hybrid):
+                return propagate_walkers_wick(
+                    phia, phib, weights, overlap, e_hybrid,
+                    driver.propagator, driver.chol,
+                    driver.wick_trial,
+                    jnp.float64(0.0), jax.random.key(0),
+                    det_chunk_size=driver.det_chunk_size)
+        elif driver.multidet:
             def _call(phia, phib, weights, overlap, e_hybrid):
                 return propagate_walkers_multidet(
                     phia, phib, weights, overlap, e_hybrid,
@@ -890,7 +1032,7 @@ class _AFQMCDriverGTO:
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
                  trial=None, chol_h5_path=None, chol_chunk_g=128,
-                 det_chunk_size=5):
+                 det_chunk_size=5, multidet_method='explicit'):
         """Prepare integrals and build the propagator.
 
         Args:
@@ -913,13 +1055,24 @@ class _AFQMCDriverGTO:
             det_chunk_size: Dets per scan step for the chunked-scan
                 multi-det Green's function and local energy
                 (lower = less memory, default 5).
+            multidet_method: How multi-det trials are evaluated:
+                'explicit' (default) inverts every determinant's
+                overlap matrix; 'wick' uses the generalized Wick's
+                theorem relative to the first determinant
+                (:mod:`OmegaQMC.observables.wick`), which is exact
+                also when a walker overlaps some determinants by zero.
         """
+        if multidet_method not in ('explicit', 'wick'):
+            raise ValueError(
+                f"Unknown multidet_method {multidet_method!r}")
         self.mf = mf
         self.dt = dt
         self.verbose = verbose
         self.multidet = trial is not None
         self.chol_chunk_g = chol_chunk_g
         self.det_chunk_size = det_chunk_size
+        self.multidet_method = multidet_method if self.multidet else None
+        self.wick_trial = None
 
         if verbose:
             print("Preparing integrals (Cholesky decomposition)...")
@@ -969,9 +1122,21 @@ class _AFQMCDriverGTO:
             # (ndet, naux, nocc, nbasis) tensor that would dominate
             # memory for large CAS expansions.
 
+            if multidet_method == 'wick':
+                self.wick_trial = build_wick_trial(
+                    trial['occ_up'], trial['occ_dn'], self.ci_coeffs,
+                    self.chol, self.h1e, chunk_g=chol_chunk_g)
+
             if verbose:
                 print(f"  Multi-det trial: {ndet} determinants "
-                      f"(det_chunk_size={det_chunk_size})")
+                      f"(det_chunk_size={det_chunk_size}, "
+                      f"{multidet_method})")
+                if self.wick_trial is not None:
+                    nstr = [1 + sum(len(h) for h in s.holes)
+                            for s in (self.wick_trial.up,
+                                      self.wick_trial.dn)]
+                    print(f"  Wick's theorem: {nstr[0]} alpha and "
+                          f"{nstr[1]} beta strings")
 
             if trial.get('rdm1') is not None:
                 # Spin-summed 1-RDM of the trial (as in ipie's
@@ -1144,7 +1309,16 @@ class _AFQMCDriverGTO:
 
                 # Propagate one step
                 rng_key, step_key = jax.random.split(rng_key)
-                if self.multidet:
+                if self.wick_trial is not None:
+                    phia, phib, weights, overlap, e_hybrid, _ = \
+                        propagate_walkers_wick(
+                            phia, phib, weights, overlap, e_hybrid,
+                            self.propagator, self.chol,
+                            self.wick_trial, eshift, step_key,
+                            walker_chunk_size=walker_chunk_size,
+                            chol_chunk_g=self.chol_chunk_g,
+                            det_chunk_size=self.det_chunk_size)
+                elif self.multidet:
                     phia, phib, weights, overlap, e_hybrid, _ = \
                         propagate_walkers_multidet(
                             phia, phib, weights, overlap, e_hybrid,
@@ -1190,7 +1364,12 @@ class _AFQMCDriverGTO:
                     w_abs * e_hybrid.real)
 
             # End of block: compute energy via mixed estimator
-            if self.multidet:
+            if self.wick_trial is not None:
+                e_tot, e_1b, e_2b = _local_energy_wick_walker_chunked(
+                    self.wick_trial, phia, phib, self.enuc,
+                    det_chunk_size=self.det_chunk_size,
+                    walker_chunk_size=walker_chunk_size)
+            elif self.multidet:
                 e_tot, e_1b, e_2b = _local_energy_multidet_walker_chunked(
                     self.h1e, self.chol, phia, phib,
                     self.trials_up, self.trials_dn,
@@ -1277,7 +1456,7 @@ class _AFQMCDriverGTO:
 
 def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
                    trial=None, chol_h5_path=None, chol_chunk_g=128,
-                   det_chunk_size=5):
+                   det_chunk_size=5, multidet_method='explicit'):
     """Create a reusable AFQMC driver.
 
     Args:
@@ -1294,6 +1473,8 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
         chol_chunk_g: Slab size along the auxiliary axis for disk reads.
         det_chunk_size: Dets per scan step for the chunked-scan
             multi-det estimator (lower = less memory).
+        multidet_method: 'explicit' (default) or 'wick' (generalized
+            Wick's theorem) for multi-det trials.
 
     Returns:
         _AFQMCDriverGTO instance (callable).
@@ -1301,4 +1482,5 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
     return _AFQMCDriverGTO(mf, dt=dt, chol_cut=chol_cut, verbose=verbose,
                         trial=trial, chol_h5_path=chol_h5_path,
                         chol_chunk_g=chol_chunk_g,
-                        det_chunk_size=det_chunk_size)
+                        det_chunk_size=det_chunk_size,
+                        multidet_method=multidet_method)
