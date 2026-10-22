@@ -899,7 +899,10 @@ class _AFQMCDriverGTO:
             chol_cut: Cholesky decomposition threshold.
             verbose: Print progress.
             trial: Multi-determinant trial dict from extract_casscf_trial(),
-                   or None for single-det HF trial (default).
+                   or None for single-det HF trial (default).  An
+                   optional 'rdm1' entry, the spin-summed 1-RDM of the
+                   trial in the MO basis (nbasis, nbasis), replaces
+                   the det-diagonal density in the mean-field shift.
             chol_h5_path: If set, the MO‑basis Cholesky tensor is stored
                 in this HDF5 file (dataset ``chol_mo``) and streamed in
                 g‑chunks during the run. Required for large systems
@@ -970,15 +973,20 @@ class _AFQMCDriverGTO:
                 print(f"  Multi-det trial: {ndet} determinants "
                       f"(det_chunk_size={det_chunk_size})")
 
-            # Compute weighted G_charge for propagator
-            ci_abs2 = jnp.abs(self.ci_coeffs) ** 2
-            ci_abs2 = ci_abs2 / jnp.sum(ci_abs2)  # normalize
-            G_charge = jnp.einsum(
-                'd,dpi,dqi->pq', ci_abs2,
-                self.trials_up, self.trials_up.conj())
-            G_charge = G_charge + jnp.einsum(
-                'd,dpi,dqi->pq', ci_abs2,
-                self.trials_dn, self.trials_dn.conj())
+            if trial.get('rdm1') is not None:
+                # Spin-summed 1-RDM of the trial (as in ipie's
+                # ParticleHole mean-field shift)
+                G_charge = jnp.asarray(trial['rdm1'])
+            else:
+                # Weighted G_charge (diagonal in the det basis)
+                ci_abs2 = jnp.abs(self.ci_coeffs) ** 2
+                ci_abs2 = ci_abs2 / jnp.sum(ci_abs2)  # normalize
+                G_charge = jnp.einsum(
+                    'd,dpi,dqi->pq', ci_abs2,
+                    self.trials_up, self.trials_up.conj())
+                G_charge = G_charge + jnp.einsum(
+                    'd,dpi,dqi->pq', ci_abs2,
+                    self.trials_dn, self.trials_dn.conj())
 
             # Build propagator with multi-det charge density
             self.propagator = build_propagator(
@@ -1278,7 +1286,9 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
         chol_cut: Cholesky decomposition threshold.
         verbose: Print progress.
         trial: Multi-determinant trial dict from extract_casscf_trial(),
-               or None for single-det HF trial (default).
+               or None for single-det HF trial (default).  An optional
+               'rdm1' entry (spin-summed trial 1-RDM in the MO basis)
+               is used for the mean-field shift.
         chol_h5_path: If set, MO‑basis Cholesky tensor lives in this
             HDF5 file and is streamed in g‑chunks during the run.
         chol_chunk_g: Slab size along the auxiliary axis for disk reads.
