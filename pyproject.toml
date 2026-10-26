@@ -44,6 +44,11 @@ nn = ["flax>=0.10.0", "pyyaml"]
 include = ["OmegaQMC*"]
 exclude = ["runs*", "references*", "tests*", "scripts*"]
 
+# Non-Python files to ship in the wheel; without this a non-editable
+# install (e.g. ``pip install git+...``) has no NN ansatz presets.
+[tool.setuptools.package-data]
+"OmegaQMC.psi.nn" = ["conf/*.yaml"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests that take more than a few seconds (deselect with '-m \"not slow\"')",
