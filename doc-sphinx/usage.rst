@@ -202,7 +202,7 @@ Other PySCF solvers
 ~~~~~~~~~~~~~~~~~~~
 
 :func:`~OmegaQMC.psi.trial.trial_from_pyscf` builds the same ``trial``
-dict from other PySCF correlated calculations on RHF or ROHF
+dict from other PySCF correlated calculations on RHF, ROHF or UHF
 orbitals (:func:`~OmegaQMC.psi.gto.extract_casscf_trial` is a
 shorthand for its CASSCF/CASCI case):
 
@@ -227,15 +227,37 @@ shorthand for its CASSCF/CASCI case):
     trial = trial_from_pyscf(cis, coeff_threshold=1e-3,
                              mo_coeff=mf.mo_coeff)
 
-    # RCISD, frozen core allowed; built excitation by excitation,
-    # so it does not need an FCI-sized intermediate
+    # CISD (RCISD on RHF, UCISD on ROHF/UHF), frozen core allowed;
+    # built excitation by excitation, so it does not need an
+    # FCI-sized intermediate
     myci = ci.CISD(mf, frozen=1).run()
     trial = trial_from_pyscf(myci, coeff_threshold=1e-3)
 
 A CI vector in PySCF's FCI layout from any other source can be passed
 directly, together with ``mo_coeff``, the active ``nelec`` and,
-if needed, ``ncore`` and ``norb``.  UHF-based expansions (UCASSCF,
-UCISD) and coupled-cluster wavefunctions are not supported.
+if needed, ``ncore`` and ``norb``.  GCISD and coupled-cluster
+wavefunctions are not supported.
+
+UHF-based expansions (UCASCI/UCASSCF, UCISD, or FCI on UHF orbitals)
+give a ``trial`` whose ``mo_coeff`` has shape (2, nao, nmo), with
+``occ_up`` indexing the alpha MOs and ``occ_dn`` the beta MOs.  For an
+odd number of electrons, :func:`~OmegaQMC.generate_molecular_orbitals`
+with odd ``spin`` already returns a UHF object:
+
+.. code-block:: python
+
+    mf = generate_molecular_orbitals(
+        "Li 0 0 0; H 0 0 3.0; Li 0 0 6.0", units="Bohr", spin=1,
+        basis="6-31G",
+    )
+    mc = mcscf.UCASSCF(mf, 6, (2, 1)).run()
+    trial = trial_from_pyscf(mc, coeff_threshold=1e-3)
+
+VMC evaluates the alpha and beta determinants from their own MOs.
+AFQMC keeps its walkers and integrals in the alpha MO basis and
+expresses the beta MOs in it (:math:`C_\alpha^T S C_\beta`), so the
+two MO sets must span the same space, as they do for UHF orbitals
+without linear-dependency removal.
 
 B-spline Jastrow factors
 ~~~~~~~~~~~~~~~~~~~~~~~~~

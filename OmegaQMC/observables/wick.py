@@ -29,6 +29,13 @@ are computed once per unique alpha and beta string and then combined.
 Only the Cholesky rows of the reference and particle orbitals are
 needed (``chol_rows``).
 
+The trial orbitals of a spin may differ from the walker basis (beta
+orbitals of a UHF-based trial, with walkers in the alpha MO basis).
+That spin then carries the coefficients of its orbitals in the walker
+basis (``WickSpin.orbs``); rows of walker-basis matrices are replaced
+by projections onto those orbitals, and the Cholesky and one-body rows
+are rotated accordingly.
+
 The walker-side functions are pure and jitted; they take a
 :class:`WickTrial` built once by :func:`build_wick_trial`.
 """
@@ -58,6 +65,11 @@ class WickSpin(NamedTuple):
             hole positions in ``ref_occ``, shape (nstr_k, k).
         parts: Matching particle positions in ``rows``,
             shape (nstr_k, k).
+        orbs: None if the trial orbitals are the walker basis vectors
+            (``rows`` index them); otherwise the ``rows`` orbitals'
+            coefficients in the walker basis, shape (nbasis, nrow),
+            and ``chol_rows``/``h1e_rows`` are ``orbs^T L_g`` and
+            ``orbs^T h1e``.
 
     The strings are indexed as 0 (the reference), then the strings of
     ``holes[0]``, ``holes[1]``, ... in order.
@@ -68,6 +80,7 @@ class WickSpin(NamedTuple):
     h1e_rows: jnp.ndarray
     holes: tuple
     parts: tuple
+    orbs: jnp.ndarray | None = None
 
 
 class WickTrial(NamedTuple):
@@ -99,8 +112,13 @@ def _permutation_sign(perm):
     return sign
 
 
-def _build_spin(occ, chol, h1e, chunk_g):
-    """String tables of one spin; returns (WickSpin, str_idx, signs)."""
+def _build_spin(occ, chol, h1e, chunk_g, basis=None):
+    """String tables of one spin; returns (WickSpin, str_idx, signs).
+
+    ``basis`` (nbasis, nmo): coefficients, in the walker basis, of
+    the orbitals that ``occ`` indexes; None for the walker basis
+    itself.
+    """
     occ = np.asarray(occ)
     ndet, nocc = occ.shape
     if nocc == 0:
@@ -144,26 +162,33 @@ def _build_spin(occ, chol, h1e, chunk_g):
     levels = sorted(holes_by_k)
 
     nb = chol.shape[1]
+    R = None if basis is None else np.asarray(basis)[:, rows]
     chol_rows = np.empty((chol.shape[0], len(rows), nb))
     for g0, g1, chunk in _iter_chol_g_chunks(chol, chunk_g):
-        chol_rows[g0:g1] = np.asarray(chunk)[:, rows, :]
+        if R is None:
+            chol_rows[g0:g1] = np.asarray(chunk)[:, rows, :]
+        else:
+            chol_rows[g0:g1] = np.einsum('pr,gpq->grq', R,
+                                         np.asarray(chunk))
+    h1e = np.asarray(h1e)
 
     spin = WickSpin(
         ref_occ=jnp.asarray(ref, dtype=jnp.int32),
         rows=jnp.asarray(rows, dtype=jnp.int32),
         chol_rows=jnp.asarray(chol_rows),
-        h1e_rows=jnp.asarray(np.asarray(h1e)[rows, :]),
+        h1e_rows=jnp.asarray(h1e[rows, :] if R is None else R.T @ h1e),
         holes=tuple(jnp.asarray(holes_by_k[k], dtype=jnp.int32)
                     for k in levels),
         parts=tuple(jnp.asarray(parts_by_k[k], dtype=jnp.int32)
                     for k in levels),
+        orbs=None if R is None else jnp.asarray(R),
     )
     str_idx = np.array([index[key] for key in det_keys], dtype=np.int32)
     return spin, str_idx, signs
 
 
 def build_wick_trial(occ_up, occ_dn, ci_coeffs, chol, h1e,
-                      chunk_g=None):
+                      chunk_g=None, orbs_up=None, orbs_dn=None):
     """Build a :class:`WickTrial` from a multi-det trial.
 
     The first determinant is the reference, so it must not be
@@ -179,12 +204,20 @@ def build_wick_trial(occ_up, occ_dn, ci_coeffs, chol, h1e,
             :class:`OmegaQMC.integrals.cholesky.DiskChol`.
         h1e: One-body Hamiltonian, shape (nbasis, nbasis).
         chunk_g: g-axis slab size for reading ``chol``.
+        orbs_up, orbs_dn: Orthonormal orbitals that ``occ_up`` /
+            ``occ_dn`` index, as columns in the walker basis, shape
+            (nbasis, nmo); None (default) for the walker basis
+            itself.  A UHF-based trial with walkers in the alpha MO
+            basis passes the beta MOs, ``C_a^T S C_b``, as
+            ``orbs_dn``.
 
     Returns:
         WickTrial.
     """
-    up, str_up, sign_up = _build_spin(occ_up, chol, h1e, chunk_g)
-    dn, str_dn, sign_dn = _build_spin(occ_dn, chol, h1e, chunk_g)
+    up, str_up, sign_up = _build_spin(occ_up, chol, h1e, chunk_g,
+                                      orbs_up)
+    dn, str_dn, sign_dn = _build_spin(occ_dn, chol, h1e, chunk_g,
+                                      orbs_dn)
     coeffs = np.conj(np.asarray(ci_coeffs)) * sign_up * sign_dn
     return WickTrial(
         up=up, dn=dn,
@@ -255,9 +288,18 @@ def cofactors(A):
 # Walker-side kernels
 # ===================================================================
 
+def _rows(x, spin, ref=False):
+    """Rows ``spin.rows`` (or the reference rows) of a walker-basis
+    matrix x (w, nbasis, n), in the spin's trial orbitals."""
+    if spin.orbs is None:
+        return x[:, spin.ref_occ if ref else spin.rows, :]
+    R = spin.orbs[:, :spin.ref_occ.shape[0]] if ref else spin.orbs
+    return jnp.einsum('pr,wpj->wrj', R, x)
+
+
 def _reference(phi, spin):
-    """<D_0|phi> and Theta restricted to ``spin.rows``."""
-    S0 = phi[:, spin.ref_occ, :]
+    """<D_0|phi> and Theta (walker basis)."""
+    S0 = _rows(phi, spin, ref=True)
     sign, logdet = jnp.linalg.slogdet(S0)
     ovlp0 = sign * jnp.exp(logdet)
     theta = jnp.einsum('wpi,wij->wpj', phi, jnp.linalg.inv(S0))
@@ -291,7 +333,7 @@ def _spin_terms(phi, spin, energy, batch_size):
     """
     ovlp0, theta = _reference(phi, spin)
     nocc = theta.shape[2]
-    theta_r = theta[:, spin.rows, :]                     # (w, r, n)
+    theta_r = _rows(theta, spin)                         # (w, r, n)
 
     F = jnp.einsum('grq,wqj->wgrj', spin.chol_rows, theta)
     Y0 = F[:, :, :nocc, :]                               # (w, g, n, n)
@@ -384,8 +426,8 @@ def wick_overlap(phia, phib, trial, batch_size=None):
     """Multi-det overlap <Psi_T|phi>, shape (nwalkers,)."""
     o_up, th_up = _reference(phia, trial.up)
     o_dn, th_dn = _reference(phib, trial.dn)
-    d_up = _string_dets(th_up[:, trial.up.rows, :], trial.up)
-    d_dn = _string_dets(th_dn[:, trial.dn.rows, :], trial.dn)
+    d_up = _string_dets(_rows(th_up, trial.up), trial.up)
+    d_dn = _string_dets(_rows(th_dn, trial.dn), trial.dn)
     ratio = jnp.sum(trial.coeffs[:, None] * d_up[trial.str_up]
                     * d_dn[trial.str_dn], axis=0)
     return o_up * o_dn * ratio

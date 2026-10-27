@@ -308,7 +308,7 @@ def generate_molecular_orbitals(astr: str,
 
     # mol = gto.M(atom=astr, basis=basis, unit=units)
     mol = Mole_custom()
-    mol.build(atom=astr, basis=basis, unit=units)
+    mol.build(atom=astr, basis=basis, unit=units, spin=spin)
     # see pyscf.gto.mole.is_au(unit)
 
     gpname = "C1"
@@ -1690,9 +1690,10 @@ def get_vmc_gto_func(mf,
     trial : dict or None, optional
         Multi-Slater-determinant trial wave function, as produced
         by :func:`OmegaQMC.psi.trial.trial_from_pyscf` (CASSCF,
-        CASCI, FCI, selected CI or CISD).  ``None`` (default) uses
-        the HF determinant in ``mf``.  MO relaxation is disabled
-        for multi-determinant trials.
+        CASCI, FCI, selected CI or CISD, on restricted or UHF
+        orbitals).  ``None`` (default) uses the HF determinant in
+        ``mf``.  MO relaxation is disabled for multi-determinant
+        trials.
     jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::

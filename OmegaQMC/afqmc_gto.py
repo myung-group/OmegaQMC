@@ -1056,6 +1056,11 @@ class _AFQMCDriverGTO:
                    optional 'rdm1' entry, the spin-summed 1-RDM of the
                    trial in the MO basis (nbasis, nbasis), replaces
                    the det-diagonal density in the mean-field shift.
+                   For a UHF-based trial ('mo_coeff' of shape
+                   (2, nao, nmo)) the walkers and integrals use the
+                   alpha MOs, and the beta determinants are built from
+                   the beta MOs expressed in them, C_a^T S C_b; the
+                   two MO sets must span the same space.
             chol_h5_path: If set, the MO‑basis Cholesky tensor is stored
                 in this HDF5 file (dataset ``chol_mo``) and streamed in
                 g‑chunks during the run. Required for large systems
@@ -1077,7 +1082,9 @@ class _AFQMCDriverGTO:
                 ``mf`` and ``chol_cut`` are not used for the integrals
                 and a multi-det ``trial`` must index the orbitals of
                 these integrals directly (its 'mo_coeff' must be None or
-                the identity).
+                the identity).  A UHF-based trial's 'mo_coeff' is
+                (identity, C_b), with C_b the orthonormal beta orbitals
+                in the integral basis.
             e_hf: HF energy reported as 'ehf' on the ``integrals`` path.
                 None computes the energy of the HF trial determinant
                 from the integrals. Ignored on the ``mf`` path, which
@@ -1102,20 +1109,36 @@ class _AFQMCDriverGTO:
             print("Preparing integrals (Cholesky decomposition)...")
             t0 = time.time()
 
+        trial_mo = trial.get('mo_coeff') if trial is not None else None
+        if trial_mo is not None:
+            trial_mo = np.asarray(trial_mo)
+        # UHF-based trial: beta MOs in the alpha MO (walker) basis
+        orbs_dn = None
+        if trial_mo is not None and trial_mo.ndim == 3:
+            trial_mo, mo_b = trial_mo
+            if integrals is None:
+                ovlp = mf.mol.intor_symmetric('int1e_ovlp')
+                orbs_dn = trial_mo.T @ ovlp @ mo_b
+            else:
+                orbs_dn = mo_b
+            if not np.allclose(orbs_dn.T @ orbs_dn,
+                               np.eye(orbs_dn.shape[1]), atol=1e-8):
+                raise ValueError(
+                    "the beta MOs of the UHF-based trial do not span "
+                    "the alpha MO space (C_a^T S C_b is not orthogonal)")
+
         if integrals is None:
-            mo_coeff_override = (
-                trial['mo_coeff'] if trial is not None else None)
             integrals = prepare_afqmc_integrals(
-                mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override,
+                mf, chol_cut=chol_cut, mo_coeff=trial_mo,
                 chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
             self.ehf = float(mf.e_tot)
         else:
-            trial_mo = trial.get('mo_coeff') if trial is not None else None
             if trial_mo is not None and not np.allclose(
-                    np.asarray(trial_mo), np.eye(integrals['nbasis'])):
+                    trial_mo, np.eye(integrals['nbasis'])):
                 raise ValueError(
                     "with `integrals`, trial['mo_coeff'] must be None or "
-                    "the identity; rotate the integrals instead")
+                    "the identity (its alpha part for a UHF-based "
+                    "trial); rotate the integrals instead")
             if e_hf is None:
                 e_hf = determinant_energy_from_integrals(
                     integrals['h1e'], integrals['chol'], integrals['enuc'],
@@ -1147,9 +1170,10 @@ class _AFQMCDriverGTO:
 
             # Build stacked trial matrices from occupation indices
             eye = jnp.eye(self.nbasis)
+            basis_dn = eye if orbs_dn is None else jnp.asarray(orbs_dn)
             # occ_up: (ndet, nup) int indices -> trials_up: (ndet, nbasis, nup)
             self.trials_up = eye[:, trial['occ_up']].transpose(1, 0, 2)
-            self.trials_dn = eye[:, trial['occ_dn']].transpose(1, 0, 2)
+            self.trials_dn = basis_dn[:, trial['occ_dn']].transpose(1, 0, 2)
 
             # Dominant determinant for walker initialization
             self.trial_up = self.trials_up[0]
@@ -1164,7 +1188,8 @@ class _AFQMCDriverGTO:
             if multidet_method == 'wick':
                 self.wick_trial = build_wick_trial(
                     trial['occ_up'], trial['occ_dn'], self.ci_coeffs,
-                    self.chol, self.h1e, chunk_g=chol_chunk_g)
+                    self.chol, self.h1e, chunk_g=chol_chunk_g,
+                    orbs_dn=orbs_dn)
 
             if verbose:
                 print(f"  Multi-det trial: {ndet} determinants "

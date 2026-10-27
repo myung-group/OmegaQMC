@@ -846,13 +846,16 @@ class _PsiGTO:
         mol = mf.mol
         nocc = jnp.count_nonzero(mf.mo_occ > 0)
         if trial is not None:
-            import numpy as np
-            self.mo_coeff_full = jnp.array(
-                np.asarray(trial['mo_coeff'])
-            )
+            mo_coeff = np.asarray(trial['mo_coeff'])
             self.ci_coeffs = trial['ci_coeffs']
-            self.occ_up = trial['occ_up']
-            self.occ_dn = trial['occ_dn']
+            self.occ_up = jnp.asarray(trial['occ_up'])
+            self.occ_dn = jnp.asarray(trial['occ_dn'])
+            if mo_coeff.ndim == 3:
+                # UHF-based trial: alpha and beta MOs side by side, so
+                # beta determinants index the second half
+                self.occ_dn = self.occ_dn + mo_coeff.shape[2]
+                mo_coeff = np.concatenate(mo_coeff, axis=1)
+            self.mo_coeff_full = jnp.array(mo_coeff)
             self.mo_occ_coeff = self.mo_coeff_full[
                 :, self.occ_up[0]
             ]
