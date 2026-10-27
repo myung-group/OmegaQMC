@@ -1051,7 +1051,7 @@ class _AFQMCDriverGTO:
             dt: Imaginary time step (default 0.005 Ha^{-1}).
             chol_cut: Cholesky decomposition threshold.
             verbose: Print progress.
-            trial: Multi-determinant trial dict from extract_casscf_trial(),
+            trial: Multi-determinant trial dict from trial_from_pyscf(),
                    or None for single-det HF trial (default).  An
                    optional 'rdm1' entry, the spin-summed 1-RDM of the
                    trial in the MO basis (nbasis, nbasis), replaces
@@ -1542,7 +1542,7 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
         dt: Imaginary time step (default 0.005 Ha^{-1}).
         chol_cut: Cholesky decomposition threshold.
         verbose: Print progress.
-        trial: Multi-determinant trial dict from extract_casscf_trial(),
+        trial: Multi-determinant trial dict from trial_from_pyscf(),
                or None for single-det HF trial (default).  An optional
                'rdm1' entry (spin-summed trial 1-RDM in the MO basis)
                is used for the mean-field shift.

@@ -1687,6 +1687,12 @@ def get_vmc_gto_func(mf,
         If ``True`` (default), relax the MO coefficients
         to minimise the energy variance during the
         cusp-correction step.
+    trial : dict or None, optional
+        Multi-Slater-determinant trial wave function, as produced
+        by :func:`OmegaQMC.psi.trial.trial_from_pyscf` (CASSCF,
+        CASCI, FCI, selected CI or CISD).  ``None`` (default) uses
+        the HF determinant in ``mf``.  MO relaxation is disabled
+        for multi-determinant trials.
     jastrow_config : dict or None, optional
         Cutoff radii for B-spline Jastrow factors.
         Example::

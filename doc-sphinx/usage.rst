@@ -194,7 +194,48 @@ keyword.  MO relaxation is automatically disabled with a warning:
 
 The ``coeff_threshold`` argument controls how many determinants are kept
 from the CI expansion; smaller values include more determinants and
-improve accuracy at higher computational cost.
+improve accuracy at higher computational cost.  The determinants are
+sorted by decreasing ``|c|``, ``max_ndet`` caps their number, and
+``trial['ci_weight']`` reports the fraction of the CI norm retained.
+
+Other PySCF solvers
+~~~~~~~~~~~~~~~~~~~
+
+:func:`~OmegaQMC.psi.trial.trial_from_pyscf` builds the same ``trial``
+dict from other PySCF correlated calculations on RHF or ROHF
+orbitals (:func:`~OmegaQMC.psi.gto.extract_casscf_trial` is a
+shorthand for its CASSCF/CASCI case):
+
+.. code-block:: python
+
+    from pyscf import ci, fci, mcscf
+    from OmegaQMC.psi.trial import trial_from_pyscf
+
+    # State-averaged CASSCF: pick a root with `state`
+    mc = mcscf.CASSCF(mf, 4, 4).state_average_([0.5, 0.5]).run()
+    trial = trial_from_pyscf(mc, coeff_threshold=1e-3, state=1)
+
+    # Selected CI as the CAS solver
+    mc = mcscf.CASCI(mf, 12, 8)
+    mc.fcisolver = fci.SCI(mf.mol)
+    mc.kernel()
+    trial = trial_from_pyscf(mc, coeff_threshold=1e-3)
+
+    # FCI: the solver does not store its orbitals, so pass them
+    cis = fci.FCI(mf)
+    cis.kernel()
+    trial = trial_from_pyscf(cis, coeff_threshold=1e-3,
+                             mo_coeff=mf.mo_coeff)
+
+    # RCISD, frozen core allowed; built excitation by excitation,
+    # so it does not need an FCI-sized intermediate
+    myci = ci.CISD(mf, frozen=1).run()
+    trial = trial_from_pyscf(myci, coeff_threshold=1e-3)
+
+A CI vector in PySCF's FCI layout from any other source can be passed
+directly, together with ``mo_coeff``, the active ``nelec`` and,
+if needed, ``ncore`` and ``norb``.  UHF-based expansions (UCASSCF,
+UCISD) and coupled-cluster wavefunctions are not supported.
 
 B-spline Jastrow factors
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -498,5 +539,8 @@ keyword argument:
           f"+/- {result['energy_err']:.10f}")
 
 The ``trial`` dict is shared between the VMC and AFQMC drivers, so the
-same :func:`~OmegaQMC.psi.gto.extract_casscf_trial` call can feed
-either driver without modification.
+same :func:`~OmegaQMC.psi.gto.extract_casscf_trial` (or
+:func:`~OmegaQMC.psi.trial.trial_from_pyscf`) call can feed either
+driver without modification.  Determinant 0, the one with the largest
+``|c|``, is the walkers' initial state and the reference of the
+``multidet_method='wick'`` estimator.

@@ -364,6 +364,14 @@ GTO trial
 
 .. autofunction:: OmegaQMC.psi.gto.extract_casscf_trial
 
+Multi-determinant trials from PySCF
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: OmegaQMC.psi.trial
+   :no-members:
+
+.. autofunction:: OmegaQMC.psi.trial.trial_from_pyscf
+
 Cusp corrections
 ~~~~~~~~~~~~~~~~
 

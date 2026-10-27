@@ -716,7 +716,7 @@ def get_vmcopt_gto_func(
     trial : dict or None, optional
         Multi-Slater-determinant trial wave function,
         as produced by
-        :func:`OmegaQMC.psi.gto.extract_casscf_trial`.
+        :func:`OmegaQMC.psi.trial.trial_from_pyscf`.
         When ``None`` (default), the HF single-Slater
         determinant in ``mf`` is used.
     jastrow_config : dict or None, optional
