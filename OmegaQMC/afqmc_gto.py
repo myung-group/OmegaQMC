@@ -60,6 +60,8 @@ def _make_afqmc_sharding(num_walkers):
 from OmegaQMC.integrals.cholesky import (        # noqa: E402
     chunked_cholesky,
     prepare_afqmc_integrals,
+    prepare_afqmc_integrals_from_arrays,
+    determinant_energy_from_integrals,
     half_rotate_cholesky,
     half_rotate_cholesky_multidet,
     DiskChol,
@@ -180,7 +182,7 @@ def orthogonalize_walkers(phia, phib):
 
 
 @jax.jit
-def population_control_comb(weights, phia, phib, rng_key):
+def population_control_comb(weights, phia, phib, rng_key, e_hybrid=None):
     """Comb population control with weight rescaling.
 
     Rescales weights to sum to nwalkers (ipie convention), then
@@ -196,9 +198,14 @@ def population_control_comb(weights, phia, phib, rng_key):
         phia: shape (nwalkers, nbasis, nup).
         phib: shape (nwalkers, nbasis, ndown).
         rng_key: JAX random key.
+        e_hybrid: Optional per-walker hybrid energy, shape (nwalkers,).
+            When given it is resampled with the same indices as the
+            walkers, since the next step averages it with the new
+            hybrid energy of the same walker.
 
     Returns:
-        weights_new, phia_new, phib_new.
+        weights_new, phia_new, phib_new, plus e_hybrid_new when
+        ``e_hybrid`` is given.
     """
     nwalkers = weights.shape[0]
     total_weight = jnp.sum(weights)
@@ -226,6 +233,8 @@ def population_control_comb(weights, phia, phib, rng_key):
     # All walkers get equal weight = 1.0 after resampling
     weights_new = jnp.ones(nwalkers, dtype=weights.dtype)
 
+    if e_hybrid is not None:
+        return weights_new, phia_new, phib_new, e_hybrid[new_indices]
     return weights_new, phia_new, phib_new
 
 
@@ -1032,11 +1041,13 @@ class _AFQMCDriverGTO:
 
     def __init__(self, mf, dt=0.005, chol_cut=1e-5, verbose=True,
                  trial=None, chol_h5_path=None, chol_chunk_g=128,
-                 det_chunk_size=5, multidet_method='explicit'):
+                 det_chunk_size=5, multidet_method='explicit',
+                 integrals=None, e_hf=None, eshift0=None):
         """Prepare integrals and build the propagator.
 
         Args:
             mf: PySCF mean-field object (must have run kernel()).
+                May be None when ``integrals`` is given.
             dt: Imaginary time step (default 0.005 Ha^{-1}).
             chol_cut: Cholesky decomposition threshold.
             verbose: Print progress.
@@ -1061,6 +1072,19 @@ class _AFQMCDriverGTO:
                 theorem relative to the first determinant
                 (:mod:`OmegaQMC.observables.wick`), which is exact
                 also when a walker overlaps some determinants by zero.
+            integrals: Pre-built integral dict from
+                :func:`prepare_afqmc_integrals_from_arrays`. When given,
+                ``mf`` and ``chol_cut`` are not used for the integrals
+                and a multi-det ``trial`` must index the orbitals of
+                these integrals directly (its 'mo_coeff' must be None or
+                the identity).
+            e_hf: HF energy reported as 'ehf' on the ``integrals`` path.
+                None computes the energy of the HF trial determinant
+                from the integrals. Ignored on the ``mf`` path, which
+                reports ``mf.e_tot``.
+            eshift0: Default initial energy shift for :meth:`__call__`,
+                given as a total energy (e.g. E_HF). None keeps the
+                original initialisation eshift = 0.
         """
         if multidet_method not in ('explicit', 'wick'):
             raise ValueError(
@@ -1078,10 +1102,25 @@ class _AFQMCDriverGTO:
             print("Preparing integrals (Cholesky decomposition)...")
             t0 = time.time()
 
-        mo_coeff_override = trial['mo_coeff'] if trial is not None else None
-        integrals = prepare_afqmc_integrals(
-            mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override,
-            chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+        if integrals is None:
+            mo_coeff_override = (
+                trial['mo_coeff'] if trial is not None else None)
+            integrals = prepare_afqmc_integrals(
+                mf, chol_cut=chol_cut, mo_coeff=mo_coeff_override,
+                chol_h5_path=chol_h5_path, chol_chunk_g=chol_chunk_g)
+            self.ehf = float(mf.e_tot)
+        else:
+            trial_mo = trial.get('mo_coeff') if trial is not None else None
+            if trial_mo is not None and not np.allclose(
+                    np.asarray(trial_mo), np.eye(integrals['nbasis'])):
+                raise ValueError(
+                    "with `integrals`, trial['mo_coeff'] must be None or "
+                    "the identity; rotate the integrals instead")
+            if e_hf is None:
+                e_hf = determinant_energy_from_integrals(
+                    integrals['h1e'], integrals['chol'], integrals['enuc'],
+                    integrals['nup'], integrals['ndown'])
+            self.ehf = float(e_hf)
 
         self.h1e = integrals['h1e']
         self.h1e_mod = integrals['h1e_mod']
@@ -1178,14 +1217,23 @@ class _AFQMCDriverGTO:
                 self.trial_up, self.trial_dn, dt,
                 chol_chunk_g=chol_chunk_g)
 
+        # The hybrid energy (and hence eshift) omits the constant
+        # enuc + 1/2 sum_g mf_shift_g^2 (mf_shift is imaginary), so a
+        # total energy E corresponds to eshift = E - e_const.
+        mf_shift = self.propagator['mf_shift']
+        self.e_const = float(
+            self.enuc + 0.5 * jnp.sum(mf_shift * mf_shift).real)
+        self.eshift0 = eshift0
+
         if verbose:
-            print(f"  E_HF = {float(mf.e_tot):.10f}")
+            print(f"  E_HF = {self.ehf:.10f}")
             print(f"  dt = {dt}")
 
     def __call__(self, rng_key=None, num_walkers=100, num_blocks=100,
                  num_steps_per_block=25, stabilize_freq=5,
                  pop_control_freq=5, num_blocks_equil=10,
-                 fname_log="afqmc.log", walker_chunk_size=None):
+                 fname_log="afqmc.log", walker_chunk_size=None,
+                 eshift0=None, local_energy_cap=False):
         """Run the AFQMC simulation.
 
         Args:
@@ -1206,6 +1254,15 @@ class _AFQMCDriverGTO:
                 exceed device memory. Must divide num_walkers cleanly only
                 if you also want even chunks; the last chunk is allowed
                 to be shorter. Default None preserves prior behavior.
+            eshift0: Initial energy shift as a total energy (e.g.
+                E_HF); converted internally to the hybrid-energy level
+                as eshift0 - e_const. None uses the constructor's
+                ``eshift0``; if that is also None, eshift starts at 0.
+            local_energy_cap: If True, clip the real part of each walker's
+                local energy to E_ref +/- sqrt(2/dt) before the block
+                average, with E_ref = eshift + e_const (total-energy
+                level) and, in block 0, eshift0 or else ehf. Default
+                False (no cap).
 
         Returns:
             dict with:
@@ -1270,7 +1327,11 @@ class _AFQMCDriverGTO:
         # Main QMC loop
         total_blocks = num_blocks_equil + num_blocks
         energy_blocks = []
-        eshift = 0.0
+        n_capped = 0
+        ebound = float(np.sqrt(2.0 / self.dt))
+        if eshift0 is None:
+            eshift0 = self.eshift0
+        eshift = 0.0 if eshift0 is None else float(eshift0) - self.e_const
         step_count = 0
 
         # On-device accumulators — avoids per-step
@@ -1348,12 +1409,13 @@ class _AFQMCDriverGTO:
                 # Population control
                 if step_count % pop_control_freq == 0:
                     rng_key, pc_key = jax.random.split(rng_key)
-                    weights, phia, phib = population_control_comb(
-                        weights, phia, phib, pc_key)
+                    weights, phia, phib, e_hybrid = population_control_comb(
+                        weights, phia, phib, pc_key, e_hybrid=e_hybrid)
                     if phi_sharding is not None:
                         phia = jax.device_put(phia, phi_sharding)
                         phib = jax.device_put(phib, phi_sharding)
                         weights = jax.device_put(weights, scalar_sharding)
+                        e_hybrid = jax.device_put(e_hybrid, scalar_sharding)
 
                 # Accumulate weighted hybrid energy for eshift.
                 # Stays on device — the float() cast is deferred
@@ -1384,6 +1446,18 @@ class _AFQMCDriverGTO:
                     self.h1e, Ga, Gb, Ghalfa, Ghalfb,
                     self.rchol_a, self.rchol_b, self.enuc,
                     walker_chunk_size)
+
+            if local_energy_cap:
+                if iblock == 0:
+                    e_ref_cap = (float(eshift0) if eshift0 is not None
+                                 else self.ehf)
+                else:
+                    e_ref_cap = eshift + self.e_const
+                e_real = e_tot.real
+                n_capped += int(jnp.sum(
+                    jnp.abs(e_real - e_ref_cap) > ebound))
+                e_tot = jnp.clip(e_real, e_ref_cap - ebound,
+                                 e_ref_cap + ebound) + 1j * e_tot.imag
 
             # Weighted average over walkers
             w = jnp.abs(weights)
@@ -1423,24 +1497,28 @@ class _AFQMCDriverGTO:
 
         if verbose:
             print("-" * 100, file=fout)
-            print(f"E_HF     = {float(self.mf.e_tot):.10f}", file=fout)
+            print(f"E_HF     = {self.ehf:.10f}", file=fout)
             print(f"E_AFQMC  = {float(e_mean):.10f} +/- {float(e_err):.10f}",
                   file=fout)
-            print(f"E_corr   = {float(e_mean) - float(self.mf.e_tot):.10f}",
+            print(f"E_corr   = {float(e_mean) - self.ehf:.10f}",
                   file=fout)
             print(f"kappa    = {float(kappa):.2f}", file=fout)
 
         if fout is not sys.stdout:
             fout.close()
 
-        return {
+        out = {
             'energy_blocks': energy_blocks,
             'energy_mean': float(e_mean),
             'energy_err': float(e_err),
             'energy_std': float(e_std),
             'kappa': float(kappa),
-            'ehf': float(self.mf.e_tot),
+            'ehf': self.ehf,
         }
+        if local_energy_cap:
+            out['local_energy_cap_bound'] = ebound
+            out['n_local_energy_capped'] = n_capped
+        return out
 
     def close(self):
         """Release the disk‑backed Cholesky HDF5 file, if any."""
@@ -1484,3 +1562,45 @@ def get_afqmc_func(mf, dt=0.005, chol_cut=1e-5, verbose=True,
                         chol_chunk_g=chol_chunk_g,
                         det_chunk_size=det_chunk_size,
                         multidet_method=multidet_method)
+
+
+def get_afqmc_func_from_integrals(h1, chol, ecore, nelec, mo_coeff=None,
+                                  e_hf=None, dt=0.005, trial=None,
+                                  eshift0=None, verbose=True,
+                                  chol_chunk_g=128, det_chunk_size=5,
+                                  multidet_method='explicit'):
+    """Create a reusable AFQMC driver from Hamiltonian arrays.
+
+    For Hamiltonians not tied to a PySCF ``mf``, e.g. an active space
+    from CASCI ``get_h1eff``/``get_h2eff`` or an FCIDUMP. Uses the same
+    driver as :func:`get_afqmc_func`; only integral preparation differs.
+
+    Args:
+        h1: One-body Hamiltonian, shape (norb, norb), orthonormal basis.
+        chol: ERI Cholesky vectors, shape (naux, norb, norb).
+        ecore: Constant energy (nuclear repulsion + frozen core).
+        nelec: (nup, ndown).
+        mo_coeff: Optional (norb, norb) rotation to the trial orbitals.
+            Default identity.
+        e_hf: HF energy to report. None computes the energy of the HF
+            trial determinant from (h1, chol, ecore).
+        dt: Imaginary time step.
+        trial: Multi-determinant trial dict indexing these orbitals
+            directly, or None for the single-det HF trial.
+        eshift0: Default initial energy shift as a total energy
+            (e.g. E_HF); None keeps eshift = 0.
+        verbose: Print progress.
+        chol_chunk_g, det_chunk_size, multidet_method: As in
+            :func:`get_afqmc_func`.
+
+    Returns:
+        _AFQMCDriverGTO instance (callable).
+    """
+    integrals = prepare_afqmc_integrals_from_arrays(
+        h1, chol, ecore, nelec, mo_coeff=mo_coeff)
+    return _AFQMCDriverGTO(None, dt=dt, verbose=verbose, trial=trial,
+                           chol_chunk_g=chol_chunk_g,
+                           det_chunk_size=det_chunk_size,
+                           multidet_method=multidet_method,
+                           integrals=integrals, e_hf=e_hf,
+                           eshift0=eshift0)

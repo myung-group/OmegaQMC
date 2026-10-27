@@ -14,6 +14,36 @@ from OmegaQMC.observables.greens import (
 )
 
 
+# A determinant I whose overlap with a walker, |det(T_I^† phi_a) det(T_I^† phi_b)|,
+# is below max(OVLP_MASK_RTOL * max_J |o_J|, OVLP_MASK_ATOL) contributes nothing
+# to G or the energy:
+# its overlap matrix is (numerically) singular, so the inverse is inf or huge.
+# Typical case: the initial walkers are copies of det 0 and are exactly
+# orthogonal to other determinants at the first step of every run.
+OVLP_MASK_RTOL = 1e-14
+OVLP_MASK_ATOL = 1e-300
+
+
+def _det_overlap_max(phia, phib, trials_up, trials_dn):
+    """max_I |det(T_I^† phi_a) det(T_I^† phi_b)| per walker, shape (nwalkers,)."""
+    oa = jax.vmap(_overlap_only_spin, in_axes=(None, 0))(phia, trials_up)
+    ob = jax.vmap(_overlap_only_spin, in_axes=(None, 0))(phib, trials_dn)
+    return jnp.max(jnp.abs(oa * ob), axis=0)
+
+
+def _mask_small_overlap(Gha, Ghb, oa, ob, omax):
+    """Zero Ghalf of dets with |o_I| < max(OVLP_MASK_RTOL * omax, OVLP_MASK_ATOL).
+
+    Gha/Ghb: (ndet, nwalkers, nocc, nbasis); oa/ob: (ndet, nwalkers);
+    omax: (nwalkers,). jnp.where keeps inf/huge values of masked dets
+    out of every later product.
+    """
+    tol = jnp.maximum(OVLP_MASK_RTOL * omax, OVLP_MASK_ATOL)
+    keep = jnp.abs(oa * ob) >= tol[None, :]
+    k4 = keep[:, :, None, None]
+    return jnp.where(k4, Gha, 0.0), jnp.where(k4, Ghb, 0.0)
+
+
 def _pad_and_chunk(trials_up, trials_dn, ci_coeffs, chunk_size):
     """Pad det arrays to a multiple of chunk_size and reshape.
 
@@ -72,6 +102,7 @@ def greens_function_multidet(
 
     tu_c, td_c, ci_c = _pad_and_chunk(
         trials_up, trials_dn, ci_coeffs, det_chunk_size)
+    omax = _det_overlap_max(phia, phib, trials_up, trials_dn)
 
     def _scan_body(carry, xs):
         Ga_acc, Gb_acc, ovlp_acc = carry
@@ -84,8 +115,7 @@ def greens_function_multidet(
             _gf_spin_single_det, in_axes=(None, 0),
         )(phib, t_dn)
 
-        Gha = jnp.where(jnp.isnan(Gha), 0.0, Gha)
-        Ghb = jnp.where(jnp.isnan(Ghb), 0.0, Ghb)
+        Gha, Ghb = _mask_small_overlap(Gha, Ghb, oa, ob, omax)
 
         w = ci.conj()[:, None] * oa * ob
         ovlp_acc = ovlp_acc + jnp.sum(w, axis=0)
@@ -136,11 +166,9 @@ def greens_function_multidet_force_bias(
         _gf_spin_single_det, in_axes=(None, 0),
     )(phib, trials_dn)
 
-    Ghalfa_all = jnp.where(
-        jnp.isnan(Ghalfa_all), 0.0, Ghalfa_all,
-    )
-    Ghalfb_all = jnp.where(
-        jnp.isnan(Ghalfb_all), 0.0, Ghalfb_all,
+    Ghalfa_all, Ghalfb_all = _mask_small_overlap(
+        Ghalfa_all, Ghalfb_all, ovlp_a_all, ovlp_b_all,
+        jnp.max(jnp.abs(ovlp_a_all * ovlp_b_all), axis=0),
     )
 
     w_I = (
@@ -244,6 +272,7 @@ def greens_function_multidet_chunked_full(
     ovlp_b_chunks = []
 
     n_chunks = (ndet + det_chunk_size - 1) // det_chunk_size
+    omax = _det_overlap_max(phia, phib, trials_up, trials_dn)
 
     # Per-chunk single-det Greens evaluator (vmap of sh-new's helper).
     _vmap_gf = jax.vmap(_gf_spin_single_det, in_axes=(None, 0))
@@ -261,11 +290,9 @@ def greens_function_multidet_chunked_full(
         Ghalfa_chunk, ovlp_a_chunk = _vmap_gf(phia, tu_c)
         Ghalfb_chunk, ovlp_b_chunk = _vmap_gf(phib, td_c)
 
-        # Sanitize 1/0-from-singular-overlap (matches sh-new).
-        Ghalfa_chunk = jnp.where(
-            jnp.isfinite(Ghalfa_chunk), Ghalfa_chunk, 0.0)
-        Ghalfb_chunk = jnp.where(
-            jnp.isfinite(Ghalfb_chunk), Ghalfb_chunk, 0.0)
+        # Drop dets with (numerically) singular overlap matrices.
+        Ghalfa_chunk, Ghalfb_chunk = _mask_small_overlap(
+            Ghalfa_chunk, Ghalfb_chunk, ovlp_a_chunk, ovlp_b_chunk, omax)
 
         Ghalfa_chunks.append(Ghalfa_chunk)
         Ghalfb_chunks.append(Ghalfb_chunk)

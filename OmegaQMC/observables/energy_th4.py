@@ -13,7 +13,11 @@ from OmegaQMC.observables.energy import (
     local_energy_2body,
 )
 from OmegaQMC.observables.greens import _gf_spin_single_det
-from OmegaQMC.observables.greens_th4 import _pad_and_chunk
+from OmegaQMC.observables.greens_th4 import (
+    _det_overlap_max,
+    _mask_small_overlap,
+    _pad_and_chunk,
+)
 
 
 def local_energy_multidet(
@@ -51,6 +55,7 @@ def local_energy_multidet(
 
     tu_c, td_c, ci_c = _pad_and_chunk(
         trials_up, trials_dn, ci_coeffs, det_chunk_size)
+    omax = _det_overlap_max(phia, phib, trials_up, trials_dn)
 
     def _e2b_one(Gha_I, Ghb_I, tu_I, td_I):
         ra = jnp.einsum('pi,gpq->giq', tu_I.conj(), chol)
@@ -69,8 +74,7 @@ def local_energy_multidet(
             _gf_spin_single_det, in_axes=(None, 0),
         )(phib, t_dn)
 
-        Gha = jnp.where(jnp.isnan(Gha), 0.0, Gha)
-        Ghb = jnp.where(jnp.isnan(Ghb), 0.0, Ghb)
+        Gha, Ghb = _mask_small_overlap(Gha, Ghb, oa, ob, omax)
 
         w = ci.conj()[:, None] * oa * ob
         ovlp_acc = ovlp_acc + jnp.sum(w, axis=0)

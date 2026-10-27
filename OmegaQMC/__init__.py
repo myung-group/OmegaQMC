@@ -11,7 +11,7 @@ from OmegaQMC.vmcopt_gto_naive import get_vmcopt_gto_func as get_vmcopt_nn_naive
 from OmegaQMC.vmcopt_nn_sr import get_vmcopt_nn_func
 from OmegaQMC.vmcopt_nn_iradam import get_vmcopt_nn_func as get_vmcopt_nn_iradam_func
 from OmegaQMC.vmcopt_nn_kfac import get_vmcopt_nn_func as get_vmcopt_nn_kfac_func
-from OmegaQMC.afqmc_gto import get_afqmc_func
+from OmegaQMC.afqmc_gto import get_afqmc_func, get_afqmc_func_from_integrals
 from OmegaQMC.psi.gto import extract_casscf_trial
 from OmegaQMC.qed_afqmc_gto import get_qed_afqmc_func
 # from OmegaQMC import psi.gto
