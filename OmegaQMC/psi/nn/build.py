@@ -5,6 +5,8 @@ constructors for envelope, GNN, backflow, Jastrow,
 cusp, and the top-level wavefunction.
 """
 
+import warnings
+
 from flax import nnx
 
 from .config import NNAnsatzConfig
@@ -110,10 +112,22 @@ def build_nn_wf(
     # --- Cusp nuclei ---
     cusp_nuc = None
     if config.cusp_nuclei:
+        warnings.warn(
+            "cusp_nuclei: true with exponential envelopes counts the"
+            " electron-nucleus cusp twice: each exp(-zeta r) envelope"
+            " already has a cusp, and the factor adds a full -Z slope"
+            " for any cusp_alpha.  The network can only cancel the"
+            " excess roughly, leaving large local energies near heavy"
+            " nuclei (2H2O PsiFormer: E 0.33 Ha too high, a heavy"
+            " positive E_L tail, and training energies biased low).",
+            stacklevel=2,
+        )
         cusp_fn = DeepQMCCusp()
         cusp_nuc = NuclearCuspAsymptotic(
             mol_info.charges,
+            alpha=config.cusp_alpha,
             cusp_function=cusp_fn,
+            trainable_alpha=config.cusp_trainable_alpha,
         )
 
     # --- Backflow op ---

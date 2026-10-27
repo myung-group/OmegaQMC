@@ -47,8 +47,6 @@ def _psiformer_compat(config) -> bool:
         return False
     if not config.use_backflow:
         return False
-    if config.cusp_nuclei:
-        return False
     if (
         config.cusp_electrons
         and config.cusp_electrons_type
@@ -318,6 +316,23 @@ def _build_vgl_kwargs(
         }
     else:
         cusp = None
+    if model.cusp_nuclei is not None:
+        nuc_mod = model.cusp_nuclei
+        if type(nuc_mod.cusp_function).__name__ != 'DeepQMCCusp':
+            raise ValueError(
+                "unsupported nuclear cusp class: "
+                f"{type(nuc_mod.cusp_function).__name__}",
+            )
+        cusp_nuclei = {
+            'scale': nuc_mod.scale[0],
+            'alpha': (
+                nuc_mod.nuc_alpha.value
+                if nuc_mod.trainable_alpha
+                else jnp.asarray(nuc_mod._alpha_init, dtype=float)
+            ),
+        }
+    else:
+        cusp_nuclei = None
     if edge_features is None and gnn.edge_features:
         edge_features = {
             et: _extract_edge_feature_spec(feat)
@@ -331,6 +346,7 @@ def _build_vgl_kwargs(
         'bf_down_layers': bf_down_layers,
         'envelope': envelope,
         'cusp': cusp,
+        'cusp_nuclei': cusp_nuclei,
         'jastrow': jastrow,
         'edge_features': edge_features,
         'self_interaction': gnn.self_interaction,

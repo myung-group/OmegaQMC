@@ -22,7 +22,8 @@ attention, residual, tanh MLP, residual) followed by a tanh
 ``subnet`` MLP, per-spin linear backflow with the default
 ``1 + 2 tanh(x/4)`` multiplicative activation, isotropic
 exponential envelopes with per-orbital exponents, a sum of full
-determinants, and the PsiFormer electron cusp.  Anything else
+determinants, the PsiFormer electron cusp and the DeepQMC-form
+nuclear cusp.  Anything else
 raises ``NotImplementedError`` when the backward pass is built.
 
 As in :func:`~OmegaQMC.psi.nn.forward_lap.log_psi_vgl_psiformer`,
@@ -128,8 +129,8 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         ``backward.nuclear_grad(elec_crds, nuc_crds, params)``
         returns ``(log_psi, dlogpsi_dR)`` with ``dlogpsi_dR`` of
         shape ``(n_nuc, 3)``, from the same pass (the nuclei enter
-        only through ``r - R`` in the embedding features and the
-        envelope distances).  Under ``jit`` the parameter
+        only through ``r - R`` in the embedding features, the
+        envelope distances and the nuclear cusp).  Under ``jit`` the parameter
         gradients it does not return are eliminated as dead code.
     """
     if isinstance(config, str):
@@ -159,6 +160,7 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
     ne_log_rescale = bool(kw['embedding_kwargs']['ne_log_rescale'])
     center_idx = jnp.asarray(kw['envelope']['center_idx'])
     cusp = kw['cusp']
+    cusp_nuc = kw['cusp_nuclei']
     attn_norm = [
         (bool(s['update_specs'][0]['attn_residual_normalize']),
          bool(s['update_specs'][0]['attn_mlp_residual_normalize']))
@@ -317,6 +319,15 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
                     m * sc * a * a / (a + dist))
                 grads[name] = -jnp.sum(
                     m * sc * a * (a + 2.0 * dist) / (a + dist) ** 2)
+        if cusp_nuc is not None:
+            # -sum sc / (a (1 + a rr)), sc = -Z (NuclearCuspAsymptotic)
+            name = 'cusp_nuclei/nuc_alpha'
+            a = P.get(name, jnp.asarray(cusp_nuc['alpha'], dt))
+            sc_nuc = jnp.asarray(cusp_nuc['scale'], dt)[:, None]
+            q_nuc = 1.0 + a * rr                       # (n_nuc, n_e)
+            log_psi = log_psi - jnp.sum(sc_nuc / (a * q_nuc))
+            grads[name] = jnp.sum(
+                sc_nuc * (1.0 + 2.0 * a * rr) / (a * q_nuc) ** 2)
 
         # ---------------- backward ----------------
         caps = {}
@@ -393,7 +404,8 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         grads[emb_name + '/kernel'] = feats.T @ g_h
 
         # d log|psi| / dR: R enters only through d = r - R, in the
-        # embedding features and the envelope distances.
+        # embedding features, the envelope distances and the
+        # nuclear cusp.
         n_p = len(ne_powers)
         g_f = (g_h @ P[emb_name + '/kernel'].T)[:, :-1]  # drop spin
         g_f = jnp.swapaxes(g_f.reshape(n_e, R.shape[0], -1), 0, 1)
@@ -402,6 +414,8 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         g_fac = jnp.sum(g_fdiff * d, axis=-1)
         g_rr = jnp.zeros_like(rr).at[center_idx].add(
             jnp.concatenate(g_rr_e, axis=0).T)
+        if cusp_nuc is not None:
+            g_rr = g_rr + sc_nuc / (q_nuc * q_nuc)
         for j, pw in enumerate(ne_powers):
             g_fac = g_fac + g_fdist[..., j] * rr ** pw
             g_rr = g_rr + g_fdist[..., j] * pw * rr ** (pw - 1) * fac

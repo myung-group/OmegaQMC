@@ -2763,6 +2763,7 @@ def log_psi_vgl_psiformer(
     bf_down_layers,
     envelope,
     cusp,
+    cusp_nuclei=None,
     jastrow=None,
     edge_features=None,
     self_interaction: bool = True,
@@ -2782,7 +2783,7 @@ def log_psi_vgl_psiformer(
     * envelope = isotropic, ``per_orbital_exponent=True``,
       ``spin_restricted=False``, ``softplus_zeta=False``,
     * ``cusp_electrons=PsiformerCusp`` (or ``None``);
-    * ``cusp_nuclei=None``.
+    * ``cusp_nuclei=DeepQMCCusp`` (or ``None``).
 
     Args:
         elec_flat: 1-D electron coordinates of shape
@@ -2807,6 +2808,11 @@ def log_psi_vgl_psiformer(
             ``anti_scale``, ``same_alpha``, ``anti_alpha``,
             and an optional ``type`` (``'psiformer'`` or
             ``'deepqmc'``; defaults to ``'psiformer'``).
+        cusp_nuclei: ``None`` or dict with keys ``scale``
+            (``(n_nuc,)``, ``-Z`` per nucleus, see
+            :class:`~OmegaQMC.psi.nn.cusp.NuclearCuspAsymptotic`)
+            and ``alpha``; a :class:`DeepQMCCusp` over the
+            electron-nucleus distances.
         jastrow: ``None`` or dict with keys ``layers``,
             ``activation``, ``last_linear``, ``sum_first``
             (forwarded to :func:`vgl_jastrow`).  When
@@ -2907,6 +2913,15 @@ def log_psi_vgl_psiformer(
     log_psi_main = slogdet_multidet_vgl(
         log_abs, sign_per_det, coeffs,
     )                                           # scalar VGL
+    if cusp_nuclei is not None:
+        log_psi_main = vgl_add(
+            log_psi_main,
+            vgl_deepqmc_cusp(
+                cusp_nuclei['scale'][None, :],
+                cusp_nuclei['alpha'],
+                dists_nuc,
+            ),
+        )
 
     # 7. Electron cusp (PsiformerCusp)
     if cusp is None:

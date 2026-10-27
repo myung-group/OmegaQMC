@@ -128,6 +128,13 @@ class ElectronicCuspAsymptotic(CuspAsymptotic):
 class NuclearCuspAsymptotic(CuspAsymptotic):
     """Nuclear cusp correction.
 
+    The cusp functions are written for the repulsive
+    electron-electron cusp: ``-scale/(alpha(1 + alpha r))`` has
+    slope ``+scale`` at ``r = 0``.  Kato's electron-nucleus
+    condition needs slope ``-Z``, so the charges enter as
+    ``scale = -Z``.  (``deepqmc/wf/cusp.py`` passes ``+Z``, which
+    gives the wrong sign.)
+
     Args:
         nuclear_charges: Array of nuclear charges.
         alpha: Initial alpha value.
@@ -147,6 +154,8 @@ class NuclearCuspAsymptotic(CuspAsymptotic):
             trainable_alpha=trainable_alpha,
         )
         self.nuclear_charges = nuclear_charges[None]
+        # [1, n_nuc]; the only place the sign is set (see above)
+        self.scale = -self.nuclear_charges
         if trainable_alpha:
             self.nuc_alpha = nnx.Param(
                 jnp.array(alpha),
@@ -162,5 +171,5 @@ class NuclearCuspAsymptotic(CuspAsymptotic):
             )
         )
         return self.cusp_function(
-            self.nuclear_charges, alpha, dists,
+            self.scale, alpha, dists,
         )

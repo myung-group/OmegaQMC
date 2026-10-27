@@ -48,6 +48,8 @@ class NNAnsatzConfig:
     cusp_anti_scale: float = 0.5
     cusp_alpha: float = 10.0
     cusp_trainable_alpha: bool = False
+    # Not recommended: the exponential envelopes already carry the
+    # e-n cusp, so this factor double-counts it (build_nn_wf warns).
     cusp_nuclei: bool = False
 
     # --- OmniNet / GNN ---
