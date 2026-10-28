@@ -11,6 +11,8 @@ Top-level functions
 
 .. autofunction:: OmegaQMC.get_afqmc_func
 
+.. autofunction:: OmegaQMC.get_afqmc_func_from_integrals
+
 .. autofunction:: OmegaQMC.get_qed_afqmc_func
 
    Implements the phaseless QED-AFQMC method
@@ -328,6 +330,27 @@ Green's functions
 
 .. autofunction:: OmegaQMC.observables.greens.greens_function_multidet
 
+Wick's theorem for multi-determinant trials
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The kernels behind ``multidet_method='wick'`` of
+:class:`~OmegaQMC.afqmc_gto._AFQMCDriverGTO`.
+
+.. automodule:: OmegaQMC.observables.wick
+   :no-members:
+
+.. autofunction:: OmegaQMC.observables.wick.build_wick_trial
+
+.. autoclass:: OmegaQMC.observables.wick.WickTrial
+
+.. autoclass:: OmegaQMC.observables.wick.WickSpin
+
+.. autofunction:: OmegaQMC.observables.wick.wick_overlap
+
+.. autofunction:: OmegaQMC.observables.wick.wick_force_bias
+
+.. autofunction:: OmegaQMC.observables.wick.wick_local_energy
+
 Integrals
 ---------
 
@@ -337,6 +360,10 @@ Cholesky decomposition
 .. autofunction:: OmegaQMC.integrals.cholesky.chunked_cholesky
 
 .. autofunction:: OmegaQMC.integrals.cholesky.prepare_afqmc_integrals
+
+.. autofunction:: OmegaQMC.integrals.cholesky.prepare_afqmc_integrals_from_arrays
+
+.. autofunction:: OmegaQMC.integrals.cholesky.determinant_energy_from_integrals
 
 .. autofunction:: OmegaQMC.integrals.cholesky.half_rotate_cholesky
 
@@ -508,6 +535,14 @@ Physics utilities
 .. autofunction:: OmegaQMC.psi.nn.physics.pairwise_self_distance
 
 .. autofunction:: OmegaQMC.psi.nn.physics.laplacian
+
+Hand-written backward pass
+''''''''''''''''''''''''''
+
+.. automodule:: OmegaQMC.psi.nn.backward_psiformer
+   :no-members:
+
+.. autofunction:: OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward
 
 Graph utilities
 ''''''''''''''''

@@ -1,28 +1,28 @@
 """
 Generalized Wick's theorem for particle-hole multi-determinant trials.
 
-The trial is an expansion |Psi_T> = sum_I c_I |D_I> in orthonormal
-orbitals, and each |D_I> is written as an excitation of a reference
-determinant |D_0> (the first determinant).  All walker-dependent
-quantities are evaluated relative to |D_0>, as in Mahajan & Sharma,
-JCTC 17, 4786 (2021); Mahajan, Lee & Sharma, JCP 156, 174111 (2022);
-and ipie (Malone et al., JCTC 19, 109 (2023)):
+The trial is an expansion ``|Psi_T> = sum_I c_I |D_I>`` in
+orthonormal orbitals, and each ``|D_I>`` is written as an excitation
+of a reference determinant ``|D_0>`` (the first determinant).  All
+walker-dependent quantities are evaluated relative to ``|D_0>``, as in
+Mahajan & Sharma, JCTC 17, 4786 (2021); Mahajan, Lee & Sharma, JCP
+156, 174111 (2022); and ipie (Malone et al., JCTC 19, 109 (2023))::
 
     Theta = phi (D_0^T phi)^{-1}                  (nbasis, nocc)
 
 and, for a spin string with holes h (positions in the reference) and
-particles p (k of each),
+particles p (k of each)::
 
     <D_I|phi> / <D_0|phi> = det(A),     A = Theta[p, h]   (k, k).
 
-One-body and two-body matrix elements over <D_I| and |phi> follow from
-the Woodbury form of the transition Green's function,
+One-body and two-body matrix elements over ``<D_I|`` and ``|phi>``
+follow from the Woodbury form of the transition Green's function::
 
     Theta_I = Theta - Theta[:, h] A^{-1} (Theta[p, :] - E_h^T),
 
 multiplied by det(A), so that only the first- and second-order
 cofactors of A appear.  Unlike explicit per-determinant inverses, this
-stays exact when det(A) = 0, e.g. when a walker equals |D_0>.
+stays exact when det(A) = 0, e.g. when a walker equals ``|D_0>``.
 
 Spin strings are shared between determinants, so the string quantities
 are computed once per unique alpha and beta string and then combined.
@@ -438,9 +438,11 @@ def wick_force_bias(phia, phib, trial, batch_size=None):
     """Mixed Tr(L_g G) summed over spins, and the overlap.
 
     Returns:
-        vbias: sum_s Tr(L_g G_s) with the multi-det mixed G,
-            shape (naux, nwalkers).
-        overlap: <Psi_T|phi>, shape (nwalkers,).
+        ``(vbias, overlap)``:
+
+        * ``vbias``: sum_s Tr(L_g G_s) with the multi-det mixed G,
+          shape (naux, nwalkers);
+        * ``overlap``: <Psi_T|phi>, shape (nwalkers,).
     """
     o_up, d_up, tau_up = _spin_terms(phia, trial.up, False, batch_size)
     o_dn, d_dn, tau_dn = _spin_terms(phib, trial.dn, False, batch_size)
