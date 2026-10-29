@@ -95,10 +95,10 @@ def _check_pade_denominators(params_corr):
             continue
         sub = params_corr[key]
         for name, arr in sub.items():
-            # arr[-1] is the denominator for J1_pade;
-            # arr[1] is the denominator for J2_pade.
-            b_val = float(arr[-1]) if key == "J1_pade" \
-                else float(arr[1])
+            # The last entry is the denominator for J1_pade
+            # (b or [a, b]); arr[1] is the one for J2_pade.
+            b_val = float(jnp.ravel(arr)[-1]) \
+                if key == "J1_pade" else float(arr[1])
             if b_val <= 0.0:
                 raise ValueError(
                     f"{key}['{name}'] has denominator"

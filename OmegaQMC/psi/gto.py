@@ -1,3 +1,5 @@
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1521,23 +1523,46 @@ class _PsiGTO:
                 / (1. + curr_params["unlike"][1] * r_ij)
             return jnp.sum(u_pairs * opp_spin_mask_f)
 
-        @jax.jit
-        def J1(elec_crds, nuc_crds, curr_params):
-            """One-body Jastrow (Padé)."""
+        def J1_ab(curr_params):
+            """Per-atom Padé one-body ``(a, b)``.
+
+            With cusp-corrected orbitals (``l_cgto=True``)
+            ``curr_params[sym]`` is ``[a, b]``.  Without them
+            ``a`` is fixed at ``-Z`` so that J₁ supplies the
+            electron-nucleus cusp, and ``curr_params[sym]`` is
+            ``b``; an ``[a, b]`` entry is also accepted, and its
+            ``a`` is ignored.
+            """
             if l_cgto:
                 ab_arr = jnp.stack(
                     [curr_params[sym]
                      for sym in unique_elements]
                 )
-                a_per_atom = ab_arr[atom_to_elem_idx, 0]
-                b_per_atom = ab_arr[atom_to_elem_idx, 1]
-            else:
-                b_arr = jnp.array(
-                    [curr_params[sym]
-                     for sym in unique_elements]
-                )
-                b_per_atom = b_arr[atom_to_elem_idx]
-                a_per_atom = -Z_charges
+                return (ab_arr[atom_to_elem_idx, 0],
+                        ab_arr[atom_to_elem_idx, 1])
+            b_list = []
+            for sym in unique_elements:
+                p = jnp.ravel(jnp.asarray(curr_params[sym]))
+                if p.shape[0] not in (1, 2):
+                    raise ValueError(
+                        f"J1_pade['{sym}'] has {p.shape[0]}"
+                        " entries; expected b or [a, b]."
+                    )
+                if p.shape[0] == 2:
+                    warnings.warn(
+                        f"J1_pade['{sym}'] = [a, b] without cusp"
+                        " correction: a is fixed at -Z and the"
+                        " given a is ignored.  Pass b alone.",
+                        stacklevel=2,
+                    )
+                b_list.append(p[-1])
+            b_arr = jnp.stack(b_list)
+            return -Z_charges, b_arr[atom_to_elem_idx]
+
+        @jax.jit
+        def J1(elec_crds, nuc_crds, curr_params):
+            """One-body Jastrow (Padé)."""
+            a_per_atom, b_per_atom = J1_ab(curr_params)
             diffs = (
                 elec_crds[None, :, :]
                 - nuc_crds[:, None, :]
@@ -1602,22 +1627,10 @@ class _PsiGTO:
               * ``l_cgto=True``: ``curr_params[sym]`` is
                 ``[a, b]`` per element.
               * ``l_cgto=False``: ``curr_params[sym]`` is
-                just ``b``; ``a`` is fixed at ``-Z``.
+                ``b`` (or ``[a, b]``, ``a`` ignored); ``a`` is
+                fixed at ``-Z``.
             """
-            if l_cgto:
-                ab_arr = jnp.stack([
-                    curr_params[sym]
-                    for sym in unique_elements
-                ])
-                a_per_atom = ab_arr[atom_to_elem_idx, 0]
-                b_per_atom = ab_arr[atom_to_elem_idx, 1]
-            else:
-                b_arr = jnp.array([
-                    curr_params[sym]
-                    for sym in unique_elements
-                ])
-                b_per_atom = b_arr[atom_to_elem_idx]
-                a_per_atom = -Z_charges
+            a_per_atom, b_per_atom = J1_ab(curr_params)
             diffs = (
                 elec_crds[:, None, :] - nuc_crds[None, :, :]
             )
