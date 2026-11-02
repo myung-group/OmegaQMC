@@ -127,6 +127,40 @@ _KE_WALKER_CHUNK = 256
 # Iterations between checkpoint writes.
 _CHK_EVERY_KFAC = 500
 
+# Non-finite guard (see ``_VMCOptDriverNN_KFAC.__call__``): give up after
+# this many consecutive rejected steps, or when more than this fraction
+# of the walkers has a non-finite local energy at once; record at most
+# _NONFINITE_MAX_DUMPS events in ``{prefix}.nonfinite.h5``.
+_NONFINITE_MAX_CONSECUTIVE = 20
+_NONFINITE_MAX_FRACTION = 0.5
+_NONFINITE_MAX_DUMPS = 50
+
+
+@jax.jit
+def _tree_all_finite(tree):
+    """True when every leaf of *tree* is finite (one device reduction)."""
+    leaves = [jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(tree)]
+    if not leaves:
+        return jnp.asarray(True)
+    return jnp.all(jnp.stack(leaves))
+
+
+def _dump_nonfinite(path, it, kind, walkers, e_loc, log_psi_vals,
+                    grad_finite=None):
+    """Append one non-finite event to the HDF5 file *path*."""
+    with h5py.File(path, 'a') as f:
+        n = len(f.keys())
+        if n >= _NONFINITE_MAX_DUMPS:
+            return
+        g = f.create_group(f"{n:03d}_iter{it}_{kind}")
+        g.attrs['iteration'] = int(it)
+        g.attrs['kind'] = kind
+        g.create_dataset('walkers', data=np.asarray(walkers))
+        g.create_dataset('e_loc', data=np.asarray(e_loc))
+        g.create_dataset('log_psi', data=np.asarray(log_psi_vals))
+        if grad_finite is not None:
+            g.create_dataset('grad_r_finite', data=np.asarray(grad_finite))
+
 # Metropolis step-size adaptation (matches the other NN drivers).
 _TARGET_ACCEPTANCE_RATE = 0.5
 _STEP_SIZE_ADAPTATION_RATE = 0.05
@@ -1247,6 +1281,22 @@ class _VMCOptDriverNN_KFAC:
         ``mc_timestep=0.02**2 / 3`` here (whose step size then
         adapts).  A resumed run never pretrains.
 
+        Non-finite guard.  A single walker with a non-finite local
+        energy (or a non-finite network gradient) would otherwise turn
+        the KFAC step, and every parameter after it, into NaN.  Each
+        iteration therefore (i) replaces walkers whose local energy is
+        not finite by copies of randomly chosen finite walkers before
+        the step, and (ii) rejects a step whose parameters or
+        Kronecker factors come out non-finite, keeping the previous
+        ones.  Both are logged, and the offending walkers are recorded
+        in ``{prefix}.nonfinite.h5`` for diagnosis.  When every local
+        energy and the step are finite (the normal case) the
+        iteration, including its random numbers, is unchanged.  The
+        run stops with ``FloatingPointError`` after
+        ``_NONFINITE_MAX_CONSECUTIVE`` rejected steps in a row or if
+        more than ``_NONFINITE_MAX_FRACTION`` of the walkers are
+        non-finite at once.
+
         Args:
             rng_key: JAX PRNG key (int or key array).
             num_iters: KFAC iterations (one parameter update each).
@@ -1446,6 +1496,17 @@ class _VMCOptDriverNN_KFAC:
         prev_e_total: Optional[float] = None
         prev_predicted: Optional[float] = None
         e_mean = None
+        nonfinite_path = f"{prefix}.nonfinite.h5"
+        n_rejected_in_row = 0
+        batch_log_psi = jax.jit(jax.vmap(
+            self.log_psi, in_axes=(0, None, None),
+        ))
+        batch_grad_r_finite = jax.jit(jax.vmap(
+            lambda w, p: jnp.all(jnp.isfinite(
+                jax.grad(self.log_psi)(w, self.nuc_crds, p)
+            )),
+            in_axes=(0, None),
+        ))
 
         for it in range(start_iter, start_iter + num_iters):
             # (a) Decorrelate under the current |psi|^2.
@@ -1456,6 +1517,30 @@ class _VMCOptDriverNN_KFAC:
 
             # (b) Local energies (forward-Laplacian, chunked).
             e_loc = self.compute_batch_energy(walkers, params)
+            finite = jnp.isfinite(e_loc)
+            n_bad = int(num_walkers - int(jnp.sum(finite)))
+            if n_bad:
+                _dump_nonfinite(
+                    nonfinite_path, it, 'e_loc',
+                    walkers[~finite], e_loc[~finite],
+                    batch_log_psi(walkers[~finite], self.nuc_crds,
+                                  params),
+                )
+                if n_bad > _NONFINITE_MAX_FRACTION * num_walkers:
+                    raise FloatingPointError(
+                        f"iteration {it}: {n_bad} of {num_walkers}"
+                        " walkers have a non-finite local energy"
+                    )
+                good_idx = jnp.nonzero(finite)[0]
+                bad_idx = jnp.nonzero(~finite)[0]
+                rng_key, k_rep = jax.random.split(rng_key)
+                pick = jax.random.choice(k_rep, good_idx, (n_bad,))
+                walkers = walkers.at[bad_idx].set(walkers[pick])
+                e_loc = e_loc.at[bad_idx].set(e_loc[pick])
+                print(f"# iteration {it}: {n_bad} walker(s) with a"
+                      " non-finite local energy replaced by copies of"
+                      f" finite ones (recorded in {nonfinite_path})",
+                      file=fout)
             e_mean = jnp.mean(e_loc)
             de = e_loc - e_mean
             var = jnp.mean(de ** 2)
@@ -1489,7 +1574,7 @@ class _VMCOptDriverNN_KFAC:
             else:
                 lr_now = self.lr
 
-            (params, A_state, G_state, step_norm, clip_val,
+            (params_new, A_new, G_new, step_norm, clip_val,
              dot_grad_step, dot_step_F_step) = self._kfac_apply(
                 params, A_hat, G_hat, dW_hat, generic_flat, de_eff,
                 A_state, G_state,
@@ -1497,6 +1582,29 @@ class _VMCOptDriverNN_KFAC:
                 jnp.asarray(damping_now, dtype=jnp.float64),
                 kernel_scale,
             )
+            step_ok = bool(_tree_all_finite((params_new, A_new, G_new)))
+            if step_ok:
+                params, A_state, G_state = params_new, A_new, G_new
+                n_rejected_in_row = 0
+            else:
+                # Keep the previous parameters and factors.  The
+                # local energies were finite, so record which walkers
+                # have a non-finite log|psi| or electron gradient.
+                n_rejected_in_row += 1
+                _dump_nonfinite(
+                    nonfinite_path, it, 'step', walkers, e_loc,
+                    batch_log_psi(walkers, self.nuc_crds, params),
+                    grad_finite=batch_grad_r_finite(walkers, params),
+                )
+                print(f"# iteration {it}: non-finite KFAC step"
+                      " rejected, parameters kept"
+                      f" ({n_rejected_in_row} in a row; recorded in"
+                      f" {nonfinite_path})", file=fout)
+                if n_rejected_in_row >= _NONFINITE_MAX_CONSECUTIVE:
+                    raise FloatingPointError(
+                        f"iteration {it}: {n_rejected_in_row}"
+                        " consecutive non-finite KFAC steps"
+                    )
 
             # (e) Logging.
             now = datetime.now()
@@ -1513,7 +1621,21 @@ class _VMCOptDriverNN_KFAC:
                     file=fout,
                 )
 
-            # (f) Adaptive Levenberg-Marquardt damping.
+            # (f) Adaptive Levenberg-Marquardt damping (a rejected
+            # step carries no information about the curvature model).
+            if not step_ok:
+                prev_e_total = e_total
+                prev_predicted = None
+                ratio_window = []
+                is_last = (it == start_iter + num_iters - 1)
+                if is_last or ((it + 1) % _CHK_EVERY_KFAC == 0):
+                    if os.path.exists(chkpt_path):
+                        os.rename(chkpt_path, f"{prefix}.{it}.h5")
+                    save_nn_checkpoint(
+                        chkpt_path, params, it, self.config_name,
+                        self.mol_info, energy=e_total,
+                    )
+                continue
             eff_lr = float(lr_now) * float(clip_val)
             predicted_change = float(
                 0.5 * eff_lr ** 2 * float(dot_step_F_step)
