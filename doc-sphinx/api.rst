@@ -117,6 +117,21 @@ damping.
 .. autoclass:: OmegaQMC.vmcopt_nn_kfac._VMCOptDriverNN_KFAC
    :members: __call__
 
+**Hartree-Fock pretraining**
+
+FermiNet's supervised pretraining of the orbital matrices against
+UHF orbitals before the variational optimisation; the KFAC driver
+runs it on a fresh start with ``pretrain_iters > 0``.
+
+.. automodule:: OmegaQMC.pretrain_nn
+
+.. autofunction:: OmegaQMC.pretrain_nn.pretrain_hf
+
+.. autofunction:: OmegaQMC.pretrain_nn.init_electrons
+
+.. autoclass:: OmegaQMC.pretrain_nn.HartreeFockTarget
+   :members: __call__
+
 **Excited states: NES-VMC penalty methods**
 
 Optimise a trial orthogonal to a frozen ground state by adding an
@@ -320,6 +335,8 @@ Nuclear forces
 .. autofunction:: OmegaQMC.observables.force.vmc_nn_gradients_zvzb
 
 .. autofunction:: OmegaQMC.observables.force.vmc_nn_gradients_fast_warp
+
+.. autofunction:: OmegaQMC.observables.force.vmc_nn_gradients_swct
 
 .. autofunction:: OmegaQMC.observables.force.save_nn_gradients
 

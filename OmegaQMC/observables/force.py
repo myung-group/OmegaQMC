@@ -11,6 +11,10 @@ Estimators, selected by the drivers' ``force_warp`` argument:
 
 * GTO, ``'swct'`` (default): space-warp coordinate
   transformation (SWCT), with ``gr_scheme`` weights.
+* NN, ``'swct'``: SWCT with distance weights, differentiating the
+  local energy along the warp (Qian, Fu, Ren and Chen, J. Chem.
+  Phys. 157, 164104 (2022), Eq. 14);
+  :func:`vmc_nn_gradients_swct`.
 * GTO or NN, ``'fast_warp'``: the same space warp with every
   kinetic-energy derivative removed by Hermiticity (Qian, Li and
   Chen, Faraday Discuss. 254, 529 (2024));
@@ -57,11 +61,11 @@ PSI2_RATIO_THRESHOLD = 1e-4
 # Space-warp choices for the nuclear-force estimators.  ``None`` is no
 # warp (the no-SWCT estimator, NN only); ``'swct'`` differentiates
 # every local-energy term along the space-warp coordinate
-# transformation (GTO only); ``'fast_warp'`` keeps the same warp but
+# transformation; ``'fast_warp'`` keeps the same warp but
 # removes all derivatives of the kinetic energy by Hermiticity
 # (Qian, Li and Chen, Faraday Discuss. 254, 529 (2024), SI Eq. 19).
 FORCE_WARPS_GTO = ('swct', 'fast_warp')
-FORCE_WARPS_NN = (None, 'fast_warp')
+FORCE_WARPS_NN = (None, 'swct', 'fast_warp')
 
 
 # ---------------------------------------------------------------------
@@ -897,6 +901,172 @@ def vmc_nn_gradients_fast_warp(
         return jax.vmap(_grd_fast_warp)(batch_walkers)
 
     return _grd_fast_warp_batch
+
+
+def vmc_nn_gradients_swct(
+    log_psi,
+    nuc_crds,
+    charges,
+    nelec,
+    params,
+    lap_grad=None,
+    eps=None,
+):
+    """Build a JIT-compiled SWCT gradient batch function.
+
+    Implements the space-warp coordinate transformation (SWCT)
+    force estimator of Filippi and Umrigar :cite:`Filippi2000` in
+    the form used for FermiNet-VMC by Qian, Fu, Ren and Chen,
+    J. Chem. Phys. 157, 164104 (2022), Eq. 14:
+
+    .. math::
+       F_A = -\\frac{d E_L}{d R_A}
+             + 2 (\\bar E - E_L)
+               \\frac{d}{d R_A} \\log\\left(|J|^{1/2} \\psi\\right),
+
+    where ``d/dR_A = d/dR_A + sum_i w_A(r_i) d/dr_i`` is the
+    total derivative along the warp ``r_i -> r_i + dR_A
+    w_A(r_i)``, with ``w_A(r) = |r - R_A|^-4 / sum_B |r - R_B|^-4``.
+    Unlike :func:`vmc_nn_gradients_fast_warp`, the local kinetic
+    energy is differentiated along the warp directly (third
+    derivatives of ``log|psi|``).  Both estimate the same force; they
+    differ sample by sample.
+
+    The warped derivative of ``T_L = -1/2 (nabla^2 log|psi| +
+    |nabla log|psi||^2)`` is one forward-mode directional derivative
+    per ``(nucleus, component)``: the tangent moves nucleus ``A``
+    by ``e_k`` and every electron ``i`` by ``w_A(r_i) e_k``.  The
+    ``3 * natom`` tangents share one primal Laplacian evaluation
+    (``jax.vmap`` over ``jax.jvp``).
+
+    The per-walker *negated* force is returned decomposed like the
+    other NN estimators, so :func:`save_nn_gradients` and
+    :func:`postproc_h5_pgcs` apply unchanged:
+
+    * ``grd_ee_en = dV/dR + sum_i w[i] dV/dr_i`` with
+      ``V = V_en + V_ee`` (the warped potential term; ``V_nn`` is
+      added downstream from ``grd_nn``);
+    * ``grd_ke = dT_L/dR + sum_i w[i] dT_L/dr_i``;
+    * ``grd_logpsi = P = d log|psi|/dR + sum_i (w[i] d log|psi|/dr_i
+      + 1/2 dw[i]/dr_i)``, the warped derivative of
+      ``log(|J|^{1/2} psi)``, multiplied by ``2 (E_L - <E>)``
+      downstream.
+
+    In the paper's terms, ``grd_ee_en + grd_ke + grd_nn`` is minus
+    the SWCT Hellmann-Feynman (HFM-Bare + HFM-Warp) term and the
+    ``grd_logpsi`` part is the SWCT-Pulay term.  Because the warp
+    weights sum to one over nuclei, the sum over nuclei of every
+    component vanishes per sample (translation invariance).
+
+    Parameters
+    ----------
+    log_psi : callable
+        ``(elec_crds, nuc_crds, params) -> float``.
+    nuc_crds : jnp.ndarray
+        Nuclear coordinates, shape ``(natom, 3)``.
+    charges : jnp.ndarray
+        Nuclear charges, shape ``(natom,)``.
+    nelec : int
+        Total number of electrons.
+    params : pytree
+        NN wavefunction parameters.
+    lap_grad : callable, optional
+        ``(elec_crds, nuc_crds, params) -> (lap, grad_flat)`` for
+        ``log|psi|``, as returned by
+        :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`; it must be
+        differentiable in forward mode with respect to both
+        coordinate arguments.  Only ``lap`` and ``|grad|^2`` are
+        used, so the electron order of ``grad_flat`` does not
+        matter.  When omitted, the linearize-based Laplacian of
+        *log_psi* is used.
+    eps : float, optional
+        Distance clamp of the warp weights; defaults to the machine
+        epsilon of *nuc_crds*.
+
+    Returns
+    -------
+    callable
+        ``(batch_walkers) -> (grd_ee_en, grd_ke, grd_logpsi)``
+        with *batch_walkers* ``(batch, nelec, 3)`` and each output
+        ``(batch, natom, 3)``.
+    """
+    from ..psi.nn.physics import laplacian
+
+    nuc_crds = jnp.asarray(nuc_crds)
+    if eps is None:
+        eps = float(jnp.finfo(nuc_crds.dtype).eps)
+    n_nuc = nuc_crds.shape[0]
+    i_e, j_e = jnp.triu_indices(nelec, k=1)
+
+    if lap_grad is None:
+        def lap_grad(elec_crds, R, p):
+            def f_flat(x):
+                return log_psi(x.reshape(nelec, 3), R, p)
+            return laplacian(f_flat)(elec_crds.reshape(-1))
+
+    def _t_loc(elec_crds, R):
+        """Local kinetic energy ``-1/2 nabla^2 psi / psi``."""
+        lap, g = lap_grad(elec_crds, R, params)
+        return -0.5 * (lap + jnp.dot(g, g))
+
+    def _v_pot(elec_crds, R):
+        """``V_en + V_ee`` for one walker."""
+        d_en = jnp.linalg.norm(
+            elec_crds[:, None, :] - R[None, :, :], axis=-1,
+        )
+        v_en = -jnp.sum(charges[None, :] / d_en)
+        if nelec > 1:
+            d_ee = jnp.linalg.norm(
+                elec_crds[i_e] - elec_crds[j_e], axis=-1,
+            )
+            return v_en + jnp.sum(1.0 / d_ee)
+        return v_en
+
+    # Nuclear part of the tangent basis, row ``3 n + k`` moving
+    # nucleus n along e_k.
+    eye3 = jnp.eye(3, dtype=nuc_crds.dtype)
+    dR_basis = (
+        jnp.eye(n_nuc, dtype=nuc_crds.dtype)[:, None, :, None]
+        * eye3[None, :, None, :]
+    ).reshape(3 * n_nuc, n_nuc, 3)
+
+    @jax.jit
+    def _grd_swct(elec_crds):
+        dv_dr, dv_dR = jax.grad(_v_pot, argnums=(0, 1))(
+            elec_crds, nuc_crds,
+        )
+        g, dlp_dR = jax.grad(log_psi, argnums=(0, 1))(
+            elec_crds, nuc_crds, params,
+        )
+        w, dw = _warp_weights_distance_vg(elec_crds, nuc_crds, eps)
+
+        # Electron part of the tangent basis: row ``3 n + k`` moves
+        # electron i by w[i, n] e_k.
+        dr_basis = (
+            w.T[:, None, :, None] * eye3[None, :, None, :]
+        ).reshape(3 * n_nuc, nelec, 3).astype(elec_crds.dtype)
+
+        def _warped_dt(dr, dR):
+            return jax.jvp(
+                _t_loc, (elec_crds, nuc_crds), (dr, dR),
+            )[1]
+
+        grd_ke = jax.vmap(_warped_dt)(dr_basis, dR_basis).reshape(
+            n_nuc, 3,
+        )
+        grd_ee_en = dv_dR + jnp.einsum('ik,in->nk', dv_dr, w)
+        p_tot = (
+            dlp_dR
+            + jnp.einsum('in,ik->nk', w, g)
+            + 0.5 * jnp.sum(dw, axis=0)
+        )
+        return grd_ee_en, grd_ke, p_tot
+
+    @jax.jit
+    def _grd_swct_batch(batch_walkers):
+        return jax.vmap(_grd_swct)(batch_walkers)
+
+    return _grd_swct_batch
 
 
 def save_nn_gradients(

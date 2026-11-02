@@ -506,6 +506,42 @@ def make_nn_log_psi(config, mol_info, rng_key, compute_dtype=None):
 
     log_psi.signed = log_psi_signed
 
+    def log_psi_orbitals(elec_crds, nuc_crds, params):
+        """Orbital matrices of a single walker, before the determinants.
+
+        Returns ``(orb_up, orb_down, r_grouped)``: ``orb_up`` has
+        shape ``(n_det, n_up_rows, n_orb)`` and ``orb_down``
+        ``(n_det, n_down_rows, n_orb)``, with the envelopes and the
+        multiplicative backflow applied (``return_mos=True`` of the
+        wavefunction module; ``n_orb = n_e`` for a full determinant).
+        Their rows are the electrons of ``r_grouped``, the
+        spin-grouped electron coordinates the network sees (spin-up
+        rows first), in the precision of *elec_crds*.  Used by HF
+        pretraining (:mod:`OmegaQMC.pretrain_nn`).
+        """
+        r_grouped_in = jnp.concatenate(
+            [elec_crds[::2], elec_crds[1::2]], axis=0,
+        )
+        elec_crds, nuc_crds, params, oth, out_dt = _prep(
+            elec_crds, nuc_crds, params,
+        )
+        r_up = elec_crds[::2]
+        r_dn = elec_crds[1::2]
+        r_grouped = jnp.concatenate(
+            [r_up, r_dn], axis=0,
+        )
+        phys_conf = PhysicalConfiguration(
+            R=nuc_crds,
+            r=r_grouped,
+            mol_idx=jnp.array(0),
+        )
+        mdl = nnx.merge(graphdef, params, oth)
+        orb_up, orb_down = mdl(phys_conf, return_mos=True)
+        return orb_up.astype(out_dt), orb_down.astype(out_dt), r_grouped_in
+
+    log_psi.orbitals = log_psi_orbitals
+    log_psi.full_determinant = bool(config.full_determinant)
+
     def _lap_grad_linearize(elec_crds, nuc_crds, params):
         def f_flat(r_flat):
             r = r_flat.reshape(n_e, 3)

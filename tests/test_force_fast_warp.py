@@ -274,7 +274,7 @@ def test_force_warp_validation(tmp_path):
     with pytest.raises(ValueError):
         get_vmc_nn_func(
             _h2_mol(), 'psiformer', jax.random.key(0),
-            prefix=str(tmp_path / 'bad'), force_warp='swct',
+            prefix=str(tmp_path / 'bad'), force_warp='bogus',
         )
 
 

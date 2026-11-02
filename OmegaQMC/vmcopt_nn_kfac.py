@@ -1222,12 +1222,30 @@ class _VMCOptDriverNN_KFAC:
         fname_log: Optional[str] = None,
         verbose: int = 1,
         prefix: str = 'nnopt',
+        pretrain_iters: int = 0,
+        pretrain_basis: str = 'sto-6g',
+        pretrain_lr: float = 3.0e-4,
+        pretrain_mcmc_width: float = 0.02,
     ):
         """Run KFAC natural-gradient VMC optimisation.
 
         After every ``_CHK_EVERY_KFAC`` iterations (and at the last
         one) the parameters are written to ``{prefix}.chk.h5``, with
         the previous file preserved as ``{prefix}.{iter}.h5``.
+
+        With ``pretrain_iters > 0`` and no checkpoint to resume, the
+        initial parameters are first pretrained against UHF orbitals
+        (:func:`OmegaQMC.pretrain_nn.pretrain_hf`, FermiNet's
+        pretraining) on ``num_walkers`` walkers, the result is saved
+        to ``{prefix}.pretrain.h5``, and the pretrained walkers,
+        instead of fresh ones, are equilibrated before the first
+        iteration.  FermiNet's defaults are ``pretrain_iters=1000``
+        and the defaults of the other ``pretrain_*`` arguments; its
+        burn-in after pretraining is 100 x 10 Metropolis moves of
+        width 0.02 bohr, i.e. ``num_blocks_equil=100``,
+        ``num_steps_per_block=10`` and
+        ``mc_timestep=0.02**2 / 3`` here (whose step size then
+        adapts).  A resumed run never pretrains.
 
         Args:
             rng_key: JAX PRNG key (int or key array).
@@ -1251,6 +1269,12 @@ class _VMCOptDriverNN_KFAC:
                 ``None`` or ``""`` writes to stdout.
             verbose: Verbosity (0 = silent).
             prefix: Filename prefix for the HDF5 checkpoint.
+            pretrain_iters: HF pretraining iterations before a fresh
+                start (0 = none).
+            pretrain_basis: Basis of the UHF target.
+            pretrain_lr: Adam learning rate of the pretraining.
+            pretrain_mcmc_width: Metropolis step (bohr) of the one
+                move per pretraining iteration.
 
         Returns:
             Tuple ``(params_final, energy_data)`` where
@@ -1315,9 +1339,38 @@ class _VMCOptDriverNN_KFAC:
                   f" {chunk} (must divide num_walkers"
                   f" {num_walkers})", file=fout)
 
+        # --- Optional HF pretraining (fresh start only, as FermiNet) ---
+        pretrained_walkers = None
+        if start_iter == 0 and pretrain_iters > 0 and num_iters > 0:
+            from .pretrain_nn import pretrain_hf
+            rng_key, pt_key = jax.random.split(rng_key)
+            params, pretrained_walkers, pt_info = pretrain_hf(
+                self.log_psi, self.mol_info, params, pt_key,
+                iterations=int(pretrain_iters),
+                num_walkers=num_walkers,
+                basis=pretrain_basis,
+                lr=pretrain_lr,
+                mcmc_width=pretrain_mcmc_width,
+                fout=fout,
+                verbose=verbose,
+            )
+            save_nn_checkpoint(
+                f"{prefix}.pretrain.h5", params, -1,
+                self.config_name, self.mol_info,
+                energy=float(pt_info['e_hf']),
+            )
+            if verbose >= 1:
+                print(f"# HF pretraining done: final loss"
+                      f" {pt_info['loss'][-1]:.6e}, mean acceptance"
+                      f" {pt_info['acceptance']:.3f}; saved"
+                      f" '{prefix}.pretrain.h5'", file=fout)
+
         # --- Initialise and equilibrate walkers ---
         rng_key, init_key = jax.random.split(rng_key)
-        walkers = self.initialize_walkers(init_key, num_walkers)
+        if pretrained_walkers is not None:
+            walkers = pretrained_walkers
+        else:
+            walkers = self.initialize_walkers(init_key, num_walkers)
         step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
 
         ars = None

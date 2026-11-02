@@ -595,6 +595,7 @@ class _VMCDriverNN:
             import pathlib
             from .observables.force import (
                 vmc_nn_gradients_fast_warp,
+                vmc_nn_gradients_swct,
                 vmc_nn_gradients_zvzb,
                 save_nn_gradients,
             )
@@ -607,6 +608,12 @@ class _VMCDriverNN:
                 nn_gradient_batch = vmc_nn_gradients_fast_warp(
                     self.log_psi, nuc_crds, charges,
                     nelec, params,
+                )
+            elif self.force_warp == 'swct':
+                nn_gradient_batch = vmc_nn_gradients_swct(
+                    self.log_psi, nuc_crds, charges,
+                    nelec, params,
+                    lap_grad=self.lap_grad,
                 )
             else:
                 nn_gradient_batch = vmc_nn_gradients_zvzb(
@@ -1178,9 +1185,16 @@ def get_vmc_nn_func(
             Li and Chen (2024) with no kinetic-energy derivatives
             (:func:`~OmegaQMC.observables.force.vmc_nn_gradients_fast_warp`):
             cheaper, and much less sensitive to the network's
-            learned nuclear derivative.  Both write the same
-            ``.grd.h5`` layout; the choice is recorded in its
-            ``force_warp`` attribute.
+            learned nuclear derivative.  ``'swct'`` is the
+            space-warp coordinate transformation estimator of
+            Qian, Fu, Ren and Chen, J. Chem. Phys. 157, 164104
+            (2022), Eq. 14
+            (:func:`~OmegaQMC.observables.force.vmc_nn_gradients_swct`),
+            which differentiates the local energy (including the
+            forward Laplacian) along the warp; it estimates the
+            same force as ``'fast_warp'`` at a higher cost per
+            sample.  All write the same ``.grd.h5`` layout; the
+            choice is recorded in its ``force_warp`` attribute.
         backward: How the no-warp ZVZB estimator gets
             :math:`\\nabla_R \\log|\\psi|` (its ``grd_logpsi``
             term).  ``'manual'`` uses the hand-written PsiFormer
