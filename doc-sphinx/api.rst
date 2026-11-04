@@ -132,6 +132,15 @@ runs it on a fresh start with ``pretrain_iters > 0``.
 .. autoclass:: OmegaQMC.pretrain_nn.HartreeFockTarget
    :members: __call__
 
+**Electron layout of NN walkers**
+
+How walkers order spin-up and spin-down electrons (alternating, with
+the unpaired electrons last, so any ``n_up - n_down`` works), and the
+reordering to the spin-grouped electrons the networks see.
+
+.. automodule:: OmegaQMC.spin_layout
+   :members:
+
 **Excited states: NES-VMC penalty methods**
 
 Optimise a trial orthogonal to a frozen ground state by adding an

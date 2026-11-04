@@ -110,6 +110,7 @@ import numpy as np
 from flax import nnx
 
 from .constants import MIN_DIST_THRESHOLD
+from .spin_layout import to_grouped
 from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.build import build_nn_wf
 from .psi.nn.checkpoint import (
@@ -798,10 +799,10 @@ class _VMCOptDriverNN_KFAC:
 
 
             def _apply_with_capture(params, inters, other, elec):
-                # Same interleaved -> grouped reordering the adapter
+                # Same layout -> spin-grouped reordering the adapter
                 # applies, so the twin sees identical inputs.
-                r_grouped = jnp.concatenate(
-                    [elec[::2], elec[1::2]], axis=0,
+                r_grouped = to_grouped(
+                    elec, mol_info.n_up, mol_info.n_down,
                 )
                 phys_conf = PhysicalConfiguration(
                     R=nuc_crds, r=r_grouped,

@@ -1344,10 +1344,16 @@ def vgl_update_edges_shared(
                 'ud_shape': ud.value.shape[:-1],
             })
         else:
-            arrs.append(e)
+            # Per-spin blocks (n_sender, n_receiver, F) differ in
+            # n_sender when n_up != n_down; flatten them to rows, as
+            # the production update concatenates along the sender
+            # axis (the MLP acts row by row, so the result is the
+            # same).
+            F = e.value.shape[-1]
+            arrs.append(vgl_reshape(e, (-1, F)))
             metas.append({
                 'kind': 'simple',
-                'shape': e.value.shape,
+                'shape': e.value.shape[:-1],
             })
 
     ref_ndim = arrs[0].value.ndim
@@ -1413,7 +1419,7 @@ def vgl_update_edges_shared(
             )
             new_edges[k] = (du_new, ud_new)
         else:
-            new_edges[k] = part
+            new_edges[k] = vgl_reshape(part, meta['shape'] + (F_new,))
 
     if tp_residual_normalize is not None:
         new_edges = {

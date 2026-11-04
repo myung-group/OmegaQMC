@@ -85,13 +85,15 @@ def kato_cusp_jastrow(
     the smooth long-range correlation untouched -- the Strategy-B cusp-only
     TC factor. Decode with ``tau = +1`` (``e^{-J}``) to remove the cusp.
 
-    ``layout='interleaved'`` (NN convention: up = even indices, down = odd)
+    ``layout='interleaved'`` (the NN walker layout of
+    :mod:`OmegaQMC.spin_layout`: alternating, unpaired electrons last)
     or ``'grouped'`` (up first, then down). Returns ``(K_s,)``.
     """
     w = np.asarray(walkers, dtype=float)
     K, N, _ = w.shape
     if layout == "interleaved":
-        spin = np.array([i % 2 for i in range(N)])  # 0=up(even), 1=down(odd)
+        from OmegaQMC.spin_layout import spin_of_position
+        spin = spin_of_position(n_alpha, n_beta)  # 0 = up, 1 = down
     elif layout == "grouped":
         spin = np.array([0] * n_alpha + [1] * n_beta)
     else:
@@ -149,6 +151,7 @@ def nn_jastrow_on_walkers(
     from OmegaQMC.psi.nn.build import build_nn_wf
     from OmegaQMC.psi.nn.config import load_nn_config
     from OmegaQMC.psi.nn.types import PhysicalConfiguration
+    from OmegaQMC.spin_layout import to_grouped
 
     if isinstance(config, str):
         config = load_nn_config(config)
@@ -174,9 +177,8 @@ def nn_jastrow_on_walkers(
 
     def _logamp(graphdef, params, other):
         def fn(elec_crds, nuc):
-            r_up = elec_crds[::2]
-            r_dn = elec_crds[1::2]
-            r_grouped = jnp.concatenate([r_up, r_dn], axis=0)
+            r_grouped = to_grouped(elec_crds, mol_info.n_up,
+                                   mol_info.n_down)
             pc = PhysicalConfiguration(R=nuc, r=r_grouped,
                                        mol_idx=jnp.array(0))
             return nnx.merge(graphdef, params, other)(pc).log

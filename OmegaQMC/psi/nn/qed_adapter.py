@@ -45,6 +45,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from .adapter import make_nn_log_psi
+from ...spin_layout import to_grouped
 from .qed_physics import coherent_state_log_amplitude
 
 
@@ -608,10 +609,8 @@ def _make_signed_elec_psi(config, mol_info, rng_key):
     init_params = params
 
     def log_psi_signed(elec_crds, nuc_crds, params):
-        # Reorder: interleaved alpha/beta → grouped (matches make_nn_log_psi).
-        r_up = elec_crds[::2]
-        r_dn = elec_crds[1::2]
-        r_grouped = jnp.concatenate([r_up, r_dn], axis=0)
+        # OmegaQMC electron layout -> spin-grouped (as make_nn_log_psi).
+        r_grouped = to_grouped(elec_crds, mol_info.n_up, mol_info.n_down)
         phys_conf = PhysicalConfiguration(
             R=nuc_crds, r=r_grouped, mol_idx=jnp.array(0),
         )
@@ -818,10 +817,8 @@ def make_qed_nn_log_psi_tang_native(
     init_params = {"nn": params}
 
     def log_psi_signed(elec_crds, nuc_crds, n, params):
-        # Reorder interleaved alpha/beta -> grouped (matches make_nn_log_psi).
-        r_up = elec_crds[::2]
-        r_dn = elec_crds[1::2]
-        r_grouped = jnp.concatenate([r_up, r_dn], axis=0)
+        # OmegaQMC electron layout -> spin-grouped (as make_nn_log_psi).
+        r_grouped = to_grouped(elec_crds, mol_info.n_up, mol_info.n_down)
         n_idx = jnp.asarray(n, dtype=jnp.int32)
         phys_conf = PhysicalConfiguration(
             R=nuc_crds,

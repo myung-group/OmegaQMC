@@ -30,6 +30,7 @@ from .physics import laplacian
 from .types import PhysicalConfiguration
 from .wf import NeuralNetworkWaveFunction
 from .build import build_nn_wf
+from ...spin_layout import to_grouped
 
 
 def _psiformer_compat(config) -> bool:
@@ -459,19 +460,16 @@ def make_nn_log_psi(config, mol_info, rng_key, compute_dtype=None):
         """Evaluate log|psi| for a single walker.
 
         Args:
-            elec_crds: ``(nelec, 3)`` interleaved
-                alpha/beta (OmegaQMC convention).
+            elec_crds: ``(nelec, 3)`` in OmegaQMC's electron
+                layout (:mod:`OmegaQMC.spin_layout`: alternating
+                up/down, unpaired electrons last).
             nuc_crds: ``(natom, 3)``.
             params: NNX State pytree.
         """
         elec_crds, nuc_crds, params, oth, out_dt = _prep(
             elec_crds, nuc_crds, params,
         )
-        r_up = elec_crds[::2]
-        r_dn = elec_crds[1::2]
-        r_grouped = jnp.concatenate(
-            [r_up, r_dn], axis=0,
-        )
+        r_grouped = to_grouped(elec_crds, n_up, n_down)
         phys_conf = PhysicalConfiguration(
             R=nuc_crds,
             r=r_grouped,
@@ -490,11 +488,7 @@ def make_nn_log_psi(config, mol_info, rng_key, compute_dtype=None):
         elec_crds, nuc_crds, params, oth, out_dt = _prep(
             elec_crds, nuc_crds, params,
         )
-        r_up = elec_crds[::2]
-        r_dn = elec_crds[1::2]
-        r_grouped = jnp.concatenate(
-            [r_up, r_dn], axis=0,
-        )
+        r_grouped = to_grouped(elec_crds, n_up, n_down)
         phys_conf = PhysicalConfiguration(
             R=nuc_crds,
             r=r_grouped,
@@ -519,17 +513,11 @@ def make_nn_log_psi(config, mol_info, rng_key, compute_dtype=None):
         rows first), in the precision of *elec_crds*.  Used by HF
         pretraining (:mod:`OmegaQMC.pretrain_nn`).
         """
-        r_grouped_in = jnp.concatenate(
-            [elec_crds[::2], elec_crds[1::2]], axis=0,
-        )
+        r_grouped_in = to_grouped(elec_crds, n_up, n_down)
         elec_crds, nuc_crds, params, oth, out_dt = _prep(
             elec_crds, nuc_crds, params,
         )
-        r_up = elec_crds[::2]
-        r_dn = elec_crds[1::2]
-        r_grouped = jnp.concatenate(
-            [r_up, r_dn], axis=0,
-        )
+        r_grouped = to_grouped(elec_crds, n_up, n_down)
         phys_conf = PhysicalConfiguration(
             R=nuc_crds,
             r=r_grouped,
@@ -552,11 +540,11 @@ def make_nn_log_psi(config, mol_info, rng_key, compute_dtype=None):
         elec_crds, nuc_crds, params, oth, out_dt = _prep(
             elec_crds, nuc_crds, params,
         )
-        r_up = elec_crds[::2]
-        r_dn = elec_crds[1::2]
-        r_grouped = jnp.concatenate(
-            [r_up, r_dn], axis=0,
-        )
+        r_grouped = to_grouped(elec_crds, n_up, n_down)
+        # NB: the gradient below comes out in spin-grouped electron
+        # order (the linearize path returns layout order); callers
+        # only contract it with itself or with other lap_grad
+        # gradients, so the order does not matter to them.
         elec_flat = r_grouped.reshape(-1)
         mdl = nnx.merge(graphdef, params, oth)
         kwargs = _build_vgl_kwargs(

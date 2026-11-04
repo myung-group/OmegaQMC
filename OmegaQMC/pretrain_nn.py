@@ -50,6 +50,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .spin_layout import layout_permutation, to_grouped
+
 # FermiNet defaults (ferminet/base_config.py, pretrain.py at 4cfdf1e).
 PRETRAIN_ITERATIONS = 1000
 PRETRAIN_BASIS = 'sto-6g'
@@ -123,11 +125,12 @@ def init_electrons(mol_info, num_walkers, rng_key, *,
                    init_width: float = INIT_WIDTH, seed: int = 0):
     """FermiNet's initial walkers in OmegaQMC's electron layout.
 
-    Returns ``(num_walkers, n_e, 3)`` float64 coordinates whose
-    spin-grouped view ``concat(x[::2], x[1::2])`` (what the network
-    sees, see :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`) has
-    the spin-up electrons first.  *seed* drives the random spin
-    flips of :func:`_assign_electrons`.
+    Returns ``(num_walkers, n_e, 3)`` float64 coordinates in
+    OmegaQMC's electron layout (:mod:`OmegaQMC.spin_layout`), so that
+    their spin-grouped view (what the network sees, see
+    :func:`~OmegaQMC.psi.nn.adapter.make_nn_log_psi`) has the spin-up
+    electrons of :func:`_assign_electrons` first.  *seed* drives its
+    random spin flips.
     """
     charges = [int(round(float(z))) for z in mol_info.charges]
     n_up, n_down = int(mol_info.n_up), int(mol_info.n_down)
@@ -137,10 +140,7 @@ def init_electrons(mol_info, num_walkers, rng_key, *,
     )
     coords = np.asarray(mol_info.coords, dtype=np.float64)
     grouped = coords[np.asarray(up + dn, dtype=int)]
-    n_even = (n_e + 1) // 2
-    centres = np.empty_like(grouped)
-    centres[0::2] = grouped[:n_even]
-    centres[1::2] = grouped[n_even:]
+    centres = grouped[layout_permutation(n_up, n_down)]
     noise = init_width * jax.random.normal(
         rng_key, (num_walkers, n_e, 3), dtype=jnp.float64,
     )
@@ -335,10 +335,10 @@ def pretrain_hf(
         x = jnp.where(acc[:, None, None], prop, x)
         return p, state, x, loss, jnp.mean(acc)
 
+    n_up, n_down = int(mol_info.n_up), int(mol_info.n_down)
+
     def grouped(x):
-        return np.concatenate(
-            [np.asarray(x[:, ::2]), np.asarray(x[:, 1::2])], axis=1,
-        )
+        return np.asarray(to_grouped(x, n_up, n_down))
 
     losses = np.empty(iterations)
     accs = np.empty(iterations)

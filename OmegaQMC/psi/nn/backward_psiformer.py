@@ -40,6 +40,7 @@ from flax import nnx
 from .adapter import _build_vgl_kwargs, _psiformer_compat, cast_floats
 from .build import build_nn_wf
 from .config import load_nn_config
+from ...spin_layout import to_grouped
 
 
 def _path_str(path):
@@ -116,7 +117,7 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
     Returns:
         ``(backward, layer_names)``.  ``backward(elec_crds,
         nuc_crds, params)`` takes one walker in OmegaQMC's
-        interleaved spin order and returns ``(log_psi, grads,
+        electron layout (:mod:`OmegaQMC.spin_layout`) and returns ``(log_psi, grads,
         captures)``: ``grads`` has the structure of *params*;
         ``captures`` maps each Linear layer (named as in
         *layer_names*, e.g. ``'omni/gnn/layers/0/subnet/layers/1'``)
@@ -213,8 +214,8 @@ def make_psiformer_backward(config, mol_info, rng_key=None,
         P = dict(zip(paths, jax.tree.leaves(params)))
         dt = elec_crds.dtype
         eps = jnp.finfo(dt).eps
-        # OmegaQMC interleaves spins; the network groups them
-        r = jnp.concatenate([elec_crds[::2], elec_crds[1::2]], axis=0)
+        # OmegaQMC's electron layout -> the network's spin grouping
+        r = to_grouped(elec_crds, n_up, n_down)
         R = nuc_crds
 
         # ---------------- forward ----------------

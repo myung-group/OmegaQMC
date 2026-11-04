@@ -26,30 +26,20 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from OmegaQMC.spin_layout import grouping_permutation
+
 
 def _normalization(n_alpha: int, n_beta: int) -> float:
     return 1.0 / math.sqrt(math.factorial(n_alpha) * math.factorial(n_beta))
 
 
 def _interleaved_to_grouped_indices(n_alpha: int, n_beta: int) -> np.ndarray:
-    """Permutation that maps OmegaQMC interleaved walker layout (alpha at
-    even positions, beta at odd) into grouped layout (all alpha first,
+    """Permutation that maps OmegaQMC's NN walker layout ("interleaved":
+    alpha and beta alternate, unpaired electrons last; see
+    :mod:`OmegaQMC.spin_layout`) into grouped layout (all alpha first,
     then all beta). Use as ``walkers[:, perm, :]`` or ``orb[:, perm, :]``.
-
-    Assumes ``n_alpha >= n_beta`` (the closed-shell or high-spin-alpha
-    convention used by OmegaQMC's NN adapter ``r_up = elec_crds[::2]``).
-    Raises ValueError otherwise to surface ambiguous spin assignments
-    before they corrupt the orbital evaluation.
     """
-    if n_alpha < n_beta:
-        raise ValueError(
-            f"interleaved->grouped permutation expects n_alpha >= n_beta; "
-            f"got ({n_alpha}, {n_beta})"
-        )
-    n_total = n_alpha + n_beta
-    a_idx = np.arange(0, n_total, 2)[:n_alpha]
-    b_idx = np.arange(1, n_total, 2)[:n_beta]
-    return np.concatenate([a_idx, b_idx])
+    return grouping_permutation(n_alpha, n_beta)
 
 
 def evaluate_orbitals_on_walkers(
@@ -68,8 +58,8 @@ def evaluate_orbitals_on_walkers(
     walkers. ``"grouped"`` (the default, matching test synthetic data and
     PySCF FCI) puts alpha electrons in positions ``0..n_alpha-1`` and beta
     in ``n_alpha..n_total-1``. ``"interleaved"`` (matching OmegaQMC NN-VMC
-    walkers — see ``OmegaQMC.psi.nn.adapter`` where ``r_up = elec_crds[::2]``)
-    puts alpha at even positions and beta at odd. For interleaved input the
+    walkers, :mod:`OmegaQMC.spin_layout`) alternates alpha and beta and
+    puts the unpaired electrons last. For interleaved input the
     returned orbitals are permuted into grouped order so the downstream
     estimators always see alpha-first walkers; this requires ``n_alpha``
     and ``n_beta``.

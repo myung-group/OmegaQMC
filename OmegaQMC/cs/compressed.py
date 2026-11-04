@@ -301,9 +301,10 @@ def evaluate_rotated_hf_on_walkers(
     base_vals = base_vals.reshape(K_s, N, -1)           # (K_s, N, n_orb)
 
     if walker_convention == "interleaved":
-        # alpha = even indices, beta = odd indices
-        idx_a = np.arange(0, n_alpha * 2, 2)
-        idx_b = np.arange(1, n_beta * 2 + 1, 2)
+        # NN walker layout (OmegaQMC.spin_layout): alternating alpha/beta,
+        # unpaired electrons last
+        from OmegaQMC.spin_layout import spin_indices
+        idx_a, idx_b = spin_indices(n_alpha, n_beta)
         base_a = base_vals[:, idx_a, :]   # (K_s, n_alpha, n_orb)
         base_b = base_vals[:, idx_b, :]   # (K_s, n_beta, n_orb)
     elif walker_convention == "grouped":
