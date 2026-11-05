@@ -175,6 +175,50 @@ def _adapt_step_size(step_size, acceptance_rate):
     )
 
 
+@partial(jax.jit, static_argnames=('clip_median', 'center_at_clip'))
+def clip_local_energies(e_loc, clip_scale, clip_median=False,
+                        center_at_clip=True):
+    """Clip local energies for the energy gradient, as FermiNet does.
+
+    Follows ``ferminet.loss.clip_local_values``.  With centre ``c``
+    (the batch mean of *e_loc*, or its median if *clip_median*) and
+    spread ``D = mean |E_L - c|`` (the mean absolute deviation, which
+    is less sensitive to outliers than the standard deviation), each
+    local energy is clipped to ``[c - clip_scale D, c + clip_scale D]``.
+    The energy residual that weights ``d log|psi| / d theta`` in the
+    gradient is then ``E_clip - <E_clip>`` with *center_at_clip*
+    (FermiNet's default, and the PsiFormer paper's choice: the
+    residuals sum to zero in every batch), or ``E_clip - <E_L>``
+    without it (Pfau et al. 2020).
+
+    FermiNet's defaults are ``clip_scale = 5``, ``clip_median=False``,
+    ``center_at_clip=True``.  The PsiFormer paper (von Glehn et al.
+    2023, Eq. A4) uses the median instead of the mean.  Only the
+    gradient sees the clipped values; reported energies stay
+    unclipped.
+
+    Args:
+        e_loc: ``(W,)`` local energies of one batch.
+        clip_scale: Half-width of the window in units of ``D``
+            (positive; the caller skips clipping for ``<= 0``).
+        clip_median: Centre the window (and measure ``D``) at the
+            median rather than the mean.
+        center_at_clip: Subtract the mean of the clipped energies,
+            rather than of the unclipped ones.
+
+    Returns:
+        ``(e_clip, de)``: the clipped local energies and the
+        residuals used in the gradient.
+    """
+    e_mean = jnp.mean(e_loc)
+    center = jnp.median(e_loc) if clip_median else e_mean
+    spread = jnp.mean(jnp.abs(e_loc - center))
+    e_clip = jnp.clip(e_loc, center - clip_scale * spread,
+                      center + clip_scale * spread)
+    de = e_clip - (jnp.mean(e_clip) if center_at_clip else e_mean)
+    return e_clip, de
+
+
 # ---------------------------------------------------------------------
 # Param-pytree introspection: identify Linear kernels vs generic leaves
 # ---------------------------------------------------------------------
@@ -503,6 +547,21 @@ class _VMCOptDriverNN_KFAC:
             ``None`` disables the clip.
         var_weight: Umrigar-style beta for a mixed
             ``<E> + beta Var(E_L)`` objective (0 = pure energy).
+            With clipping on, the variance term is built from the
+            clipped residuals.
+        clip_local_energy: Clip the local energies entering the
+            gradient to this many mean absolute deviations around
+            the batch centre (FermiNet's ``optim.clip_local_energy``;
+            FermiNet's configs use 5.0).  ``0`` (default) turns
+            clipping off, as in earlier versions of this driver.
+            The logged and returned energies are never clipped.  See
+            :func:`clip_local_energies`.
+        clip_median: Centre the clipping window at the median rather
+            than the mean (FermiNet's ``optim.clip_median``, default
+            off; the PsiFormer paper's choice).
+        center_at_clip: Subtract the mean of the clipped energies in
+            the gradient rather than the mean of the unclipped ones
+            (FermiNet's ``optim.center_at_clip``, default on).
         capture_activations: Use per-electron factors from a
             capturing twin of the model, with the output cotangents
             recovered from the per-walker gradients by a damped
@@ -559,6 +618,9 @@ class _VMCOptDriverNN_KFAC:
         ema_decay: float = 0.95,
         norm_constraint: Optional[float] = 1.0e-3,
         var_weight: float = 0.0,
+        clip_local_energy: float = 0.0,
+        clip_median: bool = False,
+        center_at_clip: bool = True,
         capture_activations: bool = False,
         fixed_scale: bool = False,
         nn_dtype: Optional[str] = 'float32',
@@ -600,6 +662,9 @@ class _VMCOptDriverNN_KFAC:
             None if norm_constraint is None else float(norm_constraint)
         )
         self.var_weight = float(var_weight)
+        self.clip_local_energy = float(clip_local_energy)
+        self.clip_median = bool(clip_median)
+        self.center_at_clip = bool(center_at_clip)
         self.capture_activations = bool(capture_activations)
         if backward not in ('auto', 'autodiff', 'manual'):
             raise ValueError(
@@ -1444,6 +1509,14 @@ class _VMCOptDriverNN_KFAC:
                 f" beta={self.var_weight:g}", file=fout,
             )
             print(
+                f"# clip_local_energy={self.clip_local_energy:g}"
+                + (f" (window centred at the"
+                   f" {'median' if self.clip_median else 'mean'},"
+                   f" center_at_clip={self.center_at_clip})"
+                   if self.clip_local_energy > 0 else " (off)"),
+                file=fout,
+            )
+            print(
                 f"# num_walkers={num_walkers},"
                 f" factor_chunk_size={chunk},"
                 f" capture_activations={self.capture_activations},"
@@ -1490,6 +1563,7 @@ class _VMCOptDriverNN_KFAC:
 
         e_history: List[float] = []
         var_history: List[float] = []
+        n_clipped_history: List[int] = []
         timestamp_prev = datetime.now()
         damping_now = self.damping
         step_norm_window: List[float] = []
@@ -1542,10 +1616,21 @@ class _VMCOptDriverNN_KFAC:
                       " non-finite local energy replaced by copies of"
                       f" finite ones (recorded in {nonfinite_path})",
                       file=fout)
+            # <E> and Var(E_L) are logged unclipped; only the
+            # gradient residuals de are clipped.
             e_mean = jnp.mean(e_loc)
             de = e_loc - e_mean
             var = jnp.mean(de ** 2)
-            de_eff = de + self.var_weight * (de ** 2 - var)
+            if self.clip_local_energy > 0:
+                e_clip, de = clip_local_energies(
+                    e_loc, self.clip_local_energy,
+                    clip_median=self.clip_median,
+                    center_at_clip=self.center_at_clip,
+                )
+                n_clipped_history.append(
+                    int(jnp.sum(e_clip != e_loc))
+                )
+            de_eff = de + self.var_weight * (de ** 2 - jnp.mean(de ** 2))
 
             # (c) Accumulate Kronecker factors, scanned over walker
             # chunks inside a single jitted call.
@@ -1728,6 +1813,9 @@ class _VMCOptDriverNN_KFAC:
                        'sigma': final_std},
             'E_history': e_history,
             'Var_history': var_history,
+            # walkers whose local energy was clipped, per iteration
+            # (empty with clipping off)
+            'n_clipped_history': n_clipped_history,
         }
 
 
