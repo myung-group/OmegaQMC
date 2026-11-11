@@ -1327,6 +1327,8 @@ class _VMCOptDriverNN_KFAC:
         pretrain_lr: float = 3.0e-4,
         pretrain_mcmc_width: float = 0.02,
         pretrain_hf_fraction: float = 0.0,
+        pretrain_hf_mcmc_width: Optional[float] = None,
+        pretrain_hf_burn_in: int = 0,
         pretrain_reinit_walkers: Optional[bool] = None,
     ):
         """Run KFAC natural-gradient VMC optimisation.
@@ -1361,7 +1363,10 @@ class _VMCOptDriverNN_KFAC:
         without pretraining) are equilibrated instead; with
         ``pretrain_hf_fraction=0`` the default keeps continuing from
         the pretrained walkers, as before.  ``True``/``False`` forces
-        either choice.
+        either choice.  At the default Metropolis step (0.02 bohr) the
+        HF chain barely moves in 1000 iterations; give it its own step
+        and a burn-in with ``pretrain_hf_mcmc_width`` and
+        ``pretrain_hf_burn_in``.
 
         Non-finite guard.  A single walker with a non-finite local
         energy (or a non-finite network gradient) would otherwise turn
@@ -1410,6 +1415,11 @@ class _VMCOptDriverNN_KFAC:
             pretrain_hf_fraction: Share (0 to 1) of the pretraining
                 walkers that sample the HF density (Pfau et al. 2020:
                 0.5; default 0, FermiNet 4cfdf1e).
+            pretrain_hf_mcmc_width: Metropolis step (bohr) of the HF
+                chain; ``None`` (default) uses
+                ``pretrain_mcmc_width``.
+            pretrain_hf_burn_in: HF-chain moves before the first
+                pretraining step (default 0).
             pretrain_reinit_walkers: After pretraining, equilibrate
                 fresh walkers instead of the pretrained ones.
                 ``None`` (default): ``True`` if
@@ -1491,6 +1501,8 @@ class _VMCOptDriverNN_KFAC:
                 lr=pretrain_lr,
                 mcmc_width=pretrain_mcmc_width,
                 hf_fraction=pretrain_hf_fraction,
+                hf_mcmc_width=pretrain_hf_mcmc_width,
+                hf_burn_in=pretrain_hf_burn_in,
                 fout=fout,
                 verbose=verbose,
             )

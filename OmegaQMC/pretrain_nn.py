@@ -44,8 +44,12 @@ Hartree-Fock orbitals using MCMC" (``hf_fraction=0.5``).  That share
 of the walkers is a second, persistent Metropolis chain on
 ``p_HF(R) ~ |det phi_up(r_up)|^2 |det phi_down(r_down)|^2`` built from
 the same UHF orbitals as the target; the loss is the mean over both
-sets.  With ``hf_fraction=0`` (the default) pretraining is the
-FermiNet 4cfdf1e scheme above, bit for bit.
+sets.  The HF chain may take its own Metropolis step
+(``hf_mcmc_width``) and a burn-in before the first Adam step
+(``hf_burn_in``); at the default 0.02 bohr it barely leaves its
+initial positions in 1000 iterations.  With ``hf_fraction=0`` (the
+default) pretraining is the FermiNet 4cfdf1e scheme above, bit for
+bit.
 
 The Hartree-Fock orbitals are evaluated on the host with PySCF, as
 in FermiNet; at ``sto-6g`` this is a small fraction of an iteration.
@@ -310,6 +314,8 @@ def pretrain_hf(
     init_width: float = INIT_WIDTH,
     walkers=None,
     hf_fraction: float = 0.0,
+    hf_mcmc_width: Optional[float] = None,
+    hf_burn_in: int = 0,
     log_every: int = 100,
     fout=None,
     verbose: int = 1,
@@ -328,6 +334,20 @@ def pretrain_hf(
     ``|psi|^2``, the last ``n_hf`` the HF density), the loss is the
     mean over all of them, and both move after each parameter update.
     ``hf_fraction=0`` is the FermiNet scheme, bit for bit.
+
+    The HF chain can take its own step (*hf_mcmc_width*) and a burn-in
+    of *hf_burn_in* moves before the first Adam step (no parameter
+    update, no loss), so that it starts from ``p_HF`` rather than from
+    :func:`init_electrons`.  At the default width (0.02 bohr) the chain
+    hardly moves in 1000 iterations.  Measured from
+    :func:`init_electrons` (all-electron moves): the Li atom and LiH
+    equilibrate in about 1000 moves of 0.3 bohr (acceptance 0.3); for
+    N2 (R = 2.068 bohr, STO-6G or STO-3G) 0.3 bohr is accepted 1% of
+    the time and is still far from ``p_HF`` after 4000 moves, while
+    0.1 bohr (acceptance 0.18) equilibrates in 2000 to 4000 moves.
+    Each move evaluates the orbitals once on the host (N2, 2048
+    walkers: about 6 s per 1000 moves).  The defaults (``None``, 0)
+    keep the behaviour without these options.
 
     Args:
         log_psi: ``log|psi|`` callable from
@@ -348,6 +368,11 @@ def pretrain_hf(
             :func:`init_electrons`.
         hf_fraction: Share of the walkers that sample the HF density
             (0 to 1; default 0, Pfau et al. 2020: 0.5).
+        hf_mcmc_width: Gaussian Metropolis step (bohr) of the HF
+            chain; ``None`` (default) uses *mcmc_width*.
+        hf_burn_in: HF-chain moves before pretraining starts
+            (default 0).  Ignored, as is *hf_mcmc_width*, when no
+            walker samples the HF density.
         log_every: Iterations between log lines.
         fout: Text stream for the log (default stdout).
         verbose: 0 silences the log.
@@ -359,8 +384,12 @@ def pretrain_hf(
         with ``'loss'`` (per-iteration array), ``'acceptance'`` (mean
         acceptance of the ``|psi|^2`` set; NaN if it is empty),
         ``'acceptance_hf'`` (of the HF-density set; NaN if empty),
-        ``'n_hf'`` (walkers in the HF-density set), ``'e_hf'`` and
-        ``'hf_converged'``.
+        ``'n_hf'`` (walkers in the HF-density set),
+        ``'hf_mcmc_width'`` (step of the HF chain), ``'hf_burn_in'``
+        (burn-in moves made), ``'acceptance_hf_burn_in'`` (mean
+        acceptance over the last ``min(100, hf_burn_in)`` burn-in
+        moves; NaN without burn-in), ``'hf_burn_in_time'`` (seconds),
+        ``'e_hf'`` and ``'hf_converged'``.
     """
     import optax
 
@@ -375,6 +404,12 @@ def pretrain_hf(
     hf_fraction = float(hf_fraction)
     if not 0.0 <= hf_fraction <= 1.0:
         raise ValueError(f"hf_fraction must be in [0, 1], got {hf_fraction}")
+    hf_width = float(mcmc_width if hf_mcmc_width is None else hf_mcmc_width)
+    if not hf_width > 0.0:
+        raise ValueError(f"hf_mcmc_width must be > 0, got {hf_width}")
+    hf_burn_in = int(hf_burn_in)
+    if hf_burn_in < 0:
+        raise ValueError(f"hf_burn_in must be >= 0, got {hf_burn_in}")
     full_det = bool(log_psi.full_determinant)
     orbitals = log_psi.orbitals
     nuc = jnp.asarray(mol_info.coords, dtype=jnp.float64)
@@ -401,20 +436,40 @@ def pretrain_hf(
         if n_hf:
             print(f"# HF pretraining: HF-density sampling (Pfau 2020) on"
                   f" {n_hf} of {num_walkers} walkers"
-                  f" (hf_fraction {hf_fraction:g}), |psi|^2 on {n_psi}",
-                  file=fout)
+                  f" (hf_fraction {hf_fraction:g}), |psi|^2 on {n_psi},"
+                  f" HF-chain width {hf_width:g} bohr", file=fout)
 
     # The HF-density chain (the last n_hf walkers) lives on the host,
     # next to the PySCF target; its random numbers come from a key
     # folded off rng_key, so the main key stream is that of
     # hf_fraction=0.
+    acc_burn, t_burn = float('nan'), 0.0
     if n_hf:
         hf_key = jax.random.fold_in(rng_key, 0x48460)
         walkers_hf = np.asarray(walkers[n_psi:])
         hf_state = hf_density_state(target, walkers_hf)
         walkers = walkers[:n_psi] if n_psi else None
+        if hf_burn_in:
+            # Burn-in on its own key, so the in-loop HF moves draw the
+            # same random numbers with or without it.
+            burn_key = jax.random.fold_in(rng_key, 0x48461)
+            t1 = time.perf_counter()
+            accs_burn = np.empty(hf_burn_in)
+            for i in range(hf_burn_in):
+                walkers_hf, hf_state, accs_burn[i] = hf_metropolis_step(
+                    target, walkers_hf, hf_state,
+                    jax.random.fold_in(burn_key, i), hf_width,
+                )
+            t_burn = time.perf_counter() - t1
+            acc_burn = float(np.mean(accs_burn[-min(100, hf_burn_in):]))
+            if verbose:
+                print(f"# HF pretraining: HF-chain burn-in {hf_burn_in}"
+                      f" moves of width {hf_width:g} bohr, final"
+                      f" acceptance {acc_burn:.3f}, {t_burn:.1f} s",
+                      file=fout)
     else:
         walkers_hf = None
+        hf_burn_in = 0
 
     batch_orbitals = jax.vmap(orbitals, in_axes=(0, None, None))
     batch_lp = jax.vmap(log_psi, in_axes=(0, None, None))
@@ -492,7 +547,7 @@ def pretrain_hf(
             # it does not depend on the parameters.
             walkers_hf, hf_state, accs_hf[it] = hf_metropolis_step(
                 target, walkers_hf, hf_state,
-                jax.random.fold_in(hf_key, it), mcmc_width,
+                jax.random.fold_in(hf_key, it), hf_width,
             )
         walkers = walkers_new
         losses[it] = float(loss)
@@ -519,6 +574,10 @@ def pretrain_hf(
         'acceptance_hf': (float(np.mean(accs_hf)) if iterations and n_hf
                           else float('nan')),
         'n_hf': n_hf,
+        'hf_mcmc_width': hf_width,
+        'hf_burn_in': hf_burn_in,
+        'acceptance_hf_burn_in': acc_burn,
+        'hf_burn_in_time': t_burn,
         'e_hf': target.energy,
         'hf_converged': target.converged,
     }

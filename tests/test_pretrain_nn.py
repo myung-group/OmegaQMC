@@ -210,6 +210,21 @@ def _load_frozen():
     return sys.modules[name].pretrain_hf
 
 
+def _share_hf_target(monkeypatch, mol, *modules):
+    """Make every pretrain_hf call in *modules* use one UHF solution.
+
+    Separate ``scf.UHF`` runs of the same molecule are not reproducible
+    bit for bit (on the GH200 nodes LiH and N2 energies differ by up to
+    3e-14 Ha between runs and the MO coefficient matrices by more), so
+    bitwise comparisons between pretrain_hf calls need a shared target.
+    """
+    import OmegaQMC.pretrain_nn as live
+    shared = HartreeFockTarget(mol)
+    for mod in (live,) + modules:
+        monkeypatch.setattr(mod, 'HartreeFockTarget',
+                            lambda *a, **k: shared)
+
+
 def _strip_times(text):
     import re
     return [re.sub(r"\s+[0-9.]+ s$", "", ln)
@@ -220,29 +235,28 @@ def _strip_times(text):
 def test_hf_fraction_zero_is_frozen_loop(mol_fn, monkeypatch):
     """hf_fraction=0 (and the default) is the old loop, bit for bit.
 
-    All three runs share one UHF solution: separate ``scf.UHF`` runs
-    of the same molecule are not reproducible bit for bit (on the GH200
-    nodes LiH and N2 energies differ by up to 3e-14 Ha between runs and
-    the MO coefficient matrices by more), which would hide what is
-    tested here.
+    So are the HF-chain options at their defaults, and when no walker
+    samples the HF density (they are then ignored).  All runs share one
+    UHF solution (:func:`_share_hf_target`).
     """
     import io
     import sys
-    import OmegaQMC.pretrain_nn as live
     mol = mol_fn()
     log_psi, params, _, _ = make_nn_log_psi(
         'ferminet', mol, jax.random.key(0), compute_dtype='float32',
     )
     frozen = _load_frozen()
-    shared = HartreeFockTarget(mol)
-    for mod in (live, sys.modules[frozen.__module__]):
-        monkeypatch.setattr(mod, 'HartreeFockTarget',
-                            lambda *a, **k: shared)
+    _share_hf_target(monkeypatch, mol, sys.modules[frozen.__module__])
     kw = dict(iterations=12, num_walkers=32, verbose=1, log_every=4)
     runs = []
     for fn, extra in ((frozen, {}),
                       (pretrain_hf, {}),
-                      (pretrain_hf, {'hf_fraction': 0.0})):
+                      (pretrain_hf, {'hf_fraction': 0.0}),
+                      (pretrain_hf, {'hf_mcmc_width': None,
+                                     'hf_burn_in': 0}),
+                      (pretrain_hf, {'hf_fraction': 0.0,
+                                     'hf_mcmc_width': 0.3,
+                                     'hf_burn_in': 5})):
         buf = io.StringIO()
         runs.append(fn(log_psi, mol, params, jax.random.key(7),
                        fout=buf, **kw, **extra) + (buf.getvalue(),))
@@ -251,6 +265,8 @@ def test_hf_fraction_zero_is_frozen_loop(mol_fn, monkeypatch):
         np.testing.assert_array_equal(info['loss'], info_ref['loss'])
         assert info['acceptance'] == info_ref['acceptance']
         assert info['n_hf'] == 0 and np.isnan(info['acceptance_hf'])
+        assert info['hf_burn_in'] == 0
+        assert np.isnan(info['acceptance_hf_burn_in'])
         np.testing.assert_array_equal(w, w_ref)
         for a, b in zip(jax.tree.leaves(p), jax.tree.leaves(p_ref)):
             assert a.dtype == b.dtype
@@ -271,9 +287,6 @@ def test_hf_chain_samples_hf_density(mol_fn):
     diffuse Li 2s electron and LiH's bond need about 1000 steps of
     width 0.3 bohr to equilibrate (after 300, Li's <r^2> was 7% short).
     """
-    from pyscf.dft import gen_grid
-    from OmegaQMC.spin_layout import to_grouped
-
     mol = mol_fn()
     tgt = HartreeFockTarget(mol)
     assert tgt.converged
@@ -293,7 +306,21 @@ def test_hf_chain_samples_hf_density(mol_fn):
     np.testing.assert_allclose(state[0], t_up, rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(state[1], t_dn, rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(state[2], log_p, rtol=1e-12)
+    _assert_hf_moments(mol, tgt, x)
 
+
+def _assert_hf_moments(mol, tgt, x, n_sigma=4.0):
+    """Walkers *x* (layout order) against quadrature of ``p_HF``.
+
+    For orthonormal orbitals the one-electron marginal of
+    ``|det phi(r_1..r_n)|^2`` is ``sum_i |phi_i(r)|^2 / n``.  Checks
+    ``<z>``, ``<x>`` and ``<r^2>`` per spin, each within *n_sigma*
+    standard errors (walkers taken as independent).
+    """
+    from pyscf.dft import gen_grid
+    from OmegaQMC.spin_layout import to_grouped
+
+    nw = x.shape[0]
     grids = gen_grid.Grids(tgt.mol)
     grids.level = 5
     grids.build()
@@ -316,13 +343,51 @@ def test_hf_chain_samples_hf_density(mol_fn):
             per_walker = f(g[:, sl]).mean(axis=1)
             mean = per_walker.mean()
             err = per_walker.std() / np.sqrt(nw)
-            assert abs(mean - exact) < 4.0 * err, (name, n, mean, exact, err)
+            assert abs(mean - exact) < n_sigma * err, (
+                name, n, mean, exact, err)
 
 
-def test_pretrain_hf_fraction():
+@pytest.mark.parametrize("mol_fn", [_lih, _li_atom])
+def test_hf_burn_in_reaches_hf_density(mol_fn):
+    """pretrain_hf's HF-chain burn-in (own width) reaches p_HF.
+
+    1000 moves of 0.3 bohr put the moments within tolerance; for LiH,
+    300 moves (the old too-short case: spin-up <z> 8.6 sigma low) do
+    not, which shows the check can fail.
+    """
+    import io
+    mol = mol_fn()
+    log_psi, params, _, _ = make_nn_log_psi(
+        'ferminet', mol, jax.random.key(0), compute_dtype='float32',
+    )
+    tgt = HartreeFockTarget(mol)
+
+    def run(burn_in):
+        buf = io.StringIO()
+        _, w, info = pretrain_hf(
+            log_psi, mol, params, jax.random.key(1), iterations=0,
+            num_walkers=2000, hf_fraction=1.0, hf_mcmc_width=0.3,
+            hf_burn_in=burn_in, verbose=1, fout=buf,
+        )
+        return np.asarray(w), info, buf.getvalue()
+
+    w, info, txt = run(1000)
+    assert info['hf_burn_in'] == 1000 and info['hf_mcmc_width'] == 0.3
+    assert 0.2 < info['acceptance_hf_burn_in'] < 0.5
+    assert info['hf_burn_in_time'] > 0
+    assert 'HF-chain burn-in 1000 moves of width 0.3 bohr' in txt
+    _assert_hf_moments(mol, tgt, w)
+    if mol_fn is _lih:
+        w, _, _ = run(300)
+        with pytest.raises(AssertionError):
+            _assert_hf_moments(mol, tgt, w)
+
+
+def test_pretrain_hf_fraction(monkeypatch):
     """hf_fraction=0.5 and 1: walker order, acceptances, loss, logging."""
     import io
     mol = _lih()
+    _share_hf_target(monkeypatch, mol)
     log_psi, params, _, _ = make_nn_log_psi(
         'ferminet', mol, jax.random.key(0), compute_dtype='float32',
     )
@@ -355,6 +420,23 @@ def test_pretrain_hf_fraction():
     txt = buf.getvalue()
     assert 'HF-density sampling' in txt
     assert len([ln for ln in txt.splitlines() if 'acc_hf' in ln]) == 5
+
+    # The HF-chain options at their defaults change nothing, and a
+    # burn-in moves only the HF set.
+    runs = [pretrain_hf(log_psi, mol, params, jax.random.key(4),
+                        iterations=10, num_walkers=16, hf_fraction=0.5,
+                        verbose=0, **kw)
+            for kw in ({}, {'hf_mcmc_width': 0.02, 'hf_burn_in': 0})]
+    np.testing.assert_array_equal(runs[0][2]['loss'], runs[1][2]['loss'])
+    np.testing.assert_array_equal(runs[0][1], runs[1][1])
+    _, wb, infob = pretrain_hf(
+        log_psi, mol, params, jax.random.key(1), iterations=0,
+        num_walkers=64, hf_fraction=0.5, hf_mcmc_width=0.3, hf_burn_in=20,
+        verbose=0,
+    )
+    np.testing.assert_array_equal(wb[:32], w0[:32])
+    assert not np.array_equal(np.asarray(wb[32:]), np.asarray(w0[32:]))
+    assert infob['hf_burn_in'] == 20
 
     # All walkers on the HF density: no |psi|^2 chain at all.
     _, w1, info1 = pretrain_hf(
