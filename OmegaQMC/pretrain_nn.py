@@ -36,6 +36,17 @@ pretraining compares the proposal against a ``log|psi|`` cached from
 the previous parameters; here it is re-evaluated with the current
 parameters, which costs one network evaluation per iteration.
 
+Optional, off by default: **HF-density sampling** (``hf_fraction``),
+the pretraining of Pfau, Spencer, Matthews and Foulkes, Phys. Rev.
+Research 2, 033429 (2020), whose TensorFlow FermiNet drew "half the
+samples in the batch from |psi|^2 and half from the product of
+Hartree-Fock orbitals using MCMC" (``hf_fraction=0.5``).  That share
+of the walkers is a second, persistent Metropolis chain on
+``p_HF(R) ~ |det phi_up(r_up)|^2 |det phi_down(r_down)|^2`` built from
+the same UHF orbitals as the target; the loss is the mean over both
+sets.  With ``hf_fraction=0`` (the default) pretraining is the
+FermiNet 4cfdf1e scheme above, bit for bit.
+
 The Hartree-Fock orbitals are evaluated on the host with PySCF, as
 in FermiNet; at ``sto-6g`` this is a small fraction of an iteration.
 """
@@ -219,6 +230,70 @@ def _target_matrix(t_up, t_dn, full_det):
 
 
 # ---------------------------------------------------------------------
+# Metropolis chain on the Hartree-Fock density (Pfau et al. 2020)
+# ---------------------------------------------------------------------
+def _hf_log_density(t_up, t_dn):
+    """``log p_HF`` (unnormalised) from the target blocks.
+
+    ``2 log|det t_up| + 2 log|det t_dn|`` per walker; an empty spin
+    block contributes 0.
+    """
+    out = np.zeros(t_up.shape[0])
+    for t in (t_up, t_dn):
+        if t.shape[-1]:
+            out = out + 2.0 * np.linalg.slogdet(t)[1]
+    return out
+
+
+def hf_density_state(target, walkers):
+    """Target blocks and ``log p_HF`` of layout-ordered walkers.
+
+    Returns ``(t_up, t_dn, log_p)`` (host arrays), the cache that
+    :func:`hf_metropolis_step` carries from move to move.
+    """
+    x = np.asarray(walkers, dtype=np.float64)
+    t_up, t_dn = target(to_grouped(x, target.n_up, target.n_down))
+    return t_up, t_dn, _hf_log_density(t_up, t_dn)
+
+
+def hf_metropolis_step(target, walkers, state, rng_key, width):
+    """One all-electron Gaussian Metropolis move on ``p_HF``.
+
+    Args:
+        target: :class:`HartreeFockTarget`.
+        walkers: ``(W, n_e, 3)`` host array in OmegaQMC's layout.
+        state: ``(t_up, t_dn, log_p)`` of *walkers* from
+            :func:`hf_density_state` (or a previous call).
+        rng_key: JAX PRNG key.
+        width: Standard deviation (bohr) of the Gaussian proposal.
+
+    Returns:
+        ``(walkers, state, acceptance)``: the moved walkers, their
+        cached target blocks and ``log p_HF``, and the accepted
+        fraction.  One target evaluation (at the proposals) per call.
+    """
+    t_up, t_dn, log_p = state
+    k_prop, k_acc = jax.random.split(rng_key)
+    x = np.asarray(walkers, dtype=np.float64)
+    prop = x + width * np.asarray(jax.random.normal(
+        k_prop, x.shape, dtype=jnp.float64,
+    ))
+    p_up, p_dn, log_p_new = hf_density_state(target, prop)
+    u = np.asarray(jax.random.uniform(
+        k_acc, (x.shape[0],), dtype=jnp.float64,
+    ))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        acc = np.log(u) < log_p_new - log_p
+    x = np.where(acc[:, None, None], prop, x)
+    state = (
+        np.where(acc[:, None, None], p_up, t_up),
+        np.where(acc[:, None, None], p_dn, t_dn),
+        np.where(acc, log_p_new, log_p),
+    )
+    return x, state, float(np.mean(acc))
+
+
+# ---------------------------------------------------------------------
 # Pretraining loop
 # ---------------------------------------------------------------------
 def pretrain_hf(
@@ -234,11 +309,25 @@ def pretrain_hf(
     mcmc_width: float = PRETRAIN_MCMC_WIDTH,
     init_width: float = INIT_WIDTH,
     walkers=None,
+    hf_fraction: float = 0.0,
     log_every: int = 100,
     fout=None,
     verbose: int = 1,
 ):
     """Pretrain an NN wavefunction's orbitals against UHF.
+
+    With ``hf_fraction > 0`` (Pfau et al. 2020 use 0.5),
+    ``n_hf = round(hf_fraction * num_walkers)`` of the walkers sample
+    the Hartree-Fock density ``|det phi_up|^2 |det phi_down|^2`` of
+    the UHF target instead of ``|psi|^2``: a separate persistent chain
+    with one Gaussian Metropolis move of width *mcmc_width* per
+    iteration (:func:`hf_metropolis_step`; the target of its accepted
+    positions is cached, so it costs one target evaluation of
+    ``n_hf`` walkers per iteration).  Both sets start from the same
+    initial walkers (the first ``num_walkers - n_hf`` sample
+    ``|psi|^2``, the last ``n_hf`` the HF density), the loss is the
+    mean over all of them, and both move after each parameter update.
+    ``hf_fraction=0`` is the FermiNet scheme, bit for bit.
 
     Args:
         log_psi: ``log|psi|`` callable from
@@ -257,15 +346,21 @@ def pretrain_hf(
         init_width: Width of :func:`init_electrons`.
         walkers: Optional starting walkers; default
             :func:`init_electrons`.
+        hf_fraction: Share of the walkers that sample the HF density
+            (0 to 1; default 0, Pfau et al. 2020: 0.5).
         log_every: Iterations between log lines.
         fout: Text stream for the log (default stdout).
         verbose: 0 silences the log.
 
     Returns:
         ``(params, walkers, info)``: the pretrained parameters (same
-        dtypes as *params*), the final walkers ``(W, n_e, 3)``, and a
-        dict with ``'loss'`` (per-iteration array), ``'acceptance'``
-        (mean acceptance), ``'e_hf'`` and ``'hf_converged'``.
+        dtypes as *params*), the final walkers ``(W, n_e, 3)`` (the
+        ``|psi|^2`` set first, the HF-density set last), and a dict
+        with ``'loss'`` (per-iteration array), ``'acceptance'`` (mean
+        acceptance of the ``|psi|^2`` set; NaN if it is empty),
+        ``'acceptance_hf'`` (of the HF-density set; NaN if empty),
+        ``'n_hf'`` (walkers in the HF-density set), ``'e_hf'`` and
+        ``'hf_converged'``.
     """
     import optax
 
@@ -277,18 +372,15 @@ def pretrain_hf(
         fout = sys.stdout
     if isinstance(rng_key, int):
         rng_key = jax.random.key(rng_key)
+    hf_fraction = float(hf_fraction)
+    if not 0.0 <= hf_fraction <= 1.0:
+        raise ValueError(f"hf_fraction must be in [0, 1], got {hf_fraction}")
     full_det = bool(log_psi.full_determinant)
     orbitals = log_psi.orbitals
     nuc = jnp.asarray(mol_info.coords, dtype=jnp.float64)
 
     t0 = time.perf_counter()
     target = HartreeFockTarget(mol_info, basis=basis)
-    if verbose:
-        print(f"# HF pretraining: UHF/{basis} E = {target.energy:.8f} Ha"
-              f" (converged: {target.converged}), {iterations}"
-              f" iterations, {num_walkers} walkers, Adam lr {lr:g},"
-              f" MCMC width {mcmc_width:g} bohr,"
-              f" full_det={full_det}", file=fout)
 
     rng_key, k_init = jax.random.split(rng_key)
     if walkers is None:
@@ -296,6 +388,33 @@ def pretrain_hf(
             mol_info, num_walkers, k_init, init_width=init_width,
         )
     walkers = jnp.asarray(walkers, dtype=jnp.float64)
+    num_walkers = walkers.shape[0]
+    n_hf = int(round(hf_fraction * num_walkers))
+    n_psi = num_walkers - n_hf
+
+    if verbose:
+        print(f"# HF pretraining: UHF/{basis} E = {target.energy:.8f} Ha"
+              f" (converged: {target.converged}), {iterations}"
+              f" iterations, {num_walkers} walkers, Adam lr {lr:g},"
+              f" MCMC width {mcmc_width:g} bohr,"
+              f" full_det={full_det}", file=fout)
+        if n_hf:
+            print(f"# HF pretraining: HF-density sampling (Pfau 2020) on"
+                  f" {n_hf} of {num_walkers} walkers"
+                  f" (hf_fraction {hf_fraction:g}), |psi|^2 on {n_psi}",
+                  file=fout)
+
+    # The HF-density chain (the last n_hf walkers) lives on the host,
+    # next to the PySCF target; its random numbers come from a key
+    # folded off rng_key, so the main key stream is that of
+    # hf_fraction=0.
+    if n_hf:
+        hf_key = jax.random.fold_in(rng_key, 0x48460)
+        walkers_hf = np.asarray(walkers[n_psi:])
+        hf_state = hf_density_state(target, walkers_hf)
+        walkers = walkers[:n_psi] if n_psi else None
+    else:
+        walkers_hf = None
 
     batch_orbitals = jax.vmap(orbitals, in_axes=(0, None, None))
     batch_lp = jax.vmap(log_psi, in_axes=(0, None, None))
@@ -316,12 +435,22 @@ def pretrain_hf(
     opt_state = optimizer.init(params)
 
     @jax.jit
-    def step(p, state, x, t_up, t_dn, key):
-        loss, grads = jax.value_and_grad(loss_fn)(p, x, t_up, t_dn)
+    def step(p, state, x, x_hf, t_up, t_dn, key):
+        # x: the |psi|^2 walkers, x_hf: the HF-density walkers (either
+        # may be None); t_up, t_dn: targets of both, in that order.
+        if x_hf is None:
+            x_all = x
+        elif x is None:
+            x_all = x_hf
+        else:
+            x_all = jnp.concatenate([x, x_hf], axis=0)
+        loss, grads = jax.value_and_grad(loss_fn)(p, x_all, t_up, t_dn)
         updates, state = optimizer.update(grads, state, p)
         p = jax.tree.map(
             lambda a, u: (a + u).astype(a.dtype), p, updates,
         )
+        if x is None:
+            return p, state, x, loss, jnp.nan
         # One all-electron Metropolis move under the updated |psi|^2.
         k_prop, k_acc = jax.random.split(key)
         prop = x + mcmc_width * jax.random.normal(
@@ -342,25 +471,54 @@ def pretrain_hf(
 
     losses = np.empty(iterations)
     accs = np.empty(iterations)
+    accs_hf = np.full(iterations, np.nan)
     for it in range(iterations):
-        t_up, t_dn = target(grouped(walkers))
+        if walkers is not None:
+            t_up, t_dn = target(grouped(walkers))
+        if n_hf:
+            if walkers is None:
+                t_up, t_dn = hf_state[0], hf_state[1]
+            else:
+                t_up = np.concatenate([t_up, hf_state[0]], axis=0)
+                t_dn = np.concatenate([t_dn, hf_state[1]], axis=0)
         rng_key, k = jax.random.split(rng_key)
-        params, opt_state, walkers, loss, acc = step(
+        params, opt_state, walkers_new, loss, acc = step(
             params, opt_state, walkers,
+            None if walkers_hf is None else jnp.asarray(walkers_hf),
             jnp.asarray(t_up), jnp.asarray(t_dn), k,
         )
+        if n_hf:
+            # One Metropolis move of the HF-density set (host, PySCF);
+            # it does not depend on the parameters.
+            walkers_hf, hf_state, accs_hf[it] = hf_metropolis_step(
+                target, walkers_hf, hf_state,
+                jax.random.fold_in(hf_key, it), mcmc_width,
+            )
+        walkers = walkers_new
         losses[it] = float(loss)
         accs[it] = float(acc)
         if verbose and (it % log_every == 0 or it == iterations - 1):
-            print(f"# pretrain {it:6d}  loss {losses[it]:.6e}"
-                  f"  acc {np.mean(accs[max(0, it - log_every + 1):it + 1]):.3f}"
-                  f"  {time.perf_counter() - t0:8.1f} s", file=fout)
+            window = slice(max(0, it - log_every + 1), it + 1)
+            line = (f"# pretrain {it:6d}  loss {losses[it]:.6e}"
+                    f"  acc {np.mean(accs[window]):.3f}")
+            if n_hf:
+                line += (f"  acc_hf {np.mean(accs_hf[window]):.3f}"
+                         f"  (hf {n_hf}/{num_walkers})")
+            print(f"{line}  {time.perf_counter() - t0:8.1f} s", file=fout)
 
     if not np.all(np.isfinite(losses)):
         raise FloatingPointError("non-finite pretraining loss")
+    if n_hf:
+        walkers_hf = jnp.asarray(walkers_hf)
+        walkers = (walkers_hf if walkers is None
+                   else jnp.concatenate([walkers, walkers_hf], axis=0))
     return params, walkers, {
         'loss': losses,
-        'acceptance': float(np.mean(accs)) if iterations else float('nan'),
+        'acceptance': (float(np.mean(accs)) if iterations and n_psi
+                       else float('nan')),
+        'acceptance_hf': (float(np.mean(accs_hf)) if iterations and n_hf
+                          else float('nan')),
+        'n_hf': n_hf,
         'e_hf': target.energy,
         'hf_converged': target.converged,
     }

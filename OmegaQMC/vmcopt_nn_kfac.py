@@ -1326,6 +1326,8 @@ class _VMCOptDriverNN_KFAC:
         pretrain_basis: str = 'sto-6g',
         pretrain_lr: float = 3.0e-4,
         pretrain_mcmc_width: float = 0.02,
+        pretrain_hf_fraction: float = 0.0,
+        pretrain_reinit_walkers: Optional[bool] = None,
     ):
         """Run KFAC natural-gradient VMC optimisation.
 
@@ -1346,6 +1348,20 @@ class _VMCOptDriverNN_KFAC:
         ``num_steps_per_block=10`` and
         ``mc_timestep=0.02**2 / 3`` here (whose step size then
         adapts).  A resumed run never pretrains.
+
+        ``pretrain_hf_fraction > 0`` switches on the pretraining of
+        Pfau et al., Phys. Rev. Research 2, 033429 (2020): that share
+        of the pretraining walkers samples the Hartree-Fock density
+        instead of ``|psi|^2`` (Pfau: 0.5; see
+        :func:`~OmegaQMC.pretrain_nn.pretrain_hf`).  Those walkers are
+        not distributed like ``|psi|^2``, and Pfau et al. reinitialised
+        the walkers after pretraining, so by default
+        (``pretrain_reinit_walkers=None``) the walkers are then
+        discarded and fresh ones (:meth:`initialize_walkers`, as
+        without pretraining) are equilibrated instead; with
+        ``pretrain_hf_fraction=0`` the default keeps continuing from
+        the pretrained walkers, as before.  ``True``/``False`` forces
+        either choice.
 
         Non-finite guard.  A single walker with a non-finite local
         energy (or a non-finite network gradient) would otherwise turn
@@ -1391,6 +1407,13 @@ class _VMCOptDriverNN_KFAC:
             pretrain_lr: Adam learning rate of the pretraining.
             pretrain_mcmc_width: Metropolis step (bohr) of the one
                 move per pretraining iteration.
+            pretrain_hf_fraction: Share (0 to 1) of the pretraining
+                walkers that sample the HF density (Pfau et al. 2020:
+                0.5; default 0, FermiNet 4cfdf1e).
+            pretrain_reinit_walkers: After pretraining, equilibrate
+                fresh walkers instead of the pretrained ones.
+                ``None`` (default): ``True`` if
+                ``pretrain_hf_fraction > 0``, else ``False``.
 
         Returns:
             Tuple ``(params_final, energy_data)`` where
@@ -1467,6 +1490,7 @@ class _VMCOptDriverNN_KFAC:
                 basis=pretrain_basis,
                 lr=pretrain_lr,
                 mcmc_width=pretrain_mcmc_width,
+                hf_fraction=pretrain_hf_fraction,
                 fout=fout,
                 verbose=verbose,
             )
@@ -1475,11 +1499,23 @@ class _VMCOptDriverNN_KFAC:
                 self.config_name, self.mol_info,
                 energy=float(pt_info['e_hf']),
             )
+            reinit = (pretrain_hf_fraction > 0
+                      if pretrain_reinit_walkers is None
+                      else bool(pretrain_reinit_walkers))
             if verbose >= 1:
+                acc_hf = (f", HF-density acceptance"
+                          f" {pt_info['acceptance_hf']:.3f}"
+                          f" ({pt_info['n_hf']} walkers)"
+                          if pt_info['n_hf'] else "")
                 print(f"# HF pretraining done: final loss"
                       f" {pt_info['loss'][-1]:.6e}, mean acceptance"
-                      f" {pt_info['acceptance']:.3f}; saved"
+                      f" {pt_info['acceptance']:.3f}{acc_hf}; saved"
                       f" '{prefix}.pretrain.h5'", file=fout)
+                if reinit:
+                    print("# pretrained walkers discarded; equilibrating"
+                          " fresh walkers", file=fout)
+            if reinit:
+                pretrained_walkers = None
 
         # --- Initialise and equilibrate walkers ---
         rng_key, init_key = jax.random.split(rng_key)
