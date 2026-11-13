@@ -23,7 +23,9 @@ class ExponentialEnvelopes(nnx.Module):
         per_shell: One envelope per atomic shell.
         per_orbital_exponent: Per-orbital zeta params.
         spin_restricted: Shared params for up/down.
-        init_to_ones: Initialise pi/zeta to ones.
+        init_to_ones: Initialise pi and zeta to unit scale: ones,
+            and for ``isotropic=False`` identity 3x3 zeta matrices
+            (otherwise zeta starts at ``Z / (k + 1)``).
         softplus_zeta: Apply softplus to zeta.
     """
 
@@ -100,7 +102,15 @@ class ExponentialEnvelopes(nnx.Module):
             else ['zetas_up', 'zetas_down']
         )
         for name in zeta_names:
-            if init_to_ones:
+            if init_to_ones and not isotropic:
+                # Unit scale: identity decay matrices, not all-ones
+                # (rank-1) ones, which would not decay perpendicular
+                # to (1, 1, 1).
+                val = (
+                    jnp.ones(zetas_init.shape[:-2])[..., None, None]
+                    * jnp.eye(3)
+                )
+            elif init_to_ones:
                 val = jnp.ones(zetas_init.shape)
             else:
                 val = jnp.copy(zetas_init)
