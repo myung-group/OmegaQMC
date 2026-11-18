@@ -2110,6 +2110,15 @@ def _vgl_default_mult_act(vin: VGL) -> VGL:
     )
 
 
+def _vgl_mult_act(name):
+    """VGL twin of :data:`OmegaQMC.psi.nn.wf.BACKFLOW_MULT_ACTS`."""
+    if name == 'deepqmc':
+        return _vgl_default_mult_act
+    if name == 'linear':
+        return lambda vin: vin
+    raise ValueError(f"unsupported backflow mult act: {name!r}")
+
+
 def _vgl_default_add_act(vin: VGL) -> VGL:
     """``0.1 tanh(x / 4)`` — default :class:`BackflowOp` add act."""
     return vgl_scale(vgl_tanh(vgl_scale(vin, 0.25)), 0.1)
@@ -2122,6 +2131,7 @@ def vgl_backflow_op(
     dists_nuc_vgl: VGL,
     *,
     with_envelope: bool,
+    mult_act: str = 'deepqmc',
 ) -> VGL:
     """VGL twin of :meth:`OmegaQMC.psi.nn.wf.BackflowOp.__call__`.
 
@@ -2142,6 +2152,8 @@ def vgl_backflow_op(
         with_envelope: if ``True``, scale the additive term
             by ``sqrt(Σ_{n_det, n_orb} xs²)`` (the
             production envelope).
+        mult_act: name of the multiplicative activation
+            (:data:`OmegaQMC.psi.nn.wf.BACKFLOW_MULT_ACTS`).
     """
     if with_envelope:
         envel = vgl_sqrt(
@@ -2156,7 +2168,7 @@ def vgl_backflow_op(
 
     out = xs_vgl
     if fs_mult_vgl is not None:
-        out = vgl_mul(out, _vgl_default_mult_act(fs_mult_vgl))
+        out = vgl_mul(out, _vgl_mult_act(mult_act)(fs_mult_vgl))
     if fs_add_vgl is not None:
         R_vgl = vgl_scale(
             vgl_min_along(dists_nuc_vgl, axis=-1),
@@ -2774,6 +2786,7 @@ def log_psi_vgl_psiformer(
     edge_features=None,
     self_interaction: bool = True,
     deep_features=False,
+    backflow_mult_act: str = 'deepqmc',
 ) -> VGL:
     """VGL twin of
     :meth:`OmegaQMC.psi.nn.wf.NeuralNetworkWaveFunction.__call__`
@@ -2824,6 +2837,9 @@ def log_psi_vgl_psiformer(
             (forwarded to :func:`vgl_jastrow`).  When
             non-``None``, the Jastrow scalar is added to
             ``log|ψ|`` after the cusp.
+        backflow_mult_act: multiplicative backflow activation
+            (``'deepqmc'``: ``1 + 2 tanh(f / 4)``; ``'linear'``:
+            ``f``, DeepMind's FermiNet).
 
     Returns:
         VGL of ``log|ψ|`` (scalar value and lap, ``(D,)`` grad).
@@ -2903,8 +2919,8 @@ def log_psi_vgl_psiformer(
     #    BackflowOp.with_envelope=True, but the envel array
     #    is unused on the mult branch, so this reduces to a
     #    plain element-wise product.
-    mult_up = _vgl_default_mult_act(bf_up)
-    mult_dn = _vgl_default_mult_act(bf_dn)
+    mult_up = _vgl_mult_act(backflow_mult_act)(bf_up)
+    mult_dn = _vgl_mult_act(backflow_mult_act)(bf_dn)
     orb_up = vgl_mul(orb_up_env, mult_up)
     orb_dn = vgl_mul(orb_dn_env, mult_dn)
 

@@ -52,6 +52,9 @@ def _w_init(init_name: str):
         'ferminet': nnx.initializers.variance_scaling(
             1.0, 'fan_in', 'normal',
         ),
+        'ferminet_deepmind': nnx.initializers.variance_scaling(
+            1.0, 'fan_in', 'normal',
+        ),
     }[init_name]
 
 
@@ -69,11 +72,18 @@ def _ferminet_bias_init(key, shape, dtype=jnp.float32):
 
 
 def _b_init(init_name: str):
-    """Bias initializer by name."""
+    """Bias initializer by name.
+
+    ``'ferminet'`` gives 1-D biases zeros (see
+    :func:`_ferminet_bias_init`); ``'ferminet_deepmind'`` draws them
+    from N(0, 1), as ``ferminet.network_blocks.init_linear_layer``
+    does (its kernels are N(0, 1/fan_in), the same as ``'ferminet'``).
+    """
     return {
         'deeperwin': nnx.initializers.zeros_init(),
         'default': nnx.initializers.zeros_init(),
         'ferminet': _ferminet_bias_init,
+        'ferminet_deepmind': nnx.initializers.normal(1.0),
     }[init_name]
 
 

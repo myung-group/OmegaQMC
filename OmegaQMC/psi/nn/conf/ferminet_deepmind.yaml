@@ -1,0 +1,88 @@
+# FermiNet exactly as in DeepMind's JAX code (github.com/google-deepmind/
+# ferminet, networks.make_fermi_net with its defaults: hidden_dims
+# 4 x (256, 32), 16 full determinants, isotropic envelope, no Jastrow,
+# use_last_layer False, separate_spin_channels False, bias_orbitals False).
+#
+# Differences from ferminet.yaml (the DeepQMC version of FermiNet):
+#   * orbitals = envelope * (W h) (backflow_mult_act: linear) rather than
+#     envelope * (1 + 2 tanh(W h / 4));
+#   * the two-electron stream layers have a bias (g_mlp_bias: true);
+#   * biases start from N(0, 1) (init ferminet_deepmind) rather than zero;
+#     kernels are N(0, 1/fan_in) in both.
+# tests/test_ferminet_deepmind.py checks log|psi| against DeepMind's
+# network with transplanted parameters.
+n_determinants: 16
+full_determinant: true
+backflow_transform: mult
+backflow_mult_act: linear
+
+# Envelope: pi = sigma = 1 at start, one exponent per (orbital, atom)
+envelope_isotropic: true
+envelope_per_shell: false
+envelope_per_orbital_exponent: true
+envelope_spin_restricted: false
+envelope_init_to_ones: true
+envelope_softplus_zeta: false
+
+# Cusp
+cusp_electrons: false
+cusp_nuclei: false
+
+# OmniNet / GNN
+embedding_dim: 256
+use_jastrow: false
+use_backflow: true
+n_interactions: 4
+two_particle_stream_dim: 32
+self_interaction: true
+deep_features: shared
+update_rule: concatenate
+
+# One-electron stream: tanh(W f + b)
+mlp_hidden_layers: [log, 1]
+mlp_bias: true
+mlp_activation: tanh
+mlp_init: ferminet_deepmind
+
+# Two-electron stream: tanh(W h + b) (unused on the last layer)
+g_mlp_hidden_layers: [log, 1]
+g_mlp_bias: true
+g_mlp_last_linear: false
+g_mlp_activation: tanh
+g_mlp_init: ferminet_deepmind
+
+# Orbital layer: W h, no bias
+bf_mlp_hidden_layers: [log, 1]
+bf_mlp_bias: false
+bf_mlp_last_linear: true
+bf_mlp_activation: null
+bf_mlp_init: ferminet_deepmind
+
+# Determinants are summed with unit weights
+conf_coeff: sum_pool
+
+# Edge types (FermiNet uses spin-specific streams)
+edge_types: [up, down]
+
+# Ne positional embedding: |r - R| and r - R per nucleus
+ne_powers: [1]
+ne_log_rescale: false
+
+# Embeddings
+use_spin_embedding: false
+project_to_embedding_dim: false
+
+# Residual connections (x + f(x)) / sqrt(2) where shapes match
+electron_residual_normalize: true
+two_particle_residual_normalize: true
+nucleus_residual: false
+
+# Update features: h_i, spin means of h, spin means of the pair stream
+update_features:
+  - type: residual
+  - type: node_sum
+    node_types: [up, down]
+    normalize: true
+  - type: edge_sum
+    edge_types: [up, down]
+    normalize: true

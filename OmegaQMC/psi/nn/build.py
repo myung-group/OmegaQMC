@@ -131,7 +131,7 @@ def build_nn_wf(
         )
 
     # --- Backflow op ---
-    backflow_op = BackflowOp()
+    backflow_op = BackflowOp(mult_act=config.backflow_mult_act)
 
     # --- Conf coeff ---
     if config.conf_coeff == 'sum_pool':

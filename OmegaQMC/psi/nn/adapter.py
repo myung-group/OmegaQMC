@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from .compat import param_value
 from .config import NNAnsatzConfig, load_nn_config
 from .forward_lap import log_psi_vgl_psiformer
 from .gnn.edge_features import (
@@ -72,8 +73,8 @@ def _psiformer_compat(config) -> bool:
 def _extract_mlp_layers(mlp):
     out = []
     for layer in mlp.layers:
-        w = layer.kernel.value
-        b = layer.bias.value if layer.use_bias else None
+        w = param_value(layer.kernel)
+        b = param_value(layer.bias) if layer.use_bias else None
         out.append((w, b))
     return out
 
@@ -110,10 +111,10 @@ def _extract_update_spec(uf):
         )
         return {
             'type': 'node_attention',
-            'attn_wq': attn.wq.kernel.value,
-            'attn_wk': attn.wk.kernel.value,
-            'attn_wv': attn.wv.kernel.value,
-            'attn_wo': attn.wo.kernel.value,
+            'attn_wq': param_value(attn.wq.kernel),
+            'attn_wk': param_value(attn.wk.kernel),
+            'attn_wv': param_value(attn.wv.kernel),
+            'attn_wo': param_value(attn.wo.kernel),
             'attn_num_heads': attn.num_heads,
             'attn_mlp_layers': _extract_mlp_layers(uf.mlp),
             'attn_mlp_activation': 'tanh',
@@ -247,7 +248,7 @@ def _build_vgl_kwargs(
     gnn = model.omni.gnn
     embed_mod = gnn.electron_embedding
     proj_W = (
-        embed_mod.proj.kernel.value
+        param_value(embed_mod.proj.kernel)
         if embed_mod.proj is not None else None
     )
     embedding_kwargs = {
@@ -268,10 +269,10 @@ def _build_vgl_kwargs(
     env = model.envelope
     envelope = {
         'center_idx': env.center_idx,
-        'zetas_up': env.zetas_up.value,
-        'zetas_down': env.zetas_down.value,
-        'pi_up': env.pi_up.value,
-        'pi_down': env.pi_down.value,
+        'zetas_up': param_value(env.zetas_up),
+        'zetas_down': param_value(env.zetas_down),
+        'pi_up': param_value(env.pi_up),
+        'pi_down': param_value(env.pi_down),
         'isotropic': env.isotropic,
         'per_orbital_exponent': env.per_orbital_exponent,
         'softplus_zeta': env.softplus_zeta,
@@ -300,8 +301,8 @@ def _build_vgl_kwargs(
                 f"unsupported cusp class: {cusp_cls_name}",
             )
         if cusp_mod.trainable_alpha:
-            same_alpha = cusp_mod.same_alpha.value
-            anti_alpha = cusp_mod.anti_alpha.value
+            same_alpha = param_value(cusp_mod.same_alpha)
+            anti_alpha = param_value(cusp_mod.anti_alpha)
         else:
             init = jnp.asarray(
                 cusp_mod.initial_alpha, dtype=float,
@@ -327,7 +328,7 @@ def _build_vgl_kwargs(
         cusp_nuclei = {
             'scale': nuc_mod.scale[0],
             'alpha': (
-                nuc_mod.nuc_alpha.value
+                param_value(nuc_mod.nuc_alpha)
                 if nuc_mod.trainable_alpha
                 else jnp.asarray(nuc_mod._alpha_init, dtype=float)
             ),
@@ -340,6 +341,11 @@ def _build_vgl_kwargs(
             for et, feat in gnn.edge_features.items()
         }
     deep_features = gnn.layers[0].deep_features
+    mult_act = getattr(model.backflow_op, 'mult_act_name', 'deepqmc')
+    if mult_act is None:
+        raise ValueError(
+            "the forward Laplacian needs a named backflow mult act"
+        )
     return {
         'embedding_kwargs': embedding_kwargs,
         'layer_specs': layer_specs,
@@ -352,6 +358,7 @@ def _build_vgl_kwargs(
         'edge_features': edge_features,
         'self_interaction': gnn.self_interaction,
         'deep_features': deep_features,
+        'backflow_mult_act': mult_act,
     }
 
 

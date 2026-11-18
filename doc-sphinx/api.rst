@@ -110,12 +110,16 @@ Kronecker-factored approximation of the Fisher matrix, so its
 state does not grow with the walker count.  The step is bounded
 by a Fisher-norm trust region (``norm_constraint``), and the
 defaults follow DeepQMC's KFAC configuration, including constant
-damping.
+damping.  ``kfac_style='kfac_jax'`` reproduces the kfac-jax optimiser
+of DeepMind's FermiNet instead (exact per-electron factors with the
+biases in the Kronecker blocks, its scales, damping and moving
+average); with the ``ferminet_deepmind`` ansatz it takes the same
+steps as DeepMind's code.
 
 .. autofunction:: OmegaQMC.vmcopt_nn_kfac.get_vmcopt_nn_func
 
 .. autoclass:: OmegaQMC.vmcopt_nn_kfac._VMCOptDriverNN_KFAC
-   :members: __call__
+   :members: __call__, kfac_jax_step
 
 **Hartree-Fock pretraining**
 
@@ -435,7 +439,10 @@ Neural network trial
 
 Ports the DeepQMC architectures (PauliNet, FermiNet, DeepErwin,
 PsiFormer) using Flax NNX.  All NN-related code lives under
-``OmegaQMC.psi.nn``.
+``OmegaQMC.psi.nn``.  The ``ferminet`` preset is DeepQMC's FermiNet;
+``ferminet_deepmind`` is DeepMind's (orbitals ``envelope * (W h)``
+rather than ``envelope * (1 + 2 tanh(W h / 4))``, a bias in the
+two-electron stream, biases initialised from N(0, 1)).
 
 .. autofunction:: OmegaQMC.psi.nn.adapter.make_nn_log_psi
 
@@ -561,6 +568,15 @@ Physics utilities
 .. autofunction:: OmegaQMC.psi.nn.physics.pairwise_self_distance
 
 .. autofunction:: OmegaQMC.psi.nn.physics.laplacian
+
+Per-row Linear statistics for KFAC
+''''''''''''''''''''''''''''''''''
+
+.. automodule:: OmegaQMC.psi.nn.kfac_tap
+   :no-members:
+
+.. autoclass:: OmegaQMC.psi.nn.kfac_tap.LinearTaps
+   :members: per_walker
 
 Hand-written backward pass
 ''''''''''''''''''''''''''

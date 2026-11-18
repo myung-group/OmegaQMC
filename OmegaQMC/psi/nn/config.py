@@ -15,7 +15,7 @@ _CONF_DIR = os.path.join(os.path.dirname(__file__), 'conf')
 
 _BUILTIN_CONFIGS = {
     'paulinet', 'ferminet', 'ferminet_jastrow', 'ferminet_jastrow_complex',
-    'deeperwin', 'psiformer',
+    'deeperwin', 'psiformer', 'ferminet_deepmind',
 }
 
 
@@ -32,6 +32,11 @@ class NNAnsatzConfig:
     n_determinants: int = 16
     full_determinant: bool = True
     backflow_transform: str = 'mult'
+    # Activation of the multiplicative backflow: 'deepqmc' multiplies
+    # the envelope by 1 + 2 tanh(f / 4) (DeepQMC); 'linear' by f
+    # itself, i.e. orbital = envelope * (W h), as DeepMind's FermiNet
+    # and PsiFormer do.
+    backflow_mult_act: str = 'deepqmc'
 
     # --- Envelope ---
     envelope_isotropic: bool = True

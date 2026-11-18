@@ -66,6 +66,8 @@ def _check_supported(config, kw):
     need(config.project_to_embedding_dim,
          "project_to_embedding_dim=False")
     need(kw['jastrow'] is None, "a Jastrow factor")
+    need(kw.get('backflow_mult_act', 'deepqmc') == 'deepqmc',
+         "this backflow mult act")
     need(kw['cusp'] is None or kw['cusp']['type'] == 'psiformer',
          "this electron cusp type")
     env = kw['envelope']

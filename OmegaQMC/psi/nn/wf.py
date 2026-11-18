@@ -46,11 +46,21 @@ def eval_log_slater(xs):
 # Backflow operator
 # ----------------------------------------------------------------
 
+#: Multiplicative backflow activations by name: DeepQMC's bounded
+#: ``1 + 2 tanh(x / 4)``, and the identity, with which the orbitals are
+#: ``envelope * (W h)`` as in DeepMind's FermiNet.
+BACKFLOW_MULT_ACTS = {
+    'deepqmc': lambda x: 1 + 2 * jnp.tanh(x / 4),
+    'linear': lambda x: x,
+}
+
 class BackflowOp(nnx.Module):
     """Apply backflow transformations to orbitals.
 
     Args:
-        mult_act: Multiplicative activation.
+        mult_act: Multiplicative activation: a callable, or one of
+            the names in :data:`BACKFLOW_MULT_ACTS` (default
+            ``'deepqmc'``, ``1 + 2 tanh(x / 4)``).
         add_act: Additive activation.
         with_envelope: Scale additive term by envelope.
     """
@@ -61,8 +71,15 @@ class BackflowOp(nnx.Module):
         add_act=None,
         with_envelope=True,
     ):
-        self.mult_act = mult_act or (
-            lambda x: 1 + 2 * jnp.tanh(x / 4)
+        if mult_act is None:
+            mult_act = 'deepqmc'
+        # The name lets the forward-Laplacian twin pick the same act.
+        self.mult_act_name = (
+            mult_act if isinstance(mult_act, str) else None
+        )
+        self.mult_act = (
+            BACKFLOW_MULT_ACTS[mult_act]
+            if isinstance(mult_act, str) else mult_act
         )
         self.add_act = add_act or (
             lambda x: 0.1 * jnp.tanh(x / 4)
