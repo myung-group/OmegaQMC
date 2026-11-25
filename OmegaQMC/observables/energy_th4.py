@@ -20,6 +20,10 @@ from OmegaQMC.observables.greens_th4 import (
 )
 
 
+# Jitted so that the scan below (whose body closes over this call's arrays) is traced and compiled once per input
+# shape, not on every call: called eagerly once per block, the scan was recompiled every block and each compiled
+# executable kept its memory mappings, so long multi-det runs hit vm.max_map_count (65530) after about 610 blocks.
+@partial(jax.jit, static_argnames=['det_chunk_size'])
 def local_energy_multidet(
     h1e, chol, phia, phib,
     trials_up, trials_dn, ci_coeffs,
