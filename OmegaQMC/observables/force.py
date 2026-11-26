@@ -1952,6 +1952,26 @@ def _format_xyz_lines(symbols, coords_ang, frag_ids=None,
     return lines
 
 
+def _combo_local_energies(f, label, bcs, ref_local_energies):
+    """E_L(T R) of secondary state *label* in block *bcs*.
+
+    Both :func:`save_gto_gradients` and :func:`save_nn_gradients`
+    store it as ``local_energies/<label>/<blk>``.  A file without it
+    falls back to the reference E_L(R), which is exact only when T is
+    a symmetry of the trial function acting on all electrons.
+    """
+    grp = f['local_energies']
+    if label in grp and bcs in grp[label]:
+        return jnp.asarray(grp[label][bcs][()])
+    warnings.warn(
+        f"local_energies/{label}/{bcs} missing; the Pulay term of "
+        f"state {label} uses the reference E_L(R) (biased unless the "
+        "operation is an exact symmetry of the trial function).",
+        stacklevel=3,
+    )
+    return ref_local_energies
+
+
 def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
@@ -2249,8 +2269,9 @@ nuclear forces using PGCS.
         for block_cnt in block_nums:
             bcs = f'{block_cnt}'
 
-            # Reference local energies feed the Pulay
-            # term for every state in this block.
+            # Reference local energies E_L(R): Pulay term
+            # of the reference state (and of any secondary
+            # state written without its own E_L, see below).
             local_energies = jnp.asarray(
                 f['local_energies'][bcs][()]
             )
@@ -2285,6 +2306,7 @@ nuclear forces using PGCS.
                 jnp.asarray(ke_grp[bcs][()]),
                 jnp.asarray(lp_grp[bcs][()]),
                 None,
+                local_energies,
             )
             if combo_labels:
                 fw_grp = f['fragment_weights']
@@ -2302,10 +2324,13 @@ nuclear forces using PGCS.
                         jnp.asarray(
                             fw_grp[label][bcs][()]
                         ),
+                        _combo_local_energies(
+                            f, label, bcs, local_energies,
+                        ),
                     )
 
             for state_label in states:
-                grd_ee_en, grd_ke, grd_logpsi, frag_w = (
+                grd_ee_en, grd_ke, grd_logpsi, frag_w, e_loc = (
                     block_data[state_label]
                 )
 
@@ -2323,9 +2348,19 @@ nuclear forces using PGCS.
                     num_steps_per_block,
                     num_walkers, num_nuc, 3,
                 )
+                # Pulay term at the configuration the state's
+                # gradients were evaluated at: E_L(T R) for a
+                # secondary state, so that the whole local
+                # force O(T R) enters the correlated-sampling
+                # identity <O> = <w O(T R)> / <w>.  E_V stays
+                # the reference mean (= <w E_L(T R)> / <w> in
+                # expectation).
                 grd_pulay = 2.0 * jnp.einsum(
                     'sw,swnK->swnK',
-                    d_enr, grd_logpsi,
+                    e_loc.reshape(
+                        num_steps_per_block, num_walkers,
+                    ) - enr_mean,
+                    grd_logpsi,
                 )
 
                 # Sum the gradient contributions directly
