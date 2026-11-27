@@ -1804,7 +1804,34 @@ def _solve_param_response(
     return dp_dR
 
 
-def _project_force_sum_rules(grd, grd_err, coords, ref):
+def _block_correlation(series, bin_size):
+    """Correlation matrix of the columns of a block series.
+
+    *series* has shape ``(T, M)``; its blocks are averaged in bins of
+    *bin_size* and the sample correlation of the ``(N_b, M)`` bin
+    means is returned.  Columns with zero variance (e.g. components a
+    symmetry fixes at zero) are treated as uncorrelated with the rest.
+    Returns ``None`` when fewer than two bins exist.
+    """
+    series = np.asarray(series, dtype=np.float64)
+    bin_size = max(1, int(bin_size))
+    n_b = series.shape[0] // bin_size
+    if n_b < 2:
+        return None
+    bins = series[:n_b * bin_size].reshape(
+        n_b, bin_size, -1,
+    ).mean(axis=1)
+    centered = bins - bins.mean(axis=0)
+    cov = centered.T @ centered / (n_b - 1)
+    sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    ok = sd > 1e-12 * max(float(sd.max()), 1e-300)
+    corr = np.eye(len(sd))
+    sub = np.ix_(ok, ok)
+    corr[sub] = cov[sub] / np.outer(sd[ok], sd[ok])
+    return corr
+
+
+def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None):
     """Project a force/gradient estimate onto the translational and
     rotational sum-rule subspace via constrained generalized least
     squares (Lagrange multipliers).
@@ -1826,9 +1853,22 @@ def _project_force_sum_rules(grd, grd_err, coords, ref):
     where ``C`` is the 6 x 3N constraint matrix (3 translational rows
     plus 3 rows of the r_i-cross skew blocks about ``ref``) and
     ``Sigma`` is ``diag(grd_err**2)``.  The residual is absorbed mostly
-    by the least well-determined components, the result satisfies both
-    sum rules exactly, and the propagated covariance
-    ``(I - P) Sigma (I - P)^T`` does not exceed the input variances.
+    by the least well-determined components and the result satisfies
+    both sum rules exactly.
+
+    The error is propagated as ``(I - P) V (I - P)^T``.  Without
+    *corr*, ``V = Sigma`` (independent components), which never exceeds
+    the input variances.  Force components are not independent,
+    though: SWCT makes ``sum_i F_i = 0`` hold sample by sample, so e.g.
+    F_O,z and -(F_H1,z + F_H2,z) of a water are almost the same random
+    variable, and the diagonal propagation would average their common
+    noise away as if they were two independent measurements.  With
+    *corr*, the correlation matrix of the components (from their
+    block series), ``V = D corr D`` with ``D = diag(grd_err)``: the
+    input errors are kept and only their correlations are added, so
+    the propagated error is that of the projected estimate.  The
+    projection ``P`` itself, and so ``grd_proj``, does not depend on
+    *corr*.
     A pseudo-inverse is used so degenerate constraints (e.g. the
     torque about the axis of a linear molecule, whose constraint row
     vanishes) are handled gracefully.
@@ -1841,6 +1881,11 @@ def _project_force_sum_rules(grd, grd_err, coords, ref):
         Nuclear coordinates.
     ref : array_like, shape (3,)
         Reference point for the rotational (torque) constraint.
+    corr : array_like, shape (3N, 3N), optional
+        Correlation matrix of the flattened components (row-major
+        over atoms, then x, y, z), e.g. from
+        :func:`_block_correlation`.  ``None`` (default) treats them as
+        independent.
 
     Returns
     -------
@@ -1884,7 +1929,12 @@ def _project_force_sum_rules(grd, grd_err, coords, ref):
     m = np.eye(3 * n) - p                       # I - P
 
     g_proj = m @ g
-    cov_proj = (m * sigma2[None, :]) @ m.T      # (I-P) Sigma (I-P)^T
+    if corr is None:
+        cov_in = np.diag(sigma2)
+    else:
+        sd = np.sqrt(sigma2)
+        cov_in = sd[:, None] * np.asarray(corr, dtype=float) * sd
+    cov_proj = m @ cov_in @ m.T                 # (I-P) V (I-P)^T
     var_proj = np.clip(np.diag(cov_proj), 0.0, None)
 
     grd_proj = g_proj.reshape(n, 3)
@@ -2534,6 +2584,12 @@ nuclear forces using PGCS.
                     _project_force_sum_rules(
                         grd_tot, grd_err,
                         coords_state, com_state,
+                        corr=_block_correlation(
+                            np.asarray(grd_block_series).reshape(
+                                len(grd_block_series), -1,
+                            ),
+                            1,
+                        ),
                     )
                 )
                 grd_tot_print = jnp.asarray(grd_tot_p)
@@ -2662,6 +2718,11 @@ nuclear forces using PGCS.
 
             avg_grd_tot_np = np.zeros((num_nuc, 3))
             avg_grd_err_np = np.zeros((num_nuc, 3))
+            # Per-block series of each combined component,
+            # sum_s w_s F_s(t), for the correlations the
+            # sum-rule projection propagates its error with.
+            avg_series = None
+            avg_bin_size = 1
 
             # Per-(atom, direction) BLUE combination across
             # the states that touched atom i's fragment.
@@ -2693,6 +2754,7 @@ nuclear forces using PGCS.
                         for s in relevant_states
                     ])
                     N = len(relevant_states)
+                    avg_series = False      # no correlations
                     avg_grd_tot_np[i] = np.asarray(
                         forces.mean(axis=0)
                     )
@@ -2707,13 +2769,23 @@ nuclear forces using PGCS.
                         s: series_block[s][:, i, k]
                         for s in relevant_states
                     }
-                    mean, err, _, _, _ = (
+                    mean, err, _, w_ik, bin_ik = (
                         blue_combine_states(
                             series_ik, relevant_states,
                         )
                     )
                     avg_grd_tot_np[i, k] = mean
                     avg_grd_err_np[i, k] = err
+                    if avg_series is None:
+                        avg_series = np.zeros(
+                            (len(series_ik[None]), num_nuc, 3),
+                        )
+                    if avg_series is not False:
+                        avg_series[:, i, k] = sum(
+                            w_s * np.asarray(series_ik[s])
+                            for w_s, s in zip(w_ik, relevant_states)
+                        )
+                        avg_bin_size = max(avg_bin_size, bin_ik)
 
             # Enforce the exact translational + rotational sum
             # rules (sum F = 0, sum r x F = 0) that the
@@ -2728,9 +2800,16 @@ nuclear forces using PGCS.
             com_for_proj = np.average(
                 coords_for_proj, axis=0, weights=masses_for_proj,
             )
+            avg_corr = (
+                _block_correlation(
+                    avg_series.reshape(len(avg_series), -1),
+                    avg_bin_size,
+                )
+                if isinstance(avg_series, np.ndarray) else None
+            )
             avg_grd_tot_np, avg_grd_err_np = _project_force_sum_rules(
                 avg_grd_tot_np, avg_grd_err_np,
-                coords_for_proj, com_for_proj,
+                coords_for_proj, com_for_proj, corr=avg_corr,
             )
 
             avg_grd_tot = jnp.asarray(avg_grd_tot_np)

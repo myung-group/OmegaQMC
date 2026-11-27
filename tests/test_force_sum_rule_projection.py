@@ -17,7 +17,10 @@ weighted by the per-component error bars.  These tests pin
 the defining properties of that projection:
 
 * both sum rules are satisfied to machine precision;
-* error bars are never inflated;
+* error bars are never inflated (independent components);
+* with the components' correlations, a field whose every sample
+  already obeys the sum rules keeps its error bars, which the
+  independent propagation would shrink;
 * the map is idempotent and a leaves a sum-rule-consistent
   field untouched;
 * the residual is absorbed mostly by the least
@@ -31,7 +34,10 @@ needed.
 """
 import numpy as np
 
-from OmegaQMC.observables.force import _project_force_sum_rules
+from OmegaQMC.observables.force import (
+    _block_correlation,
+    _project_force_sum_rules,
+)
 
 
 def _total_force(grd):
@@ -203,3 +209,57 @@ if __name__ == "__main__":
     test_gls_weighting_protects_precise_components()
     test_collinear_molecule_no_nan()
     print("OK")
+
+
+def _sum_rule_null_projector(coords, ref):
+    """Orthogonal projector onto fields obeying both sum rules."""
+    rel = coords - ref
+    rows = []
+    for k in range(3):
+        t = np.zeros(coords.shape)
+        t[:, k] = 1.0
+        rows.append(t.ravel())
+        r = np.cross(rel, np.eye(3)[k]).ravel()   # d tau_k / d F
+        rows.append(r)
+    c = np.array(rows)
+    return np.eye(c.shape[1]) - np.linalg.pinv(c) @ c
+
+
+def test_correlated_errors_kept_for_consistent_samples():
+    # Every block obeys both sum rules exactly, as each SWCT sample
+    # does for the translational one, so the components are strongly
+    # correlated and the mean is already consistent: projecting must
+    # change neither the mean nor, given the correlations, the error.
+    coords = _bent_trimer()
+    ref = coords.mean(axis=0)
+    rng = np.random.default_rng(5)
+    q = _sum_rule_null_projector(coords, ref)
+    series = rng.normal(size=(400, coords.size)) @ q   # (T, 3N)
+    grd = series.mean(axis=0).reshape(coords.shape)
+    err = (series.std(axis=0, ddof=1)
+           / np.sqrt(len(series))).reshape(coords.shape)
+    corr = _block_correlation(series, 1)
+
+    grd_c, err_c = _project_force_sum_rules(
+        grd, err, coords, ref, corr=corr,
+    )
+    np.testing.assert_allclose(grd_c, grd, atol=1e-12)
+    np.testing.assert_allclose(err_c, err, rtol=1e-8)
+
+    # The independent propagation understates these errors.
+    grd_d, err_d = _project_force_sum_rules(grd, err, coords, ref)
+    np.testing.assert_allclose(grd_d, grd_c, atol=1e-12)
+    assert np.all(err_d <= err + 1e-12)
+    assert np.mean(err_d / err) < 0.9
+
+
+def test_block_correlation_zero_variance_and_few_bins():
+    rng = np.random.default_rng(6)
+    series = np.column_stack([
+        rng.normal(size=20), np.zeros(20), rng.normal(size=20),
+    ])
+    corr = _block_correlation(series, 2)
+    assert corr.shape == (3, 3)
+    np.testing.assert_allclose(np.diag(corr), 1.0)
+    assert corr[1, 0] == corr[1, 2] == 0.0
+    assert _block_correlation(series, 11) is None
