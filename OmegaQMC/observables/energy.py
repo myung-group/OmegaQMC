@@ -459,7 +459,9 @@ correlated-sample-averaged VMC energy.
     makes the same decision on the same blocks, and
     both logs print it in the same lines.  When every
     secondary state is dropped the reference estimate
-    is returned.
+    is returned.  The log always ends with the
+    returned energy, ``Reported E = ... ± ...`` and
+    ``(BLUE over K states)`` or ``(reference only)``.
 
     Parameters
     ----------
@@ -675,6 +677,16 @@ correlated-sample-averaged VMC energy.
                 )
             ref_enr = blue_mean
             ref_err = blue_err
+            how = f"BLUE over {len(blue_states)} states"
+        else:
+            how = "reference only"
+        # Always state the returned energy, whichever path
+        # produced it.
+        print(
+            f"\nReported E = {ref_enr:.8f} ± {ref_err:.8f}"
+            f"  ({how})",
+            file=fout,
+        )
 
         if ofname_log is not None:
             fout.close()

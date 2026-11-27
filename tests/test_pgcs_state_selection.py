@@ -14,7 +14,11 @@ block, these tests check
 * that ``ess_min = 0`` (or ``None``) combines every state, the energy
   BLUE then equalling a direct :func:`blue_combine_states` over all;
 * that an atom whose fragment lost its secondary state is averaged
-  over the reference alone.
+  over the reference alone;
+* that with every fragment reference-only the sum-rule projection is
+  skipped by default (``project_sum_rules="auto"``), the averaged rows
+  being the reference rows, while ``True`` still projects;
+* that the energy log always ends with the reported energy.
 """
 import re
 import warnings
@@ -89,7 +93,9 @@ def _run(tmp_path, **kw):
         warnings.simplefilter('always')
         for name, mod in (('energy', energy), ('force', force)):
             log = str(tmp_path / f'{name}.log')
-            res = mod.postproc_h5_pgcs(prefix=pre, logfile=log, **kw)
+            kw_m = {k: v for k, v in kw.items()
+                    if name == 'force' or k != 'project_sum_rules'}
+            res = mod.postproc_h5_pgcs(prefix=pre, logfile=log, **kw_m)
             with open(log) as fh:
                 out[name] = (res, fh.read())
     return out, [str(w.message) for w in caught]
@@ -201,3 +207,157 @@ def test_ess_min_zero_combines_every_state(tmp_path):
     np.testing.assert_allclose(out['energy'][0], (mean, err),
                                rtol=1e-10)
     assert 'over 3 states)' in out['energy'][1]
+
+
+_ROW = r'^H\s+(\S+) ± +(\S+)\s+(\S+) ± +(\S+)\s+(\S+) ± +(\S+)'
+
+
+def _force_rows(text, header):
+    """Rows (as printed strings) of the force block after *header*."""
+    block = text.split(header + '\n', 1)[1]
+    rows = []
+    for ln in block.splitlines():
+        m = re.match(_ROW, ln)
+        if not m:
+            break
+        rows.append(m.groups())
+    assert len(rows) == N_NUC
+    return rows
+
+
+def test_all_reference_skips_projection_by_default(tmp_path):
+    out, _ = _run(tmp_path, ess_min=2.0)
+    text = out['force'][1]
+    assert 'Sum-rule projection: skipped (every fragment is' in text
+    # the reference state is printed first
+    ref_rows = _force_rows(text, 'Total forces (-gradients)')
+    avg_rows = _force_rows(text, 'Total forces (-gradients, averaged)')
+    assert avg_rows == ref_rows
+    forces, errs = out['force'][0]
+    np.testing.assert_allclose(
+        np.asarray(forces), np.array(ref_rows, float)[:, ::2],
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(errs), np.array(ref_rows, float)[:, 1::2],
+        rtol=1e-5,
+    )
+    # the raw reference estimate does not obey the sum rules
+    assert np.abs(np.asarray(forces).sum(axis=0)).max() > 1e-6
+
+    out_f, _ = _run(tmp_path, ess_min=2.0, project_sum_rules=False)
+    assert 'disabled (project_sum_rules=False)' in out_f['force'][1]
+    np.testing.assert_array_equal(
+        np.asarray(out_f['force'][0][0]), np.asarray(forces),
+    )
+
+
+def test_project_sum_rules_true_still_projects(tmp_path):
+    out, _ = _run(tmp_path, ess_min=2.0, project_sum_rules=True)
+    text = out['force'][1]
+    assert 'Sum-rule projection: weighting = diagonal' in text
+    forces = np.asarray(out['force'][0][0])
+    np.testing.assert_allclose(forces.sum(axis=0), 0.0, atol=1e-10)
+    # a kept secondary state: "auto" projects as before
+    out, _ = _run(tmp_path)
+    assert 'Sum-rule projection: weighting = ' in out['force'][1]
+    np.testing.assert_allclose(
+        np.asarray(out['force'][0][0]).sum(axis=0), 0.0, atol=1e-10,
+    )
+    with pytest.raises(ValueError, match='project_sum_rules'):
+        force.postproc_h5_pgcs(prefix=str(tmp_path / 'syn'),
+                               project_sum_rules='yes')
+
+
+def _reported_energy(text):
+    m = re.findall(r'^Reported E = (\S+) ± (\S+)  \((.*)\)$', text, re.M)
+    assert len(m) == 1 and text.rstrip().splitlines()[-1].startswith(
+        'Reported E = ')
+    return float(m[0][0]), float(m[0][1]), m[0][2]
+
+
+@pytest.mark.parametrize('ess_min, how', [
+    (2.0, 'reference only'), (CS_ESS_MIN, 'BLUE over 2 states'),
+    (0, 'BLUE over 3 states'),
+])
+def test_energy_log_states_reported_energy(tmp_path, ess_min, how):
+    out, _ = _run(tmp_path, ess_min=ess_min)
+    (enr, err), text = out['energy']
+    e, de, got = _reported_energy(text)
+    assert got == how
+    np.testing.assert_allclose([e, de], [enr, err], rtol=1e-7)
+
+
+def test_energy_log_without_pgcs_states(tmp_path):
+    pre = str(tmp_path / 'syn')
+    _write_file(pre + '.grd.h5')
+    with h5py.File(pre + '.grd.h5', 'a') as f:
+        del f['fragment_weights']
+    log = str(tmp_path / 'e.log')
+    enr, err = energy.postproc_h5_pgcs(prefix=pre, logfile=log)
+    with open(log) as fh:
+        text = fh.read()
+    e, de, how = _reported_energy(text)
+    assert how == 'reference only'
+    np.testing.assert_allclose([e, de], [enr, err], rtol=1e-7)
+
+
+def _net_line(text, header, nth=0):
+    """(values, errors) of the net line after the *nth* *header*."""
+    line = text.split(header + '\n')[nth + 1].splitlines()[0]
+    nums = [float(x) for x in line.replace('±', ' ').split()]
+    assert len(nums) == 6
+    return np.array(nums[::2]), np.array(nums[1::2])
+
+
+def test_net_force_error_from_its_own_series(tmp_path):
+    # The synthetic gradients do not sum to zero, so the reference
+    # state's net force has a finite error, which must be that of the
+    # per-sample series sum_I F_I, binned like the atoms.
+    from OmegaQMC.utils import do_binning_analysis_grds
+    out, _ = _run(tmp_path, ess_min=0)
+    text = out['force'][1]
+    _, dnet = _net_line(text, 'Total force on system')
+    sq, count = 0.0, 0
+    with h5py.File(str(tmp_path / 'syn.grd.h5'), 'r') as f:
+        e_v = np.mean([f['local_energies'][f'{b}'][()]
+                       for b in range(N_BLOCKS)])
+        for b in range(N_BLOCKS):
+            el = f['local_energies'][f'{b}'][()]
+            g = [f[k][f'{b}'][()].reshape(N_STEPS, N_WALKERS, N_NUC, 3)
+                 for k in GRD_KEYS]
+            tot = (f['grd_nn'][()] + g[0] + g[1]
+                   + 2.0 * (el - e_v)[..., None, None] * g[2])
+            serr = np.asarray(do_binning_analysis_grds(
+                tot.sum(axis=2, keepdims=True),
+            )[1])                                   # (W, 1, 3)
+            sq = sq + (serr ** 2).sum(axis=(0, 1))
+            count += serr.shape[0]
+    np.testing.assert_allclose(dnet, np.sqrt(sq) / count, rtol=2e-5)
+    assert np.all(dnet > 1e-3)
+    assert 'Total torque (about center of mass)\n' in text
+
+
+def test_averaged_net_force_and_torque_zero_after_projection(tmp_path):
+    out, _ = _run(tmp_path)
+    text = out['force'][1]
+    assert 'Sum-rule projection: weighting = ' in text
+    for header in ('Total force on system (averaged)',
+                   'Total torque (about center of mass, averaged)'):
+        val, err = _net_line(text, header)
+        assert np.all(np.abs(val) < 1e-10) and np.all(err < 1e-10)
+
+    # skipped projection: the reference state's net lines
+    out, _ = _run(tmp_path, ess_min=2.0)
+    text = out['force'][1]
+    for h_ref, h_avg in (
+        ('Total force on system', 'Total force on system (averaged)'),
+        ('Total torque (about center of mass)',
+         'Total torque (about center of mass, averaged)'),
+    ):
+        ref = _net_line(text, h_ref)
+        avg = _net_line(text, h_avg)
+        np.testing.assert_array_equal(ref[0], avg[0])
+        np.testing.assert_array_equal(ref[1], avg[1])
+        # finite, except the torque about the molecular (z) axis
+        assert np.all(ref[1][:2] > 0)

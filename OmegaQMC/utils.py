@@ -1022,8 +1022,10 @@ def compute_torque_with_error(mol, grd, grd_err):
     # Compute torque
     r = coords - ref
     torque = jnp.sum(jnp.cross(r, -grd), axis=0)
-    # Compute torque errors
-    x, y, z = coords.T
+    # Compute torque errors (components treated as independent;
+    # postproc_h5_pgcs takes the error of the total torque from its
+    # own series instead)
+    x, y, z = r.T
     dFx, dFy, dFz = grd_err.T
     dtau_sq = jnp.stack([
         (y * dFz)**2 + (z * dFy)**2,

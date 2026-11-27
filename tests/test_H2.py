@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.observables.force import postproc_h5_pgcs as vmc_forces
 from OmegaQMC.utils import format_basis_name
@@ -63,3 +64,49 @@ def test_force():
     # consistency with zero at a generous multiple of that rather
     # than pinning an exact Monte Carlo trajectory.
     assert forces[0, 2] == approx(0.0, abs=3.0e-2)
+
+
+def _selection(text):
+    return [ln for ln in text.splitlines()
+            if ln.startswith(('PGCS state selection', 'BLUE:'))
+            or 'ESS/N = ' in ln and ln.startswith('  ')]
+
+
+def test_pgcs_logs_gto(tmp_path):
+    # GTO (Slater-Jastrow) PGCS post-processing end to end: C2z is an
+    # exact symmetry of the RHF trial state, so the secondary state is
+    # kept by both energy and force paths, the averaged forces are
+    # projected, and the energy log ends with the reported energy.
+    from OmegaQMC.observables.energy import postproc_h5_pgcs as vmc_enr
+    flog, elog = str(tmp_path / 'f.log'), str(tmp_path / 'e.log')
+    vmc_forces(prefix=chkfile_prefix, logfile=flog)
+    enr, err = vmc_enr(prefix=chkfile_prefix, logfile=elog)
+    with open(flog) as fh:
+        ftext = fh.read()
+    with open(elog) as fh:
+        etext = fh.read()
+    assert _selection(ftext) == _selection(etext)
+    assert 'BLUE: no states dropped (ESS/N >= 0.1)' in etext
+    assert 'Sum-rule projection: weighting = ' in ftext
+    last = etext.rstrip().splitlines()[-1]
+    assert last == (f"Reported E = {enr:.8f} ± {err:.8f}"
+                    "  (BLUE over 2 states)")
+
+    # force_estimator 'simple' (SWCT) makes sum_I F_I = 0 sample by
+    # sample, so each state's net force has a zero error once it is
+    # taken from its own series; the projected average is 0 +- 0 (to
+    # round-off, which the vanishing torque row of a linear molecule
+    # inflates to ~1e-11).
+    def net_lines(header):
+        out = []
+        for chunk in ftext.split(header + '\n')[1:]:
+            nums = chunk.splitlines()[0].replace('±', ' ').split()
+            out.append([float(x) for x in nums])
+        return np.array(out)
+
+    per_state = net_lines('Total force on system')
+    assert per_state.shape == (2, 6)
+    assert np.all(np.abs(per_state) <= 1e-8)
+    for header in ('Total force on system (averaged)',
+                   'Total torque (about center of mass, averaged)'):
+        assert np.all(np.abs(net_lines(header)) <= 1e-8)
