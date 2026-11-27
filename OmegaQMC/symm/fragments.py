@@ -63,6 +63,66 @@ def _selfmap_error(Xc, M, Z):
     return err
 
 
+# Nuclear self-map error (bohr) above which an operation is reported
+# as only an approximate symmetry of its fragment, and above which the
+# warning calls it far from a symmetry.
+SELFMAP_WARN_BOHR = 1e-3
+SELFMAP_STRONG_BOHR = 0.5
+
+
+def _report_selfmap_errors(fid, frag_ops, frag_nuc, charges,
+                           centroid, Vh):
+    """Print and check the nuclear self-map error of each operation.
+
+    Each non-identity operation in *frag_ops* is applied to the
+    fragment's nuclei exactly as the samplers apply it to electrons,
+    ``c + op((r - c) @ Vh.T) @ Vh``, and :func:`_selfmap_error` gives
+    the largest distance from an image to the nearest nucleus of equal
+    charge.  One line per operation is printed.  Above
+    :data:`SELFMAP_WARN_BOHR` the operation is not a symmetry of the
+    nuclear frame, so the trial function is not symmetric under it
+    either and the PGCS weights ``psi^2(R') / psi^2(R)`` deviate from
+    1; this only warns and never stops the run.
+
+    Returns:
+        ``{op: error in bohr}``.
+    """
+    Xc = np.asarray(frag_nuc, dtype=float) - np.asarray(
+        centroid, dtype=float,
+    )
+    Z = np.asarray(charges)
+    V = np.asarray(Vh, dtype=float)
+    errors = {}
+    for op in frag_ops:
+        if op == 'E' or op not in symmetry_operations_map:
+            continue
+        err = float(_selfmap_error(Xc, V.T @ _op_matrix_local(op) @ V, Z))
+        errors[op] = err
+        print(
+            f"ℹ️\tFragment {fid}: operation {op} maps the nuclei "
+            f"onto themselves to {err:.3e} bohr"
+        )
+        if err > SELFMAP_STRONG_BOHR:
+            warnings.warn(
+                f"Fragment {fid}: operation {op} moves a nucleus "
+                f"{err:.3g} bohr from any equivalent one, so it is "
+                "far from a symmetry of the fragment; its PGCS "
+                "weights psi^2(R')/psi^2(R) will deviate strongly "
+                "from 1 and its correlated-sampling estimates may "
+                "be unreliable.",
+                stacklevel=3,
+            )
+        elif err > SELFMAP_WARN_BOHR:
+            warnings.warn(
+                f"Fragment {fid}: operation {op} is only an "
+                f"approximate symmetry (nuclear self-map error "
+                f"{err:.3g} bohr); its PGCS weights "
+                "psi^2(R')/psi^2(R) will deviate from 1.",
+                stacklevel=3,
+            )
+    return errors
+
+
 def _geometric_symmetry_frame(frag_nuc, charges, centroid,
                               frag_ops):
     """Local frame aligned to a fragment's symmetry elements.
@@ -196,6 +256,12 @@ def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
         (no ``map_frag_symmops``) the whole molecule is
         one fragment about its nuclear centroid, with
         an infinite in-radius and the identity frame.
+
+    For every fragment that applies a non-identity operation, the
+    nuclear self-map error of each operation in the final frame is
+    printed, and an operation that is only an approximate symmetry
+    (error above :data:`SELFMAP_WARN_BOHR`) triggers a warning; see
+    :func:`_report_selfmap_errors`.  The run is never stopped.
     """
     if hasattr(mol, 'map_frag_symmops'):
         frag_ids = sorted(mol.map_frag_ctr.keys())
@@ -266,6 +332,13 @@ def build_frag_transform_data(mol, nuc_crds, frag_symmops=None):
             else:
                 Vh_list.append(jnp.eye(3))
             is_planar_list.append(is_planar)
+
+            if frag_ops != ['E']:
+                idx = np.asarray(frag_atom_indices)
+                _report_selfmap_errors(
+                    fid, frag_ops, np.asarray(nuc_crds)[idx],
+                    mol.atom_charges()[idx], centroid, Vh_list[-1],
+                )
     else:
         centroids_list = [jnp.mean(nuc_crds, axis=0)]
         inradii_list = [jnp.inf]
