@@ -321,6 +321,13 @@ Non-QMC reference calculators living under :mod:`OmegaQMC.addons`.
 
 .. autofunction:: OmegaQMC.addons.qed_fci.run_qed_fci
 
+.. autofunction:: OmegaQMC.addons.qed_noci.run_qed_noci
+
+.. autoclass:: OmegaQMC.addons.qed_noci.QEDNOCI
+   :members: kernel, build, spin_adapt, weights
+
+.. autofunction:: OmegaQMC.addons.qed_noci_scf.run_qed_bs_rohf
+
 Observables
 -----------
 
