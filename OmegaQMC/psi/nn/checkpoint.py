@@ -17,6 +17,13 @@ HDF5 layout::
     /vmc/              # appended by vmc_nn (optional)
         .attrs['E_mean', 'E_serr']
         E_blocks       # (num_blocks,) float64
+
+Optimiser and sampler state (Kronecker factors, walkers, PRNG key) is
+written by :func:`save_state_tree`, normally to a separate file next
+to the checkpoint so that the parameter backups stay small::
+
+    /<group>/0, ...    # leaves in jax.tree.leaves order
+    /<group>.attrs['num_leaves', ...]
 """
 
 import h5py
@@ -364,3 +371,69 @@ def append_vmc_results(filepath, results):
                     dtype=np.float64,
                 ),
             )
+
+
+def save_state_tree(filepath, group, tree, attrs=None):
+    """Append a pytree of arrays to an HDF5 file as group *group*.
+
+    Used for optimiser and sampler state that a run needs to resume
+    exactly (Kronecker factors, walkers, PRNG key).  An existing group
+    of that name is replaced.  The leaves are stored in
+    ``jax.tree.leaves`` order, so the tree is restored against a
+    template of the same structure (:func:`load_state_tree`).
+
+    Args:
+        filepath: HDF5 file (created if absent).
+        group: Group name.
+        tree: Pytree of arrays.
+        attrs: Optional dict of scalar attributes.
+    """
+    leaves = jax.tree.leaves(tree)
+    with h5py.File(filepath, 'a') as f:
+        if group in f:
+            del f[group]
+        g = f.create_group(group)
+        for i, leaf in enumerate(leaves):
+            arr = np.asarray(leaf)
+            kw = {'compression': 'gzip'} if arr.ndim > 0 else {}
+            g.create_dataset(str(i), data=arr, **kw)
+        g.attrs['num_leaves'] = len(leaves)
+        for k, v in (attrs or {}).items():
+            g.attrs[k] = v
+
+
+def load_state_tree(filepath, group, template):
+    """Read a group written by :func:`save_state_tree`.
+
+    Args:
+        filepath: HDF5 file.
+        group: Group name.
+        template: Pytree with the expected structure and shapes
+            (the dtypes are those stored).
+
+    Returns:
+        ``(tree, attrs)``, or ``(None, reason)`` when the group is
+        absent or does not match *template* (number of leaves or a
+        shape).
+    """
+    t_leaves, treedef = jax.tree.flatten(template)
+    with h5py.File(filepath, 'r') as f:
+        if group not in f:
+            return None, f"no '{group}' group"
+        g = f[group]
+        n = int(g.attrs['num_leaves'])
+        if n != len(t_leaves):
+            return None, (f"'{group}' has {n} leaves, expected"
+                          f" {len(t_leaves)}")
+        leaves = []
+        for i, t in enumerate(t_leaves):
+            arr = g[str(i)][()]
+            if np.shape(arr) != np.shape(t):
+                return None, (f"'{group}' leaf {i} has shape"
+                              f" {np.shape(arr)}, expected"
+                              f" {np.shape(t)}")
+            # the stored dtype is the one the run had (e.g. a float32
+            # step size), so keep it for a bit-identical resume
+            leaves.append(jnp.asarray(arr))
+        attrs = {k: g.attrs[k] for k in g.attrs if k != 'num_leaves'}
+    return jax.tree.unflatten(treedef, leaves), attrs

@@ -1,11 +1,29 @@
 """KFAC (Kronecker-Factored Approximate Curvature) VMC optimiser
 for molecular NN wavefunctions.
 
-Molecular counterpart of :mod:`OmegaQMC.vmcopt_nn_heg_kfac`: the
-KFAC core (Kronecker-factor extraction, Martens-Grosse damped
-inverse, adaptive Levenberg-Marquardt damping, trust-region norm
-constraint) is the same, while the Hamiltonian, sampler and
+The optimiser reproduces ``kfac_jax.Optimizer`` as DeepMind's FermiNet
+configures it (ferminet ``train.py``, kfac-jax 0.0.8): exact
+per-(walker, row) Kronecker factors for every Linear layer with the
+bias in the block, kfac-jax's ``fixed_scale``, Fisher factor, bias-
+corrected moving average, pi-adjusted per-block damping and norm
+constraint, and uncentred diagonal blocks for the remaining leaves
+(the envelope).  See :meth:`_VMCOptDriverNN_KFAC._setup_kfac`.  With
+the ``ferminet_deepmind`` ansatz the steps agree with DeepMind's
+ferminet + kfac-jax to ~1e-7 relative
+(``tests/test_vmcopt_nn_kfac_jax.py``).  The Hamiltonian, sampler and
 checkpointing follow :mod:`OmegaQMC.vmcopt_nn_sr`.
+
+Every Linear's input rows and output cotangents come exactly from
+:mod:`OmegaQMC.psi.nn.kfac_tap` (gradients with respect to zero
+perturbations of the Linear outputs), so the method needs no
+model-specific code: any ansatz built from ``nnx.Linear`` works.
+OmegaQMC's earlier KFAC (``kfac_style='omegaqmc'``: identity-
+initialised factors, biases and envelope in a centred CG block, no
+Fisher factor, with a hand-written PsiFormer backward pass, walker-
+level ``M^T M`` factors or a capturing twin) trained 7-11 mHa above
+DeepMind's FermiNet on N2 and CO and was no faster, and has been
+removed; the HEG driver :mod:`OmegaQMC.vmcopt_nn_heg_kfac` keeps its
+own implementation.
 
 Why KFAC rather than SR for large walker counts
 -----------------------------------------------
@@ -25,92 +43,25 @@ needs only ``d log|psi| / d theta``, so it composes with the
 analytic forward-Laplacian path in
 :mod:`OmegaQMC.psi.nn.forward_lap` rather than fighting it.
 
-Deliberate deviations from the HEG implementation
--------------------------------------------------
-1. **Walker-chunked factor accumulation.**  The HEG driver
-   evaluates the per-walker gradient for the whole batch inside
-   its jitted step, so its peak is ``num_walkers * n_params`` —
-   the very thing that caps SR.  Here the accumulation is a
-   ``lax.scan`` over chunks of ``factor_chunk_size`` walkers, so
-   peak memory is ``factor_chunk_size * n_params`` and the walker
-   count is decoupled from the parameter count.  (For the
-   PsiFormer used in testing, 2.1M parameters, the unchunked
-   gradient for 1000 walkers is ~17 GB and does not fit.)
-2. **Trust region in the Fisher norm.**  The HEG driver clips the
-   *Euclidean* norm of the step.  That is not scale-meaningful
-   for the ``M^T M`` factors, whose ``E[|a|^2] E[|g|^2]`` constant
-   the learning rate is supposed to absorb; with a Euclidean bound
-   the step is shrunk by that same constant every iteration and
-   the optimiser stalls.  This module bounds
-   ``dtheta^T F dtheta`` instead, as kfac-jax / FermiNet /
-   DeepQMC do, which makes ``norm_constraint`` comparable with
-   the value in DeepQMC's ``conf/task/opt/kfac.yaml``.
-3. **Dtype-preserving parameter update.**  NNX initialises the
+Implementation notes
+--------------------
+1. **Walker-chunked factor accumulation.**  The factor sums are a
+   ``lax.scan`` over chunks of ``factor_chunk_size`` walkers, so peak
+   memory is set by the chunk, not by ``num_walkers``.  Each chunk's
+   products are formed in the network's dtype at JAX's default matmul
+   precision (as kfac-jax does) and summed over chunks in float64.
+2. **Dtype-preserving parameter update.**  NNX initialises the
    network in float32 while ``OmegaQMC.config`` enables
    ``jax_enable_x64``, so writing the float64 KFAC step straight
-   back into the parameters silently promotes the whole network
+   back into the parameters would silently promote the whole network
    to float64.  The factors, inverses and step stay in float64
    (conditioning), but each leaf is cast back to its own dtype on
    application.
+3. **Exact resume.**  The factor state, damping, walkers, step size
+   and PRNG key are checkpointed next to the parameters, so a resumed
+   run continues with the iterates of an uninterrupted one.
 
-Not implemented here (unlike the HEG driver): multi-device
-``pmap``.  The generic helpers below still carry the
-``pmean_axis`` plumbing, so adding it is mechanical, but it is
-left out until it can be tested on more than one device.  Note
-also that the HEG driver's ``pmap`` path passes ``captured_inputs``
-into a ``pmap``ed step without sharding it, so its multi-device
-and ``capture_activations`` options do not currently compose.
-
-Three factor-extraction paths are available for the default
-``kfac_style='omegaqmc'`` (a fourth style, (d), replaces them):
-
-a. **Hand-written backward pass (default for the PsiFormer).**
-   ``backward='manual'`` (chosen by ``backward='auto'`` whenever the
-   ansatz supports it) evaluates
-   :func:`OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward`,
-   which returns, without automatic differentiation, every Linear
-   layer's per-electron inputs ``a_we`` and output cotangents
-   ``g_we``.  The factors ``sum a a^T`` and ``sum g g^T`` run over
-   the flattened ``(W * n_e)`` population, exactly as FermiNet's
-   ``RepeatedDenseBlock`` and kfac-jax do.  No per-walker parameter
-   gradient is formed, which makes an iteration ~5x faster than (b).
-
-b. **M^T M / M M^T (``backward='autodiff'``, biased).**  Uses the
-   per-walker pytree gradient from ``jax.grad`` directly.  For a
-   per-electron Linear with ``d log|psi_w| / dW = sum_e a_we (x)
-   g_we`` this gives factors biased by per-walker ``||a||`` /
-   ``||g||`` weights relative to FermiNet's strict per-(walker,
-   electron) factorisation, but it needs no model-specific code, so
-   it is the fallback for other ansatz configurations.
-
-c. **Per-electron capture (``capture_activations=True``).**  Builds
-   a *capturing twin* of the model in which every ``nnx.Linear`` is
-   a ``CapturingLinear`` (see
-   :func:`OmegaQMC.psi.nn.kfac_capture.use_capturing_linears`) and
-   recovers ``g_we`` from the captured inputs and the per-walker
-   gradient by a damped ``(n_e, n_e)`` solve.  It targets the same
-   factors as (a), but the solve is inaccurate where a walker's
-   per-electron inputs are nearly parallel (up to 0.5% in ``g g^T``
-   for the PsiFormer's attention output projections), and it is the
-   slowest path.
-
-d. **kfac-jax replica (``kfac_style='kfac_jax'``).**  Reproduces
-   ``kfac_jax.Optimizer`` as DeepMind's FermiNet uses it, for any
-   ansatz built from ``nnx.Linear`` (see
-   :meth:`_VMCOptDriverNN_KFAC._setup_kfac_jax`).  Every Linear's input
-   rows and output cotangents come exactly from
-   :mod:`OmegaQMC.psi.nn.kfac_tap` (gradients with respect to zero
-   perturbations of the Linear outputs, no solve); the bias joins its
-   kernel's Kronecker block; the factors carry kfac-jax's scales
-   (``fixed_scale`` = rows per walker, Fisher factor 2 of FermiNet's
-   variance-1/2 predictive distribution), bias-corrected moving
-   average and per-block damping; the remaining leaves (envelope) get
-   kfac-jax's uncentred diagonal.  The other options above
-   (``backward``, ``capture_activations``, ``fixed_scale``) do not
-   apply.  With the ``ferminet_deepmind`` ansatz the steps agree with
-   DeepMind's ferminet + kfac-jax to ~1e-7 relative
-   (``tests/test_vmcopt_nn_kfac_jax.py``).
-
+Not implemented here: multi-device ``pmap``.
 """
 
 from __future__ import annotations
@@ -119,7 +70,7 @@ import os
 import sys
 from datetime import datetime
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import h5py
 import jax
@@ -133,7 +84,9 @@ from .psi.nn.adapter import make_nn_log_psi
 from .psi.nn.build import build_nn_wf
 from .psi.nn.checkpoint import (
     load_nn_checkpoint,
+    load_state_tree,
     save_nn_checkpoint,
+    save_state_tree,
 )
 from .psi.nn.config import load_nn_config
 from .psi.nn.types import PhysicalConfiguration
@@ -238,280 +191,8 @@ def clip_local_energies(e_loc, clip_scale, clip_median=False,
 
 
 # ---------------------------------------------------------------------
-# Param-pytree introspection: identify Linear kernels vs generic leaves
+# Kronecker blocks
 # ---------------------------------------------------------------------
-
-def _path_str(path) -> str:
-    """Render a JAX tree-path, excluding the trailing ``.value``."""
-    return '/'.join(
-        str(p.key) if hasattr(p, 'key') else str(p)
-        for p in path[:-1]
-    )
-
-
-def _name_at(path, idx) -> Optional[str]:
-    if len(path) < abs(idx):
-        return None
-    p = path[idx]
-    return p.key if hasattr(p, 'key') else None
-
-
-def _classify_params(params) -> Tuple[
-    Dict[str, Tuple[Any, Any]],
-    Dict[str, Tuple[int, int]],
-    List[Any],
-]:
-    """Bucket parameter leaves into Linear kernels vs generic.
-
-    Returns:
-        layers: ``{layer_path: (kernel_key_path, bias_key_path)}``.
-        kernel_shapes: ``{layer_path: kernel.shape}``.  NNX stores a
-            ``Linear`` kernel as ``(in, out)``, so this is the
-            ``(in, out)`` pair.
-        generic: ``[(KeyPath, leaf), ...]`` for every other leaf.
-    """
-    leaves = jax.tree_util.tree_flatten_with_path(params)[0]
-    kernel_paths: Dict[str, Any] = {}
-    bias_paths: Dict[str, Any] = {}
-    kernel_shapes: Dict[str, Tuple[int, int]] = {}
-    generic: List[Tuple[Any, Any]] = []
-
-    for path, leaf in leaves:
-        slast = _name_at(path, -2)
-        if slast == 'kernel' and leaf.ndim == 2:
-            layer = _path_str(path).rsplit('/', 1)[0]
-            kernel_paths[layer] = path
-            kernel_shapes[layer] = leaf.shape
-        elif slast == 'bias' and leaf.ndim == 1:
-            layer = _path_str(path).rsplit('/', 1)[0]
-            bias_paths[layer] = path
-        else:
-            generic.append((path, leaf))
-
-    layers = {
-        layer: (kernel_paths[layer], bias_paths.get(layer))
-        for layer in kernel_paths
-    }
-    return layers, kernel_shapes, generic
-
-
-def _set_at_path(pytree, path, value):
-    """Replace the leaf at ``path`` in ``pytree`` with ``value``."""
-    leaves, treedef = jax.tree_util.tree_flatten_with_path(pytree)
-    leaves = [
-        (p, value if p == path else lf) for p, lf in leaves
-    ]
-    return jax.tree_util.tree_unflatten(
-        treedef, [lf for _, lf in leaves],
-    )
-
-
-def _get_at_path(pytree, path):
-    """Look up the leaf at ``path`` in ``pytree``."""
-    leaves = jax.tree_util.tree_flatten_with_path(pytree)[0]
-    for p, lf in leaves:
-        if p == path:
-            return lf
-    raise KeyError(path)
-
-
-# ---------------------------------------------------------------------
-# Kronecker-factor accumulation
-#
-# All factor routines below return *sums* over the walker population
-# rather than means, so a caller can accumulate them across walker
-# chunks and normalise once at the end.  ``M`` is the per-walker
-# gradient of ``log|psi|`` wrt a Linear kernel and therefore carries
-# NNX's ``(in, out)`` kernel layout, i.e. shape ``(W, in, out)``.
-#
-# With that layout the two factors are
-#
-#     A_out[o, p] = sum_w sum_i M[w, i, o] M[w, i, p]   -> (out, out)
-#     G_in [i, j] = sum_w sum_o M[w, i, o] M[w, j, o]   -> (in,  in)
-#
-# and the KFAC step for that layer is
-#
-#     dW = G_in_inv @ dW_loss @ A_out_inv               -> (in,  out)
-#
-# (The HEG module names these ``A``/``G`` with the opposite reading
-# of which side is "input"; the maths is identical, only the labels
-# here are made to match the shapes.)
-# ---------------------------------------------------------------------
-
-def _kron_factor_sums(
-    per_walker_dW: jax.Array,
-    de: jax.Array,
-) -> Tuple[jax.Array, jax.Array, jax.Array, int]:
-    """Un-decomposed ``M^T M`` / ``M M^T`` factor sums.
-
-    Exact under the standard KFAC factorisation assumption
-    (independence of activations and output gradients across the
-    sample population), independently of how many rank-1 outer
-    products contribute to each ``M_w``.  For per-electron Linears
-    it is considerably more faithful than extracting a single rank-1
-    SVD component, at the cost of an ``E[||a||^2] E[||g||^2]``
-    proportionality constant that the learning rate absorbs (a
-    scalar multiple of the Fisher leaves ``F^{-1} grad`` unchanged
-    in direction).
-
-    Args:
-        per_walker_dW: ``(W, in, out)``.
-        de: ``(W,)`` energy residual ``E_L - <E_L>``.
-
-    Returns:
-        ``(A_out_sum, G_in_sum, dW_loss_sum, n_samples)``.
-    """
-    M = per_walker_dW
-    A_out = jnp.einsum('wio,wip->op', M, M)
-    G_in = jnp.einsum('wio,wjo->ij', M, M)
-    dW_loss = jnp.einsum('w,wio->io', de, M)
-    return A_out, G_in, dW_loss, M.shape[0]
-
-
-def _per_electron_factor_sums(
-    captured_input: jax.Array,
-    per_walker_dW: jax.Array,
-    de: jax.Array,
-    solve_damping: float = 1.0e-6,
-) -> Tuple[jax.Array, jax.Array, jax.Array, int, int]:
-    """Exact per-electron KFAC factor sums (FermiNet-style).
-
-    Treats each ``(walker, electron)`` pair as its own Fisher
-    sample, as FermiNet's ``RepeatedDenseBlock`` does.  The
-    per-electron output gradients are recovered from the captured
-    inputs and the per-walker kernel gradient by
-
-        ``dW_w = a_w^T g_w``  ->
-        ``g_w = (a_w a_w^T + lambda I)^{-1} a_w dW_w``
-
-    Args:
-        captured_input: ``(W, n_e, in)`` per-walker per-electron
-            Linear inputs.  ``(W, in)`` is accepted for a global
-            Linear (treated as ``n_e = 1``); higher-rank captures
-            (e.g. edge features of shape ``(W, n_e, n_e, in)``) are
-            flattened into a single sample axis.
-        per_walker_dW: ``(W, in, out)``.
-        de: ``(W,)`` energy residual.
-        solve_damping: Tikhonov term on the ``(n_e, n_e)`` solve.
-
-    Returns:
-        ``(A_out_sum, G_in_sum, dW_loss_sum, n_samples, n_e)`` where
-        ``n_samples = W * n_e`` is the population the factor sums run
-        over, while ``dW_loss_sum`` remains a per-*walker* sum.
-    """
-    a_we = captured_input
-    if a_we.ndim == 2:                      # (W, in) — global Linear
-        a_we = a_we[:, None, :]
-    elif a_we.ndim > 3:
-        W_ = a_we.shape[0]
-        in_dim_ = a_we.shape[-1]
-        a_we = a_we.reshape(W_, -1, in_dim_)
-    W, n_e, in_dim = a_we.shape
-
-    AAT = jnp.einsum('wei,wfi->wef', a_we, a_we)
-    AAT = AAT + solve_damping * jnp.eye(
-        n_e, dtype=AAT.dtype,
-    )[None]
-    a_dW = jnp.einsum('wei,wio->weo', a_we, per_walker_dW)
-    g_we = jnp.linalg.solve(AAT, a_dW)                 # (W, n_e, out)
-
-    out_dim = per_walker_dW.shape[2]
-    a_flat = a_we.reshape(W * n_e, in_dim)
-    g_flat = g_we.reshape(W * n_e, out_dim)
-
-    # E[a a^T] is the (in, in) factor; E[g g^T] the (out, out) one.
-    G_in = jnp.einsum('si,sj->ij', a_flat, a_flat)
-    A_out = jnp.einsum('so,sp->op', g_flat, g_flat)
-    dW_loss = jnp.einsum('w,wio->io', de, per_walker_dW)
-    return A_out, G_in, dW_loss, W * n_e, n_e
-
-
-def _damped_kron_inverse(
-    A_out: jax.Array, G_in: jax.Array, damping,
-) -> Tuple[jax.Array, jax.Array]:
-    """Factored-Tikhonov damped inverses (Martens & Grosse).
-
-    The damping is split between the two factors with the trace
-    ratio ``pi = sqrt(tr(A)/tr(G))`` so that the implied damping on
-    the Kronecker product ``G (x) A`` is isotropic.
-    """
-    n_out = A_out.shape[0]
-    n_in = G_in.shape[0]
-    tr_A = jnp.trace(A_out) / n_out
-    tr_G = jnp.trace(G_in) / n_in
-    pi = jnp.sqrt(
-        jnp.maximum(tr_A, 1e-30) / jnp.maximum(tr_G, 1e-30)
-    )
-    sqrt_lam = jnp.sqrt(jnp.asarray(damping))
-
-    A_d = A_out + (pi * sqrt_lam) * jnp.eye(
-        n_out, dtype=A_out.dtype,
-    )
-    G_d = G_in + (sqrt_lam / pi) * jnp.eye(
-        n_in, dtype=G_in.dtype,
-    )
-    return jnp.linalg.inv(A_d), jnp.linalg.inv(G_d)
-
-
-def _generic_natural_gradient(
-    de, per_walker_grads_flat, damping, n_iters: int = 20,
-    pmean_axis: Optional[str] = None,
-):
-    """Damped Fisher solve over the non-Linear tail of the params.
-
-    Biases, envelope exponents and similar leaves have no Kronecker
-    structure, so they get a plain conjugate-gradient natural
-    gradient on the centred covariance.  This block is small — the
-    Jacobian it materialises is ``(W, P_generic)``, not
-    ``(W, n_params)``.
-
-    Args:
-        de: ``(W,)`` energy residual.
-        per_walker_grads_flat: ``(W, P_generic)``.
-        damping: Tikhonov epsilon.
-        n_iters: CG iterations.
-        pmean_axis: If set, average across devices via ``lax.pmean``.
-
-    Returns:
-        ``(x, f)`` — the natural-gradient direction and the raw
-        energy gradient, both length ``P_generic``.  Returning ``f``
-        lets the caller form the quadratic-model term
-        ``<grad, step>`` without recomputing it.
-    """
-    W = per_walker_grads_flat.shape[0]
-
-    def _maybe_pmean(x):
-        if pmean_axis is not None:
-            return jax.lax.pmean(x, pmean_axis)
-        return x
-
-    f = _maybe_pmean(
-        jnp.einsum('w,wp->p', de, per_walker_grads_flat) / W
-    )
-    g_mean = _maybe_pmean(
-        per_walker_grads_flat.mean(axis=0, keepdims=True)
-    )
-    do = per_walker_grads_flat - g_mean
-
-    def _matvec(v):
-        prod_local = (do.T @ (do @ v)) / W
-        return _maybe_pmean(prod_local) + damping * v
-
-    x = jnp.zeros_like(f)
-    r = f - _matvec(x)
-    p = r
-    rr = jnp.dot(r, r)
-    for _ in range(n_iters):
-        Ap = _matvec(p)
-        alpha = rr / (jnp.dot(p, Ap) + 1e-30)
-        x = x + alpha * p
-        r = r - alpha * Ap
-        rr_new = jnp.dot(r, r)
-        beta = rr_new / (rr + 1e-30)
-        p = r + beta * p
-        rr = rr_new
-    return x, f
-
 
 def _pi_adjusted_inverse(S_in, S_out, damping):
     """Inverses of kfac-jax's pi-adjusted damped Kronecker factors.
@@ -551,9 +232,9 @@ class _VMCOptDriverNN_KFAC:
     Each iteration decorrelates the walkers under ``|psi_theta|^2``,
     evaluates the local energy with the forward-Laplacian,
     accumulates the Kronecker factors in walker chunks, and applies
-    the damped natural-gradient step
-    ``dW = -lr * G_in_inv @ dW_loss @ A_out_inv`` per Linear layer
-    (with a CG solve over the remaining leaves).
+    kfac-jax's damped natural-gradient step (Kronecker blocks for the
+    Linear layers, diagonal blocks for the remaining leaves; see
+    :meth:`_setup_kfac`).
 
     Args:
         mol_info: :class:`~OmegaQMC.utils.Mole_custom` instance.
@@ -563,8 +244,8 @@ class _VMCOptDriverNN_KFAC:
         lr: Initial learning rate.  Schedule is FermiNet's
             ``lr_t = lr / (1 + t / lr_decay)``.
         lr_decay: Decay constant; ``None`` for a constant rate.
-        damping: Initial Tikhonov damping, used by both the Linear
-            (KFAC) and generic (full-Fisher) blocks.
+        damping: Initial damping, added to every curvature block
+            (kfac-jax's ``damping``).
         damping_adapt: Enable adaptive Levenberg-Marquardt damping.
             Off by default, matching DeepQMC's constant damping
             schedule (``conf/task/opt/kfac.yaml``): the ratio test
@@ -586,11 +267,13 @@ class _VMCOptDriverNN_KFAC:
             Fast "panic mode" — if the step norm exceeds this
             multiple of its running median, damping is raised by
             this factor immediately.
-        ema_decay: Exponential moving average applied to the
-            Kronecker factors across iterations (FermiNet uses 0.95;
-            0 disables).
-        norm_constraint: Trust-region bound on ``lr * ||step||``;
-            ``None`` disables the clip.
+        ema_decay: Decay of kfac-jax's bias-corrected moving average
+            of the curvature across iterations (FermiNet uses 0.95;
+            0 uses the current iteration's estimate alone).
+        norm_constraint: kfac-jax's norm constraint: the step is
+            scaled by ``min(1, sqrt(norm_constraint / (lr^2 <F^-1 g,
+            g>)))``, a trust region in the Fisher norm; ``None``
+            disables it.
         var_weight: Umrigar-style beta for a mixed
             ``<E> + beta Var(E_L)`` objective (0 = pure energy).
             With clipping on, the variance term is built from the
@@ -608,44 +291,10 @@ class _VMCOptDriverNN_KFAC:
         center_at_clip: Subtract the mean of the clipped energies in
             the gradient rather than the mean of the unclipped ones
             (FermiNet's ``optim.center_at_clip``, default on).
-        capture_activations: Use per-electron factors from a
-            capturing twin of the model, with the output cotangents
-            recovered from the per-walker gradients by a damped
-            solve (inaccurate where a walker's per-electron inputs
-            are nearly parallel, e.g. the attention output
-            projections).  Implies ``backward='autodiff'``.
-        fixed_scale: With per-electron factors
-            (``capture_activations`` or ``backward='manual'``),
-            multiply each layer's step by ``n_e`` to match textbook
-            KFAC magnitude (FermiNet's ``fixed_scale``).
-        backward: How the per-walker derivatives of ``log|psi|``
-            are obtained.  ``'manual'`` uses the hand-written
-            backward pass of
-            :func:`~OmegaQMC.psi.nn.backward_psiformer.make_psiformer_backward`
-            (PsiFormer configuration only), which returns each
-            Linear layer's per-electron inputs and output
-            cotangents directly; the Kronecker factors are then the
-            exact per-electron (FermiNet / kfac-jax) ones, and an
-            iteration is ~5x faster than with ``'autodiff'``.
-            ``'autodiff'`` differentiates the network with
-            ``jax.grad`` one walker at a time and builds the
-            walker-level ``M^T M`` factors (or, with
-            ``capture_activations``, approximate per-electron ones).
-            ``'auto'`` (default) is ``'manual'`` whenever the ansatz
-            supports it and ``capture_activations`` is off, and
-            ``'autodiff'`` otherwise; the choice made is in
-            ``self.backward``.
-        kfac_style: ``'omegaqmc'`` (default) is this module's own
-            KFAC (paths (a)-(c) of the module docstring: identity-
-            initialised factor EMA, biases and envelope in a centred
-            CG block, no Fisher factor 2).  ``'kfac_jax'`` reproduces
-            kfac-jax as DeepMind's FermiNet configures it (path (d)):
-            exact per-row factors with the bias folded in,
-            ``fixed_scale``, its damping and moving average and the
-            diagonal envelope blocks; ``backward`` must be left at
-            ``'auto'`` and ``capture_activations`` off, and
-            ``fixed_scale`` is ignored.  ``damping_adapt`` and the
-            other arguments keep their meaning.
+        kfac_style: Only ``'kfac_jax'`` (the default) is accepted;
+            the argument is kept so that scripts written for the
+            version with two styles still run.  ``'omegaqmc'``
+            raises ``ValueError``.
         nn_dtype: Precision the network (log|psi|, its gradients
             and the forward Laplacian) is evaluated in.
             ``'float32'`` (default) matches DeepQMC and runs 20-40x
@@ -678,11 +327,8 @@ class _VMCOptDriverNN_KFAC:
         clip_local_energy: float = 0.0,
         clip_median: bool = False,
         center_at_clip: bool = True,
-        capture_activations: bool = False,
-        fixed_scale: bool = False,
         nn_dtype: Optional[str] = 'float32',
-        backward: str = 'auto',
-        kfac_style: str = 'omegaqmc',
+        kfac_style: str = 'kfac_jax',
     ):
         nuc_crds = jnp.asarray(
             mol_info.coords, dtype=jnp.float64,
@@ -723,38 +369,12 @@ class _VMCOptDriverNN_KFAC:
         self.clip_local_energy = float(clip_local_energy)
         self.clip_median = bool(clip_median)
         self.center_at_clip = bool(center_at_clip)
-        self.capture_activations = bool(capture_activations)
-        if backward not in ('auto', 'autodiff', 'manual'):
+        if kfac_style != 'kfac_jax':
             raise ValueError(
-                "backward must be 'auto', 'autodiff' or 'manual',"
-                f" got {backward!r}"
-            )
-        if backward == 'manual' and self.capture_activations:
-            raise ValueError(
-                "backward='manual' already gives per-electron factors;"
-                " do not combine it with capture_activations"
-            )
-        if backward == 'auto' and self.capture_activations:
-            backward = 'autodiff'
-        if kfac_style not in ('omegaqmc', 'kfac_jax'):
-            raise ValueError(
-                "kfac_style must be 'omegaqmc' or 'kfac_jax',"
-                f" got {kfac_style!r}"
+                "kfac_style must be 'kfac_jax' (OmegaQMC's former"
+                f" 'omegaqmc' KFAC has been removed), got {kfac_style!r}"
             )
         self.kfac_style = kfac_style
-        if kfac_style == 'kfac_jax':
-            if self.capture_activations or backward != 'auto':
-                raise ValueError(
-                    "kfac_style='kfac_jax' takes its own per-row"
-                    " statistics; leave backward='auto' and"
-                    " capture_activations=False"
-                )
-            # no hand-written backward pass is tried below
-            backward = 'tap'
-        # 'auto' is resolved below, once the backward pass has been
-        # tried on this ansatz
-        self.backward = backward
-        self.fixed_scale = bool(fixed_scale)
 
         log_psi, init_params, graphdef, lap_grad = make_nn_log_psi(
             config, mol_info, init_key, compute_dtype=nn_dtype,
@@ -892,443 +512,18 @@ class _VMCOptDriverNN_KFAC:
 
         self.decorr_scan = decorr_scan
 
-        # --- Parameter classification ---
-        (self._layers, self._kernel_shapes,
-         _generic_leaves) = _classify_params(init_params)
-        self._linear_count = len(self._layers)
-        self._linear_params = sum(
-            int(np.prod(s)) for s in self._kernel_shapes.values()
-        )
-
-        # Ordered list of non-kernel leaf paths, so the chunked
-        # accumulation and the update step agree on the layout of
-        # the flattened generic block.
-        self._generic_paths = []
-        self._generic_sizes = []
-        for path, leaf in jax.tree_util.tree_flatten_with_path(
-            init_params,
-        )[0]:
-            if _name_at(path, -2) == 'kernel' and leaf.ndim == 2:
-                continue
-            self._generic_paths.append(path)
-            self._generic_sizes.append(int(leaf.size))
-
-        # --- Capturing twin (exact per-electron factors) ---
-        self._cap_grad_fn = None
-        self._captures_to_path_dict = None
-        if self.capture_activations:
-            from .psi.nn.kfac_capture import (
-                captures_to_path_dict, use_capturing_linears,
-            )
-            self._captures_to_path_dict = captures_to_path_dict
-            cfg = (
-                load_nn_config(config)
-                if isinstance(config, str) else config
-            )
-            cap_rngs = nnx.Rngs(init_key)
-            with use_capturing_linears():
-                cap_model = build_nn_wf(cfg, mol_info, cap_rngs)
-            (cap_graphdef, _cap_params, cap_inters_init,
-             cap_other) = nnx.split(
-                cap_model, nnx.Param, nnx.Intermediate, ...,
-            )
-            self._cap_inters_init = cap_inters_init
-            self._cap_other = cap_other
-
-
-            def _apply_with_capture(params, inters, other, elec):
-                # Same layout -> spin-grouped reordering the adapter
-                # applies, so the twin sees identical inputs.
-                r_grouped = to_grouped(
-                    elec, mol_info.n_up, mol_info.n_down,
-                )
-                phys_conf = PhysicalConfiguration(
-                    R=nuc_crds, r=r_grouped,
-                    mol_idx=jnp.array(0),
-                )
-                m = nnx.merge(cap_graphdef, params, inters, other)
-                out = m(phys_conf)
-                _, _, new_inters, _ = nnx.split(
-                    m, nnx.Param, nnx.Intermediate, ...,
-                )
-                return out.log, new_inters
-
-            def _capture_one(params, inters, other, elec):
-                (_lp, new_inters) = _apply_with_capture(
-                    params, inters, other, elec,
-                )
-                return new_inters
-
-            self._cap_grad_fn = jax.jit(jax.vmap(
-                _capture_one, in_axes=(None, None, None, 0),
-            ))
-
-        # --- Per-walker gradient of log|psi| wrt the param pytree ---
-        def _log_psi_of_params(params, elec):
-            return log_psi(elec, nuc_crds, params)
-
-        per_walker_grad = jax.vmap(
-            jax.grad(_log_psi_of_params, argnums=0),
-            in_axes=(None, 0),
-        )
-
-        layer_paths = dict(self._layers)
-        generic_paths = list(self._generic_paths)
-
-        # --- Chunked factor accumulation ---
-        # A ``lax.scan`` over walker chunks, so the whole accumulation
-        # is a single dispatch and XLA never unrolls it: peak memory
-        # stays at ``(chunk, n_params)`` for ``pw_grad`` while the
-        # carried factors are only ``(in, in)`` / ``(out, out)`` per
-        # layer and do not grow with the walker count.  Doing this
-        # chunking in Python instead costs ~4 dispatches per layer per
-        # chunk (>1300 tiny device ops per iteration here), which
-        # dominated the step time.
-        def factor_chunk(params, w_chunk, de_chunk, captured_chunk):
-            pw_grad = per_walker_grad(params, w_chunk)
-            A_sums: Dict[str, jax.Array] = {}
-            G_sums: Dict[str, jax.Array] = {}
-            dW_sums: Dict[str, jax.Array] = {}
-            counts: Dict[str, jax.Array] = {}
-            for layer, (kpath, _bpath) in layer_paths.items():
-                M = _get_at_path(pw_grad, kpath)      # (w, in, out)
-                if layer in captured_chunk:
-                    A_s, G_s, dW_s, n_s, _n_e = (
-                        _per_electron_factor_sums(
-                            captured_chunk[layer], M, de_chunk,
-                        )
-                    )
-                else:
-                    A_s, G_s, dW_s, n_s = _kron_factor_sums(
-                        M, de_chunk,
-                    )
-                A_sums[layer] = A_s
-                G_sums[layer] = G_s
-                dW_sums[layer] = dW_s
-                counts[layer] = jnp.asarray(
-                    n_s, dtype=jnp.float64,
-                )
-            generic_flat = (
-                jnp.concatenate(
-                    [
-                        _get_at_path(pw_grad, p).reshape(
-                            w_chunk.shape[0], -1,
-                        )
-                        for p in generic_paths
-                    ],
-                    axis=1,
-                )
-                if generic_paths
-                else jnp.zeros((w_chunk.shape[0], 0))
-            )
-            return A_sums, G_sums, dW_sums, counts, generic_flat
-
-        self._factor_chunk = jax.jit(factor_chunk)
-
-        # --- Hand-written backward pass (backward='manual') ---
-        # Same per-electron factors as the capture path, from the
-        # inputs ``a`` and output cotangents ``g`` of every Linear
-        # that the backward pass returns:
-        #     G_in = sum a a^T,  A_out = sum g g^T,
-        #     dW_loss = sum_w de_w sum_e a_we (x) g_we.
-        # Kernels the network never uses (``subnet_g`` without deep
-        # features) have zero gradients; they get zero factors.
-        manual_bwd = None
-        bwd_one = None
-        if backward in ('auto', 'manual'):
-            from .psi.nn.backward_psiformer import (
-                make_psiformer_backward,
-            )
-            try:
-                bwd_one, bwd_layers = make_psiformer_backward(
-                    config, mol_info, init_key,
-                    compute_dtype=nn_dtype,
-                )
-            except NotImplementedError:
-                if backward == 'manual':
-                    raise
-            backward = 'manual' if bwd_one is not None else 'autodiff'
-            self.backward = backward
-        if bwd_one is not None:
-            unknown = set(bwd_layers) - set(layer_paths)
-            if unknown:
-                raise RuntimeError(
-                    "backward pass layers missing from the parameter"
-                    f" layout: {sorted(unknown)}"
-                )
-            manual_bwd = jax.vmap(
-                lambda p, w: bwd_one(w, nuc_crds, p),
-                in_axes=(None, 0),
-            )
-            self._manual_bwd = jax.jit(manual_bwd)
-
-        def factor_chunk_manual(params, w_chunk, de_chunk):
-            _, pw_grad, caps = manual_bwd(params, w_chunk)
-            n_w = w_chunk.shape[0]
-            A_sums: Dict[str, jax.Array] = {}
-            G_sums: Dict[str, jax.Array] = {}
-            dW_sums: Dict[str, jax.Array] = {}
-            counts: Dict[str, jax.Array] = {}
-            for layer in layer_paths:
-                in_, out_ = self._kernel_shapes[layer]
-                if layer in caps:
-                    a, g = caps[layer]          # (w, n, in), (w, n, out)
-                    de_c = de_chunk.astype(a.dtype)[:, None, None]
-                    G_sums[layer] = jnp.einsum('wni,wnj->ij', a, a)
-                    A_sums[layer] = jnp.einsum('wno,wnp->op', g, g)
-                    dW_sums[layer] = jnp.einsum(
-                        'wni,wno->io', a * de_c, g,
-                    )
-                    n_s = a.shape[0] * a.shape[1]
-                else:
-                    G_sums[layer] = jnp.zeros((in_, in_))
-                    A_sums[layer] = jnp.zeros((out_, out_))
-                    dW_sums[layer] = jnp.zeros((in_, out_))
-                    n_s = n_w
-                counts[layer] = jnp.asarray(n_s, dtype=jnp.float64)
-            generic_flat = (
-                jnp.concatenate(
-                    [_get_at_path(pw_grad, p).reshape(n_w, -1)
-                     for p in generic_paths],
-                    axis=1,
-                )
-                if generic_paths
-                else jnp.zeros((n_w, 0))
-            )
-            return A_sums, G_sums, dW_sums, counts, generic_flat
-
-        capture_fn = None
-        if self.capture_activations:
-            cap_inters_init = self._cap_inters_init
-            cap_other = self._cap_other
-            captures_to_path = self._captures_to_path_dict
-
-            def capture_fn(params, w_chunk):        # noqa: F811
-                ints = jax.vmap(
-                    _capture_one, in_axes=(None, None, None, 0),
-                )(params, cap_inters_init, cap_other, w_chunk)
-                return {
-                    k: v
-                    for k, v in captures_to_path(ints).items()
-                    if v.ndim >= 2 and k in layer_paths
-                }
-
-        def accumulate_factors(params, walkers_r, de_r):
-            """Scan the factor sums over walker chunks.
-
-            Args:
-                walkers_r: ``(n_chunks, chunk, nelec, 3)``.
-                de_r: ``(n_chunks, chunk)``.
-
-            Returns:
-                ``(A_sum, G_sum, dW_sum, count, generic_flat)`` with
-                ``generic_flat`` of shape ``(n_chunks * chunk, P_g)``.
-            """
-            def body(carry, xs):
-                A_c, G_c, dW_c, cnt_c = carry
-                w_c, de_c = xs
-                if manual_bwd is not None:
-                    A_s, G_s, dW_s, n_s, gen_s = factor_chunk_manual(
-                        params, w_c, de_c,
-                    )
-                else:
-                    cap_c = (
-                        capture_fn(params, w_c)
-                        if capture_fn is not None else {}
-                    )
-                    A_s, G_s, dW_s, n_s, gen_s = factor_chunk(
-                        params, w_c, de_c, cap_c,
-                    )
-                return (
-                    {k: A_c[k] + A_s[k] for k in A_c},
-                    {k: G_c[k] + G_s[k] for k in G_c},
-                    {k: dW_c[k] + dW_s[k] for k in dW_c},
-                    {k: cnt_c[k] + n_s[k] for k in cnt_c},
-                ), gen_s
-
-            zero = {
-                layer: (
-                    jnp.zeros((s[1], s[1]), dtype=jnp.float64),
-                    jnp.zeros((s[0], s[0]), dtype=jnp.float64),
-                    jnp.zeros(s, dtype=jnp.float64),
-                    jnp.zeros((), dtype=jnp.float64),
-                )
-                for layer, s in self._kernel_shapes.items()
-            }
-            init = (
-                {k: v[0] for k, v in zero.items()},
-                {k: v[1] for k, v in zero.items()},
-                {k: v[2] for k, v in zero.items()},
-                {k: v[3] for k, v in zero.items()},
-            )
-            carry, gen = jax.lax.scan(
-                body, init, (walkers_r, de_r),
-            )
-            A_c, G_c, dW_c, cnt_c = carry
-            return (
-                A_c, G_c, dW_c, cnt_c,
-                gen.reshape(-1, gen.shape[-1]),
-            )
-
-        self._accumulate_factors = jax.jit(accumulate_factors)
-
-        ema_decay_arr = jnp.asarray(ema_decay, dtype=jnp.float64)
-        norm_clip = (
-            None if norm_constraint is None
-            else jnp.asarray(norm_constraint, dtype=jnp.float64)
-        )
-        generic_sizes = list(self._generic_sizes)
-
-        # Linear layers grouped by kernel shape.  kfac_apply inverts
-        # each group's factors in one batched call: 32 of the 39
-        # PsiFormer layers are 256 x 256, and their small LU
-        # factorisations are launch-bound when done one at a time
-        # (63 ms per iteration, against 11 ms batched).
-        shape_groups: Dict[Tuple[int, int], List[str]] = {}
-        for layer in layer_paths:
-            shape_groups.setdefault(
-                tuple(self._kernel_shapes[layer]), [],
-            ).append(layer)
-        batched_kron_inverse = jax.vmap(
-            _damped_kron_inverse, in_axes=(0, 0, None),
-        )
-
-        # --- KFAC solve + parameter update ---
-        def kfac_apply(params, A_hat, G_hat, dW_hat, generic_flat,
-                       de_eff, A_state, G_state, lr_now,
-                       damping_arr, kernel_scale):
-            new_A: Dict[str, jax.Array] = {}
-            new_G: Dict[str, jax.Array] = {}
-            layer_steps: Dict[str, jax.Array] = {}
-
-            for layer in layer_paths:
-                new_A[layer] = (
-                    ema_decay_arr * A_state[layer]
-                    + (1.0 - ema_decay_arr) * A_hat[layer]
-                )
-                new_G[layer] = (
-                    ema_decay_arr * G_state[layer]
-                    + (1.0 - ema_decay_arr) * G_hat[layer]
-                )
-            for layers in shape_groups.values():
-                A_inv, G_inv = batched_kron_inverse(
-                    jnp.stack([new_A[lyr] for lyr in layers]),
-                    jnp.stack([new_G[lyr] for lyr in layers]),
-                    damping_arr,
-                )
-                # (in, in) @ (in, out) @ (out, out) -> (in, out)
-                steps = G_inv @ jnp.stack(
-                    [dW_hat[lyr] for lyr in layers],
-                ) @ A_inv
-                for i, lyr in enumerate(layers):
-                    layer_steps[lyr] = steps[i]
-            # Back in layer order, so the sums below do not depend on
-            # the grouping.
-            update_kernels: Dict[str, jax.Array] = {
-                layer: kernel_scale[layer] * layer_steps[layer]
-                for layer in layer_paths
-            }
-            layer_dW_loss: Dict[str, jax.Array] = {
-                layer: dW_hat[layer] for layer in layer_paths
-            }
-
-            if generic_flat.shape[1] > 0:
-                generic_step, generic_grad = (
-                    _generic_natural_gradient(
-                        de_eff, generic_flat, damping_arr,
-                    )
-                )
-            else:
-                generic_step = jnp.zeros(0)
-                generic_grad = jnp.zeros(0)
-
-            # Quadratic-model terms for LM damping and the trust
-            # region.  Under the damped relation
-            # ``(F + lambda I) raw_step = grad`` the Fisher quadratic
-            # form reduces to ``kernel_scale * <grad, step>``.
-            dot_grad_step = jnp.zeros((), dtype=jnp.float64)
-            dot_step_F_step = jnp.zeros((), dtype=jnp.float64)
-            for layer in layer_paths:
-                dot_l = jnp.sum(
-                    layer_dW_loss[layer] * update_kernels[layer]
-                )
-                dot_grad_step = dot_grad_step + dot_l
-                dot_step_F_step = (
-                    dot_step_F_step + kernel_scale[layer] * dot_l
-                )
-            if generic_flat.shape[1] > 0:
-                dot_gen = jnp.sum(generic_grad * generic_step)
-                dot_grad_step = dot_grad_step + dot_gen
-                dot_step_F_step = dot_step_F_step + dot_gen
-
-            kernel_sq = sum(
-                jnp.sum(s ** 2) for s in update_kernels.values()
-            )
-            generic_sq = jnp.sum(generic_step ** 2)
-            total_norm = jnp.sqrt(kernel_sq + generic_sq + 1e-30)
-
-            # Trust region in the *Fisher* norm, as kfac-jax /
-            # FermiNet / DeepQMC do: bound
-            # ``dtheta^T F dtheta = lr^2 c^2 <step, F step>`` by
-            # ``norm_constraint``.  Clipping the Euclidean norm
-            # instead (as the HEG driver does) is not scale-
-            # meaningful here, because the M^T M factors carry an
-            # ``E[|a|^2] E[|g|^2]`` constant that the learning rate
-            # would otherwise absorb; with a Euclidean bound that
-            # constant shrinks every step by the same factor and the
-            # optimiser stalls.
-            if norm_clip is not None:
-                fisher_sq = jnp.maximum(
-                    lr_now ** 2 * dot_step_F_step, 1e-30,
-                )
-                clip = jnp.minimum(
-                    1.0, jnp.sqrt(norm_clip / fisher_sq),
-                )
-            else:
-                clip = jnp.asarray(1.0, dtype=jnp.float64)
-
-            # Each leaf keeps the dtype it was initialised with.  NNX
-            # builds the network in float32 while OmegaQMC.config
-            # turns on jax_enable_x64, so the KFAC factors, inverses
-            # and step are float64 (where conditioning matters) but
-            # writing a float64 result back into the params would
-            # silently promote the whole network.  On a GeForce card,
-            # where FP64 runs at a small fraction of FP32, that
-            # measured as an ~11x slowdown of the per-walker gradient
-            # — the dominant cost of an iteration.
-            scale = -lr_now * clip
-            new_params = params
-            for layer, step in update_kernels.items():
-                kpath, _ = layer_paths[layer]
-                old_W = _get_at_path(new_params, kpath)
-                new_params = _set_at_path(
-                    new_params, kpath,
-                    (old_W + scale * step).astype(old_W.dtype),
-                )
-            offset = 0
-            for path, size in zip(generic_paths, generic_sizes):
-                slice_ = generic_step[offset:offset + size]
-                offset += size
-                old_p = _get_at_path(params, path)
-                upd = old_p + scale * slice_.reshape(old_p.shape)
-                new_params = _set_at_path(
-                    new_params, path, upd.astype(old_p.dtype),
-                )
-
-            return (new_params, new_A, new_G, total_norm, clip,
-                    dot_grad_step, dot_step_F_step)
-
-        self._kfac_apply = jax.jit(kfac_apply)
-
-        if kfac_style == 'kfac_jax':
-            self._setup_kfac_jax(config, mol_info, init_key, nn_dtype)
+        self._setup_kfac(config, mol_info, init_key, nn_dtype)
 
     # -----------------------------------------------------
-    # kfac_style='kfac_jax'
+    # KFAC (kfac-jax as configured by DeepMind's FermiNet)
     # -----------------------------------------------------
 
-    def _setup_kfac_jax(self, config, mol_info, init_key, nn_dtype):
+    def _setup_kfac(self, config, mol_info, init_key, nn_dtype):
         """Compile the factor accumulation and step of kfac-jax.
+
+        The per-row Linear inputs and output cotangents come from
+        :class:`~OmegaQMC.psi.nn.kfac_tap.LinearTaps`, for any ansatz
+        built from ``nnx.Linear``.
 
         Reproduces ``kfac_jax.Optimizer`` as DeepMind's FermiNet
         configures it (``ferminet/train.py``: ``estimation_mode=
@@ -1416,33 +611,45 @@ class _VMCOptDriverNN_KFAC:
 
         per_walker = jax.vmap(taps.per_walker, in_axes=(None, 0))
 
+        # Each chunk's products are formed in the network's dtype
+        # (float32 by default) at JAX's default matmul precision, as
+        # the network itself and kfac-jax are (TF32 on an Ampere GPU;
+        # ``jax_default_matmul_precision='highest'`` makes them full
+        # float32), and summed over chunks in float64.  Casting the
+        # rows to float64 first doubles the cost of the accumulation
+        # on a GPU.
+        hi = None
+
         def accumulate(params, walkers_r, de_r):
             def body(carry, xs):
                 S_in, S_out, grad, d_sum, g_other = carry
                 w_c, de_c = xs
                 x_c, g_c, go_c = per_walker(params, w_c)
-                de_c = de_c.astype(f64)
                 S_in, S_out, grad = dict(S_in), dict(S_out), dict(grad)
                 for name, info in layers.items():
-                    x = x_c[name].astype(f64)
+                    x = x_c[name]
                     if info['bias'] is not None:
                         x = jnp.concatenate(
-                            [x, jnp.ones(x.shape[:-1] + (1,), f64)],
+                            [x, jnp.ones(x.shape[:-1] + (1,), x.dtype)],
                             axis=-1,
                         )
-                    g = g_c[name].astype(f64)
+                    g = g_c[name]
                     S_in[name] = S_in[name] + jnp.einsum(
-                        'wri,wrj->ij', x, x)
+                        'wri,wrj->ij', x, x, precision=hi).astype(f64)
                     S_out[name] = S_out[name] + jnp.einsum(
-                        'wro,wrp->op', g, g)
+                        'wro,wrp->op', g, g, precision=hi).astype(f64)
                     grad[name] = grad[name] + jnp.einsum(
-                        'wri,wro->io', x * de_c[:, None, None], g)
+                        'wri,wro->io',
+                        x * de_c.astype(x.dtype)[:, None, None], g,
+                        precision=hi).astype(f64)
                 if n_other:
                     J = jnp.concatenate(
-                        [l.reshape(w_c.shape[0], -1).astype(f64)
-                         for l in go_c], axis=1)
-                    d_sum = d_sum + jnp.sum(J * J, axis=0)
-                    g_other = g_other + de_c @ J
+                        [l.reshape(w_c.shape[0], -1) for l in go_c],
+                        axis=1)
+                    d_sum = d_sum + jnp.sum(J * J, axis=0).astype(f64)
+                    g_other = g_other + jnp.matmul(
+                        de_c.astype(J.dtype), J, precision=hi
+                    ).astype(f64)
                 return (S_in, S_out, grad, d_sum, g_other), None
 
             init = (
@@ -1455,7 +662,7 @@ class _VMCOptDriverNN_KFAC:
             carry, _ = jax.lax.scan(body, init, (walkers_r, de_r))
             return carry
 
-        self._kj_accumulate = jax.jit(accumulate)
+        self._accumulate_factors = jax.jit(accumulate)
 
         shape_groups: Dict[Tuple[int, int], List[str]] = {}
         for name in layers:
@@ -1524,7 +731,7 @@ class _VMCOptDriverNN_KFAC:
             new_state = dict(S_in=S_in, S_out=S_out, D=D, weight=weight)
             return new_params, new_state, total_norm, clip, dot, dot
 
-        self._kj_apply = jax.jit(apply_step)
+        self._kfac_apply = jax.jit(apply_step)
 
         def init_state():
             return dict(
@@ -1536,11 +743,11 @@ class _VMCOptDriverNN_KFAC:
                 weight=jnp.zeros((), f64),
             )
 
-        self._kj_init_state = init_state
+        self._init_factor_state = init_state
 
     def kfac_jax_step(self, params, walkers, de, state, it,
                       damping=None, chunk=None):
-        """One ``kfac_style='kfac_jax'`` update on given walkers.
+        """One KFAC update on given walkers, outside the driver loop.
 
         Args:
             params: Current parameters.
@@ -1556,17 +763,17 @@ class _VMCOptDriverNN_KFAC:
             norm, the norm-constraint factor and ``<step, grad>``.
         """
         if state is None:
-            state = self._kj_init_state()
+            state = self._init_factor_state()
         W = walkers.shape[0]
         chunk = W if chunk is None else chunk
         lr_now = (self.lr if self.lr_decay is None
                   else self.lr / (1.0 + it / self.lr_decay))
-        sums = self._kj_accumulate(
+        sums = self._accumulate_factors(
             params,
             walkers.reshape((W // chunk, chunk) + walkers.shape[1:]),
             jnp.asarray(de).reshape(W // chunk, chunk),
         )
-        new_params, new_state, norm, clip, dot, _ = self._kj_apply(
+        new_params, new_state, norm, clip, dot, _ = self._kfac_apply(
             params, sums, state, jnp.asarray(lr_now, jnp.float64),
             jnp.asarray(self.damping if damping is None else damping,
                         jnp.float64),
@@ -1604,34 +811,74 @@ class _VMCOptDriverNN_KFAC:
             )
         )
 
-    def _init_factor_state(self):
-        """Identity-initialise the EMA Kronecker factors.
+    # -----------------------------------------------------
+    # Run state for exact resume
+    # -----------------------------------------------------
 
-        ``kernel_shapes`` holds NNX's ``(in, out)`` kernel shape, so
-        the output-side factor is ``(out, out)`` and the input-side
-        one ``(in, in)``.
+    def _save_run_state(self, path, it, opt_state, damping, walkers,
+                        step_size, rng_key):
+        """Write what a resumed run needs besides the parameters.
+
+        The Kronecker-factor state, the current damping, the walkers,
+        the Metropolis step size and the PRNG key go to *path*
+        (``{prefix}.state.h5``), replaced atomically.  Unlike the
+        parameters, the state is not kept in the per-iteration
+        backups.
         """
-        A_state = {}
-        G_state = {}
-        for layer, (in_, out_) in self._kernel_shapes.items():
-            A_state[layer] = jnp.eye(out_, dtype=jnp.float64)
-            G_state[layer] = jnp.eye(in_, dtype=jnp.float64)
-        return A_state, G_state
+        tmp = path + '.tmp'
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        attrs = dict(iteration=int(it))
+        save_state_tree(tmp, 'kfac', opt_state,
+                        dict(attrs, damping=float(damping)))
+        save_state_tree(tmp, 'mcmc', dict(
+            walkers=walkers, step_size=step_size,
+            rng=jax.random.key_data(rng_key),
+        ), attrs)
+        os.replace(tmp, path)
 
-    def _capture_for(self, params, walkers):
-        """Per-layer captured Linear inputs for a walker chunk."""
-        if self._cap_grad_fn is None:
-            return {}
-        ints_W = self._cap_grad_fn(
-            params, self._cap_inters_init, self._cap_other, walkers,
+    def _load_run_state(self, path, it, rng_key, num_walkers):
+        """Read :meth:`_save_run_state`'s file for iteration *it*.
+
+        Returns ``(opt, mcmc, message)``.  ``opt`` (``{'state',
+        'damping'}``) is ``None`` when the file is missing, belongs
+        to another iteration or KFAC style, or does not match the
+        model; the factors then start afresh.  ``mcmc`` (``{'walkers',
+        'step_size', 'rng'}``) is ``None`` under the same conditions
+        or when ``num_walkers`` changed; the walkers are then
+        initialised and equilibrated as in a fresh run.
+        """
+        if not os.path.exists(path):
+            return None, None, (f"no '{path}': KFAC factors start"
+                                " afresh, walkers re-equilibrated")
+        opt, oattrs = load_state_tree(path, 'kfac',
+                                      self._init_factor_state())
+        msgs = []
+        if opt is None:
+            msgs.append(f"KFAC factors start afresh ({oattrs})")
+        elif int(oattrs.get('iteration', -2)) != it:
+            msgs.append(
+                "KFAC factors start afresh (state file is from"
+                f" iteration {oattrs.get('iteration')})")
+            opt = None
+        else:
+            opt = dict(state=opt, damping=float(oattrs['damping']))
+            msgs.append("KFAC factors and damping restored")
+        mcmc_tmpl = dict(
+            walkers=jnp.zeros((num_walkers, self.nelec, 3), jnp.float64),
+            step_size=jnp.zeros((), jnp.float64),
+            rng=jax.random.key_data(rng_key),
         )
-        out = {}
-        for path, arr in self._captures_to_path_dict(ints_W).items():
-            # Layers that never fired still hold the scalar default.
-            if arr.ndim < 2:
-                continue
-            out[path] = arr
-        return out
+        mcmc, mattrs = load_state_tree(path, 'mcmc', mcmc_tmpl)
+        if mcmc is None:
+            msgs.append(f"walkers re-equilibrated ({mattrs})")
+        elif int(mattrs.get('iteration', -2)) != it:
+            msgs.append("walkers re-equilibrated (state file is from"
+                        f" iteration {mattrs.get('iteration')})")
+            mcmc = None
+        else:
+            msgs.append("walkers, step size and PRNG key restored")
+        return opt, mcmc, f"{path}: " + "; ".join(msgs)
 
     # -----------------------------------------------------
     # Training loop
@@ -1663,7 +910,18 @@ class _VMCOptDriverNN_KFAC:
 
         After every ``_CHK_EVERY_KFAC`` iterations (and at the last
         one) the parameters are written to ``{prefix}.chk.h5``, with
-        the previous file preserved as ``{prefix}.{iter}.h5``.
+        the previous file preserved as ``{prefix}.{iter}.h5``, and the
+        rest of the run state (Kronecker factors and their moving-
+        average weight, damping, walkers, Metropolis step size, PRNG
+        key) to ``{prefix}.state.h5``, which only ever holds the
+        latest.  If ``{prefix}.chk.h5`` exists the run resumes from
+        it; with a matching state file (same iteration, KFAC style,
+        model and ``num_walkers``) it continues exactly where it
+        stopped: no re-equilibration, and the same iterates as an
+        uninterrupted run.  Without one (e.g. a checkpoint from an
+        older version) the factors start afresh and new walkers are
+        equilibrated; the log says which.  The adaptive-damping
+        windows (``damping_adapt``) are not saved.
 
         With ``pretrain_iters > 0`` and no checkpoint to resume, the
         initial parameters are first pretrained against UHF orbitals
@@ -1760,6 +1018,9 @@ class _VMCOptDriverNN_KFAC:
         """
         if isinstance(rng_key, int):
             rng_key = jax.random.key(rng_key)
+        elif not jnp.issubdtype(rng_key.dtype, jax.dtypes.prng_key):
+            # a raw uint32 key: wrap it so its data can be checkpointed
+            rng_key = jax.random.wrap_key_data(rng_key)
         if (fname_log is None
                 or (isinstance(fname_log, str) and fname_log == "")):
             fout = sys.stdout
@@ -1768,9 +1029,11 @@ class _VMCOptDriverNN_KFAC:
 
         params = self.init_params
         start_iter = 0
+        resumed_opt = resumed_mcmc = None
 
         # --- Checkpoint resume ---
         chkpt_path = f"{prefix}.chk.h5"
+        state_path = f"{prefix}.state.h5"
         if os.path.exists(chkpt_path):
             template_leaves = jax.tree.leaves(params)
             n_model = len(template_leaves)
@@ -1803,6 +1066,11 @@ class _VMCOptDriverNN_KFAC:
                 print(f"Resuming from '{chkpt_path}' (iteration"
                       f" {start_iter - 1} completed, continuing from"
                       f" iteration {start_iter})", file=fout)
+            resumed_opt, resumed_mcmc, why = self._load_run_state(
+                state_path, start_iter - 1, rng_key, num_walkers,
+            )
+            if verbose >= 1:
+                print("# " + why, file=fout)
 
         # The factor accumulation is a scan over equal-sized chunks,
         # so round the request down to the largest divisor of
@@ -1858,25 +1126,31 @@ class _VMCOptDriverNN_KFAC:
                 pretrained_walkers = None
 
         # --- Initialise and equilibrate walkers ---
-        rng_key, init_key = jax.random.split(rng_key)
-        if pretrained_walkers is not None:
-            walkers = pretrained_walkers
-        else:
-            walkers = self.initialize_walkers(init_key, num_walkers)
-        step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
-
+        # (a resumed run continues from its saved walkers, step size
+        # and PRNG key instead)
         ars = None
-        for _ in range(num_blocks_equil):
-            (rng_key, walkers, step_size, _), ars = self.decorr_scan(
-                rng_key, walkers, step_size, params,
-                num_steps_per_block,
-            )
+        if resumed_mcmc is not None:
+            walkers = resumed_mcmc['walkers']
+            step_size = resumed_mcmc['step_size']
+            rng_key = jax.random.wrap_key_data(resumed_mcmc['rng'])
+        else:
+            rng_key, init_key = jax.random.split(rng_key)
+            if pretrained_walkers is not None:
+                walkers = pretrained_walkers
+            else:
+                walkers = self.initialize_walkers(init_key, num_walkers)
+            step_size = jnp.asarray((3 * mc_timestep) ** 0.5)
+            for _ in range(num_blocks_equil):
+                (rng_key, walkers, step_size, _), ars = self.decorr_scan(
+                    rng_key, walkers, step_size, params,
+                    num_steps_per_block,
+                )
 
         if verbose >= 1:
             print(
                 f"# KFAC-VMC — {self.n_params} params total"
                 f" ({self._linear_params} in {self._linear_count}"
-                f" Linear layers, rest generic)", file=fout,
+                f" Linear layers, rest in diagonal blocks)", file=fout,
             )
             print(
                 f"# lr={self.lr}, lr_decay={self.lr_decay},"
@@ -1895,8 +1169,6 @@ class _VMCOptDriverNN_KFAC:
             print(
                 f"# num_walkers={num_walkers},"
                 f" factor_chunk_size={chunk},"
-                f" capture_activations={self.capture_activations},"
-                f" backward={self.backward},"
                 f" kfac_style={self.kfac_style}",
                 file=fout,
             )
@@ -1912,39 +1184,26 @@ class _VMCOptDriverNN_KFAC:
                 file=fout,
             )
 
-        A_state, G_state = self._init_factor_state()
-        kj_state = (self._kj_init_state()
-                    if self.kfac_style == 'kfac_jax' else None)
+        kf_state = self._init_factor_state()
+        damping_now = self.damping
+        if resumed_opt is not None:
+            kf_state = resumed_opt['state']
+            damping_now = float(resumed_opt['damping'])
 
-        # Per-layer step scale.  Only the exact per-electron path with
-        # ``fixed_scale`` uses anything other than 1: there the factor
-        # sums run over ``W * n_e`` samples while ``dW_loss`` is a
-        # per-walker mean, so the step needs an ``n_e`` multiplier to
-        # match textbook KFAC magnitude (FermiNet's ``fixed_scale``).
-        # ``n_e`` is fixed by the architecture, so probe it once.
-        kernel_scale: Dict[str, float] = {
-            layer: 1.0 for layer in self._kernel_shapes
-        }
-        if self.fixed_scale and self.backward == 'manual':
-            for layer, (a, _g) in self._manual_bwd(
-                params, walkers[:1],
-            )[2].items():
-                kernel_scale[layer] = float(a.shape[1])
-        elif self.fixed_scale and self.capture_activations:
-            for layer, arr in self._capture_for(
-                params, walkers[:1],
-            ).items():
-                if layer in kernel_scale:
-                    kernel_scale[layer] = float(
-                        1 if arr.ndim == 2
-                        else np.prod(arr.shape[1:-1])
-                    )
+        def write_checkpoint(it, e_total):
+            if os.path.exists(chkpt_path):
+                os.rename(chkpt_path, f"{prefix}.{it}.h5")
+            save_nn_checkpoint(
+                chkpt_path, params, it, self.config_name,
+                self.mol_info, energy=e_total,
+            )
+            self._save_run_state(state_path, it, kf_state, damping_now,
+                                 walkers, step_size, rng_key)
 
         e_history: List[float] = []
         var_history: List[float] = []
         n_clipped_history: List[int] = []
         timestamp_prev = datetime.now()
-        damping_now = self.damping
         step_norm_window: List[float] = []
         ratio_window: List[Tuple[float, float]] = []
         prev_e_total: Optional[float] = None
@@ -2021,57 +1280,21 @@ class _VMCOptDriverNN_KFAC:
             else:
                 lr_now = self.lr
 
-            if self.kfac_style == 'kfac_jax':
-                kj_sums = self._kj_accumulate(
-                    params,
-                    walkers.reshape(
-                        (n_chunks, chunk) + walkers.shape[1:],
-                    ),
-                    de_eff.reshape(n_chunks, chunk),
-                )
-                (params_new, kj_new, step_norm, clip_val,
-                 dot_grad_step, dot_step_F_step) = self._kj_apply(
-                    params, kj_sums, kj_state,
-                    jnp.asarray(lr_now, dtype=jnp.float64),
-                    jnp.asarray(damping_now, dtype=jnp.float64),
-                    float(num_walkers),
-                )
-                step_ok = bool(_tree_all_finite((params_new, kj_new)))
-            else:
-                A_acc, G_acc, dW_acc, cnt_acc, generic_flat = (
-                    self._accumulate_factors(
-                        params,
-                        walkers.reshape(
-                            (n_chunks, chunk) + walkers.shape[1:],
-                        ),
-                        de_eff.reshape(n_chunks, chunk),
-                    )
-                )
-
-                # Normalise: factor sums by their sample population,
-                # dW_loss always by the walker count.
-                A_hat = {k: A_acc[k] / cnt_acc[k] for k in A_acc}
-                G_hat = {k: G_acc[k] / cnt_acc[k] for k in G_acc}
-                dW_hat = {
-                    k: dW_acc[k] / float(num_walkers) for k in dW_acc
-                }
-
-                (params_new, A_new, G_new, step_norm, clip_val,
-                 dot_grad_step, dot_step_F_step) = self._kfac_apply(
-                    params, A_hat, G_hat, dW_hat, generic_flat, de_eff,
-                    A_state, G_state,
-                    jnp.asarray(lr_now, dtype=jnp.float64),
-                    jnp.asarray(damping_now, dtype=jnp.float64),
-                    kernel_scale,
-                )
-                step_ok = bool(
-                    _tree_all_finite((params_new, A_new, G_new))
-                )
+            sums = self._accumulate_factors(
+                params,
+                walkers.reshape((n_chunks, chunk) + walkers.shape[1:]),
+                de_eff.reshape(n_chunks, chunk),
+            )
+            (params_new, kf_new, step_norm, clip_val,
+             dot_grad_step, dot_step_F_step) = self._kfac_apply(
+                params, sums, kf_state,
+                jnp.asarray(lr_now, dtype=jnp.float64),
+                jnp.asarray(damping_now, dtype=jnp.float64),
+                float(num_walkers),
+            )
+            step_ok = bool(_tree_all_finite((params_new, kf_new)))
             if step_ok:
-                if self.kfac_style == 'kfac_jax':
-                    params, kj_state = params_new, kj_new
-                else:
-                    params, A_state, G_state = params_new, A_new, G_new
+                params, kf_state = params_new, kf_new
                 n_rejected_in_row = 0
             else:
                 # Keep the previous parameters and factors.  The
@@ -2116,12 +1339,7 @@ class _VMCOptDriverNN_KFAC:
                 ratio_window = []
                 is_last = (it == start_iter + num_iters - 1)
                 if is_last or ((it + 1) % _CHK_EVERY_KFAC == 0):
-                    if os.path.exists(chkpt_path):
-                        os.rename(chkpt_path, f"{prefix}.{it}.h5")
-                    save_nn_checkpoint(
-                        chkpt_path, params, it, self.config_name,
-                        self.mol_info, energy=e_total,
-                    )
+                    write_checkpoint(it, e_total)
                 continue
             eff_lr = float(lr_now) * float(clip_val)
             predicted_change = float(
@@ -2178,12 +1396,7 @@ class _VMCOptDriverNN_KFAC:
             # (g) Checkpoint.
             is_last = (it == start_iter + num_iters - 1)
             if is_last or ((it + 1) % _CHK_EVERY_KFAC == 0):
-                if os.path.exists(chkpt_path):
-                    os.rename(chkpt_path, f"{prefix}.{it}.h5")
-                save_nn_checkpoint(
-                    chkpt_path, params, it, self.config_name,
-                    self.mol_info, energy=e_total,
-                )
+                write_checkpoint(it, e_total)
 
         # --- Final energy estimate ---
         for _ in range(num_blocks_equil):
@@ -2234,7 +1447,7 @@ def get_vmcopt_nn_func(mol_info, config, init_key, **kwargs):
         init_key: JAX PRNG key for parameter initialisation.
         **kwargs: Forwarded to :class:`_VMCOptDriverNN_KFAC` (``lr``,
             ``damping``, ``ema_decay``, ``norm_constraint``,
-            ``capture_activations``, ...).
+            ``clip_local_energy``, ...).
 
     Returns:
         :class:`_VMCOptDriverNN_KFAC` instance.  Call it with

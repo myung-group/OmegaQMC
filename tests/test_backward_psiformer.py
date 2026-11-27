@@ -11,8 +11,6 @@ so same-spin cusp pairs and multi-electron attention are covered):
 * each walker's per-electron ``g`` matches the cotangent recovered
   from the autodiff per-walker kernel gradient ``M = a^T g`` by an
   undamped solve, ``g = (a a^T)^-1 a M``;
-* the KFAC driver with ``backward='manual'`` builds the same energy
-  gradient and generic-leaf gradients as the autodiff driver.
 * ``nuclear_grad`` gives ``d log|psi| / dR`` as ``jax.grad`` does,
   and the ZVZB force components built with it are unchanged.
 """
@@ -27,7 +25,6 @@ from OmegaQMC.psi.nn.adapter import make_nn_log_psi, cast_floats
 from OmegaQMC.psi.nn.backward_psiformer import (
     _path_str, make_psiformer_backward,
 )
-from OmegaQMC.vmcopt_nn_kfac import get_vmcopt_nn_func
 
 SEED = 930
 RTOL = 1e-10
@@ -90,50 +87,6 @@ def test_backward_matches_autodiff():
         assert bool(jnp.all(err < tol)), (name, float(err.max()))
 
 
-def test_kfac_manual_gradient_matches_autodiff():
-    mol = _lih()
-    key = jax.random.key(SEED)
-    drv = {
-        m: get_vmcopt_nn_func(mol, 'psiformer', key, nn_dtype=None, **kw)
-        for m, kw in (('manual', dict(backward='manual')),
-                      ('autodiff', {}))
-    }
-    params = cast_floats(drv['manual'].init_params, jnp.float64)
-    rng = np.random.default_rng(932)
-    walkers = jnp.asarray(rng.normal(size=(2, 6, 4, 3)) * 1.5)
-    de = jnp.asarray(rng.normal(size=(2, 6)))
-    out = {m: d._accumulate_factors(params, walkers, de)
-           for m, d in drv.items()}
-    for layer, dW in out['manual'][2].items():
-        ref = out['autodiff'][2][layer]
-        scale = float(jnp.max(jnp.abs(ref)))
-        err = float(jnp.max(jnp.abs(dW - ref)))
-        assert err <= RTOL * max(scale, 1e-300), (layer, err, scale)
-    gen, gen_ref = out['manual'][4], out['autodiff'][4]
-    assert float(jnp.max(jnp.abs(gen - gen_ref))) <= RTOL * float(
-        jnp.max(jnp.abs(gen_ref)))
-
-
-def test_kfac_backward_auto_resolution():
-    """``backward='auto'`` (the default) picks the hand-written pass
-    for the PsiFormer and falls back to autodiff otherwise."""
-    mol = _lih()
-    key = jax.random.key(SEED)
-    assert get_vmcopt_nn_func(
-        mol, 'psiformer', key).backward == 'manual'
-    assert get_vmcopt_nn_func(
-        mol, 'ferminet', key).backward == 'autodiff'
-    assert get_vmcopt_nn_func(
-        mol, 'psiformer', key,
-        capture_activations=True).backward == 'autodiff'
-    try:
-        get_vmcopt_nn_func(mol, 'ferminet', key, backward='manual')
-    except NotImplementedError:
-        pass
-    else:
-        raise AssertionError("backward='manual' accepted a FermiNet")
-
-
 def test_nuclear_grad_and_zvzb():
     """``nuclear_grad`` gives ``d log|psi| / dR`` as ``jax.grad``
     does, and the ZVZB force components built with it are unchanged.
@@ -176,7 +129,5 @@ def test_nuclear_grad_and_zvzb():
 
 if __name__ == '__main__':
     test_backward_matches_autodiff()
-    test_kfac_manual_gradient_matches_autodiff()
-    test_kfac_backward_auto_resolution()
     test_nuclear_grad_and_zvzb()
     print('OK')

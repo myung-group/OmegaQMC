@@ -1,4 +1,4 @@
-"""``kfac_style='kfac_jax'`` and the ``ferminet_deepmind`` ansatz against
+"""OmegaQMC's KFAC and the ``ferminet_deepmind`` ansatz against
 DeepMind's FermiNet and kfac-jax.
 
 ``tests/ferminet_kfac_reference.npz`` was written by
@@ -123,10 +123,9 @@ def test_kfac_jax_steps_match_kfac_jax(ref, case):
     nc = float(ref[f'{case}/norm_constraint'])
     drv = get_vmcopt_nn_func(
         mol, _config(ref), jax.random.key(0), nn_dtype=None,
-        kfac_style='kfac_jax', lr=0.05, lr_decay=1.0e4, damping=1.0e-3,
+        lr=0.05, lr_decay=1.0e4, damping=1.0e-3,
         ema_decay=0.95, norm_constraint=None if np.isinf(nc) else nc,
     )
-    assert drv.backward == 'tap'
     walkers = _walkers(ref, case)
     params = _transplant(ref, case, 0, drv.init_params)
     state = None
@@ -155,7 +154,7 @@ def test_tap_statistics_reproduce_parameter_gradient(ref):
     """Rows and cotangents of the taps give d log|psi| / d theta."""
     mol = _mol(ref, 'b')
     drv = _VMCOptDriverNN_KFAC(mol, _config(ref), jax.random.key(1),
-                               nn_dtype=None, kfac_style='kfac_jax')
+                               nn_dtype=None)
     taps = drv._taps
     walkers = _walkers(ref, 'b')[:3]
     # float64 leaves, or jax.grad rounds the reference to float32
@@ -186,22 +185,28 @@ def test_tap_statistics_reproduce_parameter_gradient(ref):
     assert 'omni/gnn/layers/2/subnet_g/layers/0' not in reps
 
 
-def test_kfac_jax_option_validation(ref):
+def test_kfac_style_option(ref):
+    """``kfac_style='kfac_jax'`` is still accepted (and the default);
+    the removed style and its options are rejected."""
     mol = _mol(ref, 'a')
-    with pytest.raises(ValueError):
+    assert _VMCOptDriverNN_KFAC(
+        mol, _config(ref), jax.random.key(0),
+        kfac_style='kfac_jax').kfac_style == 'kfac_jax'
+    with pytest.raises(ValueError, match='removed'):
         _VMCOptDriverNN_KFAC(mol, _config(ref), jax.random.key(0),
-                             kfac_style='kfac-jax')
-    with pytest.raises(ValueError):
-        _VMCOptDriverNN_KFAC(mol, _config(ref), jax.random.key(0),
-                             kfac_style='kfac_jax',
-                             capture_activations=True)
+                             kfac_style='omegaqmc')
+    for kw in (dict(capture_activations=True), dict(backward='manual'),
+               dict(fixed_scale=True)):
+        with pytest.raises(TypeError):
+            _VMCOptDriverNN_KFAC(mol, _config(ref), jax.random.key(0),
+                                 **kw)
 
 
 def test_kfac_jax_driver_runs(ref, tmp_path):
     """A few iterations of the full loop in float32."""
     mol = _mol(ref, 'a')
     drv = get_vmcopt_nn_func(mol, _config(ref), jax.random.key(0),
-                             kfac_style='kfac_jax', clip_local_energy=5.0)
+                             clip_local_energy=5.0)
     log = tmp_path / 'opt.log'
     params, data = drv(
         jax.random.key(1), num_iters=4, num_walkers=64,
@@ -213,4 +218,54 @@ def test_kfac_jax_driver_runs(ref, tmp_path):
     assert np.all(np.isfinite(data['E_history']))
     assert np.isfinite(data['energy']['mean'])
     assert 'kfac_style=kfac_jax' in log.read_text()
-    assert 'backward=tap' in log.read_text()
+
+
+def test_kfac_jax_resume_is_exact(ref, tmp_path):
+    """2 + 2 resumed iterations give the iterates of 4 uninterrupted
+    ones: the KFAC factors, damping, walkers, step size and PRNG key
+    come back from ``{prefix}.state.h5``."""
+    mol = _mol(ref, 'a')
+    kw = dict(num_walkers=32, factor_chunk_size=16, num_steps_decorr=2,
+              num_blocks_equil=1, num_steps_per_block=5, verbose=1)
+
+    def driver():
+        return get_vmcopt_nn_func(mol, _config(ref), jax.random.key(0),
+                                  clip_local_energy=5.0)
+
+    p_full, d_full = driver()(jax.random.key(1), num_iters=4,
+                              prefix=str(tmp_path / 'full'),
+                              fname_log=str(tmp_path / 'full.log'), **kw)
+    drv = driver()
+    drv(jax.random.key(1), num_iters=2, prefix=str(tmp_path / 'split'),
+        fname_log=str(tmp_path / 'split1.log'), **kw)
+    assert (tmp_path / 'split.state.h5').exists()
+    p_res, d_res = drv(jax.random.key(99), num_iters=2,
+                       prefix=str(tmp_path / 'split'),
+                       fname_log=str(tmp_path / 'split2.log'), **kw)
+    log = (tmp_path / 'split2.log').read_text()
+    assert 'KFAC factors and damping restored' in log
+    assert 'walkers, step size and PRNG key restored' in log
+    np.testing.assert_array_equal(d_res['E_history'],
+                                  d_full['E_history'][2:])
+    for a, b in zip(jax.tree.leaves(p_res), jax.tree.leaves(p_full)):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_kfac_jax_resume_without_state_file(ref, tmp_path):
+    """A checkpoint without a state file (older runs) still resumes:
+    fresh factors, re-equilibrated walkers."""
+    mol = _mol(ref, 'a')
+    kw = dict(num_walkers=32, factor_chunk_size=16, num_steps_decorr=2,
+              num_blocks_equil=1, num_steps_per_block=5)
+    drv = get_vmcopt_nn_func(mol, _config(ref), jax.random.key(0),
+                             clip_local_energy=5.0)
+    pre = str(tmp_path / 'old')
+    drv(jax.random.key(1), num_iters=1, prefix=pre,
+        fname_log=str(tmp_path / 'a.log'), **kw)
+    os.remove(pre + '.state.h5')
+    _, d = drv(jax.random.key(2), num_iters=1, prefix=pre,
+               fname_log=str(tmp_path / 'b.log'), **kw)
+    assert np.all(np.isfinite(d['E_history']))
+    log = (tmp_path / 'b.log').read_text()
+    assert 'Resuming from' in log and 'start afresh' in log
+

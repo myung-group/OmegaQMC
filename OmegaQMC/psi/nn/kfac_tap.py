@@ -13,7 +13,7 @@ with ``x~ = [x, 1]`` the input row extended by a one for the bias and
 The per-walker parameter gradient alone does not determine these: it
 is ``sum_r x~_r g_r^T``, from which ``g`` can only be recovered by a
 solve (the ``capture_activations`` path of
-:mod:`OmegaQMC.vmcopt_nn_kfac`).
+:mod:`OmegaQMC.vmcopt_nn_heg_kfac`).
 
 This module gets ``x`` and ``g`` exactly, for any ansatz built from
 ``nnx.Linear``, without a model-specific backward pass: the model is

@@ -107,14 +107,13 @@ forming the full overlap matrix.
 
 Natural-gradient optimizer whose curvature is a per-layer
 Kronecker-factored approximation of the Fisher matrix, so its
-state does not grow with the walker count.  The step is bounded
-by a Fisher-norm trust region (``norm_constraint``), and the
-defaults follow DeepQMC's KFAC configuration, including constant
-damping.  ``kfac_style='kfac_jax'`` reproduces the kfac-jax optimiser
-of DeepMind's FermiNet instead (exact per-electron factors with the
-biases in the Kronecker blocks, its scales, damping and moving
-average); with the ``ferminet_deepmind`` ansatz it takes the same
-steps as DeepMind's code.
+state does not grow with the walker count.  It reproduces the
+kfac-jax optimiser of DeepMind's FermiNet (exact per-electron factors
+with the biases in the Kronecker blocks, its scales, damping, moving
+average and Fisher-norm trust region ``norm_constraint``, diagonal
+blocks for the envelope); with the ``ferminet_deepmind`` ansatz it
+takes the same steps as DeepMind's code.  A checkpointed run resumes
+exactly, factors, walkers and random state included.
 
 .. autofunction:: OmegaQMC.vmcopt_nn_kfac.get_vmcopt_nn_func
 

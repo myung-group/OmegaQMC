@@ -95,7 +95,7 @@ def _run_with_outlier(drv, tmp_path, monkeypatch, name):
     Returns the E_L batches, the residuals handed to the KFAC step,
     the driver output and the log text.
     """
-    orig_e, orig_apply = drv.compute_batch_energy, drv._kfac_apply
+    orig_e, orig_acc = drv.compute_batch_energy, drv._accumulate_factors
     seen = {'e': [], 'de': []}
 
     def with_outlier(walkers, params):
@@ -103,13 +103,12 @@ def _run_with_outlier(drv, tmp_path, monkeypatch, name):
         seen['e'].append(np.asarray(e))
         return e
 
-    def spy(params, A_hat, G_hat, dW_hat, generic_flat, de_eff, *rest):
-        seen['de'].append(np.asarray(de_eff))
-        return orig_apply(params, A_hat, G_hat, dW_hat, generic_flat,
-                          de_eff, *rest)
+    def spy(params, walkers_r, de_r):
+        seen['de'].append(np.asarray(de_r).reshape(-1))
+        return orig_acc(params, walkers_r, de_r)
 
     monkeypatch.setattr(drv, 'compute_batch_energy', with_outlier)
-    monkeypatch.setattr(drv, '_kfac_apply', spy)
+    monkeypatch.setattr(drv, '_accumulate_factors', spy)
     log = str(tmp_path / f'{name}.log')
     out = drv(jax.random.key(1), num_iters=2, num_walkers=32,
               num_blocks_equil=1, num_steps_per_block=5,

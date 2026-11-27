@@ -139,8 +139,18 @@ def test_backward_matches_autodiff(trainable):
     assert _rel(dR, dR_ref) < RTOL
 
 
-def test_kfac_picks_manual_backward():
+def test_kfac_steps_trainable_cusp():
+    """The trainable nuclear-cusp parameters get KFAC's diagonal
+    blocks, and a step moves them."""
     mol = _lih()
-    key = jax.random.key(SEED)
-    assert get_vmcopt_nn_func(
-        mol, _config(), key).backward == 'manual'
+    drv = get_vmcopt_nn_func(mol, _config(trainable=True),
+                             jax.random.key(SEED))
+    taps = drv._taps
+    cusp = [i for i in taps.other_idx if 'cusp' in taps.leaf_names[i]]
+    assert cusp
+    w = _walkers(8)
+    e = drv.compute_batch_energy(w, drv.init_params)
+    new, _, _ = drv.kfac_jax_step(drv.init_params, w, e - e.mean(),
+                                  None, 0)
+    old_l, new_l = jax.tree.leaves(drv.init_params), jax.tree.leaves(new)
+    assert any(bool(jnp.any(new_l[i] != old_l[i])) for i in cusp)
