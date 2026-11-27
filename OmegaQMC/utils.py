@@ -375,6 +375,134 @@ def blue_combine_states(
     return mean, err, neff, w, bin_size
 
 
+# Kish ESS/N below which a PGCS secondary state's correlated-sampling
+# weights are dominated by few samples; the default ``ess_min`` of
+# select_cs_states, and the level below which it always warns.
+CS_ESS_MIN = 0.1
+
+
+def select_cs_states(h5file, states, block_nums, ess_min=CS_ESS_MIN):
+    """Choose the PGCS states that enter the BLUE combination.
+
+    The decision depends on the sampling weights alone, never on an
+    observable, so that energy and force post-processing
+    (:func:`OmegaQMC.observables.energy.postproc_h5_pgcs`,
+    :func:`OmegaQMC.observables.force.postproc_h5_pgcs`) given the
+    same file and blocks combine the same states.  For each secondary
+    state the weights ``w = psi^2(T R) / psi^2(R)`` stored as
+    ``fragment_weights/<label>/<block>`` are streamed block by block
+    over *block_nums*, and the global Kish effective-sample-size ratio
+
+    ``ESS/N = (sum w)^2 / (N sum w^2)``
+
+    is formed over all steps, walkers and blocks.  A state with
+    ``ESS/N < ess_min`` is dropped; the reference state ``None`` is
+    always kept.  Warns, and never raises, for every state that is
+    dropped or has ``ESS/N <`` :data:`CS_ESS_MIN`.
+
+    Parameters
+    ----------
+    h5file : h5py.File or str
+        Open gradient file, or its path.
+    states : list
+        State labels, ``None`` for the reference.
+    block_nums : iterable of int
+        Blocks to analyse (after the equilibration cutoff).
+    ess_min : float or None, optional
+        Smallest ESS/N kept.  ``0`` or ``None`` keeps every state.
+        Default :data:`CS_ESS_MIN`.
+
+    Returns
+    -------
+    kept : list
+        The states of *states* that are kept, in their order.
+    stats : dict
+        Maps each secondary state to a dict with ``n`` (number of
+        weights), ``ess`` (ESS/N), ``mean_w`` and ``max_frac``
+        (``max w / sum w``); the ESS and ratios are ``nan`` when the
+        weights sum to zero, and such a state is dropped whenever
+        dropping is enabled.
+    """
+    if isinstance(h5file, (str, os.PathLike)):
+        with h5py.File(h5file, 'r') as f:
+            return select_cs_states(f, states, block_nums, ess_min)
+    block_nums = list(block_nums)
+    drop = ess_min is not None and ess_min > 0
+    kept, stats = [], {}
+    for label in states:
+        if label is None:
+            kept.append(label)
+            continue
+        grp = h5file['fragment_weights'][label]
+        n, sw, sw2, wmax = 0, 0.0, 0.0, 0.0
+        for b in block_nums:
+            w = np.asarray(grp[f'{b}'][()], dtype=np.float64).ravel()
+            n += w.size
+            sw += float(w.sum())
+            sw2 += float(np.square(w).sum())
+            wmax = max(wmax, float(w.max()))
+        if n > 0 and sw > 0.0:
+            ess = sw * sw / (n * sw2)
+            mean_w, max_frac = sw / n, wmax / sw
+        else:
+            ess = mean_w = max_frac = float('nan')
+        stats[label] = {
+            'n': n, 'ess': ess, 'mean_w': mean_w, 'max_frac': max_frac,
+        }
+        dropped = drop and not ess >= ess_min
+        if not dropped:
+            kept.append(label)
+        if dropped or not ess >= CS_ESS_MIN:
+            fate = (
+                "dropped from the BLUE combination" if dropped
+                else "kept in the BLUE combination, but its estimates"
+                " and error bars are unreliable"
+            )
+            warnings.warn(
+                f"PGCS state {label}: Kish ESS/N = {ess:.3g}"
+                f" (ess_min = {ess_min}); its correlated-sampling"
+                f" weights are dominated by few samples; {fate}.",
+                stacklevel=3,
+            )
+    return kept, stats
+
+
+def cs_selection_lines(states, kept, stats, ess_min=CS_ESS_MIN):
+    """Log lines reporting :func:`select_cs_states`' decision.
+
+    Energy and force post-processing print the same lines, so their
+    logs can be checked against each other: one ESS/N line per
+    secondary state, then one ``BLUE:`` line naming the dropped
+    states (comma-separated labels joined by ``", "``).
+    """
+    lines = ["PGCS state selection (Kish ESS/N of fragment_weights):"]
+    for label in states:
+        if label is None:
+            continue
+        s = stats[label]
+        tag = "kept" if label in kept else "dropped"
+        lines.append(
+            f"  {label:<24s} ESS/N = {s['ess']:.4g}"
+            f"  (mean w = {s['mean_w']:.6g},"
+            f" max w / sum w = {s['max_frac']:.3e}, N = {s['n']})"
+            f"  {tag}"
+        )
+    dropped = [s for s in states if s not in kept]
+    if ess_min is None or ess_min <= 0:
+        lines.append("BLUE: state dropping disabled (ess_min = "
+                     f"{ess_min})")
+    elif dropped:
+        lines.append(
+            "BLUE: dropped states "
+            + ", ".join(dropped) + f" (ESS/N < {ess_min})"
+        )
+    else:
+        lines.append(f"BLUE: no states dropped (ESS/N >= {ess_min})")
+    if kept == [None] and len(states) > 1:
+        lines.append("BLUE: reference state only")
+    return lines
+
+
 def batched_binning_analysis_grds(grd_tot_ls, batch_size=100, weights=None):
     # grd_tot_ls.shape == (num_steps_per_block, num_walkers, num_nuc, xyz)
     n_walkers = grd_tot_ls.shape[1]

@@ -50,10 +50,13 @@ import jax.numpy as jnp
 from pyscf.data.nist import BOHR          # Angstrom per Bohr
 
 from ..utils import (
+    CS_ESS_MIN,
     batched_binning_analysis_grds,
     blue_combine_states,
     compute_torque_with_error,
+    cs_selection_lines,
     equilibration_length,
+    select_cs_states,
 )
 
 PSI2_RATIO_THRESHOLD = 1e-4
@@ -2022,17 +2025,16 @@ def _combo_local_energies(f, label, bcs, ref_local_energies):
     return ref_local_energies
 
 
-# Thresholds of the correlated-sampling diagnostics of a PGCS
-# secondary state (see :func:`_cs_diagnostic_lines`).
-CS_ESS_WARN = 0.1
+# Offset threshold of the correlated-sampling diagnostics of a PGCS
+# secondary state (see :func:`_cs_diagnostic_lines`); the ESS/N
+# threshold is :data:`OmegaQMC.utils.CS_ESS_MIN`.
 CS_OFFSET_WARN_Z = 4.0
 
 
 def _new_cs_accumulator(has_el):
     """Per-block running sums for :func:`_cs_diagnostic_lines`."""
     return {
-        'has_el': has_el, 'n': 0, 'sw': 0.0, 'sw2': 0.0,
-        'wmax': 0.0, 'dmax': 0.0, 'w_blk': [], 'y_blk': [],
+        'has_el': has_el, 'dmax': 0.0, 'w_blk': [], 'y_blk': [],
     }
 
 
@@ -2042,14 +2044,11 @@ def _cs_accumulate(acc, w, e_t, e_ref, e_v):
     *w* are the PGCS weights psi^2(T R) / psi^2(R), *e_t* and *e_ref*
     the local energies E_L(T R) and E_L(R) of the same samples, and
     *e_v* the reference variational energy.  Only scalars are kept
-    (two per block), so memory stays per-block.
+    (two per block), so memory stays per-block.  The weight
+    statistics come from :func:`OmegaQMC.utils.select_cs_states`.
     """
-    w = np.asarray(w, dtype=np.float64).ravel()
-    acc['n'] += w.size
-    acc['sw'] += float(w.sum())
-    acc['sw2'] += float(np.square(w).sum())
-    acc['wmax'] = max(acc['wmax'], float(w.max()))
     if acc['has_el']:
+        w = np.asarray(w, dtype=np.float64).ravel()
         e_t = np.asarray(e_t, dtype=np.float64).ravel()
         e_ref = np.asarray(e_ref, dtype=np.float64).ravel()
         acc['dmax'] = max(
@@ -2059,14 +2058,16 @@ def _cs_accumulate(acc, w, e_t, e_ref, e_v):
         acc['y_blk'].append(float((w * (e_t - e_v)).sum()))
 
 
-def _cs_diagnostic_lines(label, acc):
+def _cs_diagnostic_lines(label, acc, stats):
     """Correlated-sampling diagnostics of PGCS secondary state *label*.
 
     Over the analysed samples (after ``equil_cutoff``) reports
 
-    * the mean weight and ``max w / sum w``;
-    * the Kish effective-sample-size ratio
-      ``ESS/N = (sum w)^2 / (N sum w^2)``;
+    * the mean weight, ``max w / sum w`` and the Kish
+      effective-sample-size ratio ``ESS/N = (sum w)^2 / (N sum w^2)``,
+      taken from *stats*, this state's entry of the statistics
+      returned by :func:`OmegaQMC.utils.select_cs_states` (which also
+      warns about a small ESS/N);
     * the energy offset ``<w E_L(T R)>/<w> - E_V`` and its standard
       error, from the ratio estimator ``sum_b Y_b / sum_b W_b`` over
       per-block sums ``Y_b = sum w (E_L(T R) - E_V)`` and
@@ -2078,30 +2079,20 @@ def _cs_diagnostic_lines(label, acc):
     The offset is zero in expectation for any operation (it estimates
     the same E_V from the transformed samples), and it and the weight
     statistics vanish identically for an exact symmetry.  Warns, and
-    never raises, when ESS/N < :data:`CS_ESS_WARN` or the offset is
-    more than :data:`CS_OFFSET_WARN_Z` standard errors from zero.  The
-    energy items are skipped when ``local_energies/<label>`` is absent.
+    never raises, when the offset is more than
+    :data:`CS_OFFSET_WARN_Z` standard errors from zero.  The energy
+    items are skipped when ``local_energies/<label>`` is absent.
 
     Returns:
         List of lines for the state's section of the log.
     """
-    n, sw, sw2 = acc['n'], acc['sw'], acc['sw2']
-    if n == 0 or sw <= 0.0:
+    if not stats['n'] > 0 or not stats['mean_w'] > 0.0:
         return ["Correlated sampling: no weights to analyse"]
-    ess = sw * sw / (n * sw2)
     lines = [
-        f"Correlated sampling: mean w = {sw / n:.6g},"
-        f" max w / sum w = {acc['wmax'] / sw:.3e},"
-        f" ESS/N = {ess:.4f} (N = {n})",
+        f"Correlated sampling: mean w = {stats['mean_w']:.6g},"
+        f" max w / sum w = {stats['max_frac']:.3e},"
+        f" ESS/N = {stats['ess']:.4f} (N = {stats['n']})",
     ]
-    if ess < CS_ESS_WARN:
-        warnings.warn(
-            f"PGCS state {label}: Kish ESS/N = {ess:.3g} <"
-            f" {CS_ESS_WARN}; its correlated-sampling weights are"
-            " dominated by few samples and its forces and error bars"
-            " are unreliable.",
-            stacklevel=3,
-        )
     if not acc['has_el']:
         lines.append(
             "Correlated sampling: local_energies/"
@@ -2141,6 +2132,7 @@ def postproc_h5_pgcs(
         walker_based_batch_size: int = 10,
         project_states: bool = False,
         equil_cutoff: int | str = 0,
+        ess_min: float | None = CS_ESS_MIN,
 ) -> jnp.ndarray:
     """Post-process VMC gradient data to obtain \
 nuclear forces using PGCS.
@@ -2157,6 +2149,16 @@ nuclear forces using PGCS.
     and ``max |E_L(TR) - E_L(R)|``), with a warning for a small
     ESS/N or a significant offset; see
     :func:`_cs_diagnostic_lines`.
+
+    Only the secondary states chosen by
+    :func:`OmegaQMC.utils.select_cs_states` enter the fragment-wise
+    BLUE: a state whose Kish ESS/N is below *ess_min* is still
+    analysed and printed, but not combined, and an atom whose fragment
+    has no kept secondary state takes the reference force alone.  The
+    energy post-processing
+    (:func:`OmegaQMC.observables.energy.postproc_h5_pgcs`) makes the
+    same decision on the same blocks, and both logs print it in the
+    same lines.
 
     Parameters
     ----------
@@ -2204,6 +2206,12 @@ nuclear forces using PGCS.
         energy series via
         :func:`OmegaQMC.utils.equilibration_length`.
         Default is ``0`` (use all blocks).
+    ess_min : float or None, optional
+        Smallest Kish ESS/N of a secondary state's
+        fragment weights for it to enter the BLUE; see
+        :func:`OmegaQMC.utils.select_cs_states`.  ``0``
+        or ``None`` combines every state.  Default
+        :data:`OmegaQMC.utils.CS_ESS_MIN` (0.1).
 
     Returns
     -------
@@ -2374,6 +2382,12 @@ nuclear forces using PGCS.
                 )
             )
         states = [None] + combo_labels
+        # States entering the BLUE, decided from the
+        # fragment weights of the analysed blocks only, as
+        # in the energy post-processing.
+        blue_states, cs_stats = select_cs_states(
+            f, states, block_nums, ess_min,
+        )
 
         # Detect parameter-response data (ZVZB2).
         # ``_solve_param_response`` streams per-block.
@@ -2746,6 +2760,7 @@ nuclear forces using PGCS.
                           file=fout)
                     for line in _cs_diagnostic_lines(
                         state_label, cs_acc[state_label],
+                        cs_stats[state_label],
                     ):
                         print(line, file=fout)
                 else:
@@ -2839,13 +2854,21 @@ nuclear forces using PGCS.
                 )
                 fout.write("\n")
 
+        if combo_labels:
+            for line in cs_selection_lines(
+                states, blue_states, cs_stats, ess_min,
+            ):
+                print(line, file=fout)
+
         # --- Fragment-wise BLUE averaging of PGCS ---
         if atom_frag_map is not None and combo_labels:
             frag_to_states = {}
             for fid in set(atom_frag_map):
                 frag_to_states[fid] = [None]
 
-            for label in combo_labels:
+            # Only the kept states; a fragment left without
+            # a secondary state takes the reference alone.
+            for label in blue_states[1:]:
                 for part in label.split(','):
                     fid_str, op = part.split(':')
                     if op != 'E':

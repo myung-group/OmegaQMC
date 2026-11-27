@@ -20,9 +20,12 @@ import jax.numpy as jnp
 from functools import partial
 
 from ..utils import (
+    CS_ESS_MIN,
     do_binning_analysis,
     blue_combine_states,
+    cs_selection_lines,
     equilibration_length,
+    select_cs_states,
 )
 
 
@@ -397,6 +400,7 @@ def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
         equil_cutoff: int | str = 0,
+        ess_min: float | None = CS_ESS_MIN,
         ) -> tuple[float, float]:
     """Post-process VMC sample data to obtain \
 correlated-sample-averaged VMC energy.
@@ -446,6 +450,17 @@ correlated-sample-averaged VMC energy.
     (via the bin size) and cross-series correlations
     at matched block index.
 
+    Only the states chosen by
+    :func:`OmegaQMC.utils.select_cs_states` enter the
+    BLUE: a secondary state whose Kish ESS/N is below
+    *ess_min* is still analysed and printed, but not
+    combined.  The force post-processing
+    (:func:`OmegaQMC.observables.force.postproc_h5_pgcs`)
+    makes the same decision on the same blocks, and
+    both logs print it in the same lines.  When every
+    secondary state is dropped the reference estimate
+    is returned.
+
     Parameters
     ----------
     prefix : str, optional
@@ -471,12 +486,19 @@ correlated-sample-averaged VMC energy.
         series via
         :func:`OmegaQMC.utils.equilibration_length`.
         Default is ``0`` (use all blocks).
+    ess_min : float or None, optional
+        Smallest Kish ESS/N of a secondary state's
+        fragment weights for it to enter the BLUE; see
+        :func:`OmegaQMC.utils.select_cs_states`.  ``0``
+        or ``None`` combines every state.  Default
+        :data:`OmegaQMC.utils.CS_ESS_MIN` (0.1).
 
     Returns
     -------
     enr : float
         BLUE-combined VMC total energy in Hartree.
-        When no PGCS combos are present the reference
+        When no PGCS combos are present, or all are
+        dropped by *ess_min*, the reference
         (un-displaced) estimate is returned.
     enr_err : float
         Statistical error (standard error of the mean)
@@ -553,6 +575,12 @@ correlated-sample-averaged VMC energy.
             )
         block_nums = block_nums[equil_cutoff:]
 
+        # States entering the BLUE, decided from the
+        # fragment weights of the analysed blocks only.
+        blue_states, cs_stats = select_cs_states(
+            f, states, block_nums, ess_min,
+        )
+
         # Per-state per-block scalar energies.
         E_b_per_state = {s: [] for s in states}
 
@@ -613,9 +641,15 @@ correlated-sample-averaged VMC energy.
         ref_enr, ref_err, _ = all_state_results[None]
 
         if combo_labels:
+            print("", file=fout)
+            for line in cs_selection_lines(
+                states, blue_states, cs_stats, ess_min,
+            ):
+                print(line, file=fout)
+        if len(blue_states) > 1:
             blue_mean, blue_err, blue_neff, blue_w, bin_size = (
                 blue_combine_states(
-                    E_b_per_state, states,
+                    E_b_per_state, blue_states,
                     kappa_per_label=kappa_per_state,
                 )
             )
@@ -625,11 +659,11 @@ correlated-sample-averaged VMC energy.
                 f" ± {blue_err:.8f}"
                 f"  (N_eff = {blue_neff:.1f},"
                 f" bin size = {bin_size} blocks,"
-                f" over {len(states)} states)",
+                f" over {len(blue_states)} states)",
                 file=fout,
             )
             print("  BLUE weights:", file=fout)
-            for state, wk in zip(states, blue_w):
+            for state, wk in zip(blue_states, blue_w):
                 label_txt = (
                     "reference"
                     if state is None else state

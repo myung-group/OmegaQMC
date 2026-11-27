@@ -667,3 +667,8 @@ Utilities
 
 .. autofunction:: OmegaQMC.utils.do_binning_analysis
 
+.. autofunction:: OmegaQMC.utils.select_cs_states
+
+.. autofunction:: OmegaQMC.utils.cs_selection_lines
+
+.. autodata:: OmegaQMC.utils.CS_ESS_MIN
