@@ -2022,6 +2022,119 @@ def _combo_local_energies(f, label, bcs, ref_local_energies):
     return ref_local_energies
 
 
+# Thresholds of the correlated-sampling diagnostics of a PGCS
+# secondary state (see :func:`_cs_diagnostic_lines`).
+CS_ESS_WARN = 0.1
+CS_OFFSET_WARN_Z = 4.0
+
+
+def _new_cs_accumulator(has_el):
+    """Per-block running sums for :func:`_cs_diagnostic_lines`."""
+    return {
+        'has_el': has_el, 'n': 0, 'sw': 0.0, 'sw2': 0.0,
+        'wmax': 0.0, 'dmax': 0.0, 'w_blk': [], 'y_blk': [],
+    }
+
+
+def _cs_accumulate(acc, w, e_t, e_ref, e_v):
+    """Fold one block of a secondary state into *acc*.
+
+    *w* are the PGCS weights psi^2(T R) / psi^2(R), *e_t* and *e_ref*
+    the local energies E_L(T R) and E_L(R) of the same samples, and
+    *e_v* the reference variational energy.  Only scalars are kept
+    (two per block), so memory stays per-block.
+    """
+    w = np.asarray(w, dtype=np.float64).ravel()
+    acc['n'] += w.size
+    acc['sw'] += float(w.sum())
+    acc['sw2'] += float(np.square(w).sum())
+    acc['wmax'] = max(acc['wmax'], float(w.max()))
+    if acc['has_el']:
+        e_t = np.asarray(e_t, dtype=np.float64).ravel()
+        e_ref = np.asarray(e_ref, dtype=np.float64).ravel()
+        acc['dmax'] = max(
+            acc['dmax'], float(np.abs(e_t - e_ref).max()),
+        )
+        acc['w_blk'].append(float(w.sum()))
+        acc['y_blk'].append(float((w * (e_t - e_v)).sum()))
+
+
+def _cs_diagnostic_lines(label, acc):
+    """Correlated-sampling diagnostics of PGCS secondary state *label*.
+
+    Over the analysed samples (after ``equil_cutoff``) reports
+
+    * the mean weight and ``max w / sum w``;
+    * the Kish effective-sample-size ratio
+      ``ESS/N = (sum w)^2 / (N sum w^2)``;
+    * the energy offset ``<w E_L(T R)>/<w> - E_V`` and its standard
+      error, from the ratio estimator ``sum_b Y_b / sum_b W_b`` over
+      per-block sums ``Y_b = sum w (E_L(T R) - E_V)`` and
+      ``W_b = sum w``, with the delta-method variance
+      ``sum_b (Y_b - r W_b)^2 / (B (B - 1) Wbar^2)`` (blocks treated
+      as independent);
+    * ``max |E_L(T R) - E_L(R)|``.
+
+    The offset is zero in expectation for any operation (it estimates
+    the same E_V from the transformed samples), and it and the weight
+    statistics vanish identically for an exact symmetry.  Warns, and
+    never raises, when ESS/N < :data:`CS_ESS_WARN` or the offset is
+    more than :data:`CS_OFFSET_WARN_Z` standard errors from zero.  The
+    energy items are skipped when ``local_energies/<label>`` is absent.
+
+    Returns:
+        List of lines for the state's section of the log.
+    """
+    n, sw, sw2 = acc['n'], acc['sw'], acc['sw2']
+    if n == 0 or sw <= 0.0:
+        return ["Correlated sampling: no weights to analyse"]
+    ess = sw * sw / (n * sw2)
+    lines = [
+        f"Correlated sampling: mean w = {sw / n:.6g},"
+        f" max w / sum w = {acc['wmax'] / sw:.3e},"
+        f" ESS/N = {ess:.4f} (N = {n})",
+    ]
+    if ess < CS_ESS_WARN:
+        warnings.warn(
+            f"PGCS state {label}: Kish ESS/N = {ess:.3g} <"
+            f" {CS_ESS_WARN}; its correlated-sampling weights are"
+            " dominated by few samples and its forces and error bars"
+            " are unreliable.",
+            stacklevel=3,
+        )
+    if not acc['has_el']:
+        lines.append(
+            "Correlated sampling: local_energies/"
+            f"{label} absent; energy offset not available",
+        )
+        return lines
+    W = np.asarray(acc['w_blk'])
+    Y = np.asarray(acc['y_blk'])
+    offset = float(Y.sum() / W.sum())
+    nblk = len(W)
+    if nblk > 1:
+        serr = float(np.sqrt(
+            np.sum((Y - offset * W) ** 2)
+            / (nblk * (nblk - 1) * W.mean() ** 2)
+        ))
+    else:
+        serr = float('nan')
+    lines.append(
+        "Correlated sampling: <w E_L(TR)>/<w> - E_V ="
+        f" {offset:.6g} ± {serr:.3g} Ha,"
+        f" max |E_L(TR) - E_L(R)| = {acc['dmax']:.3e} Ha",
+    )
+    if serr > 0.0 and abs(offset) > CS_OFFSET_WARN_Z * serr:
+        warnings.warn(
+            f"PGCS state {label}: <w E_L(TR)>/<w> - E_V ="
+            f" {offset:.3g} Ha is {abs(offset) / serr:.1f} standard"
+            " errors from zero; the correlated-sampling estimate of"
+            " this state is biased or its weights are undersampled.",
+            stacklevel=3,
+        )
+    return lines
+
+
 def postproc_h5_pgcs(
         prefix: str = "vmc",
         logfile: bool | str = False,
@@ -2037,6 +2150,13 @@ nuclear forces using PGCS.
     Group Correlated Sampling (PGCS) to obtain
     symmetry-averaged estimates of the nuclear forces
     and their statistical errors.
+
+    Each secondary state's section of the log starts with its
+    correlated-sampling diagnostics (mean weight, ``max w / sum
+    w``, Kish ESS/N, the energy offset ``<w E_L(TR)>/<w> - E_V``
+    and ``max |E_L(TR) - E_L(R)|``), with a warning for a small
+    ESS/N or a significant offset; see
+    :func:`_cs_diagnostic_lines`.
 
     Parameters
     ----------
@@ -2315,6 +2435,14 @@ nuclear forces using PGCS.
         # combined error sqrt(sum_{b,w} serr^2) / (B * W).
         grd_err_sq_sum = {s: 0.0 for s in states}
         grd_err_w_count = {s: 0 for s in states}
+        # Correlated-sampling diagnostics of each secondary
+        # state (per-block scalars only).
+        cs_acc = {
+            label: _new_cs_accumulator(
+                label in f['local_energies'],
+            )
+            for label in combo_labels
+        }
 
         for block_cnt in block_nums:
             bcs = f'{block_cnt}'
@@ -2454,6 +2582,10 @@ nuclear forces using PGCS.
                     frag_w = frag_w.reshape(
                         num_steps_per_block,
                         num_walkers,
+                    )
+                    _cs_accumulate(
+                        cs_acc[state_label], frag_w, e_loc,
+                        local_energies, enr_mean,
                     )
 
                 xbar, serr, sdev, kappa = (
@@ -2612,6 +2744,10 @@ nuclear forces using PGCS.
                     print("\n--- Secondary state:"
                           f" {state_label} ---",
                           file=fout)
+                    for line in _cs_diagnostic_lines(
+                        state_label, cs_acc[state_label],
+                    ):
+                        print(line, file=fout)
                 else:
                     print("\n--- Reference state ---",
                           file=fout)
