@@ -189,6 +189,60 @@ def batched_binning_analysis(x, batch_size=100):
 MIN_BINS_PER_STATE = 5
 
 
+def blue_bin_size(n_blocks, kappa_max, n_states=1):
+    """Bin size :func:`blue_combine_states` uses for a block series.
+
+    ``ceil(2 kappa_max)`` blocks, so that successive bin means are
+    approximately decorrelated, reduced to ``n_blocks // (n_states +
+    1)`` (at least 1) when that would leave fewer than ``n_states +
+    1`` bins.
+    """
+    bin_size = max(1, int(np.ceil(2.0 * float(kappa_max))))
+    if n_blocks // bin_size < n_states + 1:
+        bin_size = max(1, n_blocks // (n_states + 1))
+    return bin_size
+
+
+def binned_block_error(series):
+    """Standard error of the mean of block series, binned like BLUE.
+
+    Each column of *series* (shape ``(T,)`` or ``(T, M)``, one row per
+    block) is binned exactly as :func:`blue_combine_states` bins a
+    single state: its integrated autocorrelation time ``kappa`` from
+    :func:`do_binning_analysis` sets the bin size
+    (:func:`blue_bin_size`), and the error is the standard deviation
+    of the ``N_b`` bin means over ``sqrt(N_b)``; the remainder
+    ``T mod bin_size`` blocks are dropped.  This captures correlation
+    between blocks, which an error formed within each block cannot.
+
+    Returns
+    -------
+    err : np.ndarray, shape ``(M,)`` (or scalar for a 1-D series)
+        ``inf`` where fewer than two bins exist (``T < 2``).
+    bin_size : np.ndarray of int, same shape
+    """
+    a = np.asarray(series, dtype=np.float64)
+    one_d = a.ndim == 1
+    a = a.reshape(a.shape[0], -1)
+    T, M = a.shape
+    err = np.full(M, np.inf)
+    bins = np.ones(M, dtype=int)
+    if T >= 2:
+        kappa = np.asarray(jax.vmap(
+            do_binning_analysis, in_axes=1, out_axes=(0, 0, 0, 0),
+        )(jnp.asarray(a))[3], dtype=np.float64)
+        for m in range(M):
+            b = blue_bin_size(T, kappa[m] if np.isfinite(kappa[m])
+                              else 1.0)
+            n_b = T // b
+            means = a[:n_b * b, m].reshape(n_b, b).mean(axis=1)
+            bins[m] = b
+            err[m] = np.std(means, ddof=1) / np.sqrt(n_b)
+    if one_d:
+        return err[0], bins[0]
+    return err, bins
+
+
 def blue_combine_states(
     series_per_label, labels, kappa_per_label=None,
 ):
@@ -270,13 +324,10 @@ def blue_combine_states(
         kappas = [float(kappa_per_label[lbl]) for lbl in labels]
     kappa_max = max(kappas) if kappas else 1.0
 
-    bin_size = max(1, int(np.ceil(2.0 * kappa_max)))
+    # With too few bins for a (K×K) covariance the bin size
+    # falls back to the smallest viable one.
+    bin_size = blue_bin_size(T, kappa_max, K)
     N_b = T // bin_size
-    if N_b < K + 1:
-        # Not enough bins to estimate a (K×K) covariance
-        # — fall back to the smallest viable bin size.
-        bin_size = max(1, T // (K + 1))
-        N_b = T // bin_size
 
     truncated = E[:N_b * bin_size]
     bin_means = truncated.reshape(

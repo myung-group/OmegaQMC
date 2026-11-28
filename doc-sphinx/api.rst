@@ -674,6 +674,10 @@ Utilities
 
 .. autofunction:: OmegaQMC.utils.do_binning_analysis
 
+.. autofunction:: OmegaQMC.utils.binned_block_error
+
+.. autofunction:: OmegaQMC.utils.blue_bin_size
+
 .. autofunction:: OmegaQMC.utils.select_cs_states
 
 .. autofunction:: OmegaQMC.utils.cs_selection_lines

@@ -52,7 +52,7 @@ from pyscf.data.nist import BOHR          # Angstrom per Bohr
 from ..utils import (
     CS_ESS_MIN,
     MIN_BINS_PER_STATE,
-    batched_binning_analysis_grds,
+    binned_block_error,
     blue_combine_states,
     compute_torque_with_error,
     cs_selection_lines,
@@ -2321,6 +2321,13 @@ nuclear forces using PGCS.
     same decision on the same blocks, and both logs print it in the
     same lines.
 
+    Every printed error bar (per-atom forces, net force and torque,
+    per state and averaged) comes from the walker-averaged per-block
+    series of that quantity, binned by
+    :func:`OmegaQMC.utils.binned_block_error` exactly as
+    :func:`OmegaQMC.utils.blue_combine_states` bins one state, so it
+    accounts for correlation between blocks.
+
     Parameters
     ----------
     prefix : str, optional
@@ -2337,10 +2344,9 @@ nuclear forces using PGCS.
         file path directly (a ``.log`` extension is
         appended if absent).
     walker_based_batch_size : int, optional
-        Number of walker blocks to load into memory at
-        once when summing gradient contributions.
-        Reduce this value if GPU memory is tight.
-        Default is 10.
+        Unused; kept for backward compatibility.  (It
+        batched the per-walker binning within each block,
+        which no longer takes place.)  Default is 10.
     project_states : bool, optional
         When ``True``, apply the translational
         sum-rule projection
@@ -2623,17 +2629,12 @@ nuclear forces using PGCS.
         grd_ke_sum = {s: 0.0 for s in states}
         grd_pulay_sum = {s: 0.0 for s in states}
         # Per-block walker-averaged force series, feeding
-        # both the final mean and the BLUE block series.
-        # Each entry is reduced to (num_nuc, 3) per block so
-        # peak RAM stays O(num_nuc) rather than growing as
-        # O(num_blocks * num_walkers).
+        # the final mean, every printed error bar (binned
+        # with ``binned_block_error``) and the BLUE block
+        # series.  Each entry is reduced to (num_nuc, 3) per
+        # block so peak RAM stays O(num_nuc) rather than
+        # growing as O(num_blocks * num_walkers).
         grd_blockmean_list = {s: [] for s in states}
-        # Running sum of per-walker squared standard errors,
-        # already reduced over walkers each block: (num_nuc,
-        # 3).  Paired with the walker count below to form the
-        # combined error sqrt(sum_{b,w} serr^2) / (B * W).
-        grd_err_sq_sum = {s: 0.0 for s in states}
-        grd_err_w_count = {s: 0 for s in states}
         # Correlated-sampling diagnostics of each secondary
         # state (per-block scalars only).
         cs_acc = {
@@ -2642,19 +2643,18 @@ nuclear forces using PGCS.
             )
             for label in combo_labels
         }
-        # The per-sample net force and torque about the
-        # center of mass ride along as two extra "atoms"
-        # through the binning analysis, so that their errors
-        # come from their own series: a sum rule that holds
-        # sample by sample then gives a zero error, which
-        # adding the per-atom errors in quadrature does not.
+        # The net force and the torque about the center of
+        # mass get their errors from their own block series
+        # (linear in the force series, so formed after the
+        # loop): a sum rule that holds sample by sample then
+        # gives a zero error, which adding the per-atom
+        # errors in quadrature does not.
         coords_net = np.asarray(myMol.atom_coords())
         com_net = np.average(
             coords_net, axis=0,
             weights=np.asarray(myMol.atom_mass_list()),
         )
-        rel_com = jnp.asarray(coords_net - com_net)
-        net_err_sq_sum = {s: 0.0 for s in states}
+        rel_com = coords_net - com_net
 
         for block_cnt in block_nums:
             bcs = f'{block_cnt}'
@@ -2800,40 +2800,24 @@ nuclear forces using PGCS.
                         local_energies, enr_mean,
                     )
 
-                grd_aug = jnp.concatenate([
-                    grd_tot_sw,
-                    grd_tot_sw.sum(axis=2, keepdims=True),
-                    jnp.cross(rel_com, grd_tot_sw).sum(
-                        axis=2, keepdims=True,
-                    ),
-                ], axis=2)
-                xbar, serr, sdev, kappa = (
-                    batched_binning_analysis_grds(
-                        grd_aug,
-                        walker_based_batch_size,
-                        weights=frag_w,
-                    )
-                )
-                net_err_sq_sum[state_label] = (
-                    net_err_sq_sum[state_label]
-                    + (serr[:, num_nuc:] ** 2).sum(axis=0)
-                )
-                xbar, serr = xbar[:, :num_nuc], serr[:, :num_nuc]
-                # Reduce this block immediately: store only
-                # the walker mean (force-series term) and
-                # fold the squared standard error over
-                # walkers into the running accumulator,
-                # instead of retaining the full (W, num_nuc,
-                # 3) arrays for every block.
+                # Per-walker mean over the block's steps,
+                # weighted by the PGCS weights for a secondary
+                # state, then averaged over walkers: this
+                # block's term of the force series.  Only this
+                # (num_nuc, 3) reduction is kept per block.
+                # (Errors formed within each block, from each
+                # walker's few steps, miss the correlation
+                # between blocks and came out several times too
+                # small; every error now comes from binning the
+                # block series below.)
+                if frag_w is None:
+                    xbar = grd_tot_sw.mean(axis=0)
+                else:
+                    xbar = jnp.einsum(
+                        'sw,swnk->wnk', frag_w, grd_tot_sw,
+                    ) / frag_w.sum(axis=0)[:, None, None]
                 grd_blockmean_list[state_label].append(
                     xbar.mean(axis=0)
-                )
-                grd_err_sq_sum[state_label] = (
-                    grd_err_sq_sum[state_label]
-                    + (serr ** 2).sum(axis=0)
-                )
-                grd_err_w_count[state_label] += (
-                    serr.shape[0]
                 )
 
                 grd_ee_en_sum[state_label] = (
@@ -2879,14 +2863,18 @@ nuclear forces using PGCS.
                 )
                 grd_tot = grd_block_series.mean(axis=0)
 
-                # Combined standard error, identical to the
-                # previous nested-norm reduction:
-                # sqrt(sum_{b,w} serr^2) / (B * W), with
-                # ``grd_err_w_count`` == B * W.
-                grd_err = (
-                    jnp.sqrt(grd_err_sq_sum[state_label])
-                    / grd_err_w_count[state_label]
+                # Standard errors from binning the block
+                # series, exactly as ``blue_combine_states``
+                # bins one state, so that the per-state rows
+                # and the BLUE inputs agree and correlation
+                # between blocks is accounted for.
+                series_np = np.asarray(grd_block_series)
+                n_blk = series_np.shape[0]
+                err_np, bins_np = binned_block_error(
+                    series_np.reshape(n_blk, -1),
                 )
+                grd_err = jnp.asarray(err_np.reshape(num_nuc, 3))
+                state_bin_size = int(bins_np.max())
 
                 torque, _ = (
                     compute_torque_with_error(
@@ -2895,11 +2883,14 @@ nuclear forces using PGCS.
                 )
                 # Errors of the net force and of the torque
                 # about the center of mass, (2, 3), from their
-                # own series.
-                net_err = np.asarray(
-                    jnp.sqrt(net_err_sq_sum[state_label])
-                    / grd_err_w_count[state_label]
-                )
+                # own block series, binned the same way.
+                net_series = np.concatenate([
+                    series_np.sum(axis=1),
+                    np.cross(rel_com, series_np).sum(axis=1),
+                ], axis=1)
+                net_err = binned_block_error(
+                    net_series,
+                )[0].reshape(2, 3)
 
                 grd_ee_en = jnp.mean(grd_ee_en, axis=0)
                 grd_ke = jnp.mean(grd_ke, axis=0)
@@ -2917,6 +2908,7 @@ nuclear forces using PGCS.
                 torque = jnp.zeros(3)
                 net_err = np.zeros((2, 3))
                 grd_block_series = None
+                state_bin_size = 1
 
             if state_label is None:
                 ref_grd_tot = grd_tot
@@ -2950,9 +2942,11 @@ nuclear forces using PGCS.
                             np.asarray(grd_block_series).reshape(
                                 len(grd_block_series), -1,
                             ),
-                            1,
+                            state_bin_size,
                         ),
-                        n_bins=len(grd_block_series),
+                        n_bins=(
+                            len(grd_block_series) // state_bin_size
+                        ),
                         return_info=True,
                     )
                 )

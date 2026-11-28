@@ -19,7 +19,7 @@ block, these tests check
   projection is skipped by default (``project_sum_rules="auto"``), the
   averaged rows being the reference rows, while ``True`` still
   projects;
-* that net-force errors come from their own series, and that after
+* that net-force errors come from their own block series, and that after
   the projection the averaged net force is 0 +- 0 while the torque
   keeps a finite error;
 * that the energy log always ends with the reported energy.
@@ -319,13 +319,13 @@ def _net_line(text, header, nth=0):
 
 def test_net_force_error_from_its_own_series(tmp_path):
     # The synthetic gradients do not sum to zero, so the reference
-    # state's net force has a finite error, which must be that of the
-    # per-sample series sum_I F_I, binned like the atoms.
-    from OmegaQMC.utils import do_binning_analysis_grds
+    # state's net force has a finite error, which must be that of its
+    # walker-averaged block series sum_I F_I, binned like the atoms.
+    from OmegaQMC.utils import binned_block_error
     out, _ = _run(tmp_path, ess_min=0)
     text = out['force'][1]
     _, dnet = _net_line(text, 'Total force on system')
-    sq, count = 0.0, 0
+    series = []
     with h5py.File(str(tmp_path / 'syn.grd.h5'), 'r') as f:
         e_v = np.mean([f['local_energies'][f'{b}'][()]
                        for b in range(N_BLOCKS)])
@@ -335,12 +335,10 @@ def test_net_force_error_from_its_own_series(tmp_path):
                  for k in GRD_KEYS]
             tot = (f['grd_nn'][()] + g[0] + g[1]
                    + 2.0 * (el - e_v)[..., None, None] * g[2])
-            serr = np.asarray(do_binning_analysis_grds(
-                tot.sum(axis=2, keepdims=True),
-            )[1])                                   # (W, 1, 3)
-            sq = sq + (serr ** 2).sum(axis=(0, 1))
-            count += serr.shape[0]
-    np.testing.assert_allclose(dnet, np.sqrt(sq) / count, rtol=2e-5)
+            series.append(tot.mean(axis=(0, 1)).sum(axis=0))
+    np.testing.assert_allclose(
+        dnet, binned_block_error(np.array(series))[0], rtol=2e-5,
+    )
     assert np.all(dnet > 1e-3)
     assert 'Total torque (about center of mass)\n' in text
 
