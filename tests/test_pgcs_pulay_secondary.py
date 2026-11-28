@@ -159,7 +159,9 @@ def test_cs_diagnostics_exact_symmetry(tmp_path):
         _, text = _postproc(tmp_path, exact=True)
     d = _cs_diagnostics(text)
     assert d['mean_w'] == 1.0 and d['ess'] == 1.0 and d['dmax'] == 0.0
-    assert abs(d['offset']) < 1e-12 and d['serr'] > 0.0
+    # E_L(TR) = E_L(R) with unit weights: the difference series
+    # vanishes block by block, so the offset error is zero too
+    assert abs(d['offset']) < 1e-12 and d['serr'] < 1e-12
     assert _cs_warnings(caught) == []
 
 

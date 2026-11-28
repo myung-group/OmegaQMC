@@ -2189,12 +2189,16 @@ def _combo_local_energies(f, label, bcs, ref_local_energies):
 # secondary state (see :func:`_cs_diagnostic_lines`); the ESS/N
 # threshold is :data:`OmegaQMC.utils.CS_ESS_MIN`.
 CS_OFFSET_WARN_Z = 4.0
+# Offsets below this many Ha are round-off (e.g. an exact symmetry,
+# whose offset and error both vanish) and are never flagged.
+CS_OFFSET_ATOL = 1e-8
 
 
 def _new_cs_accumulator(has_el):
     """Per-block running sums for :func:`_cs_diagnostic_lines`."""
     return {
         'has_el': has_el, 'dmax': 0.0, 'w_blk': [], 'y_blk': [],
+        'd_blk': [], 'n_blk': [],
     }
 
 
@@ -2203,9 +2207,10 @@ def _cs_accumulate(acc, w, e_t, e_ref, e_v):
 
     *w* are the PGCS weights psi^2(T R) / psi^2(R), *e_t* and *e_ref*
     the local energies E_L(T R) and E_L(R) of the same samples, and
-    *e_v* the reference variational energy.  Only scalars are kept
-    (two per block), so memory stays per-block.  The weight
-    statistics come from :func:`OmegaQMC.utils.select_cs_states`.
+    *e_v* the reference variational energy (the mean of *e_ref* over
+    the analysed blocks).  Only scalars are kept (four per block), so
+    memory stays per-block.  The weight statistics come from
+    :func:`OmegaQMC.utils.select_cs_states`.
     """
     if acc['has_el']:
         w = np.asarray(w, dtype=np.float64).ravel()
@@ -2216,6 +2221,8 @@ def _cs_accumulate(acc, w, e_t, e_ref, e_v):
         )
         acc['w_blk'].append(float(w.sum()))
         acc['y_blk'].append(float((w * (e_t - e_v)).sum()))
+        acc['d_blk'].append(float((e_ref - e_v).sum()))
+        acc['n_blk'].append(e_ref.size)
 
 
 def _cs_diagnostic_lines(label, acc, stats):
@@ -2229,18 +2236,27 @@ def _cs_diagnostic_lines(label, acc, stats):
       returned by :func:`OmegaQMC.utils.select_cs_states` (which also
       warns about a small ESS/N);
     * the energy offset ``<w E_L(T R)>/<w> - E_V`` and its standard
-      error, from the ratio estimator ``sum_b Y_b / sum_b W_b`` over
-      per-block sums ``Y_b = sum w (E_L(T R) - E_V)`` and
-      ``W_b = sum w``, with the delta-method variance
-      ``sum_b (Y_b - r W_b)^2 / (B (B - 1) Wbar^2)`` (blocks treated
-      as independent);
+      error.  The offset is the ratio estimator ``r = sum_b Y_b /
+      sum_b W_b`` over per-block sums ``Y_b = sum w (E_L(T R) -
+      E_V)`` and ``W_b = sum w``.  ``E_V`` is the mean of the same
+      blocks' ``E_L(R)``, so the error is that of the difference:
+      the delta-method series of both ratios,
+
+          Z_b = (Y_b - r W_b) / Wbar - (D_b - d n_b) / nbar ,
+
+      with ``D_b = sum (E_L(R) - E_V)`` over the block's ``n_b``
+      samples and ``d = sum_b D_b / sum_b n_b`` (zero), is binned by
+      :func:`OmegaQMC.utils.binned_block_error`, as BLUE bins a
+      state, so correlation between blocks is accounted for and the
+      noise common to ``E_L(T R)`` and ``E_L(R)`` cancels;
     * ``max |E_L(T R) - E_L(R)|``.
 
     The offset is zero in expectation for any operation (it estimates
     the same E_V from the transformed samples), and it and the weight
     statistics vanish identically for an exact symmetry.  Warns, and
     never raises, when the offset is more than
-    :data:`CS_OFFSET_WARN_Z` standard errors from zero.  The energy
+    :data:`CS_OFFSET_WARN_Z` standard errors from zero (and above the
+    round-off level :data:`CS_OFFSET_ATOL`).  The energy
     items are skipped when ``local_energies/<label>`` is absent.
 
     Returns:
@@ -2261,13 +2277,14 @@ def _cs_diagnostic_lines(label, acc, stats):
         return lines
     W = np.asarray(acc['w_blk'])
     Y = np.asarray(acc['y_blk'])
+    D = np.asarray(acc['d_blk'])
+    n = np.asarray(acc['n_blk'], dtype=np.float64)
     offset = float(Y.sum() / W.sum())
     nblk = len(W)
     if nblk > 1:
-        serr = float(np.sqrt(
-            np.sum((Y - offset * W) ** 2)
-            / (nblk * (nblk - 1) * W.mean() ** 2)
-        ))
+        z = ((Y - offset * W) / W.mean()
+             - (D - D.sum() / n.sum() * n) / n.mean())
+        serr = float(binned_block_error(z)[0])
     else:
         serr = float('nan')
     lines.append(
@@ -2275,7 +2292,8 @@ def _cs_diagnostic_lines(label, acc, stats):
         f" {offset:.6g} ± {serr:.3g} Ha,"
         f" max |E_L(TR) - E_L(R)| = {acc['dmax']:.3e} Ha",
     )
-    if serr > 0.0 and abs(offset) > CS_OFFSET_WARN_Z * serr:
+    if (serr > 0.0 and abs(offset) > CS_OFFSET_WARN_Z * serr
+            and abs(offset) > CS_OFFSET_ATOL):
         warnings.warn(
             f"PGCS state {label}: <w E_L(TR)>/<w> - E_V ="
             f" {offset:.3g} Ha is {abs(offset) / serr:.1f} standard"
