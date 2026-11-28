@@ -691,7 +691,13 @@ def test_full_cas_equals_open_shell_qed_fci():
 
 
 def test_zero_coupling_equals_pyscf_ucasscf():
-    """At λ=0, QED-UCASSCF must reduce to standard PySCF UCASSCF."""
+    """At λ=0, QED-UCASSCF must reduce to standard PySCF UCASSCF.
+
+    OH/STO-3G CAS(4,(3,2)) has two UCASSCF minima ~0.93 mHa apart, and
+    an unseeded PySCF run lands in either from process to process.  The
+    reference is therefore started from the QED-UCASSCF orbitals and
+    converged tightly, so both energies refer to the same minimum.
+    """
     mol, mf = _build_oh()
     ncas, nelecas = 4, (3, 2)
 
@@ -699,7 +705,10 @@ def test_zero_coupling_equals_pyscf_ucasscf():
                         coupling_vec=[0.0, 0.0, 0.0], nph_max=2)
     mc = mcscf.UCASSCF(mf, ncas, nelecas)
     mc.verbose = 0
-    e_ref = float(mc.kernel()[0])
+    mc.conv_tol = 1e-11
+    mc.conv_tol_grad = 1e-7
+    e_ref = float(mc.kernel(r['mo_coeff'])[0])
+    assert mc.converged
 
     d = r['e_qed_casscf'] - e_ref
     print("\n" + "=" * 70)
@@ -709,11 +718,14 @@ def test_zero_coupling_equals_pyscf_ucasscf():
     print(f"  CAS{(ncas, nelecas)}: E_QED-UCASSCF(λ=0) = "
           f"{r['e_qed_casscf']:.10f}  E_UCASSCF = {e_ref:.10f}  "
           f"Δ = {d:+.2e}")
-    # First-order optimiser converges to conv_tol_grad; allow a
-    # gradient-tolerance-sized gap to the fully-converged PySCF value.
-    assert abs(d) < 1e-7
-    # The bare-UCASSCF reference reported in the dict is the PySCF value.
-    assert abs(r['e_casscf'] - e_ref) < 1e-9
+    # Same minimum; the residual is set by QED-UCASSCF's conv_tol_grad
+    # (1e-5), whose energy error is O(|g|^2), ~1e-9 Ha here.
+    assert abs(d) < 1e-8
+    # The bare-UCASSCF energy in the dict comes from an unseeded PySCF
+    # run, so it may sit in either minimum.  Whichever it is, orbital
+    # optimisation from the UHF orbitals cannot rise above the UCASCI
+    # energy in those orbitals (QED-UCASCI at λ=0).
+    assert r['e_casscf'] <= r['e_qed_casci'] + 1e-8
     assert r['converged']
 
 
