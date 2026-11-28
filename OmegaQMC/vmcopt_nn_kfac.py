@@ -10,7 +10,7 @@ constraint, and uncentred diagonal blocks for the remaining leaves
 (the envelope).  See :meth:`_VMCOptDriverNN_KFAC._setup_kfac`.  With
 the ``ferminet_deepmind`` ansatz the steps agree with DeepMind's
 ferminet + kfac-jax to ~1e-7 relative
-(``tests/test_vmcopt_nn_kfac_jax.py``).  The Hamiltonian, sampler and
+(``tests/test_vmcopt_nn_kfac.py``).  The Hamiltonian, sampler and
 checkpointing follow :mod:`OmegaQMC.vmcopt_nn_sr`.
 
 Every Linear's input rows and output cotangents come exactly from

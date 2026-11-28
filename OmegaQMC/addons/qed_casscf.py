@@ -151,8 +151,16 @@ def run_qed_casscf(mf, ncas, nelecas, omega, coupling_vec,
                    nph_max=10, proper_dse=True, coherent_state=True,
                    max_cycle=100, conv_tol=1e-9, conv_tol_grad=1e-5,
                    verbose=False):
-    """Closed-shell QED-CASSCF: orbital-optimized CAS for the Pauli-Fierz
-    Hamiltonian tensored with a truncated photon Fock space.
+    """QED-CASSCF: orbital-optimized CAS for the Pauli-Fierz Hamiltonian
+    tensored with a truncated photon Fock space.
+
+    This is the closed-shell (restricted) QED-CASSCF.  Open-shell
+    molecules (``mol.nelec[0] != mol.nelec[1]``) and open-shell active
+    spaces (an ``(n_alpha, n_beta)`` tuple with ``n_alpha != n_beta``)
+    are dispatched to the spin-unrestricted
+    :func:`OmegaQMC.addons.qed_ucasscf.run_qed_ucasscf`, which takes the
+    same arguments and returns the analogous dict (with ``'reference':
+    'QED-UHF'`` and per-spin core sizes and orbitals).
 
     Conventions match :func:`OmegaQMC.addons.qed_fci.run_qed_fci` and
     :func:`OmegaQMC.addons.qed_casci.run_qed_casci`. QED-CASSCF reduces to
@@ -160,12 +168,13 @@ def run_qed_casscf(mf, ncas, nelecas, omega, coupling_vec,
     and lies at or below the QED-CASCI energy in the same active space.
 
     Args:
-        mf: PySCF mean-field object (closed shell, must have run kernel()).
+        mf: PySCF mean-field object (must have run kernel()).
             Its orbitals seed the bare-CASSCF reference; the QED-CASSCF
             orbital optimisation starts from a QED-HF reference.
         ncas: Number of active spatial orbitals.
         nelecas: Number of active electrons. Either an even int (total) or
-            a (n_alpha, n_beta) tuple with n_alpha == n_beta.
+            an (n_alpha, n_beta) tuple (n_alpha != n_beta is dispatched to
+            QED-UCASSCF, see above).
         omega: Photon frequency in Hartree.
         coupling_vec: Light-matter coupling vector λ·ε of length 3.
             Direction is the polarization ε; magnitude is λ.
@@ -226,13 +235,20 @@ def run_qed_casscf(mf, ncas, nelecas, omega, coupling_vec,
     """
     mol = mf.mol
 
-    if mol.nelec[0] != mol.nelec[1]:
-        raise NotImplementedError(
-            "qed_casscf implements the closed-shell (restricted) "
-            "QED-CASSCF. For an open-shell, fixed-orbital treatment use "
-            "the QED-UCASCI path of "
-            "OmegaQMC.addons.qed_casci.run_qed_casci."
-        )
+    # Open-shell molecules, and open-shell active spaces (an (na, nb)
+    # tuple with na != nb), use the spin-unrestricted QED-UCASSCF path,
+    # mirroring the qed_casci -> QED-UCASCI dispatch.  The closed-shell
+    # path below is unchanged.
+    open_shell_cas = (not isinstance(nelecas, (int, np.integer))
+                      and int(nelecas[0]) != int(nelecas[1]))
+    if mol.nelec[0] != mol.nelec[1] or open_shell_cas:
+        from OmegaQMC.addons.qed_ucasscf import run_qed_ucasscf
+        return run_qed_ucasscf(
+            mf, ncas, nelecas, omega, coupling_vec,
+            nph_max=nph_max, proper_dse=proper_dse,
+            coherent_state=coherent_state, max_cycle=max_cycle,
+            conv_tol=conv_tol, conv_tol_grad=conv_tol_grad,
+            verbose=verbose)
 
     norb = mol.nao_nr()
     enuc = mol.energy_nuc()

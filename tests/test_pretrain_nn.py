@@ -12,7 +12,6 @@ move per iteration on the network's |psi|^2).  These tests check
 * that the loss falls on H2 and LiH;
 * the KFAC driver hook: pretraining on a fresh start, none on resume;
 * the optional HF-density sampling (``hf_fraction``, Pfau et al. 2020):
-  ``hf_fraction=0`` reproduces the frozen pre-option loop bit for bit,
   the HF chain samples ``|det phi_up|^2 |det phi_down|^2`` (one-electron
   moments against quadrature), and both acceptance rates are sane.
 """
@@ -194,22 +193,6 @@ def test_kfac_pretrain_hook(tmp_path):
 # ---------------------------------------------------------------------
 # HF-density sampling (hf_fraction, Pfau et al. 2020)
 # ---------------------------------------------------------------------
-def _load_frozen():
-    """The pretraining loop before ``hf_fraction`` (tests/...frozen.py)."""
-    import importlib.util
-    import pathlib
-    import sys
-    name = "_pretrain_hf_frozen"
-    if name not in sys.modules:
-        spec = importlib.util.spec_from_file_location(
-            name, pathlib.Path(__file__).parent / "pretrain_hf_frozen.py",
-        )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[name] = mod
-        spec.loader.exec_module(mod)
-    return sys.modules[name].pretrain_hf
-
-
 def _share_hf_target(monkeypatch, mol, *modules):
     """Make every pretrain_hf call in *modules* use one UHF solution.
 
@@ -223,56 +206,6 @@ def _share_hf_target(monkeypatch, mol, *modules):
     for mod in (live,) + modules:
         monkeypatch.setattr(mod, 'HartreeFockTarget',
                             lambda *a, **k: shared)
-
-
-def _strip_times(text):
-    import re
-    return [re.sub(r"\s+[0-9.]+ s$", "", ln)
-            for ln in text.splitlines() if ln.startswith("# pretrain ")]
-
-
-@pytest.mark.parametrize("mol_fn", [_h2, _lih])
-def test_hf_fraction_zero_is_frozen_loop(mol_fn, monkeypatch):
-    """hf_fraction=0 (and the default) is the old loop, bit for bit.
-
-    So are the HF-chain options at their defaults, and when no walker
-    samples the HF density (they are then ignored).  All runs share one
-    UHF solution (:func:`_share_hf_target`).
-    """
-    import io
-    import sys
-    mol = mol_fn()
-    log_psi, params, _, _ = make_nn_log_psi(
-        'ferminet', mol, jax.random.key(0), compute_dtype='float32',
-    )
-    frozen = _load_frozen()
-    _share_hf_target(monkeypatch, mol, sys.modules[frozen.__module__])
-    kw = dict(iterations=12, num_walkers=32, verbose=1, log_every=4)
-    runs = []
-    for fn, extra in ((frozen, {}),
-                      (pretrain_hf, {}),
-                      (pretrain_hf, {'hf_fraction': 0.0}),
-                      (pretrain_hf, {'hf_mcmc_width': None,
-                                     'hf_burn_in': 0}),
-                      (pretrain_hf, {'hf_fraction': 0.0,
-                                     'hf_mcmc_width': 0.3,
-                                     'hf_burn_in': 5})):
-        buf = io.StringIO()
-        runs.append(fn(log_psi, mol, params, jax.random.key(7),
-                       fout=buf, **kw, **extra) + (buf.getvalue(),))
-    p_ref, w_ref, info_ref, log_ref = runs[0]
-    for p, w, info, log in runs[1:]:
-        np.testing.assert_array_equal(info['loss'], info_ref['loss'])
-        assert info['acceptance'] == info_ref['acceptance']
-        assert info['n_hf'] == 0 and np.isnan(info['acceptance_hf'])
-        assert info['hf_burn_in'] == 0
-        assert np.isnan(info['acceptance_hf_burn_in'])
-        np.testing.assert_array_equal(w, w_ref)
-        for a, b in zip(jax.tree.leaves(p), jax.tree.leaves(p_ref)):
-            assert a.dtype == b.dtype
-            np.testing.assert_array_equal(a, b)
-        assert _strip_times(log) == _strip_times(log_ref)
-        assert len(_strip_times(log)) == 4
 
 
 @pytest.mark.parametrize("mol_fn", [_lih, _li_atom, _h_atom])

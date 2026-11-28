@@ -16,6 +16,7 @@ import os
 import tempfile
 
 import jax
+import numpy as np
 from pyscf import gto, scf, fci
 
 from OmegaQMC import get_afqmc_func
@@ -42,10 +43,12 @@ def test_LiH_sto6g():
         chol_h5 = os.path.join(td, 'LiH_chol.h5')
 
         driver = get_afqmc_func(
-            mf, dt=0.005, chol_cut=1e-6,
-            chol_h5_path=chol_h5,   # spill chol to HDF5
-            chol_chunk_g=16,        # stream 16 aux vectors at a time
-                                    # Note, choose either 128 or 256 for a large-size molecule
+            mf,
+            dt=0.005,
+            chol_cut=1e-6,
+            chol_h5_path=chol_h5,  # spill chol to HDF5
+            chol_chunk_g=16,  # stream 16 aux vectors at a time
+            # Note, choose either 128 or 256 for a large-size molecule
         )
         assert isinstance(driver.chol, DiskChol), (
             f"chol should be disk‑backed, got {type(driver.chol).__name__}"
@@ -76,6 +79,12 @@ def test_LiH_sto6g():
     print(f"E_corr (FCI)   = {e_fci - mf.e_tot:.10f}")
     print(f"E_corr (AFQMC) = {e_afqmc - mf.e_tot:.10f}")
     print(f"ipie ref       = -7.9693 +/- 0.0005")
+
+    # The disk-backed, walker-chunked path must still give a sane
+    # energy: finite, with a finite error bar, and (phaseless AFQMC is
+    # near exact for LiH/STO-6G) within 5 sigma + 2 mHa of FCI.
+    assert np.isfinite(e_afqmc) and np.isfinite(e_err) and e_err > 0.0
+    assert abs(e_afqmc - e_fci) < 5.0 * e_err + 2e-3, (e_afqmc, e_err, e_fci)
 
 
 if __name__ == '__main__':

@@ -1,13 +1,18 @@
+"""GTO Slater-Jastrow VMC on H2 with PGCS forces, end to end.
+
+A module-scoped fixture runs one short VMC (SCF, 100 walkers, forces
+with the ``'simple'`` SWCT estimator and the C2z PGCS state) into a
+temporary directory; the tests check the force at the equilibrium bond
+length and the energy and force post-processing logs.
+"""
 import jax
 import jax.numpy as jnp
 import numpy as np
 from OmegaQMC import generate_molecular_orbitals, get_vmc_gto_func
 from OmegaQMC.observables.force import postproc_h5_pgcs as vmc_forces
 from OmegaQMC.utils import format_basis_name
-# from OmegaQMC.vmc_gto_symm import process_symmetric_diatomic_molecule
+import pytest
 from pytest import approx
-
-rng_key = jax.random.key(888)
 
 L = 1.4010
 bset_name = "6-31G"
@@ -24,39 +29,35 @@ H       0.0000    0.0000    {:.6f}      1
 H       0.0000    0.0000    {:.6f}      1
 '''.format(-L/2, L/2)
 
-modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
-                                    basis=bset_name)
-
-chkfile_prefix = 'H2_vmc_{}'.format(format_basis_name(bset_name))
-
-# symmetry_ops = ['E', 'x', 'y', 'Rz180']
 symmetry_ops = ['E', 'C2z']
-# symmetry_ops = ['E', 'i']
-# symmetry_ops = ['E', 'Rz180', 'Rz90', 'Rz270']
-# symmetry_ops = ['Rz90', 'Rz270']
-# symmetry_ops = ['E']
-
-vmc_run = get_vmc_gto_func(modrv, params_jastrow,
-                           cusp_scheme='Quady2025',
-                           gr_scheme='scheme1',
-                           force_estimator="simple",
-                           prefix=chkfile_prefix,
-                           symmop_list=symmetry_ops)
-
-l_grad = True
-vmc_run(rng_key,
-        num_walkers=100,
-        num_steps_per_block=100,   # MC steps per block (per walker)
-        num_blocks=10,            # MC blocks
-        num_blocks_equil=5,       # MC blocks for equilibration
-        mc_timestep=0.1,    # Brownian time; will be auto-adjusted
-        compute_gradients=l_grad)
-
-if l_grad:
-    forces, std_forces = vmc_forces(prefix=chkfile_prefix)
 
 
-def test_force():
+@pytest.fixture(scope='module')
+def h2_run(tmp_path_factory):
+    """Run the VMC once; return (chkfile prefix, forces)."""
+    modrv = generate_molecular_orbitals(atoms_string, units="Bohr",
+                                        basis=bset_name)
+    prefix = str(tmp_path_factory.mktemp('h2') / 'H2_vmc_{}'.format(
+        format_basis_name(bset_name)))
+    vmc_run = get_vmc_gto_func(modrv, params_jastrow,
+                               cusp_scheme='Quady2025',
+                               gr_scheme='scheme1',
+                               force_estimator="simple",
+                               prefix=prefix,
+                               symmop_list=symmetry_ops)
+    vmc_run(jax.random.key(888),
+            num_walkers=100,
+            num_steps_per_block=100,   # MC steps per block (per walker)
+            num_blocks=10,             # MC blocks
+            num_blocks_equil=5,        # MC blocks for equilibration
+            mc_timestep=0.1,           # Brownian time; auto-adjusted
+            compute_gradients=True)
+    forces, _ = vmc_forces(prefix=prefix)
+    return prefix, forces
+
+
+def test_force(h2_run):
+    _, forces = h2_run
     # H2 is placed at its equilibrium bond length (1.401 bohr),
     # so the z-force on each atom is physically ~0.  This short
     # 100-walker / 5-block smoke test recovers it only to within
@@ -72,7 +73,8 @@ def _selection(text):
             or 'ESS/N = ' in ln and ln.startswith('  ')]
 
 
-def test_pgcs_logs_gto(tmp_path):
+def test_pgcs_logs_gto(h2_run, tmp_path):
+    chkfile_prefix, _ = h2_run
     # GTO (Slater-Jastrow) PGCS post-processing end to end: C2z is an
     # exact symmetry of the RHF trial state, so the secondary state is
     # kept by both energy and force paths, the averaged forces are

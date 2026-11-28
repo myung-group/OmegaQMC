@@ -12,7 +12,7 @@ on 16 fixed walkers, and the parameters after a few kfac-jax steps on
 those walkers, with the optimiser configured as ferminet/train.py does
 (estimation_mode 'fisher_exact', curvature EMA 0.95, damping 1e-3,
 lr 0.05 / (1 + t / 1e4), E_L clipped at 5 mean absolute deviations
-about the mean).  tests/test_vmcopt_nn_kfac_jax.py transplants these
+about the mean).  tests/test_vmcopt_nn_kfac.py transplants these
 parameters into OmegaQMC's ``ferminet_deepmind`` ansatz and checks
 log|psi|, E_L and ``kfac_style='kfac_jax'`` against them.
 

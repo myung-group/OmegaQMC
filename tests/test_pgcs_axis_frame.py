@@ -1,58 +1,71 @@
-#!/usr/bin/env python3
-"""Regression test for the PGCS fragment-rotation axis.
+"""PGCS fragment frames: rotation axes and nuclear self-maps.
 
-A fragment ``Rz180`` (correlated-sampling C2) must rotate
-about the fragment's true C2 axis -- the H-O-H bisector for
-water -- so that it maps the fragment onto itself and leaves
-the importance weight ``|psi(C2.R)/psi(R)|^2`` near unity.
-
-A prior bug took the rotation frame from PySCF
-``detect_symm``: the moment a water fell below the exact-C2v
-tolerance it was classified ``Cs`` and local-z switched
-discontinuously from the C2 axis to the *molecular-plane
-normal*.  ``Rz180`` then rotated about the wrong axis,
-displacing the affected electrons by ~1 A instead of
-self-mapping, which collapsed the PGCS effective sample size
-from ~100% to ~0.1% for *any* non-exactly-symmetric
-fragment (i.e. every realistic, H-bonded, or relaxed water).
-
-The same flaw affects every frame-dependent operation, not
-just ``Rz180``: ``Rz90`` / ``Rz270`` / ``S4`` / ``S4_3`` need
-local-z on the C_n / S_n axis, and the reflections / secondary
-C2 rotations need local-x / y on the sigma_v / C2' elements.
-``build_frag_transform_data`` now builds the whole frame
-geometrically (continuously in the distortion) for all
-supported groups (C2v / C2h / Cs / D2h / C4v / D4h, including
-the linear Coov/Dooh mappings).
-
-These tests pin that behaviour so the axis bug cannot silently
-return -- note it was invisible at exact symmetry, hence the
-deliberately *distorted* / multi-axis geometries below.
+The fragment symmetry operations must map distorted molecules onto
+themselves (otherwise the PGCS weights collapse, ESS/N ~ 0.005), and
+the self-map diagnostic warns, without raising, when they do not.
 """
 import tempfile
-
 import numpy as np
 import pytest
-
-# Compatibility shim: some PySCF builds lack
-# ``gto.bse_predefined_ecp``, referenced by
-# ``Mole_custom.check_sanity``.  It only advises about ECPs,
-# which are irrelevant for the all-electron 6-31G water here.
 import pyscf.gto as _pgto
-if not hasattr(_pgto, "bse_predefined_ecp"):
-    _pgto.bse_predefined_ecp = lambda *a, **k: ([], [])
-
+import warnings
 import jax.numpy as jnp
 
-from OmegaQMC import generate_molecular_orbitals
-from OmegaQMC.symm.fragments import (
+from OmegaQMC.symm.fragments import (  # noqa: E402
+    SELFMAP_WARN_BOHR,
+    build_frag_symmops,
     build_frag_transform_data,
     _geometric_symmetry_frame,
 )
-from OmegaQMC.symm.operations import (
+from OmegaQMC.symm.operations import (  # noqa: E402
+    populate_fragment_symmops,
     symmetry_operations_map,
     POINT_GROUP_OPS,
 )
+from OmegaQMC.utils import (  # noqa: E402
+    Mole_custom,
+    parse_molecular_inspheres,
+)
+
+
+# ---------------------------------------------------------------------------
+# From test_pgcs_axis_frame.py
+#
+# Regression test for the PGCS fragment-rotation axis.
+#
+# A fragment ``Rz180`` (correlated-sampling C2) must rotate
+# about the fragment's true C2 axis -- the H-O-H bisector for
+# water -- so that it maps the fragment onto itself and leaves
+# the importance weight ``|psi(C2.R)/psi(R)|^2`` near unity.
+#
+# A prior bug took the rotation frame from PySCF
+# ``detect_symm``: the moment a water fell below the exact-C2v
+# tolerance it was classified ``Cs`` and local-z switched
+# discontinuously from the C2 axis to the *molecular-plane
+# normal*.  ``Rz180`` then rotated about the wrong axis,
+# displacing the affected electrons by ~1 A instead of
+# self-mapping, which collapsed the PGCS effective sample size
+# from ~100% to ~0.1% for *any* non-exactly-symmetric
+# fragment (i.e. every realistic, H-bonded, or relaxed water).
+#
+# The same flaw affects every frame-dependent operation, not
+# just ``Rz180``: ``Rz90`` / ``Rz270`` / ``S4`` / ``S4_3`` need
+# local-z on the C_n / S_n axis, and the reflections / secondary
+# C2 rotations need local-x / y on the sigma_v / C2' elements.
+# ``build_frag_transform_data`` now builds the whole frame
+# geometrically (continuously in the distortion) for all
+# supported groups (C2v / C2h / Cs / D2h / C4v / D4h, including
+# the linear Coov/Dooh mappings).
+#
+# These tests pin that behaviour so the axis bug cannot silently
+# return -- note it was invisible at exact symmetry, hence the
+# deliberately *distorted* / multi-axis geometries below.
+# ---------------------------------------------------------------------------
+
+
+if not hasattr(_pgto, "bse_predefined_ecp"):
+    _pgto.bse_predefined_ecp = lambda *a, **k: ([], [])
+from OmegaQMC import generate_molecular_orbitals  # noqa: E402
 
 BOHR_TO_ANG = 0.52917721
 REQ = 0.9572                          # equilibrium O-H (Angstrom)
@@ -202,7 +215,6 @@ def test_rz180_ess_high_for_distorted_water():
 # axis (long axis for linear, plane normal for square-planar)
 # and local-x/y align with the sigma_v / C2' elements.
 # ---------------------------------------------------------------
-
 def _op_matrix(op):
     """Local 3x3 matrix of ``op`` (op(v) = M @ v)."""
     return np.asarray(symmetry_operations_map[op](jnp.eye(3))).T
@@ -285,41 +297,62 @@ def test_bent_linear_rz90_not_catastrophic(bend):
     assert abs(float(Vh[2] @ long_axis)) > 0.95
 
 
-if __name__ == "__main__":
-    for s in (1.000, 0.999, 0.995, 0.990, 1.005, 1.010):
-        nuc, c, Vh, q = _rz180_frame(s)
-        d = _selfmap_displacement(nuc, c, Vh, q)
-        print(f"stretch={s:.3f}  self-map displacement="
-              f"{d:.4f} A  (must be < 0.05)")
-        assert d < 0.05
-    for s in (0.95, 1.05):
-        nuc, c, Vh, q = _rz180_frame(s)
-        d = _selfmap_displacement(nuc, c, Vh, q)
-        print(f"stretch={s:.3f}  self-map displacement="
-              f"{d:.4f} A  (must be < 0.20)")
-        assert d < 0.20
-    print("--- multi-axis (C4v / D4h / D2h) ---")
-    _d4h = POINT_GROUP_OPS["D4h"]
-    _d2h = POINT_GROUP_OPS["D2h"]
-    cases = [
-        ("D4h linear", [[0, 0, 0], [0, 0, 1.16], [0, 0, -1.16]],
-         [6, 8, 8], _d4h, _d4h, 0.02),
-        ("D4h sq-planar",
-         [[1.5, 0, 0], [-1.5, 0, 0], [0, 1.5, 0], [0, -1.5, 0]],
-         [1, 1, 1, 1], _d4h, _d4h, 0.02),
-        ("D2h rectangle",
-         [[1.6, 1, 0], [1.6, -1, 0], [-1.6, 1, 0], [-1.6, -1, 0]],
-         [1, 1, 1, 1], _d2h, _d2h, 0.02),
-        ("bent CO2 Rz90",
-         [[0, 0, 0], [0.12, 0, 1.16], [0.12, 0, -1.16]],
-         [6, 8, 8], _d4h, ["Rz90"], 0.25),
+# ---------------------------------------------------------------------------
+# From test_pgcs_selfmap.py
+#
+# Nuclear self-map diagnostic of the PGCS fragment frames.
+#
+# :func:`OmegaQMC.symm.fragments.build_frag_transform_data` prints, for
+# every requested non-identity operation, how far it moves the nuclei of
+# its fragment off themselves, and warns (never raises) when the
+# operation is only an approximate symmetry.
+# ---------------------------------------------------------------------------
+
+
+WATER = [('O', 0.0, 0.0, 0.1173),
+         ('H', 0.0, 0.7572, -0.4692),
+         ('H', 0.0, -0.7572, -0.4692)]
+
+
+def _frames(tmp_path, atoms, ops):
+    xyz = tmp_path / 'water.xyz'
+    xyz.write_text(
+        f"{len(atoms)}\nwater\n" + "".join(
+            f"{s} {x:.6f} {y:.6f} {z:.6f} 0\n" for s, x, y, z in atoms
+        )
+    )
+    mol = Mole_custom()
+    mol.build(atom=str(xyz), unit='Angstrom', basis='sto-3g',
+              spin=0, charge=0, verbose=0)
+    mol.ignore_hydrogen_mass = False
+    parse_molecular_inspheres(mol)
+    populate_fragment_symmops(mol)
+    fids = sorted(mol.map_frag_ctr.keys())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        fs = build_frag_symmops(mol, ops, fids)
+        build_frag_transform_data(
+            mol, jnp.asarray(mol.coords), frag_symmops=fs,
+        )
+    return [
+        str(w.message) for w in caught
+        if 'symmetry' in str(w.message) and 'bohr' in str(w.message)
     ]
-    for name, nuc, q, fops, cops, tol in cases:
-        w, _ = _worst_op_selfmap(nuc, q, fops, cops)
-        print(f"{name:16s} worst self-map={w:.4f} A  (< {tol})")
-        assert w < tol
-    print("deterministic axis checks passed; running VMC ESS...")
-    ess = _frag_weight_ess(0.990)
-    print(f"ESS/n at 1% distortion = {ess:.4f}  (must be > 0.5)")
-    assert ess > 0.5
-    print("ALL PASSED")
+
+
+@pytest.mark.parametrize('ops', [['E', 'Rz180'], ['E', 'sx', 'sy']])
+def test_symmetric_water_no_warning(tmp_path, capsys, ops):
+    assert _frames(tmp_path, WATER, ops) == []
+    out = capsys.readouterr().out
+    assert out.count('maps the nuclei onto themselves') == len(ops) - 1
+
+
+def test_distorted_water_warns_without_raising(tmp_path, capsys):
+    atoms = list(WATER)
+    atoms[1] = ('H', 0.0, 0.7572 + 0.05, -0.4692)   # stretch one O-H
+    msgs = _frames(tmp_path, atoms, ['E', 'Rz180'])
+    assert len(msgs) == 1 and 'approximate symmetry' in msgs[0]
+    out = capsys.readouterr().out
+    err = float(out.split('maps the nuclei onto themselves to ')[1]
+                .split()[0])
+    assert SELFMAP_WARN_BOHR < err < 0.5
