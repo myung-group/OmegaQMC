@@ -87,16 +87,18 @@ def test_pgcs_logs_gto(tmp_path):
         etext = fh.read()
     assert _selection(ftext) == _selection(etext)
     assert 'BLUE: no states dropped (ESS/N >= 0.1)' in etext
-    assert 'Sum-rule projection: weighting = ' in ftext
+    assert ('Sum-rule projection (translational only): weighting = '
+            in ftext)
     last = etext.rstrip().splitlines()[-1]
     assert last == (f"Reported E = {enr:.8f} ± {err:.8f}"
                     "  (BLUE over 2 states)")
 
     # force_estimator 'simple' (SWCT) makes sum_I F_I = 0 sample by
     # sample, so each state's net force has a zero error once it is
-    # taken from its own series; the projected average is 0 +- 0 (to
-    # round-off, which the vanishing torque row of a linear molecule
-    # inflates to ~1e-11).
+    # taken from its own series; the projected average is 0 +- 0.
+    # The torque is not constrained (frozen MO coefficients): each
+    # state's has a finite error about x and y, while the C2z average
+    # cancels it sample by sample (Rz180 flips tau_x and tau_y).
     def net_lines(header):
         out = []
         for chunk in ftext.split(header + '\n')[1:]:
@@ -107,6 +109,11 @@ def test_pgcs_logs_gto(tmp_path):
     per_state = net_lines('Total force on system')
     assert per_state.shape == (2, 6)
     assert np.all(np.abs(per_state) <= 1e-8)
-    for header in ('Total force on system (averaged)',
-                   'Total torque (about center of mass, averaged)'):
-        assert np.all(np.abs(net_lines(header)) <= 1e-8)
+    assert np.all(
+        np.abs(net_lines('Total force on system (averaged)')) <= 1e-8
+    )
+    tau = net_lines('Total torque (about center of mass)')
+    assert tau.shape == (2, 6) and np.all(tau[:, 1:4:2] > 0)
+    np.testing.assert_allclose(tau[0, ::2], -tau[1, ::2], atol=1e-12)
+    assert np.all(np.abs(net_lines(
+        'Total torque (about center of mass, averaged)')) <= 1e-8)

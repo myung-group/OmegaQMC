@@ -15,9 +15,13 @@ block, these tests check
   BLUE then equalling a direct :func:`blue_combine_states` over all;
 * that an atom whose fragment lost its secondary state is averaged
   over the reference alone;
-* that with every fragment reference-only the sum-rule projection is
-  skipped by default (``project_sum_rules="auto"``), the averaged rows
-  being the reference rows, while ``True`` still projects;
+* that with every fragment reference-only the translational sum-rule
+  projection is skipped by default (``project_sum_rules="auto"``), the
+  averaged rows being the reference rows, while ``True`` still
+  projects;
+* that net-force errors come from their own series, and that after
+  the projection the averaged net force is 0 +- 0 while the torque
+  keeps a finite error;
 * that the energy log always ends with the reported energy.
 """
 import re
@@ -228,7 +232,8 @@ def _force_rows(text, header):
 def test_all_reference_skips_projection_by_default(tmp_path):
     out, _ = _run(tmp_path, ess_min=2.0)
     text = out['force'][1]
-    assert 'Sum-rule projection: skipped (every fragment is' in text
+    assert ('Sum-rule projection (translational only): skipped'
+            ' (every fragment is') in text
     # the reference state is printed first
     ref_rows = _force_rows(text, 'Total forces (-gradients)')
     avg_rows = _force_rows(text, 'Total forces (-gradients, averaged)')
@@ -242,7 +247,7 @@ def test_all_reference_skips_projection_by_default(tmp_path):
         np.asarray(errs), np.array(ref_rows, float)[:, 1::2],
         rtol=1e-5,
     )
-    # the raw reference estimate does not obey the sum rules
+    # the raw reference estimate does not obey the sum rule
     assert np.abs(np.asarray(forces).sum(axis=0)).max() > 1e-6
 
     out_f, _ = _run(tmp_path, ess_min=2.0, project_sum_rules=False)
@@ -255,12 +260,14 @@ def test_all_reference_skips_projection_by_default(tmp_path):
 def test_project_sum_rules_true_still_projects(tmp_path):
     out, _ = _run(tmp_path, ess_min=2.0, project_sum_rules=True)
     text = out['force'][1]
-    assert 'Sum-rule projection: weighting = diagonal' in text
+    assert ('Sum-rule projection (translational only):'
+            ' weighting = diagonal') in text
     forces = np.asarray(out['force'][0][0])
     np.testing.assert_allclose(forces.sum(axis=0), 0.0, atol=1e-10)
     # a kept secondary state: "auto" projects as before
     out, _ = _run(tmp_path)
-    assert 'Sum-rule projection: weighting = ' in out['force'][1]
+    assert ('Sum-rule projection (translational only): weighting = '
+            in out['force'][1])
     np.testing.assert_allclose(
         np.asarray(out['force'][0][0]).sum(axis=0), 0.0, atol=1e-10,
     )
@@ -338,14 +345,19 @@ def test_net_force_error_from_its_own_series(tmp_path):
     assert 'Total torque (about center of mass)\n' in text
 
 
-def test_averaged_net_force_and_torque_zero_after_projection(tmp_path):
+def test_averaged_net_force_zero_torque_kept_after_projection(tmp_path):
     out, _ = _run(tmp_path)
     text = out['force'][1]
-    assert 'Sum-rule projection: weighting = ' in text
-    for header in ('Total force on system (averaged)',
-                   'Total torque (about center of mass, averaged)'):
-        val, err = _net_line(text, header)
-        assert np.all(np.abs(val) < 1e-10) and np.all(err < 1e-10)
+    assert 'Sum-rule projection (translational only): weighting = ' in text
+    val, err = _net_line(text, 'Total force on system (averaged)')
+    assert np.all(np.abs(val) < 1e-10) and np.all(err < 1e-10)
+    # the torque is not constrained: finite value and error about x
+    # and y; about the molecular (z) axis both vanish identically
+    val, err = _net_line(
+        text, 'Total torque (about center of mass, averaged)',
+    )
+    assert np.all(np.abs(val[:2]) > 1e-6) and np.all(err[:2] > 1e-6)
+    assert val[2] == 0.0 and err[2] == 0.0
 
     # skipped projection: the reference state's net lines
     out, _ = _run(tmp_path, ess_min=2.0)

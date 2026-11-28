@@ -1836,12 +1836,15 @@ def _block_correlation(series, bin_size):
 
 
 def _sum_rule_matrix(coords, ref):
-    """The 6 x 3N matrix ``C`` of the sum rules about *ref*.
+    """The 6 x 3N matrix ``C`` of the net force and torque about *ref*.
 
     ``C g`` stacks ``sum_i g_i`` (rows 0-2) and ``sum_i (r_i - ref) x
     g_i`` (rows 3-5) for a flattened field ``g`` (row-major over
     atoms, then x, y, z): the net force and the torque about *ref*,
-    up to sign, of a gradient field.
+    up to sign, of a gradient field.  Only rows 0-2, the
+    translational sum rule, are enforced by
+    :func:`_project_force_sum_rules`; rows 3-5 give the torque
+    diagnostic.
     """
     rel = np.asarray(coords, dtype=float) - np.asarray(ref, dtype=float)
     n = rel.shape[0]
@@ -1871,9 +1874,11 @@ def _net_errors_from_cov(cov, coords, ref):
     *cov* is the ``(3N, 3N)`` covariance of the flattened force
     components; the errors are ``sqrt(diag(C cov C^T))`` with ``C``
     from :func:`_sum_rule_matrix`, returned as a ``(2, 3)`` array
-    (net force, torque).  After the sum-rule projection ``C (I - P) =
-    0``, so both vanish; :func:`_project_force_sum_rules` returns them
-    as ``info['net_err']``, formed from ``C (I - P)`` directly.
+    (net force, torque).  After the translational sum-rule projection
+    the net-force rows of ``C (I - P)`` vanish, so its error is zero,
+    while the torque keeps a finite error;
+    :func:`_project_force_sum_rules` returns both as
+    ``info['net_err']``, formed from ``C (I - P)`` directly.
     """
     C = _sum_rule_matrix(coords, ref)
     var = np.diag(C @ np.asarray(cov, dtype=float) @ C.T)
@@ -1889,11 +1894,13 @@ SUM_RULE_CORR_EIG_RTOL = 1e-8
 def _sum_rule_weighting(corr, n_bins):
     """Choose the covariance weighting of the sum-rule projection.
 
-    Returns ``(use_full, description)``: the full covariance
-    ``V = D corr D`` is used only when *corr* is given, there are at
-    least ``MIN_BINS_PER_STATE`` bins per component (the rule
-    :func:`OmegaQMC.utils.blue_combine_states` applies to its states)
-    and *corr* is positive definite to within
+    The projection enforces the translational sum rule only (see
+    :func:`_project_force_sum_rules`), but the weighting covers all
+    3N components.  Returns ``(use_full, description)``: the full
+    covariance ``V = D corr D`` is used only when *corr* is given,
+    there are at least ``MIN_BINS_PER_STATE`` bins per component (the
+    rule :func:`OmegaQMC.utils.blue_combine_states` applies to its
+    states) and *corr* is positive definite to within
     :data:`SUM_RULE_CORR_EIG_RTOL`; otherwise the diagonal weighting.
     """
     if corr is None:
@@ -1919,28 +1926,40 @@ def _sum_rule_weighting(corr, n_bins):
 
 def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
                              n_bins=None, return_info=False):
-    """Project a force/gradient estimate onto the translational and
-    rotational sum-rule subspace via constrained generalized least
-    squares (Lagrange multipliers).
+    """Project a force/gradient estimate onto the translational
+    sum rule via constrained generalized least squares (Lagrange
+    multipliers).
 
-    For an isolated molecule at any geometry the exact forces obey six
-    exact linear constraints,
+    The exact forces of an isolated molecule obey
 
         sum_i F_i = 0          (translational invariance of E)
-        sum_i r_i x F_i = 0    (rotational invariance of E)
 
-    which SWCT enforces per state but which the fragment-wise PGCS
-    average breaks (different atoms are averaged over different state
-    subsets).  Given the noisy averaged gradient ``grd`` with
+    at any geometry.  SWCT enforces it per state (sample by sample
+    with the ``'simple'`` estimator), but the fragment-wise PGCS
+    average breaks it (different atoms are averaged over different
+    state subsets).  Given the noisy averaged gradient ``grd`` with
     covariance ``W``, the minimum-chi-squared correction satisfying
     ``C g = 0`` is the oblique projection
 
         g_proj = (I - W C^T (C W C^T)^+ C) g ,
 
-    where ``C`` is the 6 x 3N constraint matrix (3 translational rows
-    plus 3 rows of the r_i-cross skew blocks about ``ref``).  The
-    residual is absorbed mostly by the least well-determined
-    components and the result satisfies both sum rules exactly.
+    where ``C`` is the 3 x 3N translational block (rows 0-2 of
+    :func:`_sum_rule_matrix`).  The residual is absorbed mostly by
+    the least well-determined components and the result satisfies
+    the translational sum rule exactly.
+
+    The rotational rule ``sum_i r_i x F_i = 0`` is deliberately *not*
+    enforced.  For a GTO trial the MO coefficients are fixed on
+    lab-frame (p, d, ...) AOs, so a rigid rotation of the nuclei at
+    fixed coefficients is not a rotation of the wavefunction: the
+    estimand, ``-grad E_V`` at fixed parameters, has the total
+    torque ``-dE_V/d theta`` at fixed ``C``, which vanishes only if
+    ``E_V`` is stationary in ``C``.  A rigid-rotation test on the
+    water dimer gave 0.05-0.07 Ha/rad for a perturbed trial and
+    ``|tau| < 0.005`` for a production RHF + Jastrow trial, so
+    constraining ``tau = 0`` would bias the forces.  The torque about
+    *ref* is instead reported, with its propagated error, as a
+    diagnostic (``info['net_err']``).
 
     The error is propagated as ``(I - P) V (I - P)^T``.  Without
     *corr*, ``V = W = Sigma = diag(grd_err**2)`` (independent
@@ -1967,9 +1986,10 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
     error is still propagated with ``V`` (an honest error for a
     projection that is then not optimal, which can exceed the input
     error).
-    A pseudo-inverse is used so degenerate constraints (e.g. the
-    torque about the axis of a linear molecule, whose constraint row
-    vanishes) are handled gracefully.
+    ``C W C^T`` is nonsingular for any positive weights, linear
+    molecules included (the axial torque row, which vanished, is no
+    longer a constraint); a pseudo-inverse is kept anyway, so a
+    degenerate ``W`` (e.g. zero errors) is handled gracefully.
 
     Parameters
     ----------
@@ -1978,7 +1998,8 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
     coords : array_like, shape (N, 3)
         Nuclear coordinates.
     ref : array_like, shape (3,)
-        Reference point for the rotational (torque) constraint.
+        Reference point of the torque diagnostic (the translational
+        projection itself does not depend on it).
     corr : array_like, shape (3N, 3N), optional
         Correlation matrix of the flattened components (row-major
         over atoms, then x, y, z), e.g. from
@@ -1994,7 +2015,7 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
     Returns
     -------
     grd_proj : ndarray, shape (N, 3)
-        Sum-rule-consistent gradient.
+        Gradient obeying the translational sum rule.
     grd_err_proj : ndarray, shape (N, 3)
         Propagated 1-sigma error of ``grd_proj``.
     info : dict
@@ -2002,8 +2023,8 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
         (...)"`` or ``"diagonal (<reason>)"``; ``cov``, the
         ``(3N, 3N)`` covariance ``(I - P) V (I - P)^T`` of
         ``grd_proj``; and ``net_err``, the ``(2, 3)`` errors of its
-        net force and torque about *ref*, zero to round-off (see
-        :func:`_net_errors_from_cov`).
+        net force (zero to round-off) and of its torque about *ref*
+        (finite; see :func:`_net_errors_from_cov`).
     """
     grd = np.asarray(grd, dtype=float)
     grd_err = np.asarray(grd_err, dtype=float)
@@ -2013,7 +2034,8 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
     g = grd.reshape(-1)                       # (3N,)
     sigma2 = (grd_err.reshape(-1)) ** 2        # (3N,)
 
-    C = _sum_rule_matrix(coords, ref)          # (6, 3N)
+    C6 = _sum_rule_matrix(coords, ref)         # (6, 3N)
+    C = C6[:3]                                 # translational rows
 
     if corr is None:
         cov_in = np.diag(sigma2)
@@ -2022,9 +2044,9 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
         cov_in = sd[:, None] * np.asarray(corr, dtype=float) * sd
     use_full, weighting = _sum_rule_weighting(corr, n_bins)
 
-    # W C^T, (3N, 6), with W = V or W = Sigma
+    # W C^T, (3N, 3), with W = V or W = Sigma
     sc_t = cov_in @ C.T if use_full else sigma2[:, None] * C.T
-    csct = C @ sc_t                            # C W C^T, (6, 6)
+    csct = C @ sc_t                            # C W C^T, (3, 3)
     csct_pinv = np.linalg.pinv(csct, rcond=1e-10)
     p = sc_t @ csct_pinv @ C                   # P = W C^T (..)^+ C
     m = np.eye(3 * n) - p                       # I - P
@@ -2036,16 +2058,51 @@ def _project_force_sum_rules(grd, grd_err, coords, ref, corr=None,
     grd_proj = g_proj.reshape(n, 3)
     grd_err_proj = np.sqrt(var_proj).reshape(n, 3)
     if return_info:
-        # Net force and torque errors from C (I - P), formed first so
-        # that its round-off, not the square root of the round-off of
-        # C cov_proj C^T, sets their size (C (I - P) = 0 exactly).
-        cm = C @ m
+        # Net force and torque errors from C6 (I - P), formed first
+        # so that its round-off, not the square root of the round-off
+        # of C6 cov_proj C6^T, sets the net-force error (C (I - P) = 0
+        # exactly); the torque keeps its propagated error.
+        cm = C6 @ m
         net_var = np.diag(cm @ cov_in @ cm.T)
         return grd_proj, grd_err_proj, {
             'weighting': weighting, 'cov': cov_proj,
             'net_err': np.sqrt(np.clip(net_var, 0.0, None)).reshape(2, 3),
         }
     return grd_proj, grd_err_proj
+
+
+# Number of standard errors by which a total torque must differ from
+# zero for :func:`_torque_note` to flag it.
+TORQUE_NSIGMA = 4.0
+
+
+def _torque_note(where, torque, dtau, nsigma=TORQUE_NSIGMA):
+    """Flag a total torque that differs significantly from zero.
+
+    The translational sum rule is exact, but the torque of a frozen-
+    coefficient GTO trial is ``-dE_V/d theta`` at fixed MO
+    coefficients (see :func:`_project_force_sum_rules`), which is
+    nonzero unless the orbitals are stationary with respect to a
+    rotation.  A torque is therefore a diagnostic, never an error:
+    when some component exceeds *nsigma* times its (nonzero) error,
+    this issues a warning and returns the note for the log, else
+    returns ``None``.  *where* names the rows (e.g. ``"reference
+    state"``).
+    """
+    torque = np.asarray(torque, dtype=float)
+    dtau = np.asarray(dtau, dtype=float)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        z = np.where(dtau > 0.0, np.abs(torque) / dtau, 0.0)
+    if not np.any(z > nsigma):
+        return None
+    note = (
+        f"Note: total torque of the {where} is {z.max():.1f} sigma"
+        " from zero; the orbitals are not stationary w.r.t. rotation"
+        " (frozen MO coefficients), so the torque is a diagnostic,"
+        " not a constraint"
+    )
+    warnings.warn(note, stacklevel=3)
+    return note
 
 
 # Markers delimiting the geometry block echoed at the head of a
@@ -2285,20 +2342,22 @@ nuclear forces using PGCS.
         Reduce this value if GPU memory is tight.
         Default is 10.
     project_states : bool, optional
-        When ``True``, apply the translational +
-        rotational sum-rule projection
+        When ``True``, apply the translational
+        sum-rule projection
         (:func:`_project_force_sum_rules`) to *each*
         per-state force vector before it is printed.
-        SWCT already makes the translational sum exact
-        per state, but the rotational sum rule holds only
-        in expectation, so without projection a state's
-        ``Total torque`` is a noisy estimate of zero; this
-        flag cleans up the per-state torque rows.  It does
-        **not** change the fragment-wise averaged result,
-        which is always projected separately (the
-        per-(atom, component) BLUE recombination re-breaks
-        the sum rules regardless, so the averaged vector is
-        projected on its own).  Default is ``False``.
+        With the ``'simple'`` SWCT estimator the
+        translational sum is already exact sample by
+        sample, so this changes nothing there; it
+        matters for estimators where the rule holds
+        only in expectation.  The torque is not
+        constrained (it is ``-dE_V/d theta`` at fixed
+        MO coefficients, nonzero unless the orbitals
+        are stationary w.r.t. rotation) and is printed
+        as a diagnostic.  The flag does **not** change
+        the fragment-wise averaged result, which is
+        projected separately (see *project_sum_rules*).
+        Default is ``False``.
     equil_cutoff : int or str, optional
         Number of leading blocks to discard as
         equilibration before the time-series analysis;
@@ -2318,16 +2377,20 @@ nuclear forces using PGCS.
         :data:`OmegaQMC.utils.CS_ESS_MIN` (0.1).
     project_sum_rules : bool or str, optional
         Whether the fragment-wise averaged forces are projected onto
-        the sum rules (:func:`_project_force_sum_rules`).  The
-        projection repairs the defect of combining different atoms
+        the translational sum rule (:func:`_project_force_sum_rules`).
+        The projection repairs the defect of combining different atoms
         over different states; when every fragment is left with the
         reference state alone there is no such defect, and projecting
-        would only push a noisy estimate onto the sum rules.
+        would only push a noisy estimate onto the sum rule.
         ``"auto"`` (default) therefore skips it in that case, and
         reports the reference rows as the averaged rows; ``True``
         always projects, ``False`` never does.  The log states which
         applied, and the covariance weighting of the projection.
         The per-state rows are governed by *project_states* alone.
+        The total torque about the center of mass is never
+        constrained; it is printed with its error, and a warning
+        flags one more than ``TORQUE_NSIGMA`` (4) sigma from zero
+        (see :func:`_torque_note`).
 
     Returns
     -------
@@ -2863,15 +2926,13 @@ nuclear forces using PGCS.
                 grd_tot, grd_err, grd_block_series, net_err,
             )
 
-            # Per-state printing optionally uses sum-rule-
-            # projected copies (``project_states``).  The
-            # values stored in ``all_state_results`` above
-            # and the returned reference force stay
-            # unprojected, so neither the fragment-wise
-            # average nor the return value is affected; this
-            # only cleans up the printed per-state rows
-            # (chiefly the rotational ``Total torque``, which
-            # SWCT does not enforce per state).
+            # Per-state printing optionally uses copies
+            # projected onto the translational sum rule
+            # (``project_states``).  The values stored in
+            # ``all_state_results`` above and the returned
+            # reference force stay unprojected, so neither the
+            # fragment-wise average nor the return value is
+            # affected.  The torque is not constrained.
             proj_line = None
             if project_states and grd_block_series is not None:
                 coords_state = np.asarray(myMol.atom_coords())
@@ -2896,8 +2957,8 @@ nuclear forces using PGCS.
                     )
                 )
                 proj_line = (
-                    "Sum-rule projection: weighting ="
-                    f" {proj_info['weighting']}"
+                    "Sum-rule projection (translational only):"
+                    f" weighting = {proj_info['weighting']}"
                 )
                 grd_tot_print = jnp.asarray(grd_tot_p)
                 grd_err_print = jnp.asarray(grd_err_p)
@@ -3014,6 +3075,14 @@ nuclear forces using PGCS.
                         torque_print[2], dtau_print[2],
                     )
                 )
+                if grd_block_series is not None:
+                    note = _torque_note(
+                        "reference state" if state_label is None
+                        else f"state {state_label}",
+                        torque_print, dtau_print,
+                    )
+                    if note is not None:
+                        fout.write(note + "\n")
                 fout.write("\n")
 
         if combo_labels:
@@ -3123,18 +3192,20 @@ nuclear forces using PGCS.
                             )
                             avg_bin_size = max(avg_bin_size, bin_ik)
 
-            # Enforce the exact translational + rotational sum
-            # rules (sum F = 0, sum r x F = 0) that the
-            # fragment-wise averaging breaks, via constrained GLS
-            # projection weighted by the components' covariance. The
-            # rotational constraint is taken about the center of
-            # mass, matching ``compute_torque_with_error`` below, so
-            # the reported total force and total torque are both
-            # exactly zero and consistent with the per-atom values.
+            # Enforce the exact translational sum rule
+            # (sum F = 0) that the fragment-wise averaging
+            # breaks, via constrained GLS projection weighted by
+            # the components' covariance.  The torque is not
+            # constrained: for frozen MO coefficients on lab-frame
+            # AOs it is -dE_V/d theta, nonzero unless the orbitals
+            # are stationary w.r.t. rotation (see
+            # ``_project_force_sum_rules``).  It is reported about
+            # the center of mass, matching
+            # ``compute_torque_with_error`` below, as a diagnostic.
             # The net force and torque errors come from the
             # covariance of the printed rows: the reference
-            # state's own series, the projected covariance
-            # (zero for both after projection), or the BLUE
+            # state's own series, the projected covariance (zero
+            # for the net force after projection), or the BLUE
             # errors with the combined series' correlations.
             coords_for_proj = np.asarray(myMol.atom_coords())
             masses_for_proj = np.asarray(myMol.atom_mass_list())
@@ -3153,13 +3224,14 @@ nuclear forces using PGCS.
                 avg_grd_err_np = np.asarray(all_state_results[None][1])
                 avg_net_err = all_state_results[None][3]
                 proj_line = (
-                    "Sum-rule projection: skipped (every fragment is"
-                    " reference-only, so the fragment average has no"
-                    " defect to repair); the averaged rows are the"
-                    " reference rows"
+                    "Sum-rule projection (translational only): skipped"
+                    " (every fragment is reference-only, so the"
+                    " fragment average has no defect to repair); the"
+                    " averaged rows are the reference rows"
                     if project_sum_rules == "auto" else
-                    "Sum-rule projection: disabled (project_sum_rules"
-                    "=False); the averaged rows are the reference rows"
+                    "Sum-rule projection (translational only): disabled"
+                    " (project_sum_rules=False); the averaged rows are"
+                    " the reference rows"
                 )
             elif do_project:
                 avg_grd_tot_np, avg_grd_err_np, proj_info = (
@@ -3172,8 +3244,8 @@ nuclear forces using PGCS.
                 )
                 avg_net_err = proj_info['net_err']
                 proj_line = (
-                    "Sum-rule projection: weighting ="
-                    f" {proj_info['weighting']}"
+                    "Sum-rule projection (translational only):"
+                    f" weighting = {proj_info['weighting']}"
                 )
             else:
                 sd = avg_grd_err_np.reshape(-1)
@@ -3183,8 +3255,8 @@ nuclear forces using PGCS.
                     coords_for_proj, com_for_proj,
                 )
                 proj_line = (
-                    "Sum-rule projection: disabled"
-                    " (project_sum_rules=False)"
+                    "Sum-rule projection (translational only):"
+                    " disabled (project_sum_rules=False)"
                 )
             print(proj_line, file=fout)
 
@@ -3289,6 +3361,11 @@ nuclear forces using PGCS.
                         avg_torque[2], avg_dtau[2],
                     )
                 )
+                note = _torque_note(
+                    "fragment-wise average", avg_torque, avg_dtau,
+                )
+                if note is not None:
+                    fout.write(note + "\n")
                 fout.write("\n")
 
             ref_grd_tot = avg_grd_tot
